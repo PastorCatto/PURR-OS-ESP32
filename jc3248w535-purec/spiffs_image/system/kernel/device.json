@@ -1,0 +1,13 @@
+{
+  "device": "jc3248w535",
+  "display": "axs15231b",
+  "display_res": [320, 480],
+  "touch": "axs15231b",
+  "psram": true,
+  "flash": "16mb",
+  "pi_slot": false,
+  "radios": ["wifi", "bt"],
+  "cpu_max_mhz": 240,
+  "boot_splash": "",
+  "verbose": true
+}

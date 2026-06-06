@@ -1,0 +1,16 @@
+# ESP-IDF build output
+/build/
+build/
+
+# Generated config (sdkconfig.defaults is the source of truth)
+/sdkconfig
+sdkconfig.old
+
+# Component manager lock (regenerated from main/idf_component.yml)
+dependencies.lock
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+__pycache__/

@@ -1,0 +1,5 @@
+## PURR OS CoreOS — JC3248W535 (pure ESP-IDF) dependency manifest
+dependencies:
+  idf: ">=5.3"
+  espressif/esp_lcd_axs15231b: "~2.1.0"
+  espressif/esp_lcd_touch: "~1.2.0"
