@@ -240,7 +240,9 @@ def apply_radio_companion_defaults(cfg):
 
     if cfg.get("modules.ui", "") in PURR_WIN_UI_BACKENDS:
         for key, val in (("apps.msn", "true"), ("apps.nearby", "true"), ("apps.milkbar", "true"),
-                          ("flash.apps/msn", "3"), ("flash.apps/nearby", "3"), ("flash.apps/milkbar", "3")):
+                          ("apps.milkbottle", "true"),
+                          ("flash.apps/msn", "3"), ("flash.apps/nearby", "3"), ("flash.apps/milkbar", "3"),
+                          ("flash.apps/milkbottle", "3")):
             cfg.setdefault(key, val)
     return cfg
 

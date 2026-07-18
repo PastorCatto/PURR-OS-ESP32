@@ -1,0 +1,12 @@
+# apps/system/milkbottle/app.pcat
+# Milk Bottle — minimal two-way ESP-NOW text exchange + live connect status
+# between paired devices, over proximity_rpc directly (no LoRa mesh
+# involved). A demo/test app for the pairing + proximity_rpc stack.
+
+name        = "milkbottle"
+version     = "1.0.0"
+tier        = "claw"
+author      = "PURR OS"
+description = "Milk Bottle: send big on-screen messages to a paired device."
+
+idf_requires = "esp_common driver freertos"

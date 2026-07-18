@@ -36,6 +36,12 @@ CONFIG_FREERTOS_THREAD_LOCAL_STORAGE_POINTERS=1
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 
+# LVGL fonts — 14 is LVGL's own upstream default (used everywhere in
+# Cupcake); 32 is added for purr_win_label_set_big() (catcall_ui.h), the
+# banner-style big-text label used by Milk Bottle's incoming-message
+# display. Both coexist fine (independent bools, not a radio choice).
+CONFIG_LV_FONT_MONTSERRAT_32=y
+
 # Main task stack — kernel spine parks in idle loop, needs minimal stack
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 

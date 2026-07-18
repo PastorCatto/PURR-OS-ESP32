@@ -280,6 +280,18 @@ static void ck_label_set(purr_wid_t wid, const char *text) {
     if (o) lv_label_set_text(o, text);
 }
 
+// Banner-style big text (Milk Bottle's incoming-message display) — same
+// widget label_create() returned, just re-styled bigger+centered on set.
+// lv_font_montserrat_32 is already linked into every build (confirmed
+// available alongside 8-48 tonight) so no new font asset is needed.
+static void ck_label_set_big(purr_wid_t wid, const char *text) {
+    lv_obj_t *o = get_wid(wid);
+    if (!o) return;
+    lv_label_set_text(o, text);
+    lv_obj_set_style_text_font(o, &lv_font_montserrat_32, 0);
+    lv_obj_set_style_text_align(o, LV_TEXT_ALIGN_CENTER, 0);
+}
+
 static void ck_label_align(purr_wid_t wid, purr_align_t align) {
     lv_obj_t *o = get_wid(wid);
     if (!o) return;
@@ -631,6 +643,7 @@ static const catcall_ui_t s_cupcake_win = {
     .label_create    = ck_label_create,
     .label_set       = ck_label_set,
     .label_align     = ck_label_align,
+    .label_set_big   = ck_label_set_big,
     .btn_create      = ck_btn_create,
     .btn_enable      = ck_btn_enable,
     .textarea_create = ck_ta_create,

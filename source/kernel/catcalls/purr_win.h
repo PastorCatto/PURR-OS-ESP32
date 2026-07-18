@@ -78,6 +78,17 @@ static inline void purr_win_label_set(purr_wid_t wid, const char *text) {
 static inline void purr_win_label_align(purr_wid_t wid, purr_align_t align) {
     _UI_VOID(label_align, wid, align);
 }
+// Banner-style big text — falls back to a normal-size label_set() on any
+// backend that leaves label_set_big NULL, so this is always safe to call
+// (just not always literally "big" everywhere; today only Cupcake
+// implements it — see catcall_ui.h's own comment on this field).
+static inline void purr_win_label_set_big(purr_wid_t wid, const char *text) {
+    purr_kernel_ui_lock();
+    const catcall_ui_t *_ui = purr_kernel_ui();
+    if (_ui && _ui->label_set_big) _ui->label_set_big(wid, text);
+    else if (_ui && _ui->label_set) _ui->label_set(wid, text);
+    purr_kernel_ui_unlock();
+}
 
 // ── Buttons ───────────────────────────────────────────────────────────────────
 
