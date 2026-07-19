@@ -9,9 +9,36 @@
 // that proximity_rpc_call() is a real blocking network call (up to its own
 // timeout), so it only ever runs on this app's own background task, never
 // on cupcake_task (see proximity_rpc.h's own warning about that).
+//
+// "Milk Bottle" — originally a separate standalone app, then briefly a
+// "Message" button bolted onto this screen — is neither: it's a synthetic
+// row always pinned at index 0 of the (otherwise remote-fetched) app list
+// below, right alongside whatever real apps REMOTEAPPS_ACTION_LIST returns
+// for the selected device. Launch/Stop act on it exactly like any other
+// row. That's deliberate — the whole point of Milk Bottle is to exercise
+// this app's own list→launch→stop pipeline end-to-end as a live test, not
+// to be a shortcut that bypasses it. It never shows up as its own
+// installed app or home-screen icon; it only exists inside Milkbar.
+// Reuses this file's own s_selected_mac/s_have_selection and refresh_task()
+// — no second background task, no second device list.
+//
+// Send has two paths, chosen per-target: a full purr_win device (Cupcake/
+// MiniWin/etc.) answers over proximity_rpc's MILKBAR_ACTION_MSG_SEND, same
+// as always — but that only works if the target is running Milkbar itself
+// (a purr_win app), which a headless device like Heltec V3's oled_ui can
+// never be (oled_ui doesn't implement purr_win, doesn't run app_manager
+// apps at all — see app_manager's own scan turning up 0 apps on it). Those
+// devices already advertise PROXIMITY_CAP_RADIO_COMPANION in their beacon
+// (oled_ui_module.c calls proximity_set_own_caps() at boot) and already
+// have their own built-in message UI (oled_ui's SCREEN_SEND/SCREEN_MESSAGES,
+// fed by meshtastic's LoRa broadcast, not proximity_rpc). So when the
+// selected device is flagged radio-companion, Send falls back to
+// mesh_manager_send_text() instead — landing directly in that device's
+// existing SCREEN_MESSAGES ring buffer, no new module or wire format needed.
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -20,8 +47,10 @@
 #include "purr_kernel.h"
 #include "purr_module.h"
 #include "pairing.h"
+#include "proximity.h"
 #include "proximity_rpc.h"
 #include "app_manager_remote.h"
+#include "meshtastic.h"
 
 #ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
 #include "cupcake.h"
@@ -31,6 +60,10 @@
 #define RPC_TIMEOUT_MS    3000
 #define MAX_DEVICE_ROWS   PAIRING_MAX_DEVICES
 #define MAX_APP_ROWS      32   // PROXIMITY_RPC_MAX_MSG / sizeof(remote_app_entry_t) headroom, see app_manager_remote.h
+
+// ── Milk Bottle screen ───────────────────────────────────────────────────
+#define MILKBAR_ACTION_MSG_SEND 0x3000   // same wire value Milk Bottle used — nothing shipped with it yet, pure rename
+#define MSG_MAX_TEXT 64
 
 static purr_win_t s_win         = 0;
 static purr_wid_t s_device_list = 0;
@@ -69,17 +102,91 @@ static const char *s_app_row_icons[MAX_APP_ROWS];
 static int          s_app_count = 0;
 static remote_app_entry_t s_last_apps[MAX_APP_ROWS];   // raw entries, for Launch/Stop to read state/name by row index
 
+// ── Milk Bottle screen state ────────────────────────────────────────────
+static purr_win_t s_msg_win     = 0;
+static purr_wid_t s_msg_big_lbl = 0;
+static purr_wid_t s_msg_input   = 0;
+
+// Last received message — written from proximity_rpc's own dispatch
+// context (handle_send_msg(), not cupcake_task), read/rendered by
+// refresh_task(). Plain flag-guarded copy, same "background writes, one
+// UI-owning task reads" shape as homebase.c's s_present.
+static char           s_last_rx_text[MSG_MAX_TEXT + 1];
+static volatile bool  s_rx_is_new = false;
+
+// proximity_rpc's own SEND_MSG responder — see this file's top comment for
+// why "receive" only works while Milkbar itself is open (registered/
+// unregistered in milkbar_app_init()/_deinit(), same as the app list
+// action IDs don't need registering/unregistering since REMOTEAPPS_
+// ACTION_LIST etc. are answered by app_manager_remote.c, an always-on
+// module — this one is answered directly by this app instead, so it's
+// scoped to the app's own lifetime).
+static bool handle_send_msg(const uint8_t mac[6], uint16_t action_id,
+                             const uint8_t *req, size_t req_len,
+                             uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out) {
+    (void)mac; (void)action_id; (void)resp_out; (void)resp_cap;
+    *resp_len_out = 0;
+    if (req_len == 0 || req_len > MSG_MAX_TEXT) return false;
+    memcpy(s_last_rx_text, req, req_len);
+    s_last_rx_text[req_len] = 0;
+    s_rx_is_new = true;
+    return true;
+}
+
+// Live presence via proximity's own beacon table — same check homebase.c
+// uses for its own home-base connect/disconnect detection, applied here to
+// whichever device is currently selected rather than a fixed home base.
+static bool device_lookup(const uint8_t mac[6], proximity_device_t *out) {
+    int n = proximity_device_count();
+    for (int i = 0; i < n; i++) {
+        if (proximity_device_at(i, out) && memcmp(out->mac, mac, 6) == 0) return true;
+    }
+    return false;
+}
+
+static bool device_is_connected(const uint8_t mac[6]) {
+    proximity_device_t d;
+    return device_lookup(mac, &d);
+}
+
+// 0 (no caps known) if the device isn't currently beaconing nearby — same
+// "nearby right now" limitation device_is_connected() already has, since
+// caps only ever travels in a live beacon (proximity.h), never persisted
+// in pairing's own paired_device_t.
+static uint8_t device_caps(const uint8_t mac[6]) {
+    proximity_device_t d;
+    return device_lookup(mac, &d) ? d.caps : 0;
+}
+
 static void refresh_device_list(void) {
     int n = pairing_device_count();
     if (n > MAX_DEVICE_ROWS) n = MAX_DEVICE_ROWS;
     for (int i = 0; i < n; i++) {
         paired_device_t pd;
         if (!pairing_device_at(i, &pd)) { n = i; break; }
-        snprintf(s_device_row_bufs[i], sizeof(s_device_row_bufs[i]), "%s", pd.name);
+        bool connected = device_is_connected(pd.mac);
+        bool companion = connected && (device_caps(pd.mac) & PROXIMITY_CAP_RADIO_COMPANION) != 0;
+        snprintf(s_device_row_bufs[i], sizeof(s_device_row_bufs[i]), "%s%s%s",
+                 pd.name, connected ? "  [connected]" : "", companion ? "  [mesh]" : "");
         s_device_row_ptrs[i] = s_device_row_bufs[i];
     }
     s_device_count = n;
     if (s_device_list) purr_win_list_set_items(s_device_list, s_device_row_ptrs, s_device_count);
+}
+
+// Row 0 is always "Milk Bottle" — a local, in-process test app, not
+// something fetched from the remote device — so it stays available even
+// when the remote query below fails outright (e.g. a headless device that
+// can't answer REMOTEAPPS_ACTION_LIST at all, like Heltec's oled_ui). Real
+// remote entries (if any) start at row 1; s_last_apps[] stays 0-indexed to
+// match them, so Launch/Stop subtract 1 from the list selection.
+static void set_milkbottle_row(int row) {
+    snprintf(s_app_row_bufs[row], sizeof(s_app_row_bufs[row]), "Milk Bottle%s",
+             s_msg_win ? "  (open)" : "");
+    s_app_row_ptrs[row] = s_app_row_bufs[row];
+#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+    s_app_row_icons[row] = LV_SYMBOL_CALL;
+#endif
 }
 
 // Runs on refresh_task() — see this file's top comment for why this can
@@ -92,29 +199,38 @@ static void refresh_app_list_from_remote(void) {
         return;
     }
 
+    set_milkbottle_row(0);
+
     uint8_t resp[PROXIMITY_RPC_MAX_MSG];
     size_t  resp_len = 0;
     bool ok = proximity_rpc_call(s_selected_mac, REMOTEAPPS_ACTION_LIST, NULL, 0,
                                   resp, sizeof(resp), &resp_len, RPC_TIMEOUT_MS);
     if (!ok) {
-        s_app_count = 0;
-        if (s_app_list) purr_win_list_set_items(s_app_list, s_app_row_ptrs, 0);
+        s_app_count = 1;   // Milk Bottle row still stands even with no remote app list
+        if (s_app_list) {
+#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+            cupcake_win_list_set_items_icon(s_app_list, s_app_row_ptrs, s_app_row_icons, s_app_count);
+#else
+            purr_win_list_set_items(s_app_list, s_app_row_ptrs, s_app_count);
+#endif
+        }
         if (s_status_lbl) purr_win_label_set(s_status_lbl, "Remote device not responding");
         return;
     }
 
     int n = (int)(resp_len / sizeof(remote_app_entry_t));
-    if (n > MAX_APP_ROWS) n = MAX_APP_ROWS;
+    if (n > MAX_APP_ROWS - 1) n = MAX_APP_ROWS - 1;
     memcpy(s_last_apps, resp, (size_t)n * sizeof(remote_app_entry_t));
     for (int i = 0; i < n; i++) {
-        snprintf(s_app_row_bufs[i], sizeof(s_app_row_bufs[i]), "%s%s",
+        int row = i + 1;
+        snprintf(s_app_row_bufs[row], sizeof(s_app_row_bufs[row]), "%s%s",
                  s_last_apps[i].name, s_last_apps[i].state == 1 /* APP_STATE_RUNNING */ ? "  (running)" : "");
-        s_app_row_ptrs[i] = s_app_row_bufs[i];
+        s_app_row_ptrs[row] = s_app_row_bufs[row];
 #ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
-        s_app_row_icons[i] = LV_SYMBOL_FILE;
+        s_app_row_icons[row] = LV_SYMBOL_FILE;
 #endif
     }
-    s_app_count = n;
+    s_app_count = n + 1;
 
     if (s_app_list) {
 #ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
@@ -125,7 +241,7 @@ static void refresh_app_list_from_remote(void) {
     }
     if (s_status_lbl) {
         char buf[48];
-        snprintf(buf, sizeof(buf), "%d remote app%s", s_app_count, s_app_count == 1 ? "" : "s");
+        snprintf(buf, sizeof(buf), "%d remote app%s", n, n == 1 ? "" : "s");
         purr_win_label_set(s_status_lbl, buf);
     }
 }
@@ -144,15 +260,22 @@ static void on_device_list_event(purr_wid_t w, purr_event_t e, void *user) {
     // this callback runs on cupcake_task.
 }
 
+// Forward-declared: Milk Bottle's own screen (defined further down, right
+// after the message-send/receive machinery it opens).
+static void open_message_screen(void);
+
 static void on_launch_click(purr_wid_t w, purr_event_t e, void *user) {
     (void)w; (void)e; (void)user;
     if (!s_have_selection) return;
     int idx = purr_win_list_get_selected(s_app_list);
     if (idx < 0 || idx >= s_app_count) return;
 
+    if (idx == 0) { open_message_screen(); return; }   // row 0 is always Milk Bottle
+
+    int i = idx - 1;
     uint8_t resp[16]; size_t resp_len = 0;
     bool ok = proximity_rpc_call(s_selected_mac, REMOTEAPPS_ACTION_LAUNCH,
-                                  (const uint8_t *)s_last_apps[idx].name, strlen(s_last_apps[idx].name),
+                                  (const uint8_t *)s_last_apps[i].name, strlen(s_last_apps[i].name),
                                   resp, sizeof(resp), &resp_len, RPC_TIMEOUT_MS);
     if (s_status_lbl) purr_win_label_set(s_status_lbl, ok ? "Launched" : "Launch failed");
 }
@@ -163,9 +286,15 @@ static void on_stop_click(purr_wid_t w, purr_event_t e, void *user) {
     int idx = purr_win_list_get_selected(s_app_list);
     if (idx < 0 || idx >= s_app_count) return;
 
+    if (idx == 0) {   // row 0 is always Milk Bottle — "Stop" just closes its own screen
+        if (s_msg_win) purr_win_hide(s_msg_win);
+        return;
+    }
+
+    int i = idx - 1;
     uint8_t resp[16]; size_t resp_len = 0;
     bool ok = proximity_rpc_call(s_selected_mac, REMOTEAPPS_ACTION_STOP,
-                                  (const uint8_t *)s_last_apps[idx].name, strlen(s_last_apps[idx].name),
+                                  (const uint8_t *)s_last_apps[i].name, strlen(s_last_apps[i].name),
                                   resp, sizeof(resp), &resp_len, RPC_TIMEOUT_MS);
     if (s_status_lbl) purr_win_label_set(s_status_lbl, ok ? "Stopped" : "Stop failed");
 }
@@ -175,11 +304,88 @@ static void on_refresh_click(purr_wid_t w, purr_event_t e, void *user) {
     refresh_device_list();
 }
 
+typedef struct {
+    uint8_t mac[6];
+    char    text[MSG_MAX_TEXT + 1];
+} msg_send_ctx_t;
+
+static void send_msg_task(void *arg) {
+    msg_send_ctx_t *ctx = (msg_send_ctx_t *)arg;
+    uint8_t resp[4]; size_t resp_len = 0;
+    // Fire-and-forget from the UI's perspective — result isn't surfaced
+    // (same "optimistic, no confirmation" precedent as MSN's own send
+    // button).
+    proximity_rpc_call(ctx->mac, MILKBAR_ACTION_MSG_SEND,
+                        (const uint8_t *)ctx->text, strlen(ctx->text),
+                        resp, sizeof(resp), &resp_len, RPC_TIMEOUT_MS);
+    free(ctx);
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void on_msg_send_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    if (!s_have_selection) return;
+    const char *text = purr_win_textarea_get(s_msg_input);
+    if (!text || !*text) return;
+
+    // Radio-companion target (Heltec's oled_ui, or anything else that
+    // advertises the same cap) can't run Milkbar/answer proximity_rpc at
+    // all — see this file's top comment. Fall back to a mesh broadcast,
+    // which oled_ui's own SCREEN_MESSAGES already listens for.
+    // mesh_manager_send_text() is documented safe to call directly from a
+    // UI callback (encoding is cheap; the actual radio TX happens later on
+    // meshtastic's own task) — no background task needed for this path.
+    if (device_caps(s_selected_mac) & PROXIMITY_CAP_RADIO_COMPANION) {
+        mesh_manager_send_text(MESH_BROADCAST, 0, text);
+        purr_win_textarea_clear(s_msg_input);
+        return;
+    }
+
+    msg_send_ctx_t *ctx = malloc(sizeof(*ctx));
+    if (!ctx) return;
+    memcpy(ctx->mac, s_selected_mac, 6);
+    size_t n = strlen(text);
+    if (n > MSG_MAX_TEXT) n = MSG_MAX_TEXT;
+    memcpy(ctx->text, text, n);
+    ctx->text[n] = 0;
+
+    // proximity_rpc_call() must never run on cupcake_task — dedicated
+    // background task per send, same rule as this file's app-list RPCs.
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(send_msg_task, "milkbar_msgtx", 4096, ctx, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) free(ctx);
+
+    purr_win_textarea_clear(s_msg_input);
+}
+
+static void on_msg_back_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    purr_win_hide(s_msg_win);
+}
+
+// Lazy create-then-show, Back hides — same pattern MSN's Nodes/Channels/
+// Messages screens use. Operates on this file's own s_selected_mac —
+// whichever device is selected in the main list, no separate picker.
+static void open_message_screen(void) {
+    if (s_msg_win) { purr_win_show(s_msg_win); return; }
+    s_msg_win = purr_win_create("Message");
+    purr_win_button(s_msg_win, "< Back", on_msg_back_click, NULL);
+    s_msg_big_lbl = purr_win_label(s_msg_win, "");
+    purr_win_label_align(s_msg_big_lbl, PURR_ALIGN_CENTER);
+    s_msg_input = purr_win_textarea(s_msg_win, 100, 20);
+    purr_win_button(s_msg_win, "Send", on_msg_send_click, NULL);
+    purr_win_show(s_msg_win);
+}
+
 static void refresh_task(void *arg) {
     (void)arg;
     while (s_running) {
         refresh_device_list();
         refresh_app_list_from_remote();   // no-op fast path if nothing selected yet
+        if (s_rx_is_new) {
+            s_rx_is_new = false;
+            if (s_msg_big_lbl) purr_win_label_set_big(s_msg_big_lbl, s_last_rx_text);
+        }
         // Short steps, not one REFRESH_MS vTaskDelay — same reasoning as
         // nearby_app.c's own refresh_task(): milkbar_app_deinit() blocks on
         // this task actually exiting, so how quickly it notices
@@ -198,12 +404,14 @@ static void refresh_task(void *arg) {
 static int milkbar_app_init(void) {
     if (!s_refresh_done) s_refresh_done = xSemaphoreCreateBinary();
 
+    proximity_rpc_register(MILKBAR_ACTION_MSG_SEND, handle_send_msg);
+
     s_win = purr_win_create("Milkbar");
     purr_win_label(s_win, "Paired devices:");
     s_device_list = purr_win_list(s_win, 100, 30);
     purr_win_list_on_select(s_device_list, on_device_list_event, NULL);
 
-    purr_wid_t row = purr_win_row(s_win, 4);
+    purr_wid_t row = purr_win_row(s_win, 3);
     purr_win_button(s_win, "Refresh", on_refresh_click, NULL);
     purr_win_button(s_win, "Launch", on_launch_click, NULL);
     purr_win_button(s_win, "Stop", on_stop_click, NULL);
@@ -213,6 +421,8 @@ static int milkbar_app_init(void) {
     s_app_list = purr_win_list(s_win, 100, 30);
 
     s_have_selection = false;
+    s_rx_is_new = false;
+    s_last_rx_text[0] = 0;
     refresh_device_list();
     purr_win_show(s_win);
 
@@ -229,6 +439,12 @@ static void milkbar_app_deinit(void) {
     s_running = false;
     if (s_refresh_done) xSemaphoreTake(s_refresh_done, pdMS_TO_TICKS(RPC_TIMEOUT_MS + 500));
     s_refresh_task = NULL;
+
+    // Stop answering MSG_SEND once the app isn't open to show it anymore —
+    // see this file's top comment on receive-only-while-open scope.
+    proximity_rpc_register(MILKBAR_ACTION_MSG_SEND, NULL);
+
+    if (s_msg_win) { purr_win_destroy(s_msg_win); s_msg_win = 0; s_msg_big_lbl = 0; s_msg_input = 0; }
 
     purr_win_destroy(s_win);
     s_win = 0; s_device_list = 0; s_app_list = 0; s_status_lbl = 0;
