@@ -105,12 +105,25 @@ static void enqueue_frame(const uint8_t *data, size_t len) {
 
     s_fromnum++;
     memcpy(s_fromnum_val, &s_fromnum, sizeof(s_fromnum));
-    // Notifies every currently-subscribed peer (tracked internally by the
-    // stack via CCCD writes) — a no-op if nobody's subscribed. Replaces
-    // Bluedroid's manual esp_ble_gatts_send_indicate(gatts_if, conn_id, ...)
-    // call, which needed s_connected/s_conn_id/s_gatts_if bookkeeping this
-    // version no longer needs at all.
-    ble_gatts_chr_updated(s_fromnum_val_handle);
+
+    // s_fromnum_val_handle is only ever assigned by NimBLE once the GATT
+    // service actually finishes registering, which only happens after the
+    // host starts (see this file's header comment) — itself only triggered
+    // by the user turning Bluetooth on (bt_mgr_ensure_active()). But
+    // mesh_manager_add_rx_callback(on_mesh_rx) below is registered
+    // unconditionally at P3 boot, so a mesh packet can arrive — and did,
+    // live — long before Bluetooth is ever touched. Calling
+    // ble_gatts_chr_updated() on a still-zero/unregistered handle in that
+    // window crashed the device outright (Core 1 LoadProhibited inside
+    // NimBLE's own ble_gatts_chr_updated, confirmed live from a passively-
+    // received mesh packet, no Settings interaction at all). Frames still
+    // queue above regardless — harmless, and lets a phone that connects
+    // later catch up via fromradio reads — only the live notify needs to
+    // wait. bt_mgr_host_ready() is the same "is the host actually up" check
+    // mesh_ble_set_advertising() already gates start_advertising() on.
+    if (bt_mgr_host_ready()) {
+        ble_gatts_chr_updated(s_fromnum_val_handle);
+    }
 }
 
 static bool dequeue_frame(uint8_t *out, size_t *out_len) {

@@ -10,6 +10,8 @@
 #include <dirent.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
+#include "freertos/semphr.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_chip_info.h"
@@ -21,6 +23,13 @@
 #include "bt_mgr.h"
 #include "mesh_ble.h"
 #include "sdkconfig.h"
+
+// LV_SYMBOL_* glyphs for the category tile grid below — meaningless (and
+// their backing font absent) under MiniWin/Pounce, same as msn.c's own
+// tile grid.
+#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#include "cupcake.h"
+#endif
 
 #define NVS_NS  "purr_settings"
 
@@ -34,6 +43,8 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 
 static purr_win_t  s_win       = 0;   // top-level window — just the category picker
+static purr_wid_t  s_cat_tile_grid = 0;   // 0 if the active backend doesn't implement tile grids
+static purr_wid_t  s_cat_list      = 0;   // fallback, built instead when s_cat_tile_grid creation failed
 
 // Category sub-windows, each built lazily on first tap and cached/reused
 // afterward — same pattern the WiFi/BT windows below already established.
@@ -55,6 +66,7 @@ static purr_win_t  s_connectivity_win = 0;
 static purr_wid_t  s_mesh_backend_status_lbl = 0;
 static purr_win_t  s_mesh_switch_confirm_win = 0;
 static purr_mesh_backend_t s_mesh_switch_target;
+static purr_win_t  s_about_win = 0;
 
 static purr_wid_t  s_brightness_lbl = 0;
 static purr_wid_t  s_screen_timeout_lbl = 0;
@@ -98,6 +110,16 @@ static char        s_bt_labels[MAX_BT_RESULTS][48];
 static const char *s_bt_label_ptrs[MAX_BT_RESULTS];
 static uint8_t     s_bt_addrs[MAX_BT_RESULTS][6];
 static int         s_bt_count = 0;
+// Set while a scan task (below) is in flight — blocks a second concurrent
+// scan rather than racing s_bt_count/s_bt_labels between two background
+// tasks. Cleared by bt_scan_task() itself right before it exits.
+static volatile bool s_bt_scanning = false;
+// Given by bt_scan_task() right before it self-deletes, waited on by
+// settings_deinit() before it destroys s_bt_win/s_bt_list/s_bt_status_lbl —
+// otherwise closing Settings mid-scan lets that task touch widgets out from
+// under a window that's already gone. Same use-after-free shape as
+// nearby_app.c/msn.c/milkbar_app.c's own s_refresh_done.
+static SemaphoreHandle_t s_bt_scan_done = NULL;
 #endif  // CONFIG_BT_NIMBLE_ENABLED
 
 static purr_wid_t  s_wallpaper_list = 0;
@@ -414,24 +436,52 @@ static void on_bt_toggle(purr_wid_t w, purr_event_t e, void *u) {
     set_bt_status(on ? "Bluetooth enabled." : "Bluetooth disabled.");
 }
 
+// bt_mgr_scan() blocks its caller for up to 7s (duration + 2s grace,
+// waiting on NimBLE's own scan-complete semaphore — see bt_mgr.c). Calling
+// that directly from a button click ran it on cupcake_task itself, which is
+// also the task subscribed to the 5s task watchdog (see cupcake_module.c) —
+// starving it of a single esp_task_wdt_reset() call for that whole window
+// tripped the watchdog for real, forcing a hard reboot, confirmed live.
+// Same class of bug as proximity_rpc_call() elsewhere in this codebase
+// (milkbar_app.c's own top comment) and fixed the same way: run the
+// blocking call on its own background task, never on cupcake_task.
+static void bt_scan_task(void *arg) {
+    (void)arg;
+    int n = bt_mgr_scan(5);
+    if (n < 0) {
+        set_bt_status("Bluetooth scan failed.");
+    } else {
+        if (n > MAX_BT_RESULTS) n = MAX_BT_RESULTS;
+        s_bt_count = n;
+        for (int i = 0; i < n; i++) {
+            bt_scan_result_t r;
+            bt_mgr_scan_at(i, &r);
+            memcpy(s_bt_addrs[i], r.addr, 6);
+            snprintf(s_bt_labels[i], sizeof(s_bt_labels[i]), "%s  %ddBm", r.name, r.rssi);
+            s_bt_label_ptrs[i] = s_bt_labels[i];
+        }
+        purr_win_list_set_items(s_bt_list, s_bt_label_ptrs, s_bt_count);
+        set_bt_status("Scan complete — tap a device to pair.");
+    }
+    s_bt_scanning = false;
+    if (s_bt_scan_done) xSemaphoreGive(s_bt_scan_done);
+    vTaskDeleteWithCaps(NULL);
+}
+
 static void on_bt_scan(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
     if (!bt_mgr_is_enabled()) { set_bt_status("Enable Bluetooth first."); return; }
-    set_bt_status("Scanning (BLE)...");
-    int n = bt_mgr_scan(5);
-    if (n < 0) { set_bt_status("Bluetooth scan failed."); return; }
-    if (n > MAX_BT_RESULTS) n = MAX_BT_RESULTS;
-    s_bt_count = n;
+    if (s_bt_scanning) return;   // a scan is already in flight
 
-    for (int i = 0; i < n; i++) {
-        bt_scan_result_t r;
-        bt_mgr_scan_at(i, &r);
-        memcpy(s_bt_addrs[i], r.addr, 6);
-        snprintf(s_bt_labels[i], sizeof(s_bt_labels[i]), "%s  %ddBm", r.name, r.rssi);
-        s_bt_label_ptrs[i] = s_bt_labels[i];
-    }
-    purr_win_list_set_items(s_bt_list, s_bt_label_ptrs, s_bt_count);
-    set_bt_status("Scan complete — tap a device to pair.");
+    if (!s_bt_scan_done) s_bt_scan_done = xSemaphoreCreateBinary();
+    set_bt_status("Scanning (BLE)...");
+    s_bt_scanning = true;
+    // PSRAM-backed stack — same rationale as milkbar_app.c's send_msg_task:
+    // internal DRAM is already the scarce resource NimBLE itself is fighting
+    // for, no reason for this task's own stack to compete for it too.
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(bt_scan_task, "bt_scan", 4096, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { s_bt_scanning = false; set_bt_status("Bluetooth scan failed."); }
 }
 
 static void on_bt_select(purr_wid_t w, purr_event_t e, void *u) {
@@ -572,13 +622,30 @@ static void build_about_text(char *buf, size_t sz) {
 #undef APPEND
 }
 
+static void on_open_about(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (s_about_win) { purr_win_show(s_about_win); return; }
+
+    s_about_win = purr_win_create("About");
+    add_back_button(s_about_win);
+
+    char about_buf[512];
+    build_about_text(about_buf, sizeof(about_buf));
+    s_about_lbl = purr_win_label(s_about_win, about_buf);
+
+    purr_win_show(s_about_win);
+}
+
 // ── Category windows ─────────────────────────────────────────────────────────
 // Each built lazily on first tap and cached/reused afterward, same pattern
 // as the WiFi/BT windows above — see add_back_button()'s doc comment for why
 // each needs its own "< Back" button. Grouping: General (storage/developer/
-// system/about — the catch-all for things that don't fit elsewhere),
-// Display (brightness/timeout/bar visibility), Customization (theme/
-// wallpaper), Connectivity (WiFi/BT, each still its own nested window).
+// system — the catch-all for things that don't fit elsewhere), Display
+// (brightness/timeout/bar visibility), Customization (theme/wallpaper),
+// Connectivity (WiFi/BT, each still its own nested window). About is its
+// own category too (on_open_about(), just above) rather than living inside
+// General — it's read-only device info, not a setting to change, and grew
+// large enough on its own to earn a dedicated screen.
 
 static void on_open_general(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
@@ -604,11 +671,6 @@ static void on_open_general(purr_wid_t w, purr_event_t e, void *u) {
     purr_wid_t sys = purr_win_row(s_general_win, 4);
     purr_win_button(s_general_win, "Reboot", on_reboot, NULL);
     purr_win_layout_end(sys);
-
-    purr_win_label(s_general_win, "About");
-    char about_buf[512];
-    build_about_text(about_buf, sizeof(about_buf));
-    s_about_lbl = purr_win_label(s_general_win, about_buf);
 
     s_general_status_lbl = purr_win_label(s_general_win, "Ready.");
     purr_win_show(s_general_win);
@@ -769,6 +831,61 @@ static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
     purr_win_show(s_connectivity_win);
 }
 
+// ── Category picker nav ──────────────────────────────────────────────────
+// Same tile-grid-with-list-fallback shape MSN's own Home screen uses
+// (msn.c's build_home_screen_nav()) — reused here so every multi-screen
+// system app reads as one consistent design language instead of Settings
+// keeping its older plain-button-row picker. Purely a top-level nav swap:
+// each category's own sub-window (on_open_general() etc.) is untouched.
+
+#define CAT_COUNT 5
+static const char *s_category_labels[CAT_COUNT] = { "General", "Display", "Customization", "Connectivity", "About" };
+
+// Fallback path only — the tile grid path dispatches per-tile via cbs[]
+// below and never reaches this (PURR_EVENT_CLICKED per tile, not a shared
+// list-selection callback).
+static void on_cat_list_event(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)user;
+    if (e != PURR_EVENT_ACTIVATED) return;
+    switch (purr_win_list_get_selected(s_cat_list)) {
+        case 0: on_open_general(0, PURR_EVENT_CLICKED, NULL);       break;
+        case 1: on_open_display(0, PURR_EVENT_CLICKED, NULL);       break;
+        case 2: on_open_customization(0, PURR_EVENT_CLICKED, NULL); break;
+        case 3: on_open_connectivity(0, PURR_EVENT_CLICKED, NULL);  break;
+        case 4: on_open_about(0, PURR_EVENT_CLICKED, NULL);         break;
+        default: break;
+    }
+}
+
+static void build_category_nav(void) {
+    s_cat_tile_grid = purr_win_tile_grid(s_win, 100, 75);
+    if (s_cat_tile_grid) {
+#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+        static const char *symbols[CAT_COUNT] = { LV_SYMBOL_SETTINGS, LV_SYMBOL_IMAGE, LV_SYMBOL_EDIT, LV_SYMBOL_WIFI, LV_SYMBOL_LIST };
+#else
+        // Active backend implements tile_grid but isn't Cupcake — no
+        // LV_SYMBOL_* available at compile time here (cupcake.h/lvgl.h are
+        // only pulled in under the Cupcake ifdef), so tiles render
+        // label-only. Functionally complete either way.
+        static const char *symbols[CAT_COUNT] = { NULL, NULL, NULL, NULL, NULL };
+#endif
+        // A neutral slate accent — distinct from MSN's blue and the App
+        // Drawer's per-app hash-tinted rainbow (catcall_ui.h: tile colors
+        // are caller-supplied, backend-interpreted).
+        static const uint32_t colors[CAT_COUNT] = { 0x4A4A4Cu, 0x4A4A4Cu, 0x4A4A4Cu, 0x4A4A4Cu, 0x4A4A4Cu };
+        static purr_win_cb_t cbs[CAT_COUNT] = { on_open_general, on_open_display, on_open_customization, on_open_connectivity, on_open_about };
+        static void *users[CAT_COUNT] = { NULL, NULL, NULL, NULL, NULL };
+        purr_win_tile_grid_set_items(s_cat_tile_grid, s_category_labels, symbols, colors, cbs, users, CAT_COUNT);
+    } else {
+        // Active backend doesn't implement the tile grid (e.g. MiniWin,
+        // until/unless it's added there) — plain list of the same
+        // categories, fully functional, just less decorated.
+        s_cat_list = purr_win_list(s_win, 100, 75);
+        purr_win_list_set_items(s_cat_list, s_category_labels, CAT_COUNT);
+        purr_win_list_on_select(s_cat_list, on_cat_list_event, NULL);
+    }
+}
+
 // ── Build UI ──────────────────────────────────────────────────────────────────
 
 static int settings_init(void) {
@@ -785,15 +902,7 @@ static int settings_init(void) {
     s_win = purr_win_create("Settings");
 
     purr_win_label(s_win, "Settings");
-    purr_wid_t cr1 = purr_win_row(s_win, 4);
-    purr_win_button(s_win, "General",       on_open_general,       NULL);
-    purr_win_button(s_win, "Display",       on_open_display,       NULL);
-    purr_win_layout_end(cr1);
-
-    purr_wid_t cr2 = purr_win_row(s_win, 4);
-    purr_win_button(s_win, "Customization", on_open_customization, NULL);
-    purr_win_button(s_win, "Connectivity",  on_open_connectivity,  NULL);
-    purr_win_layout_end(cr2);
+    build_category_nav();
 
     purr_win_show(s_win);
     return 0;
@@ -803,15 +912,17 @@ static void settings_deinit(void) {
     close_wifi_dialog();
     if (s_wifi_win) { purr_win_destroy(s_wifi_win); s_wifi_win = 0; s_wifi_status_lbl = 0; s_wifi_list = 0; }
 #ifdef CONFIG_BT_NIMBLE_ENABLED
+    if (s_bt_scanning && s_bt_scan_done) xSemaphoreTake(s_bt_scan_done, pdMS_TO_TICKS(7500));
     if (s_bt_win)   { purr_win_destroy(s_bt_win);   s_bt_win   = 0; s_bt_status_lbl   = 0; s_bt_list   = 0; }
 #endif
     if (s_general_win)       { purr_win_destroy(s_general_win);       s_general_win       = 0; s_general_status_lbl       = 0; }
     if (s_display_win)       { purr_win_destroy(s_display_win);       s_display_win       = 0; s_display_status_lbl       = 0; }
     if (s_customization_win) { purr_win_destroy(s_customization_win); s_customization_win = 0; s_customization_status_lbl = 0; }
     if (s_connectivity_win)  { purr_win_destroy(s_connectivity_win);  s_connectivity_win  = 0; s_mesh_backend_status_lbl = 0; }
+    if (s_about_win)         { purr_win_destroy(s_about_win);         s_about_win         = 0; s_about_lbl = 0; }
     if (s_mesh_switch_confirm_win) { purr_win_destroy(s_mesh_switch_confirm_win); s_mesh_switch_confirm_win = 0; }
     purr_win_destroy(s_win);
-    s_win = 0;
+    s_win = 0; s_cat_tile_grid = 0; s_cat_list = 0;
 }
 
 // ── Module header ─────────────────────────────────────────────────────────────

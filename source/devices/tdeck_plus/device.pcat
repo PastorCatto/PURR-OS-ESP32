@@ -24,10 +24,17 @@ battery     = "adc_battery"
 
 [radio]
 wifi        = true
-# bt — off. Gated behind CONFIG_BT_NIMBLE_ENABLED (see CoreOS/main/
-# Kconfig.projbuild), not deleted — flip that Kconfig + re-add "bt_mgr" to
-# [modules]/[flash] below to bring it back with zero code changes.
-bt          = false
+# bt — NimBLE (BLE-only, this chip has no classic BT). Needed for
+# Meshtastic's phone-companion BLE service (mesh_ble.c). Live-crash history
+# so far, each root-caused and fixed: two internal-DRAM exhaustion crashes
+# (sdkconfig_tdeck_plus.overrides's Bluetooth section), a cupcake_task
+# watchdog trip from a blocking scan call on the UI task (settings.c's
+# bt_scan_task fix), and a mesh_ble.c crash calling ble_gatts_chr_updated()
+# on a not-yet-registered handle before BT was ever turned on (fixed —
+# gated on bt_mgr_host_ready()). Internal free RAM still runs tight (~62KB
+# -> ~26KB just from activating) — worth watching, not yet proven safe
+# under sustained mesh traffic + BLE together.
+bt          = true
 # sx1262_rl — RadioLib-backed driver (source/drivers/radio/sx1262_rl),
 # swapped in for real Meshtastic node discovery instead of the hand-rolled
 # sx1262.c SPI driver (still present, unused by this device — see the
@@ -50,6 +57,7 @@ mesh        = "meshtastic"
 meshcore    = "meshcore"
 lua         = "lua_runtime"
 wifi        = "wifi_mgr"
+bt          = "bt_mgr"
 # proximity/pairing — NOT listed here anymore; purrstrap.py's
 # apply_radio_companion_defaults() adds them automatically to any device
 # with [radio] wifi = true (this one), see cyd/device.pcat's comment for
@@ -79,6 +87,7 @@ app_manager       = 2
 radio/sx1262_rl   = 2
 driver_manager    = 2
 wifi_mgr          = 2
+bt_mgr            = 2
 lua_runtime       = 2
 meshtastic        = 2
 meshcore          = 2

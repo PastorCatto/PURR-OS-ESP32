@@ -124,7 +124,7 @@ CONFIG_LV_CONF_SKIP=n
 # Scanning/connecting/basic GATT (everything bt_mgr.c/mesh_ble.c actually
 # do) doesn't need any BLE 5.0 feature — same reasoning that kept the old
 # Bluedroid config on 4.2-only.
-# CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
 
 # Even with BLE 5.0 features off, esp_nimble_hci_init() still failed live
 # ("BLE_INIT: hci inits failed" -> "nimble host init failed" -> bt_mgr's own
@@ -145,7 +145,7 @@ CONFIG_LV_CONF_SKIP=n
 # allocations to PSRAM instead of fighting for scarce internal DRAM.
 # CONFIG_SPIRAM_USE_MALLOC=y (already on, see this file's LV_MEM_CUSTOM
 # comment) satisfies this option's own Kconfig dependency.
-# CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 
 # wifi_mgr/bt_mgr/lua_runtime were declared in device.pcat's [flash] section
 # (staging priority) but never in [modules] — purrstrap's _generate_glue()
