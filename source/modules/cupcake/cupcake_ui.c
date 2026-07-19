@@ -1367,13 +1367,27 @@ static void ck_lock_dismiss_cb(lv_event_t *e)
     // already "now" by the time we get here.
 }
 
-// Clock/nodes/messages labels — populated by ck_lock_refresh_info(),
-// called once on lock (ck_lock_check_idle()) and then every tick while
-// locked (cupcake_ui_tick()) so they stay live for anyone glancing at a
-// locked device, not just at the instant it locked.
+// Minimalist-centered redesign (ASCII mockup approved by the user before
+// building this): big uptime clock as the focal point, a small "up Xh Ym"
+// subtitle right under it (states plainly that this isn't wall-clock time,
+// instead of only a code comment saying so), a brand mark, a real-data
+// status line (node/message counts) and a battery reading (reusing the
+// same symbol-threshold logic as the status bar's own battery icon,
+// ck_refresh_status_icons(), for a consistent look), and an unlock hint at
+// the bottom. Dropped the earlier mockup's "signal bars" — there's no real
+// per-device signal-strength metric to back it (RSSI is peer-relative),
+// and this screen only ever shows numbers that come from an existing,
+// already-used catcall (purr_kernel_battery_percent()/purr_kernel_notify_
+// count()/mesh_manager_node_count()), not invented ones.
+//
+// Labels are populated by ck_lock_refresh_info(), called once on lock
+// (ck_lock_check_idle()) and then every tick while locked (cupcake_ui_
+// tick()) so they stay live for anyone glancing at a locked device, not
+// just at the instant it locked.
 static lv_obj_t *s_lock_clock_lbl;
-static lv_obj_t *s_lock_nodes_lbl;
-static lv_obj_t *s_lock_msgs_lbl;
+static lv_obj_t *s_lock_uptime_lbl;
+static lv_obj_t *s_lock_status_lbl;
+static lv_obj_t *s_lock_battery_lbl;
 
 static void ck_build_lock_screen(uint16_t w, uint16_t h)
 {
@@ -1391,33 +1405,50 @@ static void ck_build_lock_screen(uint16_t w, uint16_t h)
 
     // No RTC/NTP anywhere in this codebase (checked — no sntp usage at
     // all, and catcall_gps_t carries no time field either), so this is
-    // elapsed uptime formatted as a clock, not wall-clock time. Still
-    // genuinely useful at a glance (confirms the device is alive and how
-    // long it's been running) without claiming to be something it isn't.
+    // elapsed uptime formatted as a clock, not wall-clock time — the
+    // subtitle below says so explicitly. Still genuinely useful at a
+    // glance (confirms the device is alive and how long it's been
+    // running) without claiming to be something it isn't. montserrat_32
+    // (already linked in for Milk Bottle's big-text display) makes this
+    // the visual focal point the mockup called for.
     s_lock_clock_lbl = lv_label_create(s_lock_screen);
     lv_obj_set_style_text_color(s_lock_clock_lbl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(s_lock_clock_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_lock_clock_lbl, &lv_font_montserrat_32, 0);
     lv_label_set_text(s_lock_clock_lbl, "00:00:00");
     lv_obj_set_style_text_align(s_lock_clock_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lock_clock_lbl, LV_ALIGN_CENTER, 0, -40);
+    lv_obj_align(s_lock_clock_lbl, LV_ALIGN_CENTER, 0, -60);
 
-    lv_obj_t *lbl = lv_label_create(s_lock_screen);
-    lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
-    lv_label_set_text(lbl, "Locked\ntap to unlock");
-    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_center(lbl);
+    s_lock_uptime_lbl = lv_label_create(s_lock_screen);
+    lv_obj_set_style_text_color(s_lock_uptime_lbl, lv_color_make(0xB0, 0xB0, 0xB0), 0);
+    lv_obj_set_style_text_font(s_lock_uptime_lbl, &lv_font_montserrat_14, 0);
+    lv_label_set_text(s_lock_uptime_lbl, "");
+    lv_obj_set_style_text_align(s_lock_uptime_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lock_uptime_lbl, LV_ALIGN_CENTER, 0, -26);
 
-    s_lock_nodes_lbl = lv_label_create(s_lock_screen);
-    lv_obj_set_style_text_color(s_lock_nodes_lbl, lv_color_white(), 0);
-    lv_label_set_text(s_lock_nodes_lbl, "");
-    lv_obj_set_style_text_align(s_lock_nodes_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lock_nodes_lbl, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_t *brand = lv_label_create(s_lock_screen);
+    lv_obj_set_style_text_color(brand, lv_color_white(), 0);
+    lv_obj_set_style_text_font(brand, &lv_font_montserrat_14, 0);
+    lv_label_set_text(brand, "PURR OS");
+    lv_obj_set_style_text_align(brand, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(brand, LV_ALIGN_CENTER, 0, 6);
 
-    s_lock_msgs_lbl = lv_label_create(s_lock_screen);
-    lv_obj_set_style_text_color(s_lock_msgs_lbl, lv_color_white(), 0);
-    lv_label_set_text(s_lock_msgs_lbl, "");
-    lv_obj_set_style_text_align(s_lock_msgs_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_lock_msgs_lbl, LV_ALIGN_CENTER, 0, 64);
+    s_lock_status_lbl = lv_label_create(s_lock_screen);
+    lv_obj_set_style_text_color(s_lock_status_lbl, lv_color_white(), 0);
+    lv_label_set_text(s_lock_status_lbl, "");
+    lv_obj_set_style_text_align(s_lock_status_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lock_status_lbl, LV_ALIGN_CENTER, 0, 36);
+
+    s_lock_battery_lbl = lv_label_create(s_lock_screen);
+    lv_obj_set_style_text_color(s_lock_battery_lbl, lv_color_white(), 0);
+    lv_label_set_text(s_lock_battery_lbl, "");
+    lv_obj_set_style_text_align(s_lock_battery_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(s_lock_battery_lbl, LV_ALIGN_CENTER, 0, 58);
+
+    lv_obj_t *hint = lv_label_create(s_lock_screen);
+    lv_obj_set_style_text_color(hint, lv_color_make(0x80, 0x80, 0x80), 0);
+    lv_label_set_text(hint, "tap to unlock");
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
 }
 
 static void ck_lock_refresh_info(void)
@@ -1430,21 +1461,34 @@ static void ck_lock_refresh_info(void)
     snprintf(buf, sizeof(buf), "%02u:%02u:%02u", hh, mm, ss);
     lv_label_set_text(s_lock_clock_lbl, buf);
 
-#ifdef CONFIG_PURR_FEATURE_MESHTASTIC
-    int nodes = mesh_manager_node_count();
-    snprintf(buf, sizeof(buf), "%d node%s", nodes, nodes == 1 ? "" : "s");
-    lv_label_set_text(s_lock_nodes_lbl, buf);
-#else
-    lv_label_set_text(s_lock_nodes_lbl, "");
-#endif
+    unsigned up_hh = (unsigned)(up_s / 3600ULL);
+    if (up_hh > 0) snprintf(buf, sizeof(buf), "up %uh %um", up_hh, mm);
+    else           snprintf(buf, sizeof(buf), "up %um", mm);
+    lv_label_set_text(s_lock_uptime_lbl, buf);
 
+    int nodes = 0;
+#ifdef CONFIG_PURR_FEATURE_MESHTASTIC
+    nodes = mesh_manager_node_count();
+#endif
     int n = purr_kernel_notify_count();
-    if (n > 0) {
-        snprintf(buf, sizeof(buf), "%d message%s", n, n == 1 ? "" : "s");
+    snprintf(buf, sizeof(buf), "%d node%s  |  %d message%s",
+             nodes, nodes == 1 ? "" : "s", n, n == 1 ? "" : "s");
+    lv_label_set_text(s_lock_status_lbl, buf);
+
+    // Same threshold/symbol choice as ck_refresh_status_icons()'s own
+    // battery icon, for a consistent look between the status bar and lock
+    // screen.
+    int pct = purr_kernel_battery_percent();
+    if (pct < 0) {
+        lv_label_set_text(s_lock_battery_lbl, "");
     } else {
-        buf[0] = '\0';
+        const char *sym = pct > 80 ? LV_SYMBOL_BATTERY_FULL :
+                           pct > 55 ? LV_SYMBOL_BATTERY_3 :
+                           pct > 30 ? LV_SYMBOL_BATTERY_2 :
+                           pct > 10 ? LV_SYMBOL_BATTERY_1 : LV_SYMBOL_BATTERY_EMPTY;
+        snprintf(buf, sizeof(buf), "%s %d%%", sym, pct);
+        lv_label_set_text(s_lock_battery_lbl, buf);
     }
-    lv_label_set_text(s_lock_msgs_lbl, buf);
 }
 
 bool cupcake_ui_is_locked(void) { return s_locked; }
