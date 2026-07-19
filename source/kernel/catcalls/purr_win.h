@@ -150,6 +150,23 @@ static inline void purr_win_list_on_select(purr_wid_t wid,
     _UI_VOID(list_cb, wid, cb, user);
 }
 
+// ── Tile grid ─────────────────────────────────────────────────────────────────
+// Optional — see catcall_ui.h's own comment. purr_win_tile_grid_create()
+// returns 0 on a backend that doesn't implement this; callers must check
+// for that and fall back to something else (e.g. purr_win_list()) rather
+// than assuming it always succeeds.
+
+static inline purr_wid_t purr_win_tile_grid(purr_win_t win,
+                                             uint16_t w_pct, uint16_t h_pct) {
+    return _UI_CALL(purr_wid_t, 0, tile_grid_create, win, w_pct, h_pct);
+}
+static inline void purr_win_tile_grid_set_items(purr_wid_t wid,
+                                                  const char **labels, const char **symbols,
+                                                  const uint32_t *colors,
+                                                  purr_win_cb_t *cbs, void **users, int count) {
+    _UI_VOID(tile_grid_set_items, wid, labels, symbols, colors, cbs, users, count);
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────────
 
 static inline purr_wid_t purr_win_row(purr_win_t win, uint8_t pad) {

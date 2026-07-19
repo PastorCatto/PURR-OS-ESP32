@@ -1,24 +1,38 @@
-// msn.c — PURR OS MSN (Mesh Social Network): rooms + buddy list, private 1:1
-// chat and multi-channel group chat over whichever mesh backend (Meshtastic
-// or MeshCore) is currently active. Renamed/refactored from meshchat.c,
+// msn.c — PURR OS MSN (Mesh Social Network): a tile-grid Home screen (Nodes/
+// Messages/Channels/Manage) plus private 1:1 chat and multi-channel group
+// chat over whichever mesh backend (Meshtastic or MeshCore) is currently
+// active. Renamed/refactored from meshchat.c,
 // which talked to meshtastic.h directly — this file now talks only through
 // msn_backend.h's protocol-agnostic vtable (msn_backend_meshtastic.c /
 // msn_backend_meshcore.c own the actual meshtastic.h/meshcore_api.h calls).
 //
 // Launch screen is a backend chooser: two big buttons (Meshtastic/MeshCore)
 // with an active-indicator next to whichever one purr_kernel_get_module()
-// shows is actually running. Tapping the active one enters the normal
-// Rooms/Buddies chat UI below. Tapping the inactive one live-switches to it
-// via purr_kernel_mesh_backend_switch() — persists the choice and swaps
-// which mesh module is loaded, no reboot (see that function's own comment
-// in purr_kernel.c for how the one-physical-radio mutual exclusion still
-// holds without one).
+// shows is actually running. Tapping the active one enters MSN's Home
+// screen below. Tapping the inactive one live-switches to it via
+// purr_kernel_mesh_backend_switch() — persists the choice and swaps which
+// mesh module is loaded, no reboot (see that function's own comment in
+// purr_kernel.c for how the one-physical-radio mutual exclusion still holds
+// without one).
 //
-// Two lists on the chat window: Rooms (channels — group chat scoped to one
-// channel's key) and Buddies (1:1 DMs). A buddy is DMed using whichever
-// channel/key the active backend's own contact record implies (Meshtastic:
-// the contact's last-heard channel; MeshCore: per-contact ECDH, no channel
-// involved) — msn_backend_t's send_text() owns that distinction internally.
+// Home screen (open_msn_home()) is a small tile-grid navigation menu —
+// falls back to a plain list on any UI backend that doesn't implement
+// purr_win_tile_grid_create() (see catcall_ui.h; MSN must stay portable
+// across every backend, not just Cupcake) — with four destinations: Nodes
+// (the buddy/contact list, its own full screen), Messages (a recent-
+// activity inbox across all DMs/rooms touched since this launch, most-
+// recent-first), Channels (the room list, its own full screen, plus Add
+// Room), and Manage (forget nodes/rooms). Replaces an earlier design where
+// Rooms and Buddies shared one window at 40% height each — cramped once a
+// mesh has more than a handful of nodes. Home itself is never destroyed
+// once built; sub-screens hide back to it (settings.c's own category-
+// picker pattern), not the destroy/recreate the chooser→Home transition
+// still uses.
+//
+// A buddy is DMed using whichever channel/key the active backend's own
+// contact record implies (Meshtastic: the contact's last-heard channel;
+// MeshCore: per-contact ECDH, no channel involved) — msn_backend_t's
+// send_text() owns that distinction internally.
 //
 // Message logs (both rooms and DMs) persist across closing and reopening a
 // chat window (and across closing/relaunching the whole app) — only the
@@ -31,6 +45,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -75,12 +90,28 @@ static purr_win_t s_switch_confirm_win = 0;
 static purr_wid_t s_switch_confirm_lbl = 0;
 static purr_mesh_backend_t s_pending_switch_target;
 
-// ── Main chat window state ───────────────────────────────────────────────
+// ── Home screen + sub-screens ─────────────────────────────────────────────
+// s_home_win is created once by open_msn_home() and never destroyed until
+// close_chat_ui() — Nodes/Messages/Channels lazily-create-then-show/hide
+// back to it, same pattern settings.c already uses for its own category
+// picker. s_buddy_list/s_room_list keep their names (still "the widget
+// showing buddies"/"the widget showing rooms") even though they now live
+// inside the Nodes/Channels windows instead of the old combined screen.
 
-static purr_win_t  s_buddy_win   = 0;
-static purr_wid_t  s_buddy_list  = 0;
-static purr_wid_t  s_room_list   = 0;
-static purr_wid_t  s_status_lbl  = 0;
+static purr_win_t  s_home_win       = 0;
+static purr_wid_t  s_home_tile_grid = 0;   // 0 if the active backend doesn't implement tile grids
+static purr_wid_t  s_home_list      = 0;   // fallback, built instead when s_home_tile_grid creation failed
+static purr_wid_t  s_status_lbl     = 0;
+
+static purr_win_t  s_nodes_win      = 0;
+static purr_wid_t  s_buddy_list     = 0;
+
+static purr_win_t  s_channels_win   = 0;
+static purr_wid_t  s_room_list      = 0;
+
+static purr_win_t  s_messages_win   = 0;
+static purr_wid_t  s_messages_list  = 0;
+
 static TaskHandle_t s_refresh_task = NULL;
 static bool         s_running      = false;
 // Given by buddy_refresh_task() right before it self-deletes, waited on by
@@ -109,6 +140,11 @@ static purr_win_t  s_chat_win[MAX_CHATS];
 static purr_wid_t  s_chat_out[MAX_CHATS];
 static purr_wid_t  s_chat_in[MAX_CHATS];
 static int         s_chat_scroll[MAX_CHATS];   // lines skipped from the top of the log — see render_chat_view()
+// Stamped in chat_log_append() — 0 means "nothing sent/received this
+// launch." Drives the Messages screen's recency sort; reset to 0 in
+// close_chat_ui() so the inbox starts empty again on relaunch, same as the
+// rest of MSN's per-launch (not per-boot, not persisted) UI state.
+static uint32_t    s_buddy_last_ms[MAX_CHATS];
 
 // ── Rooms (channel group chat) ───────────────────────────────────────────
 
@@ -137,6 +173,8 @@ static purr_win_t   s_room_win[MAX_ROOMS];
 static purr_wid_t   s_room_out[MAX_ROOMS];
 static purr_wid_t   s_room_in[MAX_ROOMS];
 static int          s_room_scroll[MAX_ROOMS];   // lines skipped from the top of the log
+// Same shape/reset rule as s_buddy_last_ms above.
+static uint32_t     s_room_last_ms[MAX_ROOMS];
 
 // ── Add Room window ──────────────────────────────────────────────────────
 
@@ -397,13 +435,6 @@ static void refresh_status_label(void) {
     }
 }
 
-static void on_refresh_click(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)e; (void)user;
-    refresh_buddy_list();
-    refresh_room_list();
-    refresh_status_label();
-}
-
 // Defined further down (Manage section) — reused here for the remote-mode
 // transition below, forward-declared to avoid reordering the file.
 static void reset_all_buddy_windows(void);
@@ -521,6 +552,7 @@ static void on_room_scroll_click(purr_wid_t w, purr_event_t e, void *user) {
 
 static void chat_log_append(int idx, const char *text) {
     log_append(s_chat_logs[idx], &s_chat_loglen[idx], text);
+    s_buddy_last_ms[idx] = (uint32_t)purr_kernel_uptime_ms();
     render_chat_view(idx);
     char path[64];
     dm_path(s_buddy_id_strs[idx], path, sizeof(path));
@@ -530,6 +562,7 @@ static void chat_log_append(int idx, const char *text) {
 static void room_log_append(int idx, const char *text) {
     if (!s_room_logs[idx]) return;
     log_append(s_room_logs[idx], &s_room_loglen[idx], text);
+    s_room_last_ms[idx] = (uint32_t)purr_kernel_uptime_ms();
     render_room_view(idx);
     char path[64];
     room_path(idx, path, sizeof(path));
@@ -801,11 +834,6 @@ static void open_manage(void) {
     purr_win_show(s_manage_win);
 }
 
-static void on_manage_click(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)e; (void)user;
-    open_manage();
-}
-
 // ── Incoming messages ─────────────────────────────────────────────────────────
 // Registers with the active backend's single unified RX-callback slot —
 // both mesh modules already fire purr_kernel_notify() for every text
@@ -827,35 +855,196 @@ static void on_mesh_rx(int contact_idx, int channel_idx, const char *text) {
     chat_log_append(contact_idx, line);
 }
 
-// ── Chat UI lifecycle (Rooms/Buddies window + its background task) ─────────
+// ── Nodes / Channels / Messages screens ─────────────────────────────────────
+// Lazy-create-then-show/hide, same shape as open_chat()/open_room() below
+// and settings.c's own category-sub-window pattern — each screen persists
+// once built until close_chat_ui() tears everything down; Back just hides.
 
-static void open_chat_ui(void) {
+static void on_nodes_back_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    purr_win_hide(s_nodes_win);
+}
+
+static void open_nodes_screen(void) {
+    if (s_nodes_win) { purr_win_show(s_nodes_win); return; }
+    s_nodes_win = purr_win_create("Nodes");
+    purr_win_button(s_nodes_win, "< Back", on_nodes_back_click, NULL);
+    s_buddy_list = purr_win_list(s_nodes_win, 100, 85);
+    purr_win_list_on_select(s_buddy_list, on_buddy_list_event, NULL);
+    refresh_buddy_list();
+    purr_win_show(s_nodes_win);
+}
+
+static void on_channels_back_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    purr_win_hide(s_channels_win);
+}
+
+static void open_channels_screen(void) {
+    if (s_channels_win) { purr_win_show(s_channels_win); return; }
+    s_channels_win = purr_win_create("Channels");
+    purr_wid_t row = purr_win_row(s_channels_win, 4);
+    purr_win_button(s_channels_win, "< Back", on_channels_back_click, NULL);
+    purr_win_button(s_channels_win, "Add Room", on_addroom_click, NULL);
+    purr_win_layout_end(row);
+    s_room_list = purr_win_list(s_channels_win, 100, 80);
+    purr_win_list_on_select(s_room_list, on_room_list_event, NULL);
+    refresh_room_list();
+    purr_win_show(s_channels_win);
+}
+
+// Recent-activity inbox — most-recent-first across every DM/room touched
+// since MSN was last (re)launched (s_buddy_last_ms/s_room_last_ms reset in
+// close_chat_ui()). No new message storage: the preview text is read on
+// demand from the tail of the existing s_chat_logs/s_room_logs buffer.
+#define MAX_INBOX (MAX_CHATS + MAX_ROOMS)
+typedef struct { bool is_room; int idx; uint32_t last_ms; } inbox_entry_t;
+static inbox_entry_t s_inbox_entries[MAX_INBOX];
+static int           s_inbox_count = 0;
+static char          s_inbox_row_bufs[MAX_INBOX][100];
+static const char    *s_inbox_row_ptrs[MAX_INBOX];
+
+// Extracts the last non-empty line from a log buffer (each entry already
+// ends in '\n' — see chat_log_append()/room_log_append()) into out.
+static void last_line(const char *log, char *out, size_t out_max) {
+    out[0] = 0;
+    if (!log || !*log) return;
+    size_t end = strlen(log);
+    while (end > 0 && log[end - 1] == '\n') end--;
+    size_t start = end;
+    while (start > 0 && log[start - 1] != '\n') start--;
+    size_t n = end - start;
+    if (n >= out_max) n = out_max - 1;
+    memcpy(out, log + start, n);
+    out[n] = 0;
+}
+
+static int inbox_cmp(const void *a, const void *b) {
+    uint32_t ma = ((const inbox_entry_t *)a)->last_ms;
+    uint32_t mb = ((const inbox_entry_t *)b)->last_ms;
+    if (mb > ma) return 1;
+    if (mb < ma) return -1;
+    return 0;
+}
+
+static void refresh_messages_list(void) {
+    s_inbox_count = 0;
+    for (int i = 0; i < s_buddy_count && s_inbox_count < MAX_INBOX; i++) {
+        if (s_buddy_last_ms[i] == 0) continue;
+        s_inbox_entries[s_inbox_count++] = (inbox_entry_t){ false, i, s_buddy_last_ms[i] };
+    }
+    for (int i = 0; i < s_room_count && s_inbox_count < MAX_INBOX; i++) {
+        if (s_room_last_ms[i] == 0) continue;
+        s_inbox_entries[s_inbox_count++] = (inbox_entry_t){ true, i, s_room_last_ms[i] };
+    }
+    qsort(s_inbox_entries, (size_t)s_inbox_count, sizeof(inbox_entry_t), inbox_cmp);
+
+    for (int i = 0; i < s_inbox_count; i++) {
+        const inbox_entry_t *e = &s_inbox_entries[i];
+        char preview[64];
+        last_line(e->is_room ? s_room_logs[e->idx] : s_chat_logs[e->idx], preview, sizeof(preview));
+        snprintf(s_inbox_row_bufs[i], sizeof(s_inbox_row_bufs[i]), "%s: %s",
+                 e->is_room ? s_room_names[e->idx] : s_buddy_labels[e->idx], preview);
+        s_inbox_row_ptrs[i] = s_inbox_row_bufs[i];
+    }
+    if (s_messages_list) purr_win_list_set_items(s_messages_list, s_inbox_row_ptrs, s_inbox_count);
+}
+
+static void on_messages_list_event(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)user;
+    if (e != PURR_EVENT_ACTIVATED) return;
+    int idx = purr_win_list_get_selected(s_messages_list);
+    if (idx < 0 || idx >= s_inbox_count) return;
+    const inbox_entry_t *entry = &s_inbox_entries[idx];
+    if (entry->is_room) open_room(entry->idx);
+    else                open_chat(entry->idx);
+}
+
+static void on_messages_back_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    purr_win_hide(s_messages_win);
+}
+
+static void open_messages_screen(void) {
+    if (s_messages_win) { purr_win_show(s_messages_win); refresh_messages_list(); return; }
+    s_messages_win = purr_win_create("Messages");
+    purr_win_button(s_messages_win, "< Back", on_messages_back_click, NULL);
+    s_messages_list = purr_win_list(s_messages_win, 100, 85);
+    purr_win_list_on_select(s_messages_list, on_messages_list_event, NULL);
+    refresh_messages_list();
+    purr_win_show(s_messages_win);
+}
+
+// ── Home screen (tile grid, falls back to a plain list) ─────────────────────
+
+static void on_nodes_tile(purr_wid_t w, purr_event_t e, void *user)    { (void)w; (void)e; (void)user; open_nodes_screen(); }
+static void on_messages_tile(purr_wid_t w, purr_event_t e, void *user) { (void)w; (void)e; (void)user; open_messages_screen(); }
+static void on_channels_tile(purr_wid_t w, purr_event_t e, void *user) { (void)w; (void)e; (void)user; open_channels_screen(); }
+static void on_manage_tile(purr_wid_t w, purr_event_t e, void *user)   { (void)w; (void)e; (void)user; open_manage(); }
+
+static const char *s_home_labels[4] = { "Nodes", "Messages", "Channels", "Manage" };
+
+// Fallback path only — the tile grid path dispatches per-tile via cbs[]
+// below and never reaches this (PURR_EVENT_CLICKED per tile, not a shared
+// list-selection callback).
+static void on_home_list_event(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)user;
+    if (e != PURR_EVENT_ACTIVATED) return;
+    switch (purr_win_list_get_selected(s_home_list)) {
+        case 0: open_nodes_screen(); break;
+        case 1: open_messages_screen(); break;
+        case 2: open_channels_screen(); break;
+        case 3: open_manage(); break;
+        default: break;
+    }
+}
+
+static void build_home_screen_nav(void) {
+    s_home_tile_grid = purr_win_tile_grid(s_home_win, 100, 75);
+    if (s_home_tile_grid) {
+#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+        static const char *symbols[4] = { LV_SYMBOL_LIST, LV_SYMBOL_ENVELOPE, LV_SYMBOL_WIFI, LV_SYMBOL_TRASH };
+#else
+        // Backend implements tile_grid but isn't Cupcake (a future LVGL-
+        // based backend) — no LV_SYMBOL_* available at compile time here
+        // (cupcake.h/lvgl.h are only pulled in under the Cupcake ifdef,
+        // see this file's top-of-file include comment), so tiles render
+        // label-only. Functionally complete either way.
+        static const char *symbols[4] = { NULL, NULL, NULL, NULL };
+#endif
+        // MSN's own accent — a consistent blue, distinct from the App
+        // Drawer's per-app-name hash-tinted rainbow (see catcall_ui.h's
+        // own comment on why tile colors are caller-supplied here).
+        static const uint32_t colors[4] = { 0x2E6F9E, 0x2E6F9E, 0x2E6F9E, 0x2E6F9E };
+        static purr_win_cb_t cbs[4] = { on_nodes_tile, on_messages_tile, on_channels_tile, on_manage_tile };
+        static void *users[4] = { NULL, NULL, NULL, NULL };
+        purr_win_tile_grid_set_items(s_home_tile_grid, s_home_labels, symbols, colors, cbs, users, 4);
+    } else {
+        // Active backend doesn't implement the tile grid (e.g. MiniWin,
+        // until/unless it's added there) — plain list of the same 4
+        // destinations, fully functional, just less decorated.
+        s_home_list = purr_win_list(s_home_win, 100, 75);
+        purr_win_list_set_items(s_home_list, s_home_labels, 4);
+        purr_win_list_on_select(s_home_list, on_home_list_event, NULL);
+    }
+}
+
+// ── Chat UI lifecycle (Home screen + its background task) ──────────────────
+
+static void open_msn_home(void) {
     // Reused across relaunches like s_room_logs below — starts "empty"
     // (taken), which is exactly the state close_chat_ui()'s xSemaphoreTake()
     // below needs at the start of every run.
     if (!s_refresh_done) s_refresh_done = xSemaphoreCreateBinary();
 
-    s_buddy_win  = purr_win_create("MSN");
-    s_status_lbl = purr_win_label(s_buddy_win, "Mesh: starting...");
-
-    purr_wid_t row = purr_win_row(s_buddy_win, 4);
-    purr_win_button(s_buddy_win, "Refresh",  on_refresh_click,  NULL);
-    purr_win_button(s_buddy_win, "Add Room", on_addroom_click,  NULL);
-    purr_win_button(s_buddy_win, "Manage",   on_manage_click,   NULL);
-    purr_win_layout_end(row);
-
-    purr_win_label(s_buddy_win, "Rooms");
-    s_room_list = purr_win_list(s_buddy_win, 100, 40);
-    purr_win_list_on_select(s_room_list, on_room_list_event, NULL);
-
-    purr_win_label(s_buddy_win, "Buddies");
-    s_buddy_list = purr_win_list(s_buddy_win, 100, 40);
-    purr_win_list_on_select(s_buddy_list, on_buddy_list_event, NULL);
+    s_home_win   = purr_win_create("MSN");
+    s_status_lbl = purr_win_label(s_home_win, "Mesh: starting...");
+    build_home_screen_nav();
 
     refresh_buddy_list();
     refresh_room_list();
     refresh_status_label();
-    purr_win_show(s_buddy_win);
+    purr_win_show(s_home_win);
 
     s_backend->add_rx_cb(on_mesh_rx);
 
@@ -882,12 +1071,14 @@ static void close_chat_ui(void) {
             purr_win_destroy(s_chat_win[i]);
             s_chat_win[i] = 0; s_chat_out[i] = 0; s_chat_in[i] = 0;
         }
+        s_buddy_last_ms[i] = 0;   // Messages inbox starts empty again next launch
     }
     for (int i = 0; i < MAX_ROOMS; i++) {
         if (s_room_win[i]) {
             purr_win_destroy(s_room_win[i]);
             s_room_win[i] = 0; s_room_out[i] = 0; s_room_in[i] = 0;
         }
+        s_room_last_ms[i] = 0;
     }
     if (s_addroom_win) {
         purr_win_destroy(s_addroom_win);
@@ -897,8 +1088,12 @@ static void close_chat_ui(void) {
         purr_win_destroy(s_manage_win);
         s_manage_win = 0; s_manage_node_list = 0; s_manage_room_list = 0;
     }
-    if (s_buddy_win) purr_win_destroy(s_buddy_win);
-    s_buddy_win = 0; s_buddy_list = 0; s_room_list = 0; s_status_lbl = 0;
+    if (s_nodes_win)    { purr_win_destroy(s_nodes_win);    s_nodes_win = 0; }
+    if (s_channels_win) { purr_win_destroy(s_channels_win); s_channels_win = 0; }
+    if (s_messages_win) { purr_win_destroy(s_messages_win); s_messages_win = 0; s_messages_list = 0; }
+    if (s_home_win) purr_win_destroy(s_home_win);
+    s_home_win = 0; s_home_tile_grid = 0; s_home_list = 0; s_status_lbl = 0;
+    s_buddy_list = 0; s_room_list = 0;
     // s_chat_logs/s_chat_loglen/s_room_logs/s_room_loglen deliberately NOT
     // cleared — chat history persists across closing and relaunching the app.
 }
@@ -934,7 +1129,7 @@ static void on_force_local_click(purr_wid_t w, purr_event_t e, void *user) {
 static void enter_chat_ui(const msn_backend_t *backend) {
     s_backend = backend;
     close_chooser();
-    open_chat_ui();
+    open_msn_home();
 }
 
 static void do_switch(purr_wid_t w, purr_event_t e, void *user) {

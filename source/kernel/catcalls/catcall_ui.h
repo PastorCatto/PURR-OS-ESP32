@@ -12,7 +12,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
-#define CATCALL_UI_VERSION 5
+#define CATCALL_UI_VERSION 6
 
 typedef uint32_t purr_win_t;   // window handle
 typedef uint32_t purr_wid_t;   // widget handle (label, button, textarea, etc.)
@@ -111,6 +111,23 @@ typedef struct {
     int        (*list_get_selected) (purr_wid_t wid);   // -1 if none
     void       (*list_set_selected) (purr_wid_t wid, int index);
     void       (*list_cb)           (purr_wid_t wid, purr_win_cb_t cb, void *user);
+
+    // ── Tile grid (scrollable grid of icon+label tiles, e.g. an app's own
+    // internal navigation menu) ─────────────────────────────────────────────
+    // Optional, like label_set_big above: a backend that doesn't implement
+    // this leaves both NULL. purr_win_tile_grid_create() in purr_win.h
+    // returns 0 in that case — the CALLER (not this layer) is responsible
+    // for falling back to something else (e.g. a plain list), since only
+    // the caller knows what a sane fallback looks like for its own content.
+    // symbols are LV_SYMBOL_*-style built-in glyph strings, not bitmap
+    // assets — keeps this implementable by any LVGL-based backend without
+    // needing shared icon resources. colors are backend-interpreted (a
+    // backend that can't do per-tile color may just ignore that array).
+    purr_wid_t (*tile_grid_create)     (purr_win_t win, uint16_t w_pct, uint16_t h_pct);
+    void       (*tile_grid_set_items)  (purr_wid_t grid_wid,
+                                         const char **labels, const char **symbols,
+                                         const uint32_t *colors,
+                                         purr_win_cb_t *cbs, void **users, int count);
 
     // ── Layout helpers ─────────────────────────────────────────────────────
     // Begin a row or column container inside win. Returns container widget.

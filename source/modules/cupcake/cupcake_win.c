@@ -516,6 +516,132 @@ static void ck_list_set_items(purr_wid_t wid, const char **items, int count) {
     ck_list_set_items_ex(wid, items, NULL, count);
 }
 
+// ── Tile grid (scrollable grid of icon+label tiles) ──────────────────────────
+// Generic version of build_lp_launcher_tile()'s visual shape (cupcake_ui.c's
+// "All Apps" launcher) — same tile size/padding/flex-wrap constants, but the
+// caller supplies the per-tile color/symbol/callback instead of the
+// launcher's hardcoded per-app-name hash tint + bitmap icon lookup + fixed
+// click handler. See catcall_ui.h's own comment — this is the generic,
+// portable capability MSN's Home screen (and any future caller) uses for an
+// internal navigation menu; not Cupcake-only despite living here.
+
+#define TILE_W  64
+#define TILE_H  84
+
+static purr_wid_t ck_tile_grid_create(purr_win_t h, uint16_t w_pct, uint16_t h_pct) {
+    lv_obj_t *parent = content_parent(h);
+    if (!parent) return 0;
+    lv_obj_t *grid = lv_obj_create(parent);
+    lv_obj_remove_style_all(grid);
+    lv_obj_set_size(grid, LV_PCT(w_pct), LV_PCT(h_pct));
+    lv_obj_set_style_bg_opa(grid, LV_OPA_TRANSP, 0);
+    lv_obj_set_scroll_dir(grid, LV_DIR_VER);
+    lv_obj_clear_flag(grid, LV_OBJ_FLAG_SCROLL_ELASTIC);
+    lv_obj_set_layout(grid, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW_WRAP);
+    // Same SPACE_EVENLY/fixed-gap reasoning as the Lollipop launcher's own
+    // grid (cupcake_ui.c) — fixed pad_row/column holds regardless of
+    // overflow, unlike SPACE_EVENLY's leftover-space gap which collapses to
+    // 0 once rows overflow (confirmed live there).
+    lv_obj_set_flex_align(grid, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_all(grid, 8, 0);
+    lv_obj_set_style_pad_row(grid, 10, 0);
+    lv_obj_set_style_pad_column(grid, 10, 0);
+    return alloc_wid(grid);
+}
+
+// Separate cb_ctx_t-alike from the shared one above — tiles are per-item
+// one-shot "tap to activate" like buttons (own cb/user per tile), not a
+// persistent-selection list, so there's no s_list_meta-equivalent state.
+typedef struct { purr_win_cb_t cb; void *user; purr_wid_t wid; } tile_cb_ctx_t;
+
+static void tile_event_cb(lv_event_t *e) {
+    tile_cb_ctx_t *ctx = (tile_cb_ctx_t *)lv_event_get_user_data(e);
+    if (ctx && ctx->cb) ctx->cb(ctx->wid, PURR_EVENT_CLICKED, ctx->user);
+}
+
+static void tile_ctx_delete_cb(lv_event_t *e) {
+    tile_cb_ctx_t *ctx = (tile_cb_ctx_t *)lv_event_get_user_data(e);
+    if (ctx) heap_caps_free(ctx);
+}
+
+// Same "rebuild must not run synchronously off a background task" hazard as
+// ck_list_set_items_ex() above (see its own comment — confirmed live hang,
+// scrolling while a background refresh rebuilt the list concurrently) —
+// deferred via lv_async_call() for the exact same reason. Callers must keep
+// the labels/symbols/colors/cbs/users arrays valid until actually consumed
+// on the next lv_timer_handler() tick, same contract ck_list_set_items_ex()
+// already documents.
+typedef struct {
+    purr_wid_t grid_wid;
+    const char **labels;
+    const char **symbols;
+    const uint32_t *colors;
+    purr_win_cb_t *cbs;
+    void **users;
+    int count;
+} tile_set_ctx_t;
+
+static void ck_tile_grid_set_items_async_cb(void *user) {
+    tile_set_ctx_t *sctx = (tile_set_ctx_t *)user;
+    lv_obj_t *grid = get_wid(sctx->grid_wid);
+    if (grid) {
+        lv_obj_clean(grid);
+        for (int i = 0; i < sctx->count; i++) {
+            lv_obj_t *tile = lv_obj_create(grid);
+            lv_obj_remove_style_all(tile);
+            lv_obj_set_size(tile, TILE_W, TILE_H);
+            lv_obj_set_style_radius(tile, 10, 0);
+            uint32_t color = (sctx->colors && sctx->colors[i]) ? sctx->colors[i] : 0x3A3A3Cu;
+            lv_obj_set_style_bg_color(tile, lv_color_hex(color), 0);
+            lv_obj_set_style_bg_opa(tile, LV_OPA_80, 0);
+            lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(tile, LV_OBJ_FLAG_CLICKABLE);
+
+            const char *symbol = (sctx->symbols && sctx->symbols[i]) ? sctx->symbols[i] : LV_SYMBOL_FILE;
+            lv_obj_t *icon = lv_label_create(tile);
+            lv_label_set_text(icon, symbol);
+            lv_obj_set_style_text_font(icon, &lv_font_montserrat_32, 0);
+            lv_obj_set_style_text_color(icon, lv_color_white(), 0);
+            lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 4);
+            lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+            lv_obj_t *lbl = lv_label_create(tile);
+            lv_label_set_text(lbl, (sctx->labels && sctx->labels[i]) ? sctx->labels[i] : "");
+            lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+            lv_obj_set_width(lbl, TILE_W - 6);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+            lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -4);
+            lv_obj_clear_flag(lbl, LV_OBJ_FLAG_CLICKABLE);
+
+            purr_win_cb_t cb     = sctx->cbs   ? sctx->cbs[i]   : NULL;
+            void         *cbuser = sctx->users ? sctx->users[i] : NULL;
+            if (cb) {
+                tile_cb_ctx_t *ctx = heap_caps_malloc(sizeof(tile_cb_ctx_t), MALLOC_CAP_DEFAULT);
+                if (ctx) {
+                    ctx->cb = cb; ctx->user = cbuser; ctx->wid = sctx->grid_wid;
+                    lv_obj_add_event_cb(tile, tile_event_cb, LV_EVENT_CLICKED, ctx);
+                    lv_obj_add_event_cb(tile, tile_ctx_delete_cb, LV_EVENT_DELETE, ctx);
+                }
+            }
+        }
+    }
+    heap_caps_free(sctx);
+}
+
+static void ck_tile_grid_set_items(purr_wid_t wid, const char **labels, const char **symbols,
+                                    const uint32_t *colors, purr_win_cb_t *cbs, void **users, int count) {
+    if (wid < 1 || wid > MAX_WIDS) return;
+    tile_set_ctx_t *sctx = heap_caps_malloc(sizeof(tile_set_ctx_t), MALLOC_CAP_DEFAULT);
+    if (!sctx) return;
+    sctx->grid_wid = wid;
+    sctx->labels = labels; sctx->symbols = symbols; sctx->colors = colors;
+    sctx->cbs = cbs; sctx->users = users; sctx->count = count;
+    lv_async_call(ck_tile_grid_set_items_async_cb, sctx);
+}
+
 // icons[i] is an LV_SYMBOL_* string constant (a font glyph baked into
 // LVGL's own symbol font, not a bitmap asset) or NULL for no icon, matching
 // lv_list_add_btn()'s own (list, icon, txt) shape. See cupcake.h's doc
@@ -659,6 +785,8 @@ static const catcall_ui_t s_cupcake_win = {
     .list_get_selected = ck_list_get_selected,
     .list_set_selected = ck_list_set_selected,
     .list_cb           = ck_list_cb,
+    .tile_grid_create    = ck_tile_grid_create,
+    .tile_grid_set_items = ck_tile_grid_set_items,
     .layout_begin    = ck_layout_begin,
     .layout_end      = ck_layout_end,
     .kb_show         = ck_kb_show,
