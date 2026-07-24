@@ -62,6 +62,8 @@ static void draw_cursor(int x, int y, uint16_t color)
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+bool miniwin_cursor_enabled(void) { return CURSOR_ENABLED; }
+
 bool miniwin_cursor_handle_event(const input_event_t *ev)
 {
 #if !CURSOR_ENABLED

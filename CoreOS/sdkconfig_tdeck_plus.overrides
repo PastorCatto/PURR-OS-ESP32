@@ -147,6 +147,21 @@ CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
 # comment) satisfies this option's own Kconfig dependency.
 CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 
+# The above routes the NimBLE *host*'s own pools (msys/event/ACL) to PSRAM,
+# but the lower controller layer (CONFIG_BT_CTRL_*) is tightly coupled to
+# the radio ISR/link-layer timing and isn't PSRAM-redirectable the same
+# way — it stays forced into internal DRAM regardless. Confirmed live:
+# internal_free drops from ~63KB to ~26-27KB the moment BT activates and
+# sits there under normal use (soak-tested ~50min, not actively leaking,
+# just a tight fixed cost) — still uncomfortably close to the kernel's own
+# memory-watchdog threshold. Both defaults below are sized for far more
+# traffic than this app needs (bt_mgr.c/mesh_ble.c: one phone connection
+# at a time, MAX_SCAN_RESULTS=24 per scan) — trimming them shrinks the
+# controller's own fixed buffer allocations, which live in that same
+# stuck-internal pool.
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM=24
+
 # wifi_mgr/bt_mgr/lua_runtime were declared in device.pcat's [flash] section
 # (staging priority) but never in [modules] — purrstrap's _generate_glue()
 # only reads [drivers]/[modules]/[apps] for what to statically register, so

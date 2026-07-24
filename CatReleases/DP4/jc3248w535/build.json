@@ -1,0 +1,11 @@
+{
+  "device": "jc3248w535",
+  "chip": "esp32s3",
+  "purros_version": "1.0.0-dp4",
+  "kitt_version": "1.0.0",
+  "last_build": "2026-07-10T16:53:15.225354",
+  "pcat": "/home/PastorCatto/Projects/PURR-OS-ESP32/source/devices/jc3248w535/device.pcat",
+  "flash_bin": "/home/PastorCatto/Projects/PURR-OS-ESP32/cattobaked/jc3248w535/flash.bin",
+  "firmware_bin": "/home/PastorCatto/Projects/PURR-OS-ESP32/cattobaked/jc3248w535/firmware.bin",
+  "spiffs_kb": 1024
+}

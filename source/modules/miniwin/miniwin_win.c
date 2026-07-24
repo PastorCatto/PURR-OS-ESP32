@@ -497,6 +497,15 @@ static void mw_win_destroy(purr_win_t h) {
     s_cursor_y[h-1] = 0;
     s_layout[h-1].active = false;
     free_win(h);
+
+#ifdef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
+    // Closing this window exposes whatever's underneath — see
+    // wce_redraw_layers()'s doc comment for why mw_paint_all() alone can't
+    // be trusted to catch that on its own. Unconditional (not just the
+    // !already_torn_down branch above) since both teardown paths end up
+    // here and both can leave the same stale pixels behind.
+    wce_redraw_layers();
+#endif
 }
 
 static void mw_win_show(purr_win_t h) {

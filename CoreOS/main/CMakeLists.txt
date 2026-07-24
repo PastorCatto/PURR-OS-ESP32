@@ -46,11 +46,11 @@ endif()
 
 if(PURR_KERNEL_TYPE STREQUAL "arduino")
     set(EXTRA_REQUIRES espressif__arduino-esp32)
-    set(DRIVER_REQUIRES st7789 trackball)
+    set(DRIVER_REQUIRES st7789 trackball boot_splash)
     message(STATUS "PURR: Arduino kernel — using Wire for I2C peripherals")
 else()
     set(EXTRA_REQUIRES "")
-    set(DRIVER_REQUIRES st7789 gt911 trackball bbq20)
+    set(DRIVER_REQUIRES st7789 gt911 trackball bbq20 boot_splash)
 endif()
 
 # Tab5 (ESP32-P4) baked-in Layer 0 driver — matches T-Deck Plus's own

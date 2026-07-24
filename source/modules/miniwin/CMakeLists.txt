@@ -17,6 +17,7 @@ idf_component_register(
         miniwin_wince_icons.c
         miniwin_cursor.c
         miniwin_keyboard.c
+        miniwin_lock.c
         MiniWin/miniwin.c
         MiniWin/miniwin_message_queue.c
         MiniWin/miniwin_settings.c
@@ -109,5 +110,6 @@ idf_component_register(
         hal/purr_os
         ../../kernel/core
         ../../kernel/catcalls
-    REQUIRES esp_common driver freertos nvs_flash
+        ../../modules/meshtastic
+    REQUIRES esp_common driver freertos nvs_flash meshtastic
 )

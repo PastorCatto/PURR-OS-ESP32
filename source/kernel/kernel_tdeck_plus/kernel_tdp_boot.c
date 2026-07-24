@@ -33,6 +33,7 @@
 #include "../../drivers/input/trackball/trackball.h"
 #include "../../drivers/input/bbq20/bbq20.h"
 #include "../../drivers/radio/sx1262_rl/sx1262_rl.h"
+#include "../../modules/boot_splash/boot_splash.h"
 #include "driver/i2c_master.h"
 #include "esp_rom_sys.h"
 // usb_msc.h — pinned/dormant (source/modules/usb_msc/DISABLED.md), its own
@@ -563,6 +564,12 @@ void app_main(void)
         purr_kernel_panic("ST7789 display init failed");
     }
 
+    // Raw-framebuffer splash — drawn directly via catcall_display_t, well
+    // before any UI backend (Cupcake/MiniWin) has started (that happens in
+    // Phase 1 below). boot_splash_show() is itself a no-op if display init
+    // above degraded to "continuing without display" on a recovery boot.
+    boot_splash_show();
+
     // Perf mode: bulk-transfer PSRAM buffer for push_pixels — collapses
     // per-row spi_device_transmit() calls into one per flush (see
     // st7789.h's doc comment). DISABLED for now — confirmed live this
@@ -608,6 +615,7 @@ void app_main(void)
 #endif
 
     ESP_LOGI(TAG, "baked-in drivers ready");
+    boot_splash_advance();
 
     // Checked here — after display/touch (Layer 0) are up, so the blue
     // recoverable panic screen can actually render/accept touch if this
@@ -635,6 +643,7 @@ void app_main(void)
     extern void purr_register_static_modules(void);
     purr_register_static_modules();
     purr_kernel_load_static_modules();
+    boot_splash_advance();
 
     // Ends the "recovering" window — every device (SD/display above,
     // radio/UI/everything else via load_one_static()'s own gating inside
@@ -691,6 +700,8 @@ void app_main(void)
         purr_kernel_scan_modules("/sdcard/drivers", NULL);
     }
 
+    boot_splash_advance();
+
     if (!purr_kernel_display()) {
         ESP_LOGW(TAG, "no display catcall — check ST7789 init");
     }
@@ -698,6 +709,7 @@ void app_main(void)
         ESP_LOGW(TAG, "app_manager not loaded");
     }
 
+    boot_splash_advance();   // final step — UI backend's own first paint supersedes this shortly after
     ESP_LOGI(TAG, "boot complete — %u bytes free", (unsigned)purr_kernel_free_ram());
     purr_kernel_notify("PURR OS ready", "T-Deck Plus booted", "kernel");
 

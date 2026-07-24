@@ -1,0 +1,184 @@
+{
+  "release": "DP3",
+  "purros_version": "1.0.0-dp3",
+  "kitt_version": "1.0.0",
+  "generated_at": "2026-07-09T23:12:07",
+  "devices": {
+    "cyd": {
+      "chip": "esp32",
+      "kernel_type": "native",
+      "ui": "miniwin",
+      "flash_mb": "4",
+      "spiffs_offset": null,
+      "merged_image": "PURR_OS_cyd.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 26800,
+        "partition-table.bin": 3072,
+        "firmware.bin": 705936,
+        "flash.bin": 524288,
+        "build.json": 425,
+        "PURR_OS_cyd.bin": 3211264
+      }
+    },
+    "cyd_s024c": {
+      "chip": "esp32",
+      "kernel_type": "native",
+      "ui": "miniwin",
+      "flash_mb": "4",
+      "spiffs_offset": null,
+      "merged_image": "PURR_OS_cyd_s024c.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 26800,
+        "partition-table.bin": 3072,
+        "firmware.bin": 721952,
+        "flash.bin": 524288,
+        "build.json": 449,
+        "PURR_OS_cyd_s024c.bin": 3211264
+      }
+    },
+    "cyd_s028r": {
+      "chip": "esp32",
+      "kernel_type": "native",
+      "ui": "miniwin",
+      "flash_mb": "4",
+      "spiffs_offset": null,
+      "merged_image": "PURR_OS_cyd_s028r.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 26800,
+        "partition-table.bin": 3072,
+        "firmware.bin": 705936,
+        "flash.bin": 524288,
+        "build.json": 449,
+        "PURR_OS_cyd_s028r.bin": 3211264
+      }
+    },
+    "heltec": {
+      "chip": "esp32s3",
+      "kernel_type": "native",
+      "ui": "oled_ui",
+      "flash_mb": "8",
+      "spiffs_offset": "0x690000",
+      "merged_image": "PURR_OS_heltec.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 21552,
+        "partition-table.bin": 3072,
+        "firmware.bin": 350096,
+        "flash.bin": 262144,
+        "build.json": 439,
+        "PURR_OS_heltec.bin": 7143424
+      }
+    },
+    "jc3248w535": {
+      "chip": "esp32s3",
+      "kernel_type": "native",
+      "ui": "miniwin",
+      "flash_mb": "16",
+      "spiffs_offset": "0xD90000",
+      "merged_image": "PURR_OS_jc3248w535.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 21552,
+        "partition-table.bin": 3072,
+        "firmware.bin": 725936,
+        "flash.bin": 1048576,
+        "build.json": 456,
+        "PURR_OS_jc3248w535.bin": 15269888
+      }
+    },
+    "tdeck": {
+      "chip": "esp32s3",
+      "kernel_type": "native",
+      "ui": "miniwin",
+      "flash_mb": "16",
+      "spiffs_offset": "0xD90000",
+      "merged_image": "PURR_OS_tdeck.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 21552,
+        "partition-table.bin": 3072,
+        "firmware.bin": 533568,
+        "flash.bin": 524288,
+        "build.json": 435,
+        "PURR_OS_tdeck.bin": 14745600
+      }
+    },
+    "tdeck_plus": {
+      "chip": "esp32s3",
+      "kernel_type": "native",
+      "ui": "miniwin",
+      "flash_mb": "16",
+      "spiffs_offset": "0xD90000",
+      "merged_image": "PURR_OS_tdeck_plus.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 21552,
+        "partition-table.bin": 3072,
+        "firmware.bin": 1313872,
+        "flash.bin": 524288,
+        "build.json": 455,
+        "PURR_OS_tdeck_plus.bin": 14745600
+      }
+    },
+    "tdeck_plus_arduino": {
+      "chip": "esp32s3",
+      "kernel_type": "arduino",
+      "ui": "miniwin",
+      "flash_mb": "16",
+      "spiffs_offset": "0xD90000",
+      "merged_image": "PURR_OS_tdeck_plus_arduino.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 21552,
+        "partition-table.bin": 3072,
+        "firmware.bin": 1154064,
+        "flash.bin": 524288,
+        "build.json": 487,
+        "PURR_OS_tdeck_plus_arduino.bin": 14745600
+      }
+    },
+    "tdeck_plus_pounce": {
+      "chip": "esp32s3",
+      "kernel_type": "native",
+      "ui": "pounce",
+      "flash_mb": "16",
+      "spiffs_offset": "0xD90000",
+      "merged_image": "PURR_OS_tdeck_plus_pounce.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 21552,
+        "partition-table.bin": 3072,
+        "firmware.bin": 1228912,
+        "flash.bin": 524288,
+        "build.json": 483,
+        "PURR_OS_tdeck_plus_pounce.bin": 14745600
+      }
+    },
+    "tdeck_plus_test": {
+      "chip": "esp32s3",
+      "kernel_type": "arduino",
+      "ui": null,
+      "flash_mb": "16",
+      "spiffs_offset": "0xD90000",
+      "merged_image": "PURR_OS_tdeck_plus_test.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 21552,
+        "partition-table.bin": 3072,
+        "firmware.bin": 346480,
+        "flash.bin": 524288,
+        "build.json": 475,
+        "PURR_OS_tdeck_plus_test.bin": 14745600
+      }
+    },
+    "waveshare169": {
+      "chip": "esp32s3",
+      "kernel_type": "native",
+      "ui": "miniwin",
+      "flash_mb": "4",
+      "spiffs_offset": null,
+      "merged_image": "PURR_OS_waveshare169.bin",
+      "sizes_bytes": {
+        "bootloader.bin": 21552,
+        "partition-table.bin": 3072,
+        "firmware.bin": 728976,
+        "flash.bin": 262144,
+        "build.json": 463,
+        "PURR_OS_waveshare169.bin": 2949120
+      }
+    }
+  }
+}

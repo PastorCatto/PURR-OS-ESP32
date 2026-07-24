@@ -1,0 +1,18 @@
+# modules/boot_splash/module.pcat
+# Raw-framebuffer boot splash, drawn directly via catcall_display_t before
+# any UI backend (Cupcake/MiniWin/etc.) has come up — see boot_splash.c for
+# the full design. No PURR_MODULE_REGISTER: this isn't loaded through the
+# P2/P3 static module system (that's too late — the whole point is drawing
+# before it even starts) — it's called directly from each device's own
+# boot sequence (kernel_tdp_boot.c etc.), same as st7789/gt911 baked-in
+# drivers are. This .pcat exists purely so modulestrap's manifest scan
+# picks up the directory as a linkable component.
+
+name              = "boot_splash"
+version           = "1.0.0"
+module_type       = "PURR_MOD_SYSTEM"
+kernel_min        = "0.11.1"
+kernel_max        = ""
+
+provides          = []
+required_catcalls = ["display"]

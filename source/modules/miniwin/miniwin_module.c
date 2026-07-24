@@ -20,6 +20,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "sdkconfig.h"
 #include <stdio.h>
 
@@ -175,6 +176,7 @@ void mw_user_root_message_function(const mw_message_t *message)
 
 #if defined(CONFIG_PURR_MINIWIN_DESKTOP_WINCE) && !defined(CONFIG_PURR_UI_WINCE_SHELL)
 #include "miniwin_wince_desktop.h"
+#include "miniwin_lock.h"
 #endif
 
 // miniwin_task() itself is shared by both desktop styles (icon-grid and
@@ -202,6 +204,12 @@ static void miniwin_task(void *arg)
     // Init trackball cursor overlay
     miniwin_cursor_init(disp_w, disp_h);
 
+#ifdef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
+    // Stamp the idle clock at "now" right before the loop below starts
+    // polling it — see miniwin_lock_init()'s own comment for why.
+    miniwin_lock_init();
+#endif
+
 #ifndef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
     // Desktop boots empty with app icons (drawn in mw_user_root_paint_function).
     // Launcher now opens on demand: Enter key with nothing focused, or tapping
@@ -217,13 +225,12 @@ static void miniwin_task(void *arg)
 
     // MiniWin message pump
     TickType_t last_status_redraw = xTaskGetTickCount();
-#ifdef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
-    // WinCE desktop draws its own background + taskbar in mw_user_init()'s
-    // window (see miniwin_wince_desktop.c); only the taskbar's RAM readout
-    // needs a periodic repaint, targeting that window instead of root.
-    mw_util_rect_t status_rect = { (int16_t)(disp_w - 50), (int16_t)(disp_h - 20), 48, 18 };
-#else
+#ifndef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
     mw_util_rect_t status_rect = { 0, 0, (int16_t)disp_w, STATUS_BAR_H };
+#endif
+#ifdef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
+#define STATUS_ROTATE_TICKS 4
+    int status_ticks = 0;
 #endif
 
     while (1) {
@@ -240,7 +247,20 @@ static void miniwin_task(void *arg)
         purr_kernel_ui_breadcrumb("lock");
         purr_kernel_ui_lock();
         purr_kernel_ui_breadcrumb("process_message");
-        mw_process_message();
+        // mw_process_message() dequeues and handles exactly one message per
+        // call, and things like mw_paint_all()/window-open/control-create
+        // don't paint synchronously — they just post a message onto that
+        // same queue for a later call to actually render. One call per loop
+        // tick meant a single user action posting several paint-related
+        // messages back-to-back (e.g. opening the Start menu, launching an
+        // app) rendered as that many separate visible partial frames one
+        // tick apart — confirmed live as "takes a few redraws just to see
+        // the taskbar." Draining a bounded batch per tick instead collapses
+        // that into effectively one frame, without touching the vendored
+        // MiniWin engine itself — bounded (not a plain while-drain) so a
+        // pathologically deep queue still can't starve input polling/the
+        // watchdog heartbeat below.
+        for (int drained = 0; drained < 8 && mw_process_message(); drained++) {}
         // Runs any close-icon teardowns queued by MW_WINDOW_REMOVED_MESSAGE
         // this iteration — deliberately from here, not from inside
         // mw_process_message()'s own callback dispatch. See
@@ -253,14 +273,40 @@ static void miniwin_task(void *arg)
         purr_kernel_ui_breadcrumb("cursor_poll");
         miniwin_cursor_poll();    // redraw cursor on top of frame if position changed
 
-        // Refresh the status bar (RAM/WiFi/LoRa/battery) once a second —
-        // these change slowly, no need to redraw on every tick.
+        // Refresh the status bar (RAM/WiFi/LoRa/battery, or the WinCE
+        // taskbar's RAM/battery corner) once a second — these change
+        // slowly, no need to redraw on every tick.
         TickType_t now = xTaskGetTickCount();
         if ((now - last_status_redraw) >= pdMS_TO_TICKS(1000)) {
             last_status_redraw = now;
             purr_kernel_ui_breadcrumb("status_repaint");
 #ifdef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
-            mw_paint_window_client_rect(wce_desktop_handle(), &status_rect);
+            // Idle-lock check — same "screen timeout -> lock screen"
+            // behavior Cupcake's own ck_lock_check_idle() has, driven by
+            // the same portable purr_kernel_screen_timeout_min() Settings'
+            // Display screen sets. Activity itself is tracked wherever
+            // input is actually handled (miniwin_keyboard.c's
+            // miniwin_lock_handle_key()/_other(), the lock windows' own
+            // miniwin_lock_handle_touch() calls in miniwin_wince_desktop.c)
+            // — not here, this is just the periodic "has enough idle time
+            // passed" check.
+            miniwin_lock_check_idle();
+            // While locked, the overlay owns the screen and repaints
+            // itself exactly once per real state change (on_lock_
+            // transition()'s own paint calls) — skip the taskbar's RAM/
+            // battery rotation entirely while locked instead of
+            // redundantly repainting a window that's currently hidden.
+            if (!miniwin_lock_is_locked()) {
+                // Taskbar corner rotates RAM/battery every
+                // STATUS_ROTATE_TICKS repaints (~4s at this 1s cadence).
+                if (++status_ticks >= STATUS_ROTATE_TICKS) {
+                    status_ticks = 0;
+                    wce_desktop_toggle_status();
+                }
+                mw_util_rect_t wce_status_r;
+                wce_status_rect(&wce_status_r);
+                mw_paint_window_client_rect(wce_taskbar_handle(), &wce_status_r);
+            }
 #else
             mw_paint_window_client_rect(MW_ROOT_WINDOW_HANDLE, &status_rect);
 #endif
@@ -314,9 +360,24 @@ static int miniwin_init(void)
     // Register catcall_ui_t so apps can use purr_win_*() regardless of task state
     miniwin_win_register();
 
-    // Run MiniWin message pump in its own task
-    BaseType_t ret = xTaskCreate(miniwin_task, "miniwin",
-                                 8192, NULL, 5, &s_task);
+    // Run MiniWin message pump in its own task. Deliberately plain
+    // xTaskCreate() — internal-DRAM stack, NOT MALLOC_CAP_SPIRAM like every
+    // other background task in this codebase (Milkbar's send task, MSN's
+    // refresh task, Settings' BT scan task). Tried moving it to PSRAM to
+    // reclaim that internal-DRAM cost; confirmed live it doesn't work here:
+    // touch calibration flows into mw_init() -> mw_settings_save() ->
+    // nvs_open()/esp_flash_write() on THIS task's own stack, and ESP-IDF's
+    // flash-write path asserts esp_task_stack_is_sane_cache_disabled() —
+    // it briefly disables the flash cache (which also gates PSRAM access)
+    // and requires the calling task's own stack to be entirely in internal
+    // RAM at that moment. A PSRAM stack fails that assert outright
+    // ("assert failed: spi_flash_disable_interrupts_caches_and_other_cpu"),
+    // crashing every time calibration tries to persist. The other
+    // background tasks this pattern is copied from never touch NVS/flash
+    // directly from their own task context, so they never hit this.
+    TaskHandle_t task = NULL;
+    BaseType_t ret = xTaskCreate(miniwin_task, "miniwin", 8192, NULL, 5, &task);
+    s_task = task;
     return (ret == pdPASS) ? 0 : -1;
 #endif  // CONFIG_PURR_UI_WINCE_SHELL
 }

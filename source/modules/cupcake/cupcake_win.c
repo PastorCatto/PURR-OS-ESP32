@@ -11,6 +11,7 @@
 // that just hides the window, returning to the home screen (no dim-overlay
 // hookup needed here — Cupcake has no card stack to restore into).
 
+#include <string.h>
 #include "lvgl.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -70,6 +71,41 @@ static lv_obj_t *get_win(purr_win_t h) {
 }
 static void free_win(purr_win_t h) {
     if (h >= 1 && h <= MAX_WINS) s_wins[h - 1] = NULL;
+}
+
+// ── Foreground window stack (Lollipop nav bar's Home button) ────────────────
+// Every app window is a same-parent sibling on lv_scr_act() (see
+// ck_win_create()'s doc comment below) — there's no per-app grouping at the
+// LVGL object level, so once an app opens any lazily-created sub-window on
+// top of its root (settings.c's Display/About/etc, msn.c's Nodes/Messages/
+// Channels, milkbar_app.c's Message screen), "hide the foreground app" can't
+// just mean "hide app->window" (cupcake_ui.c's old lp_navbar_home_click_cb)
+// — that leaves whatever sub-window is actually on top still fully visible,
+// confirmed live as "Home doesn't work" from inside any of these. Worse,
+// s_lp_foreground_idx still got reset to -1 regardless, so the *next* Back
+// press silently no-oped too ("Back doesn't work half the time") — same
+// root cause, not a second bug. Only one app is ever foreground at a time
+// (s_lp_foreground_idx is a single int, not a list), so a single shared
+// stack of "windows currently shown" is equivalent to "this app's open
+// windows" in practice. cupcake_win_hide_foreground() (declared in
+// cupcake.h, defined near ck_win_hide below) pops and hides every one.
+static purr_win_t s_win_stack[MAX_WINS];
+static int        s_win_stack_count = 0;
+
+static void win_stack_remove(purr_win_t h) {
+    for (int i = 0; i < s_win_stack_count; i++) {
+        if (s_win_stack[i] == h) {
+            memmove(&s_win_stack[i], &s_win_stack[i + 1],
+                    (size_t)(s_win_stack_count - i - 1) * sizeof(purr_win_t));
+            s_win_stack_count--;
+            return;
+        }
+    }
+}
+
+static void win_stack_push(purr_win_t h) {
+    win_stack_remove(h);   // avoid duplicates if the same window is re-shown
+    if (s_win_stack_count < MAX_WINS) s_win_stack[s_win_stack_count++] = h;
 }
 
 static void free_wid(purr_wid_t h) {
@@ -222,6 +258,7 @@ static void ck_win_destroy(purr_win_t h) {
         s_close_hooks[h - 1].cb = NULL;
         s_close_hooks[h - 1].user = NULL;
     }
+    win_stack_remove(h);
     free_win(h);
 }
 
@@ -235,6 +272,7 @@ static void ck_win_show(purr_win_t h) {
     lv_obj_t *w = get_win(h);
     if (!w) { ESP_LOGW(TAG, "win_show: handle=%u has no lv_obj!", (unsigned)h); return; }
     lv_obj_clear_flag(w, LV_OBJ_FLAG_HIDDEN);
+    win_stack_push(h);
     // Every app window is a same-parent (lv_scr_act()) sibling of the home
     // screen, the drawer, and every other app's window — move_foreground()
     // makes this one the last child, i.e. painted last/on top of all of
@@ -254,6 +292,13 @@ static void ck_win_show(purr_win_t h) {
 static void ck_win_hide(purr_win_t h) {
     lv_obj_t *w = get_win(h);
     if (w) lv_obj_add_flag(w, LV_OBJ_FLAG_HIDDEN);
+    win_stack_remove(h);
+}
+
+void cupcake_win_hide_foreground(void) {
+    while (s_win_stack_count > 0) {
+        ck_win_hide(s_win_stack[s_win_stack_count - 1]);   // removes itself from the stack
+    }
 }
 
 static void ck_win_clear(purr_win_t h) {

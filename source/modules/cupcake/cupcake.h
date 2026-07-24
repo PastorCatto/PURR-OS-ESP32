@@ -78,6 +78,14 @@ void cupcake_ui_wake(void);
 void cupcake_win_list_set_items_icon(purr_wid_t wid, const char **items,
                                       const char **icons, int count);
 
+// Hides every window currently shown by the foreground app, not just the
+// one app_manager tracked at launch (app->window) — see cupcake_win.c's
+// "Foreground window stack" comment for why that distinction matters once
+// an app opens any lazily-created sub-window on top of its root. Used by
+// the Lollipop nav bar's Home button (cupcake_ui.c) instead of hiding a
+// single window handle.
+void cupcake_win_hide_foreground(void);
+
 #ifdef __cplusplus
 }
 #endif

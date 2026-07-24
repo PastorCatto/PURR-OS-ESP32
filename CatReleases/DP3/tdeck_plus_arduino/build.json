@@ -1,0 +1,11 @@
+{
+  "device": "tdeck_plus_arduino",
+  "chip": "esp32s3",
+  "purros_version": "1.0.0-dp3",
+  "kitt_version": "1.0.0",
+  "last_build": "2026-07-09T22:40:59.319139",
+  "pcat": "/home/PastorCatto/Projects/PURR-OS-ESP32/source/devices/tdeck_plus_arduino/device.pcat",
+  "flash_bin": "/home/PastorCatto/Projects/PURR-OS-ESP32/cattobaked/tdeck_plus_arduino/flash.bin",
+  "firmware_bin": "/home/PastorCatto/Projects/PURR-OS-ESP32/cattobaked/tdeck_plus_arduino/firmware.bin",
+  "spiffs_kb": 512
+}

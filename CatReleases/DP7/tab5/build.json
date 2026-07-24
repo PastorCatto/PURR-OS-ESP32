@@ -1,0 +1,11 @@
+{
+  "device": "tab5",
+  "chip": "esp32p4",
+  "purros_version": "1.0.0-dp7",
+  "kitt_version": "1.0.0",
+  "last_build": "2026-07-20T12:51:04.797320",
+  "pcat": "C:\\Users\\PastorCatto\\Documents\\PURR-OS-ESP32\\source\\devices\\tab5\\device.pcat",
+  "flash_bin": "C:\\Users\\PastorCatto\\Documents\\PURR-OS-ESP32\\cattobaked\\tab5\\flash.bin",
+  "firmware_bin": "not built",
+  "spiffs_kb": 2496
+}

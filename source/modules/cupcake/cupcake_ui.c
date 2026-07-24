@@ -235,16 +235,22 @@ static void lp_apps_launcher_click_cb(lv_event_t *e)
     }
 }
 
-// Home: "leave the app without closing it" — hides the foreground app's
-// window (same as its own Minimize button) and returns to the home screen.
-// s_lp_foreground_idx < 0 means the home screen is already showing; no-op.
+// Home: "leave the app without closing it" — hides every window the
+// foreground app currently has open (not just app->window, the one
+// app_manager tracked at launch — an app that's opened any lazily-created
+// sub-window on top of its root, e.g. settings.c's Display/About or msn.c's
+// Nodes/Messages/Channels, would otherwise leave that sub-window fully
+// visible after Home, confirmed live as "Home doesn't work" — worse,
+// s_lp_foreground_idx still got reset below regardless, so the next Back
+// press silently no-oped too, since it bails out on s_lp_foreground_idx < 0)
+// and returns to the home screen. s_lp_foreground_idx < 0 means the home
+// screen is already showing; no-op.
 static void lp_navbar_home_click_cb(lv_event_t *e)
 {
     (void)e;
     if (lp_recents_is_open()) lp_recents_close();
     if (s_lp_foreground_idx < 0) return;
-    const app_entry_t *app = app_manager_get(s_lp_foreground_idx);
-    if (app && app->window) purr_win_hide(app->window);
+    cupcake_win_hide_foreground();
     s_lp_foreground_idx = -1;
     lp_show_navbar(false);
     lp_show_status(false);

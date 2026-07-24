@@ -42,7 +42,13 @@ bt          = true
 lora        = "sx1262_rl"
 
 [modules]
-ui          = "cupcake"
+# ui — MiniWin (WinCE desktop, CONFIG_PURR_MINIWIN_DESKTOP_WINCE=y in
+# sdkconfig_tdeck_plus.overrides) in place of Cupcake for this pass —
+# already confirmed booting live on this exact hardware before tonight's
+# Cupcake work (see that override's own comment: "apps render and launch,
+# but this is new and rough-edged code, not a proven default yet"). Carries
+# the new Win95-style lock screen (miniwin_lockscreen.c).
+ui          = "miniwin"
 app_manager = "app_manager"
 # mesh — re-enabled for active Meshtastic diagnosis (was off, gated behind
 # CONFIG_PURR_FEATURE_MESHTASTIC, see CoreOS/main/Kconfig.projbuild).

@@ -1,0 +1,128 @@
+{
+  "purros_version": "1.0.0-dp4",
+  "kitt_version": "1.0.0",
+  "baked_at": "2026-07-10T16:52:35.238947",
+  "devices": {
+    "cyd": {
+      "status": "ok",
+      "chip": "esp32",
+      "name": "cyd",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "cyd_s024c": {
+      "status": "ok",
+      "chip": "esp32",
+      "name": "cyd_s024c",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "cyd_s028r": {
+      "status": "ok",
+      "chip": "esp32",
+      "name": "cyd_s028r",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "heltec": {
+      "status": "ok",
+      "chip": "esp32s3",
+      "name": "heltec",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "jc3248w535": {
+      "status": "ok",
+      "chip": "esp32s3",
+      "name": "jc3248w535",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "tdeck": {
+      "status": "ok",
+      "chip": "esp32s3",
+      "name": "tdeck",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "tdeck_plus": {
+      "status": "ok",
+      "chip": "esp32s3",
+      "name": "tdeck_plus",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "tdeck_plus_arduino": {
+      "status": "ok",
+      "chip": "esp32s3",
+      "name": "tdeck_plus_arduino",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "tdeck_plus_pounce": {
+      "status": "ok",
+      "chip": "esp32s3",
+      "name": "tdeck_plus_pounce",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "tdeck_plus_test": {
+      "status": "ok",
+      "chip": "esp32s3",
+      "name": "tdeck_plus_test",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    },
+    "waveshare169": {
+      "status": "ok",
+      "chip": "esp32s3",
+      "name": "waveshare169",
+      "copied": [
+        "flash.bin",
+        "build.json",
+        "firmware.bin"
+      ],
+      "staged": []
+    }
+  }
+}

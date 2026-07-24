@@ -1,0 +1,11 @@
+{
+  "device": "tdeck",
+  "chip": "esp32s3",
+  "purros_version": "1.0.0-dp3",
+  "kitt_version": "1.0.0",
+  "last_build": "2026-07-09T22:38:13.880585",
+  "pcat": "/home/PastorCatto/Projects/PURR-OS-ESP32/source/devices/tdeck/device.pcat",
+  "flash_bin": "/home/PastorCatto/Projects/PURR-OS-ESP32/cattobaked/tdeck/flash.bin",
+  "firmware_bin": "/home/PastorCatto/Projects/PURR-OS-ESP32/cattobaked/tdeck/firmware.bin",
+  "spiffs_kb": 512
+}
