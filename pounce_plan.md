@@ -1,8 +1,36 @@
 # Pounce — raw-framebuffer, keyboard+trackball-first, Meshtastic-first UI Backend + `.kitten` extension
 
-**Working tracking/design doc — not yet implemented. Delete once Pounce and
-`.kitten` are built and verified on hardware (see `meshplan.md` for the
-convention this follows).**
+> **Status as of v1.0.0-dp8 — both parts are BUILT. The "not yet implemented"
+> line below was wrong for most of the DP cycle.**
+>
+> - **Part A (Pounce)** is implemented: `source/modules/pounce/` is ~1,575 lines
+>   across `pounce_win.c`, `pounce_render.c`, `pounce_focus.c`, `pounce_status.c`,
+>   `pounce_launcher.c` and `pounce_module.c`, with its own 6×8 font. It is wired
+>   into `Kconfig.projbuild` as `PURR_UI_BACKEND_POUNCE` and has a device target,
+>   `tdeck_plus_pounce`.
+> - **Part B (`.kitten`)** is implemented: `APP_TIER_KITTEN` exists in
+>   `app_manager.c`, the first `.kitten` found on SD autoruns at boot, and it is
+>   gated behind Developer Mode exactly as `.hiss` is — with a stricter rationale,
+>   since an autorunning script needs the gate more than a launched one does.
+>
+> **Two things remain true and are the reason this file is not deleted:**
+>
+> 1. **Pounce has never been run on hardware.** Not once. It compiles and links,
+>    which proves nothing about what it draws.
+> 2. **Pounce omits four optional `catcall_ui_t` members** — `label_set_big`,
+>    `tile_grid_create`, `tile_grid_set_items` and `list_set_items_icon` (grepped:
+>    zero occurrences in the module). It leaves them NULL and callers fall back,
+>    which is the contract working as designed — but it means the MSN tile-grid
+>    Home screen and Settings' tile-grid category picker degrade to plain lists
+>    under Pounce. That is a deliberate, documented gap, not a bug.
+>
+> Also note the contract version drift: the text below says `CATCALL_UI_VERSION` 4.
+> It is **7** as of dp8. Pounce implements the members it needs and NULLs the rest,
+> so the bump did not break it — but the plan's version claim is stale.
+
+**Working tracking/design doc. Delete once Pounce has been verified on real
+hardware and its optional-member gaps are either filled or formally scoped out
+(see `meshplan.md` for the convention this follows).**
 
 This plan has two independent parts: **(A)** a brand-new UI backend ("Pounce")
 and **(B)** a new `.kitten` app-file extension, which is UI-agnostic and

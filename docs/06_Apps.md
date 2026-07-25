@@ -2,16 +2,31 @@
 
 ## App Tiers
 
-PURR OS has four app tiers, each with a distinct file extension and capability level.
+PURR OS has five app tiers, each with a distinct file extension and capability level.
 
 | Extension | Name | API access | Typical use |
 |-----------|------|-----------|-------------|
 | `.meow` | Lua script, sandboxed | `win.*`, `sd.*`, `system.*` | Scripted tools, dashboards, simple games |
 | `.hiss` | Lua script, privileged | `win.*`, `sd.*`, `system.*`, `kitt.*`, `radio.*`, `gps.*` | Scripted hardware tools (LoRa, GPS) without a full compile |
+| `.kitten` | Lua script, privileged **+ autorun** | same as `.hiss` | A script that should run at boot without being launched |
 | `.paws` | Compiled userland | `win.*`, `sd.*` | Native apps with no direct kernel calls |
 | `.claw` | Compiled kernel-access | Full `purr_kernel_*` + `win.*` + `sd.*` | System tools, emulators, advanced shells |
 
-All four tiers access UI through the same `purr_win.h` dispatch layer (or `win.*` Lua bindings) — apps are not tied to a specific UI framework.
+**`.kitten` is `.hiss` that autoruns.** Same VM, same launch path, same
+`kitt.*`/`radio.*`/`gps.*` bindings, and the same `purr-sig`/Developer-Mode
+consent gate — the only difference is that the first `.kitten` found on SD is
+started automatically at boot by `app_manager_init()`, with no user action.
+
+Treat that as a meaningful trust decision, not a convenience: dropping a
+`.kitten` on a card means it runs on the next power-on. The consent gate is what
+stops an unsigned one doing so silently.
+
+Enum values are `APP_TIER_MEOW`/`PAWS`/`CLAW`/`HISS`/`KITTEN` in
+`source/modules/app_manager/app_manager.h`. Note the enum order (`PAWS` = 1,
+`CLAW` = 2, `HISS` = 3, `KITTEN` = 4) does not match the trust ordering in the
+table above — it is historical.
+
+All five tiers access UI through the same `purr_win.h` dispatch layer (or `win.*` Lua bindings) — apps are not tied to a specific UI framework.
 
 `.meow` scripts are executed by the `lua_runtime` module (`source/modules/lua_runtime/`), which vendors a real Lua 5.4 VM (`source/lib/lib_lua/`) — previously dead code (`app_manager.c` looked up a `"lua_runtime"` module that never existed), now a working system module.
 
@@ -19,7 +34,7 @@ All four tiers access UI through the same `purr_win.h` dispatch layer (or `win.*
 
 ## Unified UI API — purr_win.h
 
-Added in v0.12.0. All compiled apps (.paws and .claw) use `purr_win.h` instead of calling LVGL or MiniWin directly. The active UI module (KittenUI or MiniWin) registers a `catcall_ui_t` at boot and `purr_win.h` dispatches through it.
+Added in v0.12.0. All compiled apps (.paws and .claw) use `purr_win.h` instead of calling LVGL or MiniWin directly. The active UI module registers a `catcall_ui_t` at boot and `purr_win.h` dispatches through it.
 
 ```c
 #include "purr_win.h"   // all you need — no LVGL, no MiniWin headers
@@ -41,7 +56,7 @@ int my_app_init(void) {
 }
 ```
 
-This app runs identically on KittenUI (LVGL) and MiniWin without any changes.
+This app runs identically on every windowed and framebuffer backend without changes — see `01_Architecture.md`'s tier table.
 
 ### Window management
 
@@ -73,7 +88,7 @@ void       purr_win_button_enable(purr_wid_t wid, bool enabled);
 Callback signature:
 ```c
 typedef void (*purr_win_cb_t)(purr_wid_t wid, purr_event_t event, void *user);
-// event: PURR_EVENT_CLICKED | PURR_EVENT_CHANGED | PURR_EVENT_FOCUSED
+// event: CLICKED | CHANGED | FOCUSED | DEFOCUS | SELECTED | ACTIVATED
 ```
 
 ### Textarea
@@ -100,7 +115,7 @@ purr_wid_t purr_win_col_grow  (purr_win_t win, uint8_t padding);  // column that
 void       purr_win_layout_end(purr_wid_t container);
 ```
 
-Widgets created between `purr_win_row()` / `purr_win_col()` and `purr_win_layout_end()` are placed inside that container. On KittenUI this uses LVGL flex layout; on MiniWin it uses simple stacking.
+Widgets created between `purr_win_row()` / `purr_win_col()` and `purr_win_layout_end()` are placed inside that container. On LVGL backends this uses flex layout; on MiniWin it uses simple stacking.
 
 The plain `_row`/`_col` variants hug their own content (right for a row of buttons). Use the `_grow` variant when the container holds **percentage-sized** children — a list, a textarea, a split view — since a content-sized container can't resolve a percentage-sized child (it collapses to 0 size). `fileman.c`'s file-list/preview split is the reference example.
 
@@ -111,7 +126,7 @@ void purr_win_keyboard_show(purr_win_t win, purr_wid_t target_textarea);
 void purr_win_keyboard_hide(purr_win_t win);
 ```
 
-On KittenUI: shows LVGL's built-in keyboard. On MiniWin: no-op — physical keyboard handled via `catcall_input` automatically.
+On LVGL backends: shows LVGL's built-in keyboard. On MiniWin: no-op — a physical keyboard is handled via `catcall_input` automatically. Backends targeting keyboard devices (Cupcake/Tabby/Mochi) suppress the on-screen keyboard entirely when one is present.
 
 ---
 
@@ -359,12 +374,20 @@ These are baked into the SPIFFS flash image for medium/large-screen devices:
 
 | App | Tier | Description |
 |-----|------|-------------|
-| `settings` | `.claw` | Theme (WCE/Dark via NVS), brightness, keyboard backlight, WiFi (scan/connect), Bluetooth (BLE scan/pair), wallpaper, SD status, About (OS/KITT version, chip, RAM, uptime, drivers — folded in from the old standalone About app), reboot |
+| `settings` | `.claw` | Theme, brightness, keyboard backlight, WiFi (scan/connect), Bluetooth (BLE scan/pair), wallpaper, **lock-screen notification privacy**, mesh-backend switch, Developer Mode, SD status, About (OS/KITT version, chip, RAM, uptime, drivers), reboot |
 | `terminal` | `.claw` | Shell: `ls`, `cat`, `echo`, `modules`, `mem`, `uptime`, `reboot` |
 | `fileman` | `.claw` | Browse SPIFFS + SD; New Folder/Rename/Delete; text file preview |
-| `hwtest` | `.claw` | Hardware diagnostics |
+| `hwtest` | `.claw` | Hardware diagnostics — live trackball motion/click and keyboard keypress log |
 | `drivermgr` | `.claw` | Lists scanned drivers (`driver_manager` module) with OK/COMPAT/FAIL/SKIP status |
-| `meshchat` | `.claw` | MSN-style buddy list + private 1:1 chat over the mesh (see `docs/03_Modules.md`'s meshtastic section) — standalone, no phone required |
+| `msn` | `.claw` | Mesh Social Network — tile-grid home (Nodes/Messages/Channels/Manage), private 1:1 chat and multi-channel group chat, over whichever mesh backend is active. Renamed from `meshchat`; talks to `msn_backend.h`'s vtable rather than `meshtastic.h` directly, so it works on Meshtastic **and** MeshCore |
+| `meshdiag` | `.claw` | Meshtastic hardware/debug diagnostics — kernel log tail, radio + node stats, test-send |
+| `taskmgr` | `.claw` | Lists running apps; the one deliberate place to kill one |
+| `services` | `.claw` | Live status of core background services + memory pressure, from the kernel health registry |
+| `nearby` | `.claw` | Read-only list of other PURR OS devices seen via ESP-NOW proximity beacons |
+| `milkbar` | `.claw` | Manage apps on a *paired* PURR OS device remotely (via `app_manager_remote` over `proximity_rpc`) |
+
+Exclusive apps (`source/apps/exclusive/`) — `magicmac`, `magidos` — are covered
+in `08_Exclusives.md`.
 
 Calculator is no longer a built-in — it's now `calculator.meow` (`sdcard_apps/calculator.meow` in this repo), an SD-loaded `.meow` script. See "Built-in vs. SD Demo Apps" below.
 
@@ -439,3 +462,9 @@ source/apps/
 Note: the `drivermgr` app directory is named differently from the `driver_manager` backend module (`source/modules/driver_manager/`) on purpose — ESP-IDF component names are derived from the directory name, and giving the app the same directory name as the module caused a silent component-name collision (one component's object files displaced the other's in the final link, producing "undefined reference" errors for functions that were actually compiled — just discarded).
 
 User apps live on the SD card at `/sdcard/apps/` — they are never in the repo.
+
+---
+
+*DP8 documentation pass performed by Claude Opus 5 in agentic/auto mode. The
+app list and tier table were verified against `source/apps/` and
+`app_manager.h`.*

@@ -1,5 +1,28 @@
 # Meshtastic Mesh Networking — Resurrection Plan
 
+> **Status as of v1.0.0-dp8 — Phases 1–2 are done and hardware-verified.** This plan's
+> own verification section (bottom of the file) is accurate and was written from a real
+> boot log; it has been re-checked against the tree and stands.
+>
+> What has changed since the plan was written:
+> - **The driver is now `sx1262_rl`, not `sx1262`.** `tdeck_plus` and `heltec` both select
+>   the RadioLib-backed driver. The plain `sx1262.c` SPI driver described throughout Part 1
+>   is still in tree and still used by `tdeck` and `tdeck_plus_pounce`, but it is no longer
+>   the T-Deck Plus path. The pin fixes in 1.2/1.3 landed and are still correct.
+> - **RX is interrupt-driven** as of dp7 (`7a7dfccc`), not polled.
+> - **MeshChat became MSN** (`6ad8ad33`, dp5) — protocol-agnostic, with **MeshCore** as a
+>   second selectable backend (`6aa8763b`) and a live switch that does not require a
+>   reboot (`215941c5`).
+> - **The shared-SPI2 hang** the plan worried about was real and was closed in dp7
+>   (`23658e42`).
+> - Two open items below are still open: `mesh_manager_send_text()`'s return value has no
+>   console trigger, and the **two-device text exchange has still never been run** — there
+>   has only ever been one LoRa board on hand.
+>
+> **Do not delete this file yet.** Phases 3–6 (position/telemetry, admin/config, the ATAK
+> gateway, store-and-forward) are named-only and unbuilt, and the two-device test is
+> outstanding. The parts that *are* done are documented in `docs/03_Modules.md`.
+
 **Working tracking doc — delete once mesh is fully implemented and verified.**
 
 ## Context

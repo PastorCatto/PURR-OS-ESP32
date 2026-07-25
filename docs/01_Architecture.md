@@ -25,7 +25,7 @@
 │    │     │     input   ──► catcall_input_t slot                     │
 │    │     │     radio   ──► catcall_radio_t slot                     │
 │    │     │     gps     ──► catcall_gps_t slot                       │
-│    │     ├── load kittenui.purr / miniwin.purr → spawns UI task     │
+│    │     ├── register UI backend (mochi/cupcake/miniwin/...) → UI task     │
 │    │     └── load app_manager.purr → scans + launches apps          │
 │    │                                                                │
 │    └── idle (vTaskDelay forever)                                    │
@@ -133,7 +133,17 @@ static const catcall_gps_t     *s_gps     = NULL;
 static const catcall_ui_t      *s_ui      = NULL;
 ```
 
-Drivers call `purr_kernel_register_display(ptr)` etc. to register themselves. **Last registered wins** — this allows hot replacement. Everything else calls `purr_kernel_display()` etc. to get the current pointer. If no driver is registered, returns `NULL`. All callers must null-check.
+Drivers call `purr_kernel_register_display(ptr)` etc. to register themselves.
+For display, touch, radio, gps and ui, **last registered wins** — registration
+is a plain assignment, which allows hot replacement. Everything else calls
+`purr_kernel_display()` etc. to get the current pointer. If no driver is
+registered these return `NULL`, so all callers must null-check.
+
+**`input` is the exception: it is a list, not a single slot** — a device can
+have a trackball and a keyboard registered simultaneously, as the T-Deck Plus
+does. Enumerate with `purr_kernel_input_count()`/`purr_kernel_input_at(i)`;
+`purr_kernel_input()` returns only the first-registered and is kept for legacy
+callers. See `02_Catcalls.md` for the capability test used to tell them apart.
 
 ---
 
@@ -146,7 +156,7 @@ Every `.purr` binary exports one symbol: `purr_module` of type `purr_module_head
 ```c
 typedef struct {
     uint32_t magic;             // 0x50555252 ('PURR') — must match
-    uint8_t  abi_version;       // must match PURR_MODULE_ABI_VERSION (1)
+    uint8_t  abi_version;       // must match PURR_MODULE_ABI_VERSION (2)
     uint8_t  module_type;       // PURR_MOD_DRIVER / SYSTEM / UI / APP
     char     name[32];          // human-readable name
     char     version[12];       // semver string "0.1.0"
@@ -165,7 +175,7 @@ typedef struct {
 |----------|-------|---------|
 | `PURR_MOD_DRIVER` | 0x01 | Hardware driver — registers one or more catcalls |
 | `PURR_MOD_SYSTEM` | 0x02 | System service — driver_manager, app_manager |
-| `PURR_MOD_UI` | 0x03 | UI framework — kittenui, miniwin |
+| `PURR_MOD_UI` | 0x03 | UI framework — 11 backends; see 03_Modules.md |
 | `PURR_MOD_APP` | 0x04 | App — reserved for future use |
 
 ### Catcall bitmask flags
@@ -230,13 +240,23 @@ only one of them needs `catcall_ui_t` at all.
 
 | Tier | Registers `catcall_ui_t`? | Modules | Use case |
 |------|---------------------------|---------|----------|
-| **Windowed** | Yes | `kittenui` (LVGL), `miniwin` | Full widget/window apps — buttons, labels, text areas, layout. Reads `catcall_touch_t` internally to drive its own hit-testing; apps never touch the touch catcall directly. |
-| **Shell** | No | `blackpurr`, `oled_ui` | Lightweight text-mode or grid shells that draw directly via `catcall_display_t.fill_rect`/`push_pixels` and read `catcall_touch_t`/`catcall_input_t` themselves. No window manager, no widget tree. |
+| **Windowed** | Yes | `kittenui`, `miniwin`, `cupcake`, `cardstack`, `mochi`, `tabby`, `nougat` | Full widget/window apps — buttons, labels, text areas, layout. Reads `catcall_touch_t` internally to drive its own hit-testing; apps never touch the touch catcall directly. All but `miniwin` are LVGL-based (`nougat` on LVGL 9, the rest on LVGL 8). |
+| **Framebuffer** | Yes | `pounce` | Implements the same widget contract with no LVGL and no vendored toolkit — draws direct to the panel via `catcall_display_t`, with its own widget model and keyboard/trackball focus navigation. Apps run unmodified. |
+| **Shell** | No | `blackpurr`, `oled_ui`, `lvgldebug` | Lightweight text-mode or grid shells that draw directly via `catcall_display_t.fill_rect`/`push_pixels` and read `catcall_touch_t`/`catcall_input_t` themselves. No window manager, no widget tree. |
 
-A device picks exactly one UI module via `device.pcat`'s `ui = "..."` field,
-same as today — this table just makes explicit which contract that module is
-expected to honor. A shell-tier module registering `catcall_ui_t` (or a
-windowed-tier module skipping it) would be a bug.
+A device picks exactly one UI module via `device.pcat`'s `ui = "..."` field.
+This table makes explicit which contract that module is expected to honor: a
+shell-tier module registering `catcall_ui_t` (or a windowed-tier module skipping
+it) would be a bug.
+
+**Apps written against `purr_win.h` run on the Windowed and Framebuffer tiers
+only.** Shell-tier backends register no UI catcall, so `purr_win_*()` calls
+degrade to no-ops there — those devices run their own built-in shell instead.
+
+Several windowed backends additionally **host the `systemui` module** for the
+status bar, panels, app switcher and lock screen — see `09_SystemUI.md`. That is
+a separate concern from the UI catcall: a backend can implement the widget
+contract without hosting any chrome.
 
 ### MiniWin desktop chrome: icon-grid vs. WinCE (experimental)
 
@@ -269,7 +289,7 @@ driver concurrently and crash (`assert failed: spi_device_transmit ...`).
 Modules are loaded in filesystem order within `/flash/modules/`. The intended boot order is:
 
 1. `driver_manager.purr` — scans `/flash/drivers` and `/sdcard/drivers`, loads display + touch + input drivers, registers catcalls
-2. `kittenui.purr` or `miniwin.purr` — requires display catcall; spawns UI task
+2. The selected UI backend — requires display catcall; spawns UI task
 3. `app_manager.purr` — requires UI catcall; scans apps, populates registry, shows launcher
 
 For specialized kernels (e.g., `kernel_tdeck_plus_arduino`), display + touch + input catcalls are registered at boot before the module scanner runs. This means `driver_manager` finds those catcall slots already filled and skips loading display/touch/input blobs — only radio and GPS drivers are loaded from SPIFFS.

@@ -1,12 +1,66 @@
 # 10 — Module Loading, Priority, and SD Fallback
 
-This document covers how PURR OS loads kernel modules at boot: the priority system, the two-stage flash-then-SD strategy, the panic screen, and the SD card directory layout.
+> **Accurate as of v1.0.0-dp8.** Read the section immediately below before the
+> rest of this document — the primary loading mechanism is **static
+> registration**, not the `.purr` file scanning that much of this document
+> describes. The `.purr` path still exists, but it is the secondary route.
+
+This document covers how PURR OS loads kernel modules at boot: static
+registration, the priority system, SD fallback, the panic screen, and the SD
+card directory layout.
+
+---
+
+## How modules actually get loaded
+
+Modules selected in a device's `device.pcat` are **compiled into the firmware
+and registered statically**. They are not shipped as `.purr` files and are not
+discovered by scanning.
+
+purrstrap generates `purr_device_glue.c` at build time from `device.pcat`'s
+`[modules]`, `[drivers]` and `[apps]` sections. For each entry it emits an
+`extern` declaration and a registration call:
+
+```c
+// auto-generated — do not edit
+extern purr_module_header_t purr_module_mochi;
+extern purr_module_header_t purr_module_systemui;
+extern purr_module_header_t purr_module_app_manager;
+
+void purr_register_static_modules(void) {
+    purr_kernel_register_module_static(&purr_module_mochi);
+    purr_kernel_register_module_static(&purr_module_systemui);
+    purr_kernel_register_module_static(&purr_module_app_manager);
+}
+```
+
+The kernel's boot then does:
+
+```c
+purr_register_static_modules();      // populate the registry
+purr_kernel_load_static_modules();   // call each init() in priority order
+```
+
+Two consequences worth knowing:
+
+- **Every value under `[modules]` becomes a module symbol.** A key whose value
+  isn't a real module directory produces an `extern purr_module_<value>;` that
+  fails at link. This is why presentation choices that select between
+  *implementations* live in a separate `[ui]` section — see `09_SystemUI.md`'s
+  `systemui_style`.
+- **Adding a module means editing `device.pcat`**, not dropping a file on the
+  device.
+
+`.purr` scanning still runs afterwards for `/sdcard/modules` and
+`/sdcard/drivers`, so an SD card can add extras — but nothing in a normal build
+arrives that way.
 
 ---
 
 ## Module Priority
 
-Every `.purr` binary declares a `load_priority` in its `purr_module_header_t`:
+Every module declares a `load_priority` in its `purr_module_header_t`,
+regardless of whether it is registered statically or loaded from a `.purr`:
 
 | Level | Constant | Value | Meaning |
 |---|---|---|---|
@@ -35,26 +89,36 @@ purr_module_header_t purr_module = {
 
 ## Boot Load Sequence
 
+Real sequence, as implemented in `source/kernel/kernel_tdeck_plus/kernel_tdp_boot.c`
+(other kernels follow the same shape):
+
 ```
 app_main()
   │
   ├─ NVS init
-  ├─ Mount /flash  (SPIFFS — core modules baked in by purrstrap)
-  ├─ Mount /sdcard (FAT — optional, SD driver handles this)
+  ├─ purr_device_init()          // board power rails, e.g. Heltec's Vext
+  ├─ Baked-in Layer 0 drivers    // display, touch, input, radio — direct calls,
+  │                              //   not modules; a specialized kernel needs a
+  │                              //   screen before anything else can report a fault
+  ├─ boot_splash_show()          // raw framebuffer, before any UI backend exists
+  ├─ Mount /flash  (SPIFFS)
+  ├─ Mount /sdcard (FAT — optional)
   │
-  ├─ Phase 1: scan /flash/modules  + /flash/drivers  (priority-sorted)
-  │     For each .purr found:
-  │       sort by load_priority (P1 first)
-  │       attempt load from flash
-  │       if fail AND P1 → try /sdcard/modules (or /sdcard/drivers)
-  │                      → still fail → PANIC
-  │       if fail AND P2 → log warning, continue
-  │       if fail AND P3 → silent continue
+  ├─ purr_register_static_modules()     // generated glue; populates the registry
+  ├─ purr_kernel_load_static_modules()  // init() each, in load_priority order
   │
-  └─ Phase 2: scan /sdcard/modules + /sdcard/drivers  (extras, all treated as optional)
+  └─ purr_kernel_scan_modules("/sdcard/modules")   // optional extras
+     purr_kernel_scan_modules("/sdcard/drivers")   // all treated as optional
 ```
 
-The sort guarantees that `PURR_PRIORITY_REQUIRED` (P1) drivers — particularly the display driver — are loaded and have registered their catcalls **before** any P2 or P3 module tries to use them.
+Priority ordering guarantees that `PURR_PRIORITY_REQUIRED` (P1) modules are
+initialised — and have registered their catcalls — **before** any P2 or P3
+module tries to use them.
+
+Note that on a specialized kernel the display/touch/input/radio drivers are
+**baked directly into boot**, ahead of the module system entirely, rather than
+being loaded as modules. purrstrap detects this (`_has_specialized_kernel()`)
+and omits them from the generated glue to avoid double-init. See `13_Kernels.md`.
 
 ---
 
@@ -156,3 +220,9 @@ A module not listed in `[flash]` won't be in the SPIFFS image. If it's P1 and mi
 4. Flash with `purrstrap flash <device>`
 
 If you want it on SD as fallback only (e.g. for dev/testing), skip step 3-4 and manually copy the `.purr` file to `/sdcard/drivers/<type>/` on the card.
+
+---
+
+*DP8 documentation pass performed by Claude Opus 5 in agentic/auto mode. The
+boot sequence above was traced against `kernel_tdp_boot.c` and purrstrap's
+`_generate_glue()`.*

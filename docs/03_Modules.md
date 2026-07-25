@@ -1,8 +1,116 @@
 # PURR OS — System Modules
 
-System modules are `.purr` binaries of type `PURR_MOD_SYSTEM` or `PURR_MOD_UI`. They are loaded by the kernel at boot from `/flash/modules/` and run as FreeRTOS tasks.
+> **Accurate as of v1.0.0-dp8.** The index below is complete — all 27 modules
+> in `source/modules/` are listed. Sections further down cover a subset in
+> depth; anything without a section is documented by its own `module.pcat` and
+> source header.
 
-This doc predates several modules that now exist — `cupcake`/`cardstack` (UI backends) and `meshtastic` (mesh networking) aren't documented below yet. What follows is up to date for `driver_manager`, `app_manager`, and `miniwin`, plus the modules added most recently: `lua_runtime`, `wifi_mgr`, and `bt_mgr`.
+System modules are `PURR_MOD_SYSTEM` or `PURR_MOD_UI` components. They are
+either compiled in and statically registered (the normal case — see
+`10_ModuleLoading.md`) or loaded as `.purr` binaries from `/flash/modules/`.
+
+---
+
+## Module index (all 27)
+
+Selected per-device via `device.pcat`'s `[modules]` section. `type` is as
+declared in each `module.pcat`.
+
+### UI backends (8 register a `catcall_ui_t`; 3 are shell-tier and do not)
+
+| Module | Tier | Notes |
+|---|---|---|
+| `kittenui` | Windowed | LVGL 8, swappable themes. Implements no optional UI members. |
+| `miniwin` | Windowed | Vendored MiniWin WM, non-LVGL. Only `canvas_*` implementation. |
+| `cupcake` | Windowed | LVGL 8, Android 1.5-style launcher. Hosts `systemui`. |
+| `cardstack` | Windowed | LVGL 8, Rabbit R1-style snap-scroll cards. |
+| `mochi` | Windowed | LVGL 8, iOS-style springboard. Hosts `systemui` (iOS style). |
+| `tabby` | Windowed | LVGL 8, keyboard-first type-to-filter launcher. Hosts `systemui`. |
+| `nougat` | Windowed | LVGL 9. **Experimental, parked** — see `02_Catcalls.md`. |
+| `pounce` | Framebuffer | No LVGL, no MiniWin. Own widget model + focus navigation. |
+| `blackpurr` | Shell | Minimal text-mode Palm-style launcher. No `catcall_ui_t`. |
+| `oled_ui` | Shell | 128x64 text-mode (Heltec). No `catcall_ui_t`. |
+| `lvgldebug` | Diagnostic | Touch/HAL diagnostic screen, not a real shell. |
+
+Apps written against `purr_win.h` run on the **Windowed** and **Framebuffer**
+tiers only — shell-tier backends don't register the UI catcall.
+
+### System services
+
+| Module | Purpose |
+|---|---|
+| `app_manager` | App registry, launching, tiers (`.meow`/`.hiss`/`.claw`). See below. |
+| `driver_manager` | Scans and loads `.purr` drivers, tracks OK/COMPAT/FAIL/SKIP. See below. |
+| `lua_runtime` | Lua VM for `.meow`/`.hiss` scripts. See below. |
+| `systemui` | Status bar, panels, nav bar/home indicator, Recents, lock screen. Two swappable styles. **See `09_SystemUI.md`.** |
+| `boot_splash` | Raw-framebuffer splash drawn via `catcall_display_t` before any UI backend starts. |
+| `usb_msc` | USB mass-storage. **Dormant** — no `module.pcat`; see its `DISABLED.md`. |
+
+### Connectivity and mesh
+
+| Module | Purpose |
+|---|---|
+| `wifi_mgr` | WiFi lifecycle. See below. |
+| `bt_mgr` | NimBLE lifecycle. See below. |
+| `meshtastic` | Meshtastic-compatible mesh. Gated by `CONFIG_PURR_FEATURE_MESHTASTIC`. |
+| `meshcore` | MeshCore mesh backend. Mutually exclusive with `meshtastic` at runtime (one radio). |
+| `msn_relay` | Relay service backing the MSN app. |
+
+### Multi-device (ESP-NOW proximity family)
+
+| Module | Purpose |
+|---|---|
+| `proximity` | ESP-NOW beacons; discovers other PURR OS devices. |
+| `proximity_rpc` | RPC transport layered on `proximity`. |
+| `pairing` | Pair/trust management between devices. |
+| `app_manager_remote` | Remote app list/control on a paired device (backs Milkbar). |
+| `homebase` | Home-base role for a paired device set. |
+
+Added automatically to any device with `[radio] wifi = true` by purrstrap's
+`apply_radio_companion_defaults()` — they usually do not appear in `device.pcat`
+explicitly.
+
+---
+
+## `module.pcat` schema — two forms are live
+
+**Use the sectioned form for anything new.** Both parse, and 16 of 27 modules
+still use the older flat form; migrating them is tracked work, not a rewrite you
+should do incidentally.
+
+**Current (sectioned):**
+```ini
+[module]
+name        = "systemui"
+version     = "0.1.0"
+type        = "module"            # or "ui"
+description = "one line, shown in tooling"
+author      = "PURR OS"
+
+[requires]
+catcalls    = "display"
+kernel_min  = "1.0.0"
+
+[depends]                          # other PURR packages, by directory slug
+app_manager = ">=0.1.0"
+
+[build]
+sources     = "a.c b.c"
+requires    = "lvgl app_manager"   # IDF component names
+```
+
+**Legacy (flat keys)** — e.g. `app_manager`, `miniwin`, `meshtastic`:
+```ini
+name              = "app_manager"
+version           = "0.1.0"
+module_type       = "PURR_MOD_SYSTEM"
+kernel_min        = "0.9.0"
+provides          = ["app_launch", "app_registry"]
+required_catcalls = ["display", "touch"]
+```
+
+Note `type` vs `module_type`, and that the legacy form has no `description`,
+`[depends]` or `[build]` section.
 
 ---
 
@@ -311,3 +419,9 @@ To update the upstream source:
 | `miniwin` | UI | — | DISPLAY (TOUCH optional) |
 
 This table is incomplete for UI backends beyond `miniwin` (`cupcake`, `cardstack`, `kittenui`, etc. aren't listed) — out of scope for this update, listed here for the modules actually touched.
+
+---
+
+*DP8 documentation pass performed by Claude Opus 5 in agentic/auto mode. The
+module index above was generated from `source/modules/*/module.pcat` and
+verified complete against the tree.*

@@ -1,5 +1,10 @@
 # PURR OS — Catcalls
 
+> **Accurate as of v1.0.0-dp8.** Contract versions in this document were
+> verified against the headers in `source/kernel/catcalls/`, not carried
+> forward. If you are adding a member to a catcall, bump its version macro and
+> update the matching section here in the same change.
+
 Catcalls are PURR OS's version of syscalls. They are the only way any module or app communicates with hardware — nothing ever calls a driver function directly. The kernel holds one registered implementation per catcall type. Drivers register; everyone else calls through the kernel accessor.
 
 **Pattern:**
@@ -27,7 +32,40 @@ All catcalls follow this pattern. Always null-check the accessor — if no drive
 | gps     | `CATCALL_FLAG_GPS` (`1<<4`)     | `purr_kernel_register_gps()` | `purr_kernel_gps()` |
 | ui      | `CATCALL_FLAG_UI` (`1<<5`)      | `purr_kernel_register_ui()` | `purr_kernel_ui()` |
 
-Each slot holds exactly one registered implementation. A second driver attempting to register the same catcall is silently ignored — first one wins. This matches hardware reality: there is one display.
+### Registration semantics — input is the exception
+
+**Five of the six catcalls hold exactly one implementation, and re-registering
+overwrites it — last registered wins.** `purr_kernel_register_display()` and
+friends are a plain assignment, not a first-wins guard. This matches hardware
+reality (there is one display) and permits hot replacement.
+
+**`input` is a list, not a slot.** A device can have several input devices at
+once, and the T-Deck Plus does — a trackball *and* a BBQ20 keyboard, both
+registered:
+
+```c
+void purr_kernel_register_input(const catcall_input_t *drv) {
+    if (s_input_count < MAX_INPUTS) s_inputs[s_input_count++] = drv;   // appended
+}
+```
+
+Accessors:
+
+| Function | Returns |
+|---|---|
+| `purr_kernel_input()` | `s_inputs[0]` — the **first registered**, kept for legacy callers |
+| `purr_kernel_input_count()` | how many are registered |
+| `purr_kernel_input_at(i)` | the i-th |
+
+> **Do not use `purr_kernel_input()` on a multi-input device.** On the T-Deck
+> Plus the trackball registers before the keyboard, so it returns the trackball
+> — a consumer wanting keystrokes must enumerate with `input_count()`/
+> `input_at()` and pick by capability. The established test is that a
+> keyboard-class driver implements `set_backlight` and a trackball does not.
+>
+> `purr_kernel_keyboard_set_backlight()` does exactly this internally: it walks
+> every registered input and dispatches to whichever implements `set_backlight`,
+> so callers never need to know which driver has one.
 
 ---
 
@@ -218,17 +256,17 @@ bit 3 - left GUI      bit 7 - right GUI
 
 **Source:** `source/kernel/catcalls/catcall_radio.h`
 **Flag:** `CATCALL_FLAG_RADIO` (`1<<3`)
-**Version:** `CATCALL_RADIO_VERSION 1`
+**Version:** `CATCALL_RADIO_VERSION 3`
 
 This catcall covers SPI LoRa modules (SX1262, SX1276). Built-in WiFi and Bluetooth use ESP-IDF APIs directly.
 
 ```c
 typedef struct {
     uint32_t frequency_hz;
-    int8_t   tx_power_dbm;
-    uint8_t  spreading_factor;   // LoRa: 7-12
+    uint8_t  tx_power_dbm;
+    uint8_t  spreading_factor;   // LoRa: 7-12, 0 = N/A
     uint32_t bandwidth_hz;       // LoRa: 125000/250000/500000
-    uint8_t  coding_rate;        // LoRa: 5-8 (denominator of 4/x)
+    uint8_t  coding_rate;        // LoRa: 5-8 (denominator of 4/x), 0 = N/A
 } radio_config_t;
 
 typedef struct {
@@ -239,11 +277,15 @@ typedef struct {
     esp_err_t (*send)(const uint8_t *data, size_t len);
     int       (*receive)(uint8_t *buf, size_t max_len);
     bool      (*data_available)(void);
-    int8_t    (*rssi)(void);
+    int       (*rssi)(void);
     float     (*snr)(void);
     esp_err_t (*set_frequency)(uint32_t hz);
-    esp_err_t (*set_power)(int8_t dbm);
+    esp_err_t (*set_power)(uint8_t dbm);
+    esp_err_t (*set_modulation)(uint8_t sf, uint32_t bw_hz, uint8_t cr);   // v2
+    esp_err_t (*set_sync_word)(uint8_t sync);                              // v2
     esp_err_t (*deinit)(void);
+    bool      (*wait_rx_signal)(uint32_t timeout_ms);   // v3, OPTIONAL
+    void      (*wake_rx_wait)(void);                    // v3, OPTIONAL
 } catcall_radio_t;
 ```
 
@@ -259,7 +301,24 @@ typedef struct {
 | `snr()` | Signal-to-noise ratio of the last received packet. |
 | `set_frequency(hz)` | Change operating frequency on the fly. |
 | `set_power(dbm)` | Change TX power on the fly. |
+| `set_modulation(sf,bw,cr)` | Retune modulation **after** `init()`. Required by anything matching a fixed radio preset — e.g. Meshtastic's LONG_FAST (SF11, BW250kHz, CR4/5). Without it, `radio_config_t`'s sf/bandwidth/coding-rate are only ever applied once, at init. |
+| `set_sync_word(sync)` | Set the LoRa sync word (Meshtastic uses `0x2B`). |
 | `deinit()` | Power down the radio. |
+
+### Optional members (v3)
+
+Both are `NULL` on drivers that don't support them, and the **caller must have
+its own fallback** — these are behaviour 2 in the sense described under
+`catcall_ui_t` above, except the check is "is the pointer NULL" rather than a
+sentinel return.
+
+| Function | Purpose | Fallback when NULL |
+|---|---|---|
+| `wait_rx_signal(timeout_ms)` | Blocks until the radio signals RX-ready (e.g. an IRQ pin edge) or the timeout expires. Returns `true` if signalled. | Caller polls `data_available()` on a fixed short interval — a full SPI transaction each time. |
+| `wake_rx_wait()` | Unblocks a task sitting in `wait_rx_signal()` early, for when something *other* than an RX event needs it to run (e.g. a newly-queued outgoing message). **Task context only — not ISR-safe.** | No early wake; the waiter runs when its timeout expires. |
+
+Reference implementation: `sx1262_rl.cpp`, consumed by `meshtastic_module.c`'s
+`mesh_task()`.
 
 ### Built-in WiFi / Bluetooth
 
@@ -269,7 +328,7 @@ WiFi and BT are silicon peripherals, not exposed through `catcall_radio_t`. The 
 [radio]
 wifi = true
 bt   = true
-lora = "sx1276"
+lora = "sx1262_rl"
 ```
 
 purrstrap emits `CONFIG_PURR_WIFI`, `CONFIG_PURR_BT`, `CONFIG_PURR_LORA`, and `CONFIG_PURR_LORA_DRIVER` into the device glue layer for conditional compilation in kernel code.
@@ -278,8 +337,13 @@ purrstrap emits `CONFIG_PURR_WIFI`, `CONFIG_PURR_BT`, `CONFIG_PURR_LORA`, and `C
 
 | Slug | Chip | Devices |
 |------|------|---------|
-| `sx1262` | SX1262 | heltec, tdeck |
-| `sx1276` | SX1276 | tdeck_plus |
+| `sx1262` | SX1262 (plain SPI driver) | `tdeck`, `tdeck_plus_pounce` |
+| `sx1262_rl` | SX1262 (RadioLib-backed) | `tdeck_plus`, `heltec` |
+| `sx1276` | SX1276 | `tdeck_plus_arduino` only — see note below |
+
+> `tdeck_plus_arduino` is the only device still selecting `sx1276`. Real T-Deck
+> Plus hardware carries an SX1262; this is a leftover from before the driver swap
+> (see `meshplan.md`) and is one more reason that kernel is deprecated.
 
 ---
 
@@ -330,78 +394,197 @@ typedef struct {
 
 **Source:** `source/kernel/catcalls/catcall_ui.h`
 **Flag:** `CATCALL_FLAG_UI` (`1<<5`)
-**Version:** `CATCALL_UI_VERSION 4` (this doc's struct listing below predates several version bumps — `win_on_close`, a `list_*` widget family, and the keyboard hooks all exist now but aren't shown here; the `layout_begin` signature below is current)
+**Version:** `CATCALL_UI_VERSION 7`
 
-The UI catcall is the widget/windowing abstraction layer added in v0.12.0. UI modules (KittenUI, MiniWin, oled_ui, cupcake, cardstack) register an implementation at boot; all apps call through `purr_win.h` which dispatches to the registered backend. Apps never touch LVGL or MiniWin APIs directly, making them portable across all display/UI combinations.
+The UI catcall is the widget/windowing abstraction layer added in v0.12.0. UI
+modules register an implementation at boot; all apps call through `purr_win.h`,
+which dispatches to the registered backend. Apps never touch LVGL or MiniWin
+APIs directly, making them portable across every display/UI combination.
+
+> **Read the "Optional members" section below before writing an app against
+> this contract.** Roughly a third of `catcall_ui_t` is optional, and the three
+> ways a missing member degrades are *not* interchangeable — one of them
+> requires the caller to check a return value and provide its own fallback.
 
 ```c
 typedef uint32_t purr_win_t;   // opaque window handle
 typedef uint32_t purr_wid_t;   // opaque widget handle
 
 typedef enum {
-    PURR_EVENT_CLICKED = 0,
-    PURR_EVENT_CHANGED,
-    PURR_EVENT_FOCUSED,
+    PURR_EVENT_CLICKED   = 0,
+    PURR_EVENT_CHANGED   = 1,   // textarea text changed
+    PURR_EVENT_FOCUSED   = 2,
+    PURR_EVENT_DEFOCUS   = 3,
+    PURR_EVENT_SELECTED  = 4,   // list: highlight moved (no confirm)
+    PURR_EVENT_ACTIVATED = 5,   // list: entry confirmed/entered
 } purr_event_t;
 
 typedef void (*purr_win_cb_t)(purr_wid_t wid, purr_event_t event, void *user);
+
+// Canvas callbacks — see "Canvas" below.
+typedef void (*purr_win_paint_cb_t)(purr_win_t win, void *user);
+typedef void (*purr_win_touch_cb_t)(purr_win_t win, int16_t x, int16_t y,
+                                     bool pressed, void *user);
 
 typedef enum { PURR_ALIGN_LEFT=0, PURR_ALIGN_CENTER, PURR_ALIGN_RIGHT } purr_align_t;
 typedef enum { PURR_LAYOUT_ROW=0, PURR_LAYOUT_COL } purr_layout_t;
 
 typedef struct {
     const char *name;
-    uint8_t     catcall_version;
+    uint8_t     catcall_version;      // must equal CATCALL_UI_VERSION
 
-    // Windows
+    // ── Window lifecycle ──
     purr_win_t (*win_create) (const char *title);
     void       (*win_destroy)(purr_win_t win);
     void       (*win_show)   (purr_win_t win);
     void       (*win_hide)   (purr_win_t win);
-    void       (*win_clear)  (purr_win_t win);
+    void       (*win_clear)  (purr_win_t win);   // remove all child widgets
+    void       (*win_on_close)(purr_win_t win, purr_win_cb_t cb, void *user);  // OPTIONAL
 
-    // Labels
-    purr_wid_t (*label_create)(purr_win_t win, const char *text);
-    void       (*label_set)   (purr_wid_t wid, const char *text);
-    void       (*label_align) (purr_wid_t wid, purr_align_t align);
+    // ── Labels ──
+    purr_wid_t (*label_create) (purr_win_t win, const char *text);
+    void       (*label_set)    (purr_wid_t wid, const char *text);
+    void       (*label_align)  (purr_wid_t wid, purr_align_t align);
+    void       (*label_set_big)(purr_wid_t wid, const char *text);            // OPTIONAL
 
-    // Buttons
+    // ── Buttons ──
     purr_wid_t (*btn_create)(purr_win_t win, const char *label,
                               purr_win_cb_t cb, void *user);
     void       (*btn_enable)(purr_wid_t wid, bool enabled);
 
-    // Textarea
-    purr_wid_t    (*textarea_create)   (purr_win_t win, uint16_t w_pct, uint16_t h_pct);
-    void          (*textarea_append)   (purr_wid_t wid, const char *text);
-    void          (*textarea_set)      (purr_wid_t wid, const char *text);
-    void          (*textarea_clear)    (purr_wid_t wid);
-    const char   *(*textarea_get)      (purr_wid_t wid);
-    void          (*textarea_focus)    (purr_wid_t wid);
-    void          (*textarea_on_change)(purr_wid_t wid, purr_win_cb_t cb, void *user);
+    // ── Textarea ──
+    purr_wid_t  (*textarea_create)(purr_win_t win, uint16_t w_pct, uint16_t h_pct);
+    void        (*textarea_append)(purr_wid_t wid, const char *text);
+    void        (*textarea_set)   (purr_wid_t wid, const char *text);
+    void        (*textarea_clear) (purr_wid_t wid);
+    const char *(*textarea_get)   (purr_wid_t wid);   // backend-owned string
+    void        (*textarea_focus) (purr_wid_t wid);
+    void        (*textarea_cb)    (purr_wid_t wid, purr_win_cb_t cb, void *user);
 
-    // Layout containers
+    // ── List (flat, non-nested, selectable) ──
+    purr_wid_t (*list_create)      (purr_win_t win, uint16_t w_pct, uint16_t h_pct);
+    void       (*list_set_items)   (purr_wid_t wid, const char **items, int count);
+    void       (*list_clear)       (purr_wid_t wid);
+    int        (*list_get_selected)(purr_wid_t wid);   // -1 if none
+    void       (*list_set_selected)(purr_wid_t wid, int index);
+    void       (*list_cb)          (purr_wid_t wid, purr_win_cb_t cb, void *user);
+    void       (*list_set_items_icon)(purr_wid_t wid, const char **items,
+                                       const char **icons, int count);        // OPTIONAL
+
+    // ── Tile grid (scrollable icon+label tiles) ──
+    purr_wid_t (*tile_grid_create)   (purr_win_t win, uint16_t w_pct, uint16_t h_pct);  // OPTIONAL
+    void       (*tile_grid_set_items)(purr_wid_t grid_wid,
+                                       const char **labels, const char **symbols,
+                                       const uint32_t *colors,
+                                       purr_win_cb_t *cbs, void **users, int count);    // OPTIONAL
+
+    // ── Layout containers ──
     // grow: fills the remaining space in the parent's flex layout instead of
-    // hugging its own content — needed for a row/col holding percentage-sized
-    // children (a list, a textarea, a split view), which otherwise collapse
-    // to 0 size inside a content-sized parent. Added this round (`grow`
-    // param + purr_win_row_grow()/col_grow() wrappers) to fix File Manager's
-    // list+preview split rendering at 0px — see docs/06_Apps.md.
-    purr_wid_t (*layout_begin)(purr_win_t win, purr_layout_t type, uint8_t padding, bool grow);
+    // hugging its own content — required for a row/col holding percentage-sized
+    // children (a list, a textarea, a split view), which otherwise collapse to
+    // 0 size inside a content-sized parent.
+    purr_wid_t (*layout_begin)(purr_win_t win, purr_layout_t dir, uint8_t pad, bool grow);
     void       (*layout_end)  (purr_wid_t container);
 
-    // On-screen keyboard
-    void (*kb_show)(purr_win_t win, purr_wid_t target);
+    // ── On-screen keyboard ──
+    void (*kb_show)(purr_win_t win, purr_wid_t target_textarea);
     void (*kb_hide)(purr_win_t win);
+
+    // ── Canvas (raw draw + touch) ──                                          // OPTIONAL
+    void (*canvas_on_paint)(purr_win_t win, purr_win_paint_cb_t cb, void *user);
+    void (*canvas_on_touch)(purr_win_t win, purr_win_touch_cb_t cb, void *user);
+    void (*canvas_rect)    (purr_win_t win, int16_t x, int16_t y,
+                             int16_t w, int16_t h, uint32_t color);
+    void (*canvas_text)    (purr_win_t win, int16_t x, int16_t y,
+                             const char *text, uint32_t color);
+    void (*canvas_repaint) (purr_win_t win);
+    void (*canvas_size)    (purr_win_t win, int16_t *w, int16_t *h);
 } catcall_ui_t;
 ```
 
+### Optional members — how a missing member degrades
+
+This is the part most likely to bite you. Members marked `OPTIONAL` above may be
+`NULL`, and **there are three different degradation behaviours**. They are not
+interchangeable, and only one of them is detectable by the caller.
+
+| Behaviour | Which members | What the caller sees |
+|---|---|---|
+| **1. Silent no-op** | `win_on_close`, `tile_grid_set_items`, all `canvas_*` | Nothing happens. The call returns normally and there is **no way to tell** it did nothing. |
+| **2. Sentinel return** | `tile_grid_create` → `0`<br>`win_create` → `0`<br>`textarea_get` → `NULL`<br>`list_get_selected` → `-1` | A defined "didn't work" value. **The caller must check it** and supply its own fallback. |
+| **3. Automatic fallback** | `label_set_big` → `label_set`<br>`list_set_items_icon` → `list_set_items` | `purr_win.h` silently substitutes the non-optional equivalent. Always safe to call; you simply lose the enhancement. |
+
+Behaviours 1 and 3 come free — call the wrapper and ignore the question.
+**Behaviour 2 does not.** `purr_win_tile_grid()` returning `0` on a backend
+without tile grids is the case that actually requires app-side handling:
+
+```c
+// Correct: tile grid where available, list everywhere else.
+purr_wid_t grid = purr_win_tile_grid(win, 100, 80);
+if (grid) {
+    purr_win_tile_grid_set_items(grid, labels, symbols, colors, cbs, users, n);
+} else {
+    purr_wid_t list = purr_win_list(win, 100, 80);
+    purr_win_list_set_items(list, labels, n);
+}
+```
+
+Only the caller knows what a sane fallback looks like for its own content, which
+is why the dispatch layer does not guess. `source/apps/system/msn/msn.c`'s Home
+screen is the reference implementation.
+
+The general rule, enforced by `_UI_CALL`/`_UI_VOID` in `purr_win.h`: **every**
+member is null-checked before dispatch, so no call can crash on an unimplemented
+backend — but "does not crash" is not "did what you asked".
+
+### Optional-member support matrix
+
+Verified against each backend's `catcall_ui_t` initialiser as of DP8:
+
+| Backend | `win_on_close` | `label_set_big` | `tile_grid_*` | `list_set_items_icon` | `canvas_*` |
+|---|:--:|:--:|:--:|:--:|:--:|
+| `cupcake` | ● | ● | ● | ● | — |
+| `mochi`   | ● | ● | ● | ● | — |
+| `tabby`   | ● | ● | ● | ● | — |
+| `miniwin` | ● | — | — | — | ● |
+| `cardstack` | ● | — | — | — | — |
+| `nougat`  | ● | — | — | — | — |
+| `pounce`  | ● | — | — | — | — |
+| `kittenui` | — | — | — | — | — |
+
+Two things worth noting from that table:
+
+- **`canvas_*` is MiniWin-only, and currently unused by any app.** The header
+  recommends it for widget-dense screens (calculators, keypads) to avoid a
+  window-teardown hang seen with ~20 native button controls. That advice is
+  sound for MiniWin but **not portable** — on any LVGL backend those calls are
+  silent no-ops (behaviour 1), so a canvas-drawn app would render nothing at
+  all. Do not adopt it without checking the target backend.
+- **`kittenui` implements no optional members.** Anything you build against the
+  optional surface degrades fully there.
+
 ### Registered implementations
 
-| UI module | Backend | Devices | Notes |
-|-----------|---------|---------|-------|
-| `kittenui` | LVGL 8.x | cyd*, tdeck* | Small-to-large SPI screens |
-| `miniwin` | MiniWin WM | jc3248w535 | Large QSPI screen (480x320) |
-| `oled_ui` | Custom text renderer | heltec | 128x64 text-mode only |
+Eight backends register a `catcall_ui_t`. Three more (`blackpurr`, `oled_ui`,
+`lvgldebug`) are shell-tier and draw directly via `catcall_display_t` without
+registering a UI catcall at all — apps using `purr_win.h` do not run on those.
+
+| UI module | Renderer | Tier | Notes |
+|---|---|---|---|
+| `kittenui` | LVGL 8 | Windowed | Small-to-large SPI screens; no optional members |
+| `miniwin` | Vendored MiniWin WM | Windowed | Only backend implementing `canvas_*` |
+| `cupcake` | LVGL 8 | Windowed | Android 1.5-style launcher |
+| `cardstack` | LVGL 8 | Windowed | Rabbit R1-style snap-scroll card UI |
+| `mochi` | LVGL 8 | Windowed | iOS-style springboard — see `09_SystemUI.md` |
+| `tabby` | LVGL 8 | Windowed | Keyboard-first type-to-filter launcher |
+| `nougat` | LVGL 9 | Windowed | **Experimental**, parked — see note below |
+| `pounce` | Raw framebuffer | Framebuffer | No LVGL; own widget model. Omits `label_set_big` and `tile_grid_*` |
+
+**On `nougat`:** its manifest and Kconfig help both describe M5Stack Tab5 as its
+"first and only device", but `devices/tab5/device.pcat` currently sets
+`ui = "cupcake"`. Nougat was an experimental LVGL 9 port that was parked once
+LVGL 8 proved stable on that hardware; Tab5 was moved back. Treat the
+Tab5-specific wording in those two places as historical.
 
 ### Using the UI catcall from an app
 
@@ -429,7 +612,33 @@ int my_app_init(void) {
 
 ### Writing a new UI backend
 
-Implement all function pointers in `catcall_ui_t`, then call `purr_kernel_register_ui(&my_ui)` from your module's `init()`. Any pointer left `NULL` becomes a graceful no-op. See `source/modules/kittenui/kittenui_win.c` and `source/modules/miniwin/miniwin_win.c` for reference implementations.
+Implement the function pointers in `catcall_ui_t`, then call
+`purr_kernel_register_ui(&my_ui)` from your module's `init()`.
+
+Set `.catcall_version = CATCALL_UI_VERSION` — use the macro, never a literal.
+Every backend in the tree does this, which is why the 6→7 bump cost nothing.
+
+**You do not have to implement everything.** The members marked `OPTIONAL` may
+be left `NULL`; see "Optional members" above for exactly how each one degrades.
+A minimal viable backend implements windows, labels, buttons, textareas, lists,
+layout and the keyboard hooks — that is what every system app actually uses.
+
+Reference implementations, in rough order of usefulness:
+
+- `source/modules/tabby/tabby_win.c` — a current, fully-commented LVGL backend.
+  Its header records several hazards any LVGL backend hits (deferred window
+  teardown, unbinding the on-screen keyboard before freeing its textarea,
+  deferred list rebuilds, per-callback context lifetime). Read that comment
+  before writing your own; each item is a live-confirmed bug, not theory.
+- `source/modules/miniwin/miniwin_win.c` — non-LVGL, and the only `canvas_*`
+  implementation.
+- `source/modules/pounce/pounce_win.c` — no LVGL and no vendored toolkit;
+  useful if you are targeting raw framebuffer.
+
+Note that `tabby_win.c`, `mochi_win.c` and `cupcake_win.c` are close relatives
+(~95% shared). That duplication is known and is a candidate for extraction into
+a shared LVGL window layer; treat it as three copies of one design rather than
+three independent designs.
 
 ---
 
@@ -444,7 +653,7 @@ Drivers do not hardcode pin numbers. purrstrap generates `purr_device_glue.c` fo
 #define CONFIG_PURR_WIFI           1
 #define CONFIG_PURR_BT             1
 #define CONFIG_PURR_LORA           1
-#define CONFIG_PURR_LORA_DRIVER    "sx1276"
+#define CONFIG_PURR_LORA_DRIVER    "sx1262_rl"
 
 const char *purr_flash_app_dir = "/flash/apps";
 const char *purr_sd_app_dir    = "/sdcard/apps";
@@ -488,3 +697,9 @@ purr_module_header_t purr_module = {
     .deinit            = my_module_deinit,
 };
 ```
+
+---
+
+*DP8 documentation pass performed by Claude Opus 5 in agentic/auto mode. Every
+contract version and struct member above was verified against the headers in
+`source/kernel/catcalls/` at the time of writing.*

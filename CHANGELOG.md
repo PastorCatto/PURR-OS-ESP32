@@ -4,6 +4,222 @@
 > History up to v0.11.0 is preserved in [archive/CHANGELOG_0.11.md](archive/CHANGELOG_0.11.md).
 > v0.11.0 was the final release of the monolithic build system. Everything from here is new.
 
+> **Reconstructed entries (dp3 – dp7).** No changelog was written during the dp3–dp7
+> cycle. Those five entries below were reconstructed after the fact from git history and
+> the `baked_at` timestamps in `CatReleases/DP*/manifest.json`, because the release
+> artifacts were all committed in one bulk commit and so cannot be dated from commit
+> order alone. They are accurate about *what changed*; they are **not** a record of what
+> was hardware-verified — commit messages do not preserve that, and no claim of on-device
+> verification should be read into them unless the commit itself stated one.
+> dp2 and earlier, and dp8, were written contemporaneously and carry no such caveat.
+
+---
+
+## v1.0.0-dp8 — 2026-07-24
+
+### Summary
+Mobile UI generation. Two new LVGL 8 backends — **Mochi** (iOS-style squircle
+springboard) and **Tabby** (keyboard-first type-to-filter launcher) — plus the extraction
+of Cupcake's status bar, quick-settings drawer, nav bar and lock screen into a standalone
+**`systemui` module** with two swappable style implementations (Android and iOS) behind a
+single host-hook contract. Cupcake becomes a launcher again. The icon pack moves to
+Ionicons and becomes system-wide rather than launcher-private, and the wallpaper is
+compiled into the firmware as a C array instead of living in SPIFFS. Closes with a full
+documentation pass bringing `docs/` back in line with the tree.
+
+### Added
+- **`systemui` module** (`source/modules/systemui/`) — status bar, quick-settings drawer,
+  nav bar, notification shade and lock screen, extracted from `cupcake_ui.c`. Two style
+  implementations selected at build time: `systemui_android.c` (`CONFIG_PURR_SYSTEMUI_STYLE_ANDROID`)
+  and `systemui_ios.c` (`CONFIG_PURR_SYSTEMUI_STYLE_IOS`). See `docs/09_SystemUI.md`.
+- **`purr_systemui_host_t`** — the host-hook table a UI backend fills in to host System UI.
+  No `lv_obj_t*` crosses the boundary: hooks are `width`, `height`, `icon_for_app`,
+  `tint_color`, `hide_drawer`, `hide_foreground_windows`, `last_activity_ms`, `wallpaper`
+  and `suppress_navbar`. Proven by two independent hosts (Cupcake and Mochi).
+- **Mochi UI backend** (`source/modules/mochi/`) — iOS-style springboard: 4-column
+  squircle grid matching the 4-slot dock for 1:1 trackball cursor mapping, page swiping,
+  a fixed 9-colour saturated icon palette, and a wide short home indicator.
+- **Tabby UI backend** (`source/modules/tabby/`) — keyboard-first launcher; type to filter,
+  trackball/arrow keys to select, touch supported.
+- **Compiled-in wallpaper** — `convert_wallpaper.py` gained `--c-array` / `--symbol`,
+  emitting an `LV_IMG_CF_TRUE_COLOR` `lv_img_dsc_t` (`purr_wallpaper`) linked into the
+  firmware rather than staged into SPIFFS. Used by both the springboard and the lock screen.
+- **Notification privacy** — lock screen can show a bare count ("You have *N* notifications")
+  and reveal the list on swipe-up. Backed by `purr_kernel_lock_hide_notifications()`
+  (defaults on), toggled from Settings → Customization, honoured by both System UI styles.
+- **`purr_kernel_notify_remove(int idx)`** — removes one notification and compacts the ring.
+- **`list_set_items_icon`** in `catcall_ui_t` (`CATCALL_UI_VERSION` 6 → 7) — optional; a
+  backend that leaves it NULL falls back to the plain `list_set_items` path.
+- **`docs/09_SystemUI.md`** — new document covering the module, both styles, the host
+  contract and the lock screen / notification model.
+
+### Changed
+- **Icons are system-wide.** The icon pipeline (`source/assets/icons/convert_icons.py`) is
+  now pack-agnostic (`PACKS` dict, `ACTIVE_PACK`), the active pack is **Ionicons**, and the
+  launcher owns the set on behalf of the whole system instead of keeping it private — so
+  apps and System UI resolve the same icons.
+- **Cupcake is a launcher.** `cupcake_ui.c` was split; everything chrome-related moved to
+  `systemui`, and Cupcake now hosts it through `purr_systemui_host_t` like any other backend.
+- **`convert_icons.py` runs on Windows** — added an svglib + reportlab render path
+  (`_render_svglib()`); cairosvg is not usable on this toolchain.
+- **Documentation pass to DP8** — every version number, module, driver, device, app and
+  build-tool subcommand across `docs/`, `README.md` and `00_Overview.md` re-verified
+  against the tree. Docs had been deliberately allowed to drift through the DP cycle.
+
+### Fixed
+- **Trackball key repeat** — repeat is now generated in the driver
+  (`source/drivers/input/trackball/trackball.c`) with proper typematic behaviour: a leading
+  edge, a 500 ms delay, then a 140 ms interval (40 ms for motion). Previously the repeat
+  behaviour came from the wrong layer; this is the bug present since 0.13.
+- **Trackball axis tie-break** — `ay >= ax` biased every diagonal towards vertical;
+  changed to a strict `>`.
+- **`PURR_KERNEL_VERSION` drift** — sat at `1.0.0-dp7` for the whole dp8 cycle, so the
+  About page reported a version no baked artifact matched. It is duplicated between
+  `purr_kernel.h` and `purrstrap.py`; both are now dp8.
+- **Status bar contrast and overlap** on the springboard; notification card background
+  height; page swiping, now driven by explicit pointer tracking rather than LVGL scroll.
+
+### Known issues
+- `purrstrap clean <device>` targets `source/build_<device>`; the real build directory is
+  `CoreOS/build_<device>`. It has silently never cleaned anything. Documented in
+  `docs/07_Build_Tools.md`, not fixed here (docs and code commits are kept separate).
+- Portable list icons are blocked on a `CONFIG_PURR_UI_LVGL` symbol — apps cannot include
+  `lvgl.h` unconditionally, since MiniWin and Pounce builds have no LVGL.
+- 16 `module.pcat` files still use the legacy flat schema; migration to the sectioned
+  `[module]` form is deferred to its own change.
+
+---
+
+## v1.0.0-dp7 — 2026-07-20 *(reconstructed)*
+
+### Summary
+M5Stack Tab5 (ESP32-P4) reaches hardware-verified DP1, and the T-Deck Plus shared-SPI2
+hang — radio and display contending for one bus — is closed. Meshtastic RX becomes
+interrupt-driven and the full MSN feature set is restored on top of it. The proximity
+family grows into multi-device pairing with a remote app manager and a home-base MSN relay.
+Longest window of the DP cycle (07-14 → 07-20) and the largest.
+
+### Added
+- **M5Stack Tab5 device** (`2034f615`, `fb6809da`) — ESP32-P4 target reaching DP1, booting
+  to the desktop and verified on hardware against a pinned IDF 5.3.5.
+- **ST7123 MIPI-DSI display + touch drivers and `tab5_kbd`** (`75eab957`, `1a70e1b3`) —
+  vendored `esp_lcd` panel and touch drivers replacing the earlier espp dependency.
+- **esp32p4 target support in purrstrap** (`e4240ba0`), and build fixes making every
+  component compile and link on esp32p4 (`807aa231`, `d998179e`).
+- **Multi-device pairing, remote app manager, home-base MSN relay** (`a200e653`).
+- **Milk Bottle demo app + big-font label capability** (`0ca7f6e6`), later folded into
+  Milkbar's own app list (`a197f98a`).
+- **Portable tile-grid Home screen for MSN** (`34d83017`) and a tile-grid category picker
+  in Settings, plus NimBLE enabled on `tdeck_plus` (`0c5d7ea6`).
+- **3-state panic screen and UI hang breadcrumbs** (`1fdd1826`).
+
+### Changed
+- **Cupcake lock screen redesigned** around a minimalist centred layout (`199f276d`).
+- **Tab5 UI switched to Cupcake** at the upstream author's request (`a1b3e8af`), after
+  `4c61b1d0` unblocked Cupcake on native kernels and wide displays.
+- **Meshtastic RX is interrupt-driven** (`7a7dfccc`), replacing polling.
+
+### Fixed
+- **Shared-SPI2-bus hang on T-Deck Plus** (`23658e42`) — radio and display on one bus.
+- **Module load-order bugs that disabled the UI on boot** (`21f97c9e`).
+- **MiniWin wide-display overflow, widget client-area sizing, physical-keyboard Enter**
+  (`3917af69`, `8472dd14`).
+- **Hang recovery** — `0b1797ee` changed a hang from parking on a possibly-dead panic
+  screen to an auto-reboot.
+- **`purrstrap`** now regenerates `components_manifest.cmake` on every build (`91a7e32b`).
+
+### Reverted
+- `718713c7` reverted `6471460b` (per-node hops/battery data) and `81c434a9`
+  (deferred window/list teardown, Cupcake-only MSN icon rows). The MSN feature set was
+  restored later in the window by `7a7dfccc`.
+
+---
+
+## v1.0.0-dp6 — 2026-07-14 *(reconstructed)*
+
+### Summary
+**Repackage only — no code changes.** DP6 was baked 35 minutes after DP5, and its commit
+(`0b946b7a`) states it packaged `CatReleases/DP6` from the existing `cattobaked/` batch.
+No feature list is given here because there is none to give.
+
+### Note
+`a0f8846e` bumped `PURROS_VERSION` to `v1.0.0-dp7` at 13:30 — *before* DP6 was packaged at
+13:44. The version string in the DP6 artifact should be read with that in mind. This is the
+first instance of the version-drift pattern that recurs through dp7 and dp8.
+
+---
+
+## v1.0.0-dp5 — 2026-07-14 *(reconstructed)*
+
+### Summary
+Mesh goes protocol-agnostic. MeshChat is replaced by **MSN**, which talks to whichever mesh
+backend is active, and **MeshCore** joins Meshtastic as a supported backend with a live
+switch that no longer requires a reboot. The ESP-NOW **proximity** family arrives. First
+ESP32-P4 bring-up work lands (Tab5, Nougat/LVGL v9), then is deliberately reverted to
+MiniWin before the bake.
+
+### Added
+- **MeshCore backend + mesh backend preference infrastructure** (`6aa8763b`).
+- **MSN** (`6ad8ad33`) — protocol-agnostic replacement for MeshChat, with a backend chooser.
+- **ESP-NOW device discovery + companion pairing** (`eecdb760`), auto-enabled per
+  `device.pcat` along with `msn` and `nearby` (`4578c059`).
+- **Runtime module enable / disable / restart**, exposed through Services and Terminal
+  (`f77c3bfd`).
+- **Memory watchdog + PSRAM offload** (`fb39a3a1`).
+- **Nougat backend (LVGL v9)** (`85d64708`) and native MIPI-DSI driver work for Tab5
+  (`c6b81897`, `29d8d9cd`) — experimental; Tab5 was reverted to MiniWin for the DP5 bake
+  (`6ee85509`) because LVGL v9 was not yet proven stable.
+- **Z-ordered WinCE desktop windows and a dedicated lock overlay** (`9dd5db25`).
+
+### Fixed
+- **Cupcake UI hangs caused by radio-driver CPU starvation** (`afb1ddd2`).
+- **ADC battery calibration** (`038f9f94`) — curve-fitting vs. line-fitting is now selected
+  per chip.
+- **Stale-pixel redraw bugs** in the WinCE desktop (`9dd5db25`).
+- `ec1d6447` held `PURR_KERNEL_VERSION` at dp5 until the next packaged release — an
+  early, deliberate attempt to manage the same version-drift problem.
+
+---
+
+## v1.0.0-dp4 — 2026-07-10 *(reconstructed)*
+
+### Summary
+Meshtastic messaging works end-to-end, with multi-channel rooms and real PKI direct-message
+crypto. Cupcake gains a lock screen and idle screen-off. MeshChat is rebranded toward MSN.
+
+### Added
+- **Cupcake lock screen + idle screen-off**, trackball navigation (`ce0e220a`).
+- **Multi-channel Meshtastic rooms** and battery voltage reporting (`19c8bbcc`).
+- **Real PKI direct-message crypto**, node and room persistence (`ef316b4c`).
+
+### Fixed
+- **Meshtastic messaging end-to-end** (`19c8bbcc`) — the headline fix of this release.
+- **App-launch render stalls** (`ce0e220a`).
+
+---
+
+## v1.0.0-dp3 — 2026-07-09 *(reconstructed)*
+
+### Summary
+T-Deck Plus moves to the MiniWin/WinCE UI and gains crash-loop protection. Meshtastic wire
+compatibility becomes real rather than approximate, and plain-ESP32 (non-S3) builds are
+unblocked with a stripped-down profile for smaller devices.
+
+### Added
+- **MiniWin/WinCE UI on `tdeck_plus`** (`d7a3ba40`), with a crash-loop guard and panic
+  screens.
+- **Vendored RadioLib** and real Meshtastic wire compatibility (`d0548eac`).
+- **Stripped-down build profile for non-T-Deck devices** (`f913ae23`).
+
+### Fixed
+- **Close-button freeze** on MiniWin windows (`d7a3ba40`).
+- **MiniWin close / layout / keyboard bugs** (`d0548eac`).
+- **PSRAM-stack NVS crash** introduced by redirecting `MW_ASSERT` into the crash guard
+  (`9e153cad`).
+- **Bluetooth on `tdeck_plus`** migrated to lazy-init NimBLE; Lua module registration
+  fixed; KITT bumped to 0.11.1 (`2cf30032`).
+- **Plain-ESP32 builds unblocked** (`f913ae23`).
+
 ---
 
 ## v1.0.0-dp2 — 2026-07-07

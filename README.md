@@ -1,6 +1,10 @@
-# PURR OS — v0.13.0
+# PURR OS — v1.0.0-dp8
 
-# Documentation will not be updated until the eve of a 1.0 RC build, as the focus is stability and support for right now. reach out if you have any issues/concerns!
+> **Docs current as of DP8.** Documentation was deliberately left to drift
+> through the DP cycle while the focus was stability; it has now been brought
+> back in line with the code ahead of a 1.0 RC. Every version number, module,
+> driver, device and command listed across `docs/` was verified against the
+> tree. Reach out with any issues or concerns.
 
 **P.U.R.R.** = Portable Unified Runtime & Radio Operating System
 **K.I.T.T** = Kernel Interface Translation Toolkit
@@ -23,7 +27,7 @@ For devices where the standard IDF driver stack has issues, a **specialized kern
 │    ├── purr_kernel_scan_modules("/flash/modules")             │
 │    │     driver_manager  →  loads .purr driver blobs         │
 │    │                        registers catcalls                │
-│    │     kittenui / miniwin  →  catcall_ui_t backend         │
+│    │     UI backend (mochi/cupcake/miniwin/...) -> catcall_ui_t│
 │    │     app_manager  →  launches .meow / .paws / .claw      │
 │    │                                                          │
 │    └── idle forever                                           │
@@ -37,6 +41,7 @@ For devices where the standard IDF driver stack has issues, a **specialized kern
 | `.purr` | Precompiled kernel module (driver, system service, UI framework) |
 | `.meow` | Lua 5.4 script — sandboxed VM, `win.*` / `sd.*` / `system.*` API |
 | `.hiss` | Lua 5.4 script — same VM as `.meow`, plus `kitt.*` / `radio.*` / `gps.*` |
+| `.kitten` | As `.hiss`, but the first one found on SD **autoruns at boot** |
 | `.paws` | Compiled userland app — `purr_win.h` + `sd.*` only |
 | `.claw` | Compiled kernel-access app — full `purr_kernel_*` + `purr_win.h` |
 | `.catt` | In-house exclusive (MagicMac, MagiDOS) — same as `.claw`, team-built |
@@ -68,7 +73,7 @@ purr_win_button(win, "Tap", on_tap, NULL);
 purr_win_show(win);
 ```
 
-This compiles once and runs on KittenUI (LVGL 8), MiniWin, and any future UI backend.
+This compiles once and runs on every windowed and framebuffer backend — eight of them today.
 
 ---
 
@@ -81,19 +86,24 @@ source/
     core/               generic kernel (boot, registry, module loader)
     kernel_arduino/     shared helpers for Arduino-backed kernels
     kernel_tdeck/       T-Deck specialized kernel
-    kernel_tdeck_plus/  T-Deck Plus IDF kernel (touch broken — see docs)
-    kernel_tdeck_plus_arduino/   T-Deck Plus Arduino kernel (production)
+    kernel_tdeck_plus/  T-Deck Plus IDF kernel (canonical)
+    kernel_tdeck_plus_arduino/   T-Deck Plus Arduino Wire kernel (deprecated)
     kernel_tdeck_plus_test/      Input test mode kernel (dev/debug)
+    kernel_tdeck_plus_pounce/    Pounce framebuffer target
+    kernel_tab5_m5bsp_legacy/    M5Stack Tab5 (ESP32-P4)
   drivers/              display/, touch/, input/, radio/, gps/
   modules/
     driver_manager/     loads .purr driver blobs
     app_manager/        launches .meow/.hiss/.paws/.claw apps
-    kittenui/           LVGL 8 UI module
-    miniwin/            MiniWin WM module
-    oled_ui/            Text-mode OLED UI
-  devices/              device.pcat manifests (8 production + 2 dev targets)
+    <11 UI backends>    kittenui, miniwin, cupcake, cardstack, mochi, tabby,
+                        nougat, pounce, blackpurr, oled_ui, lvgldebug
+    systemui/           status bar / panels / lock screen (Android + iOS styles)
+    meshtastic/         mesh networking (+ meshcore as an alternative backend)
+    proximity*/         ESP-NOW multi-device family (pairing, RPC, homebase)
+  devices/              device.pcat manifests (12 targets)
   apps/
-    system/             settings, about, terminal, fileman, calculator
+    system/             settings, terminal, fileman, msn, taskmgr, services,
+                        drivermgr, hwtest, meshdiag, milkbar, nearby, calculator
     exclusive/          magicmac, magidos (rewrite in progress)
 
 CoreOS/                 IDF project shell (CMake, sdkconfig per device, partitions)
@@ -115,20 +125,22 @@ archive/                legacy scripts, old docs
 | Device | Chip | Screen | Input | Radio | SD | Kernel |
 |--------|------|--------|-------|-------|----|--------|
 | `jc3248w535` | ESP32-S3 | 3.5" AXS15231B 480×320 QSPI | touch | WiFi + BT | no | generic |
-| `tdeck_plus` | ESP32-S3 | 3.2" ST7789 320×240 | touch + trackball + keyboard | WiFi + BT + SX1276 LoRa + GPS | yes | arduino |
+| `tdeck_plus` | ESP32-S3 | 3.2" ST7789 320×240 | touch + trackball + keyboard | WiFi + BT + SX1262 LoRa (`sx1262_rl`) + GPS | yes | specialized (IDF) |
 | `tdeck` | ESP32-S3 | 3.2" ST7789 320×240 | trackball | WiFi + BT + SX1262 LoRa | yes | specialized |
 | `cyd` | ESP32 | 2.8" ILI9341 320×240 | resistive touch | WiFi + BT | yes | generic |
 | `cyd_s024c` | ESP32 | 2.4" ILI9341 240×320 | cap touch | WiFi + BT | yes | generic |
 | `cyd_s028r` | ESP32 | 2.8" ILI9341 320×240 | resistive touch | WiFi + BT | yes | generic |
-| `heltec` | ESP32-S3 | 128×64 SSD1306 OLED | — | WiFi + BT + SX1262 LoRa | no | generic |
+| `heltec` | ESP32-S3 | 128×64 SSD1306 OLED | — | WiFi + BT + SX1262 LoRa (`sx1262_rl`) | no | generic |
 | `waveshare169` | ESP32-S3 | 1.69" ST7789 240×280 | cap touch | WiFi + BT | no | generic |
+| `tab5` | **ESP32-P4** | ST7123 MIPI-DSI | cap touch + tab5_kbd | WiFi + BT | — | specialized |
 
 ### Dev / debug targets
 
 | Target | Purpose |
 |--------|---------|
-| `tdeck_plus_arduino` | Production Arduino kernel for T-Deck Plus (use this target) |
+| `tdeck_plus_arduino` | Arduino-Wire kernel for T-Deck Plus — **deprecated**, `tdeck_plus` (IDF) is now canonical |
 | `tdeck_plus_test` | Input visualizer — confirms touch, trackball, keyboard hardware |
+| `tdeck_plus_pounce` | T-Deck Plus running the `pounce` raw-framebuffer backend |
 
 ---
 
@@ -186,11 +198,20 @@ Bundled on all medium and large-screen devices:
 
 | App | Tier | Description |
 |-----|------|-------------|
-| `settings` | `.claw` | Theme, brightness, SD status, reboot, Developer Mode |
-| `about` | `.claw` | OS/KITT version, chip info, free RAM, uptime, active drivers |
-| `terminal` | `.claw` | Shell: ls, cat, echo, modules, mem, uptime, reboot |
+| `settings` | `.claw` | Theme, brightness, SD card, device info, customization panel |
+| `terminal` | `.claw` | Shell: help, ls, cat, echo, modules, reboot, clear |
 | `fileman` | `.claw` | Browse SPIFFS + SD card; text file preview |
+| `taskmgr` | `.claw` | Running apps; the one deliberate place to kill one |
+| `services` | `.claw` | Live status of core background services + memory pressure |
+| `drivermgr` | `.claw` | Scanned drivers and their OK/COMPAT/FAIL/SKIP status |
+| `hwtest` | `.claw` | Live trackball motion/click and keyboard keypress log |
+| `msn` | `.claw` | Mesh Social Network — buddy list + rooms over the active mesh backend |
+| `meshdiag` | `.claw` | Mesh diagnostics: kernel log tail, radio + node stats, test-send |
+| `nearby` | `.claw` | Read-only list of PURR OS devices seen via ESP-NOW proximity beacons |
+| `milkbar` | `.claw` | Manage apps on a paired PURR OS device remotely |
 | `calculator` | `.paws` | Basic arithmetic with decimal support |
+
+There is no separate `about` app — device/OS info lives inside `settings`.
 
 ---
 
@@ -198,10 +219,15 @@ Bundled on all medium and large-screen devices:
 
 | Component | Version |
 |-----------|---------|
-| PURR OS | v0.13.0 |
-| KITT | v0.9.2 |
-| `.purr` ABI | 1 |
-| Catcall API | 1 |
+| PURR OS | v1.0.0-dp8 |
+| `.purr` ABI | 2 |
+| Catcall: display / touch / gps | 1 |
+| Catcall: input | 2 |
+| Catcall: radio | 3 |
+| Catcall: ui | 7 |
+
+Catcalls are versioned independently — there is no single "Catcall API" number.
+See [docs/02_Catcalls.md](docs/02_Catcalls.md).
 
 ---
 
@@ -212,14 +238,15 @@ Bundled on all medium and large-screen devices:
 | [docs/00_Overview.md](docs/00_Overview.md) | What PURR OS is, supported hardware, key concepts |
 | [docs/01_Architecture.md](docs/01_Architecture.md) | Kernel spine, specialized kernels, module loader, .purr ABI |
 | [docs/02_Catcalls.md](docs/02_Catcalls.md) | All six catcalls — full struct + function docs, driver tables |
-| [docs/03_Modules.md](docs/03_Modules.md) | driver_manager, app_manager, kittenui, miniwin, oled_ui |
+| [docs/03_Modules.md](docs/03_Modules.md) | Complete index of all 27 modules; `module.pcat` schema (two forms) |
 | [docs/04_Devices.md](docs/04_Devices.md) | device.pcat format, all devices, T-Deck Plus detail, pin reference |
 | [docs/05_Drivers.md](docs/05_Drivers.md) | driver.pcat format, all drivers, GT911/IDF 5.3 known issue, writing a driver |
 | [docs/06_Apps.md](docs/06_Apps.md) | Tiers, purr_win.h API reference, .meow/.hiss/.paws/.claw guide |
 | [docs/07_Build_Tools.md](docs/07_Build_Tools.md) | purrstrap, modulestrap, catstrap — full pipeline and commands |
 | [docs/08_Exclusives.md](docs/08_Exclusives.md) | MagicMac and MagiDOS — architecture, build, current status |
-| [docs/10_ModuleLoading.md](docs/10_ModuleLoading.md) | Module priority system, SD fallback, panic screen |
-| [docs/11_KittenUI.md](docs/11_KittenUI.md) | KittenUI LVGL 8 module in depth |
+| [docs/09_SystemUI.md](docs/09_SystemUI.md) | System UI module — two styles, host contract, lock screen, notifications |
+| [docs/10_ModuleLoading.md](docs/10_ModuleLoading.md) | Static registration, module priority, SD fallback, panic screen |
+| [docs/11_KittenUI.md](docs/11_KittenUI.md) | KittenUI LVGL 8 module in depth (no device currently selects it) |
 | [docs/12_AppAPI.md](docs/12_AppAPI.md) | purr_win.h complete API reference + backend writing guide |
 | [docs/13_Kernels.md](docs/13_Kernels.md) | Specialized kernel system — when to use, how to write, all existing kernels |
 | [docs/14_Driverstrap.md](docs/14_Driverstrap.md) | driverstrap — driver template generator CLI + wizard reference |
@@ -236,3 +263,7 @@ Legacy docs, changelogs, and build artifacts are in `archive/`.
 ## License
 
 MIT. MiniWin: MIT (John Blaiklock). Lua 5.4: MIT. See subproject READMEs for full attribution.
+
+---
+
+*Documentation reviewed and updated for v1.0.0-dp8 by Claude Opus 5 in agentic/auto mode.*

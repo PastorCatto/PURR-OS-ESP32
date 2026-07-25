@@ -40,6 +40,21 @@ required_catcalls = []
 
 ## Existing Drivers
 
+> **Complete list as of v1.0.0-dp8** — 18 drivers, verified against
+> `source/drivers/*/*/driver.pcat`.
+>
+> | Type | Drivers |
+> |---|---|
+> | display | `ili9341`, `st7789`, `axs15231b`, `ssd1306`, `st7123`, `m5tab5_bsp` |
+> | touch | `xpt2046`, `cst816s`, `gt911` |
+> | input | `trackball`, `bbq20`, `heltec_button`, `tab5_kbd` |
+> | radio | `sx1262`, `sx1276`, `sx1262_rl` |
+> | gps | `generic_nmea` |
+> | battery | `adc_battery` |
+>
+> Sections below cover the longest-standing ones in depth; the rest are
+> summarised under "Recently added drivers".
+
 ### Display Drivers
 
 #### ili9341
@@ -132,17 +147,37 @@ required_catcalls = []
 
 ### Radio Drivers
 
-#### sx1276
+Three radio drivers exist. All three implement the same `catcall_radio_t`
+(version 3), which exposes `send`, `receive`, `rssi`, `snr`, `set_freq`,
+`set_power`, plus the modulation controls Meshtastic needs (`set_modulation`,
+`set_sync_word`, `set_frequency`).
+
+#### sx1262_rl
 
 - **Type:** radio / SPI
-- **Devices:** tdeck_plus
-- **Notes:** LoRa radio. SPI bus shared with display (separate CS). Supports SF7–SF12, 125/250/500 kHz bandwidth, all standard coding rates. `catcall_radio_t` exposes `send`, `receive`, `rssi`, `snr`, `set_freq`, `set_power`.
+- **Devices:** `tdeck_plus`, `heltec`
+- **Notes:** RadioLib-backed SX1262 driver — **the one in production use.** Built on
+  the vendored RadioLib in `source/lib/lib_radiolib`. Interrupt-driven RX since dp7.
+  On T-Deck Plus the SPI bus is shared with the display and SD card (separate CS
+  lines); the shared-SPI2 contention hang was closed in dp7 (`23658e42`).
 
 #### sx1262
 
 - **Type:** radio / SPI
-- **Devices:** tdeck, heltec
-- **Notes:** Same catcall interface as sx1276. SX1262 adds a BUSY pin that must be polled before SPI transactions. Driver handles this internally.
+- **Devices:** `tdeck`, `tdeck_plus_pounce`
+- **Notes:** Plain SPI SX1262 driver, no RadioLib. Still present and functional;
+  `tdeck_plus` moved off it to `sx1262_rl`. SX1262 has a BUSY pin that must be
+  polled before every SPI transaction — the driver handles this internally.
+
+#### sx1276
+
+- **Type:** radio / SPI
+- **Devices:** `tdeck_plus_arduino` only
+- **Notes:** SF7–SF12, 125/250/500 kHz bandwidth, all standard coding rates.
+  **Selected by no real hardware.** T-Deck Plus was configured for SX1276 in error
+  early on; the physical board carries an SX1262, and the symptom was
+  `sx1276: unexpected version 0x00, expected 0x12` at boot (see `meshplan.md`).
+  `tdeck_plus_arduino` still points at it and is deprecated for other reasons too.
 
 ---
 
@@ -156,6 +191,63 @@ required_catcalls = []
 
 ---
 
+### Recently added drivers
+
+#### st7123 (display + touch)
+
+- **Type:** display + touch / MIPI-DSI
+- **Devices:** tab5
+- **Notes:** ESP-IDF v5.5+ and **esp32p4 only**. Like `axs15231b`, one IC serves
+  both display and touch, so a single driver registers both catcalls.
+
+#### m5tab5_bsp (display)
+
+- **Type:** display
+- **Devices:** tab5 (legacy path)
+- **Notes:** BSP-backed bring-up retained alongside `st7123`; pairs with
+  `kernel_tab5_m5bsp_legacy`.
+
+#### tab5_kbd (input)
+
+- **Type:** input / I2C
+- **Devices:** tab5
+- **Notes:** Attachable keyboard. Pure C on `driver/i2c_master.h`, following the
+  `bbq20` pattern.
+
+#### heltec_button (input)
+
+- **Type:** input / GPIO
+- **Devices:** heltec
+- **Notes:** Single active-low PRG button with internal pullup, sharing the
+  debounce approach used by `trackball`. On a device with no touch and no
+  keyboard, this is the only input.
+
+#### sx1262_rl (radio)
+
+- **Type:** radio / SPI
+- **Devices:** tdeck_plus
+- **Notes:** Same `catcall_radio_t` contract as the hand-rolled `sx1262`, but
+  bring-up/RX/TX go through vendored **RadioLib**. This is the driver that
+  implements the optional v3 members `wait_rx_signal`/`wake_rx_wait`, letting
+  `meshtastic_module.c`'s `mesh_task()` block on a real IRQ instead of polling
+  `data_available()` on a timer. Prefer it over `sx1262` for Meshtastic work.
+
+#### adc_battery (battery)
+
+- **Type:** battery / ADC
+- **Devices:** tdeck, tdeck_plus (defaults), heltec (overridden)
+- **Notes:** Single-pin resistive-divider voltage/percent read. Compile-time
+  defaults are T-Deck-shaped (GPIO4 / ADC1_CH3, ×2.11, no enable pin); a board
+  with a different divider overrides them at runtime via
+  `adc_battery_configure()` rather than more `#ifndef` config in the driver.
+  Heltec V3 needs both an enable pin and `DB_2_5` attenuation — its ADC
+  under-reads badly at the default `DB_12` on a high-impedance divider.
+
+There is no `catcall_battery_t`; battery values surface through
+`purr_kernel_battery_percent()` / `purr_kernel_battery_voltage_mv()`.
+
+---
+
 ## Driver Compat Matrix
 
 | Driver | ESP32 | ESP32-S3 | IDF path stable | Arduino Wire path |
@@ -166,12 +258,16 @@ required_catcalls = []
 | ssd1306 | — | ✓ | ✓ | n/a |
 | xpt2046 | ✓ | ✓ | ✓ | n/a |
 | cst816s | ✓ | ✓ | ✓ | n/a |
-| gt911 | — | ✓ | ✗ (IDF 5.3 regression) | ✓ (kernel_tdeck_plus_arduino) |
+| st7123 | — | ✓ (P4) | ✓ | n/a |
+| gt911 | — | ✓ | ✓ (fixed in `322159c6`; was broken on IDF 5.3) | ✓ (kernel_tdeck_plus_arduino) |
 | trackball | — | ✓ | ✓ | ✓ |
-| bbq20 | — | ✓ | n/a | ✓ (kernel_tdeck_plus_arduino) |
-| sx1276 | — | ✓ | ✓ | n/a |
+| bbq20 | — | ✓ | ✓ | ✓ |
+| tab5_kbd | — | ✓ (P4) | ✓ | n/a |
+| sx1262_rl | ✓ | ✓ | ✓ | n/a |
 | sx1262 | ✓ | ✓ | ✓ | n/a |
+| sx1276 | — | ✓ | ✓ | n/a |
 | generic_nmea | ✓ | ✓ | ✓ | n/a |
+| adc_battery | ✓ | ✓ | ✓ | n/a |
 
 ---
 
@@ -297,3 +393,8 @@ catcall struct. Never write a second, from-scratch implementation of a driver's
 register logic inside a specialized kernel — see
 [01_Architecture.md](01_Architecture.md#rule-specialized-kernels-consume-drivers-they-dont-reimplement-them)
 for the rule and why it exists.
+
+---
+
+*DP8 documentation pass performed by Claude Opus 5 in agentic/auto mode. Driver
+list verified against `source/drivers/*/*/driver.pcat`.*

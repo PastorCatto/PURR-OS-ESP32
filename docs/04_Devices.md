@@ -19,21 +19,25 @@ spiffs_offset = "0xD90000"            # SPIFFS partition start (hex)
 display = "ili9341" | "st7789" | "axs15231b" | "ssd1306" | ""
 touch   = "xpt2046" | "cst816s" | "gt911" | ""
 input   = "trackball" | "bbq20" | ""
-radio   = "sx1262" | "sx1276" | ""
+radio   = "sx1262" | "sx1262_rl" | "sx1276" | ""
 gps     = "generic_nmea" | ""
 
 [radio]
 wifi = true | false
 bt   = true | false
-lora = "sx1262" | "sx1276" | ""
+lora = "sx1262" | "sx1262_rl" | "sx1276" | ""
 
 [modules]
-ui          = "kittenui" | "miniwin" | "oled_ui"
+ui          = "kittenui" | "miniwin" | "cupcake" | "cardstack" | "mochi"
+              | "tabby" | "nougat" | "pounce" | "blackpurr" | "oled_ui"
+              | "lvgldebug"        # see 03_Modules.md for the tier of each
 app_manager = "app_manager"
+systemui    = "systemui"           # optional: status bar / panels / lock screen
 
 [ui]
-theme = "wce" | "dark"             # KittenUI/MiniWin only
+theme = "wce" | "dark"             # LVGL backends + MiniWin
 style = "full" | "compact"         # oled_ui only
+systemui_style = "android" | "ios" # which systemui implementation compiles in
 
 [apps]
 # true = bake this app blob into the SPIFFS image at build time
@@ -47,7 +51,7 @@ calculator = true | false
 # Maps module/driver slug to load priority (1=required, 2=important, 3=optional)
 display/st7789  = 1
 touch/gt911     = 1
-kittenui        = 2
+mochi           = 2
 app_manager     = 2
 
 [pins]
@@ -96,10 +100,10 @@ PSRAM:    8 MB
 Screen:   3.2" ST7789 320×240 SPI
 Touch:    GT911 capacitive (I2C — SDA=18, SCL=8, INT=16, RST=NC)
 Input:    Trackball (UP=3, DN=15, LT=1, RT=2, CLK=0) + BBQ20 keyboard (I2C 0x55)
-Radio:    WiFi + BT (built-in) + SX1276 LoRa (SPI)
+Radio:    WiFi + BT (built-in) + SX1262 LoRa via sx1262_rl (SPI, shared bus)
 GPS:      Generic NMEA UART (TX=43, RX=44)
 SD:       yes (SPI)
-UI:       KittenUI
+UI:       Mochi (iOS-style springboard; hosts systemui, iOS style)
 Apps:     settings, about, terminal, fileman, calculator
 Kernel:   kernel_tdeck_plus_arduino (production), kernel_tdeck_plus (IDF path — touch broken on IDF 5.3)
 ```
@@ -155,12 +159,12 @@ Touch:    none
 Input:    Trackball (4-dir GPIO + click)
 Radio:    WiFi + BT (built-in) + SX1262 LoRa (SPI)
 SD:       yes (SPI)
-UI:       KittenUI
+UI:       MiniWin
 Apps:     settings, about, terminal, fileman, calculator
 Kernel:   kernel_tdeck
 ```
 
-Same form factor as T-Deck Plus but no touch and SX1262 instead of SX1276. Navigation via trackball only — apps should handle trackball focus events through `catcall_input_t`.
+Same form factor as T-Deck Plus but no touch. Both use an SX1262; `tdeck` selects the plain `sx1262` SPI driver while `tdeck_plus` uses the RadioLib-backed `sx1262_rl`. Navigation via trackball only — apps should handle trackball focus events through `catcall_input_t`.
 
 ---
 
@@ -175,7 +179,7 @@ Touch:    XPT2046 resistive (SPI, shared bus with display)
 Input:    —
 Radio:    WiFi + BT (built-in)
 SD:       yes (optional SPI)
-UI:       KittenUI
+UI:       MiniWin
 Apps:     settings, about, terminal, fileman, calculator
 Kernel:   generic core
 ```
@@ -195,7 +199,7 @@ Touch:    CST816S capacitive (I2C, address 0x15)
 Input:    —
 Radio:    WiFi + BT (built-in)
 SD:       yes (optional SPI)
-UI:       KittenUI
+UI:       MiniWin
 Apps:     settings, about, terminal, fileman, calculator
 Kernel:   generic core
 ```
@@ -215,7 +219,7 @@ Touch:    XPT2046 resistive (SPI, shared bus)
 Input:    —
 Radio:    WiFi + BT (built-in)
 SD:       yes (optional SPI)
-UI:       KittenUI
+UI:       MiniWin
 Apps:     settings, about, terminal, fileman, calculator
 Kernel:   generic core
 ```
@@ -255,12 +259,53 @@ Touch:    CST816S capacitive (I2C, address 0x15)
 Input:    —
 Radio:    WiFi + BT (built-in)
 SD:       no
-UI:       KittenUI
+UI:       MiniWin
 Apps:     none (screen below medium threshold)
 Kernel:   generic core
 ```
 
 Small wearable / badge device. KittenUI loads so custom `.meow`/`.paws` scripts on SD work, but built-in system apps are excluded because 240×280 is too small for their layouts. Use `.meow` Lua scripts for small-screen UIs.
+
+---
+
+### tab5
+
+M5Stack Tab5 — the only **ESP32-P4** device in the tree, and the only one not on
+an ESP32/ESP32-S3.
+
+| | |
+|---|---|
+| Chip | esp32p4 |
+| Flash / PSRAM | 16 MB / yes |
+| Display | `st7123` |
+| Touch | `st7123` (same controller) |
+| Input | `tab5_kbd` |
+| Radio | none |
+| UI | `cupcake` |
+
+Originally brought up on `nougat` (LVGL 9). It was moved back to `cupcake` once
+LVGL 8 proved stable on this hardware, so Nougat is now parked — its manifest
+and Kconfig help still describe Tab5 as its target, which is historical. See
+`02_Catcalls.md`.
+
+### tdeck_plus_pounce
+
+Same hardware as `tdeck_plus`, but running the `pounce` framebuffer backend
+instead of an LVGL one. A parallel target rather than a replacement, so the
+experimental backend can be built and flashed without disturbing the production
+`tdeck_plus` device.
+
+| | |
+|---|---|
+| Chip | esp32s3 |
+| Flash / PSRAM | 16 MB / yes |
+| Display / Touch | `st7789` / `gt911` |
+| Input | `trackball` (+ BBQ20 keyboard via the specialized kernel) |
+| Radio | `sx1262` |
+| UI | `pounce` |
+
+Uses `kernel_tdeck_plus_pounce`. See `pounce_plan.md` for the backend's design
+and current status.
 
 ---
 
@@ -418,4 +463,12 @@ BBQ20 is at I2C address 0x55, shared bus with GT911. No separate pin keys — us
 | Trackball CLK | 0 | Click button |
 | GPS TX (→ ESP RX) | 43 | UART |
 | GPS RX (← ESP TX) | 44 | UART |
-| LoRa CS | varies | SX1276 |
+| LoRa CS | 9 | SX1262 (`lora_cs`) |
+| LoRa BUSY | 13 | SX1262 (`lora_busy`) |
+| LoRa RST | 17 | `lora_rst` |
+| LoRa IRQ/DIO1 | 45 | `lora_irq` |
+
+---
+
+*DP8 documentation pass performed by Claude Opus 5 in agentic/auto mode. Every
+per-device UI backend above was verified against its `device.pcat`.*

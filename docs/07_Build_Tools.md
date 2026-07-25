@@ -75,13 +75,61 @@ purrstrap is the top-level image builder. It:
 purrstrap build <device>               build firmware
 purrstrap flash <device> [-p PORT]     build + flash to connected device
 purrstrap flash <device> --erase       erase entire chip before flashing (recommended)
-purrstrap clean <device>               remove build artifacts for device
+purrstrap clean <device>               remove build artifacts for device   (see caveat)
 purrstrap monitor <device> [-p PORT]   open serial monitor after flash
 purrstrap generate [device] [--check]  regenerate sdkconfig_<device> from device.pcat (omit device = all)
+purrstrap bake [--dp]                  build ALL devices → releases/v<version>/
 purrstrap list                         list all supported devices + radio capabilities
 purrstrap status                       show .purrstrap workspace config
 purrstrap doctor                       check IDF + environment health
+
+purrstrap pkg list <device>            show what's selected for a device
+purrstrap pkg add <device> <pkg>       select a driver/module/app (edits device.pcat)
+purrstrap pkg remove <device> <pkg>    unselect a static package
+purrstrap pkg upgrade <device> [pkg]   re-check version of selected static packages
+purrstrap pkg verify <device>          check installed.json against device.pcat + source/
+
+purrstrap pkg app list <device>        list apps installed via pkg app
+purrstrap pkg app install <device> <f> stage a .meow/.hiss script into the flash image
+purrstrap pkg app remove <device> <f>  remove a staged script
+purrstrap pkg app upgrade <device> [f] re-stage installed scripts
 ```
+
+> ⚠️ **`purrstrap clean` does not currently work.** `cmd_clean` looks for
+> `source/build_<device>`, but `cmd_build` builds in `CoreOS/build_<device>`. It
+> reports "nothing to clean" while the real build tree sits untouched. Until
+> that's fixed, delete `CoreOS/build_<device>/` by hand for a clean build. Both
+> paths are gitignored, so removing it is safe.
+
+### `purrstrap pkg` — package management
+
+Two distinct things share this namespace, and the difference matters:
+
+- **`pkg add`/`remove`/`upgrade`/`verify`** operate on *static* packages —
+  drivers, modules and apps compiled into the firmware. They edit `device.pcat`
+  and require a rebuild + reflash to take effect.
+- **`pkg app install`/`remove`/`upgrade`** operate on `.meow`/`.hiss` Lua
+  scripts, which are staged into the SPIFFS image rather than compiled. This is
+  the only genuine file-drop path in the system.
+
+`pkg verify` compares `installed.json` against what `device.pcat` and `source/`
+actually contain, and reports drift — useful after hand-editing a manifest.
+
+### `purrstrap bake`
+
+Builds every device in `source/devices/` and copies the results to
+`releases/v<PURROS_VERSION>/`, with a `manifest.json` recording per-device
+status.
+
+`--dp` additionally packages a full developer-preview bundle into
+`CatReleases/DP<N>/` — split *and* merged images per device, a README with
+flashing instructions, and a top-level zip. The `N` is parsed from
+`PURROS_VERSION`'s `-dpN` suffix, so **bumping that one constant is what
+determines the next DP number**; the two numbering schemes cannot drift apart.
+
+> `PURROS_VERSION` in `purrstrap.py` is duplicated by `PURR_KERNEL_VERSION` in
+> `source/kernel/core/purr_kernel.h`, which the About app reports. These are
+> hand-maintained separately and have drifted a full release before. Bump both.
 
 ### `purrstrap generate`
 
@@ -111,7 +159,7 @@ cyd                     esp32       yes   yes   -         yes
 cyd_s024c               esp32       yes   yes   -         yes
 cyd_s028r               esp32       yes   yes   -         yes
 tdeck                   esp32s3     yes   yes   sx1262    yes
-tdeck_plus              esp32s3     yes   yes   sx1276    yes
+tdeck_plus              esp32s3     yes   yes   sx1262_rl yes
 tdeck_plus_arduino      esp32s3     yes   yes   sx1276    yes
 jc3248w535              esp32s3     yes   yes   -         no
 heltec                  esp32s3     yes   yes   sx1262    no
@@ -204,7 +252,7 @@ cattobaked/
     display/  ili9341.purr  st7789.purr  axs15231b.purr  ssd1306.purr
     touch/    xpt2046.purr  cst816s.purr  gt911.purr
     input/    trackball.purr  bbq20.purr
-    radio/    sx1262.purr  sx1276.purr
+    radio/    sx1262.purr  sx1262_rl.purr  sx1276.purr
     gps/      generic_nmea.purr
   components_manifest.cmake
 ```
@@ -384,3 +432,8 @@ Run `python3 purrstrap/purrstrap.py doctor` to check your environment.
 | `spiffsgen.py` | — | Included with IDF (`$IDF_PATH/components/spiffs/spiffsgen.py`) |
 | `git` | — | Used for version tagging |
 | `pyserial` | — | Needed for flash/monitor; installed in IDF venv |
+
+---
+
+*DP8 documentation pass performed by Claude Opus 5 in agentic/auto mode. The
+command lists above were generated from each tool's `add_parser()` calls.*

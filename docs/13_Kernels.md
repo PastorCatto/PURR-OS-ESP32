@@ -311,6 +311,29 @@ extern "C" void app_main(void) {
 
 ---
 
+### `kernel_tdeck_plus_pounce` — T-Deck Plus (Pounce backend)
+
+**Source:** `source/kernel/kernel_tdeck_plus_pounce/`
+**Device:** `tdeck_plus_pounce`
+
+Same hardware bring-up as `kernel_tdeck_plus`, paired with the `pounce`
+framebuffer UI backend instead of an LVGL one. Exists as a parallel target so
+that backend can be built and flashed without disturbing the production
+`tdeck_plus` device. See `pounce_plan.md`.
+
+### `kernel_tab5_m5bsp_legacy` — M5Stack Tab5 (BSP path)
+
+**Source:** `source/kernel/kernel_tab5_m5bsp_legacy/kernel_tab5_boot.c`
+**Device:** `tab5` (legacy path)
+
+Earlier Tab5 bring-up routed through M5Stack's own BSP (`m5tab5_bsp` display
+driver) rather than the direct `st7123` MIPI-DSI path the device uses now.
+Retained as a fallback and reference — the name records that it is the legacy
+route, not the current one.
+
+Tab5 is the only **ESP32-P4** device in the tree, so this and the current Tab5
+path are the only kernels not targeting ESP32/ESP32-S3.
+
 ### `kernel_tdeck_plus_test` — T-Deck Plus Input Test Mode
 
 **Source:** `source/kernel/kernel_tdeck_plus_test/kernel_tdp_test.cpp`
@@ -433,3 +456,7 @@ source/kernel/
   kernel_tdeck_plus_test/        Input test mode (dev/debug)
     kernel_tdp_test.cpp
 ```
+
+---
+
+*DP8 documentation pass performed by Claude Opus 5 in agentic/auto mode.*
