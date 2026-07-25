@@ -830,6 +830,7 @@ static const catcall_ui_t s_cupcake_win = {
     .list_get_selected = ck_list_get_selected,
     .list_set_selected = ck_list_set_selected,
     .list_cb           = ck_list_cb,
+    .list_set_items_icon = ck_list_set_items_ex,
     .tile_grid_create    = ck_tile_grid_create,
     .tile_grid_set_items = ck_tile_grid_set_items,
     .layout_begin    = ck_layout_begin,

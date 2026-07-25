@@ -26,16 +26,72 @@ import sys
 import time
 
 import requests
-import cairosvg
 from PIL import Image
 from io import BytesIO
+
+# cairosvg is preferred but needs a native libcairo, which pip cannot supply on
+# Windows. svglib + reportlab(rlPyCairo -> pycairo) is the self-contained
+# fallback; see _render_svglib() for the alpha caveat and the cairocffi trap.
+try:
+    import cairosvg
+    _HAVE_CAIROSVG = True
+except Exception:
+    cairosvg = None
+    _HAVE_CAIROSVG = False
+
+try:
+    from svglib.svglib import svg2rlg
+    from reportlab.graphics import renderPM
+    _HAVE_SVGLIB = True
+except Exception:
+    svg2rlg = None
+    renderPM = None
+    _HAVE_SVGLIB = False
+
+if not _HAVE_CAIROSVG and not _HAVE_SVGLIB:
+    sys.exit(
+        "No SVG rasterizer available.\n"
+        "  Linux/macOS:  pip install cairosvg\n"
+        "  Windows:      pip install svglib reportlab pycairo rlPyCairo\n"
+        "                (do NOT install cairocffi — rlPyCairo prefers it and "
+        "then fails to load native cairo)"
+    )
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 MANIFEST     = os.path.join(SCRIPT_DIR, "icons.json")
 GENERATED    = os.path.join(SCRIPT_DIR, "generated")
 HEADER_OUT   = os.path.join(SCRIPT_DIR, "blackpurr_icons.h")
 
-MDI_SVG_URL  = "https://raw.githubusercontent.com/Templarian/MaterialDesign/master/svg/{slug}.svg"
+# ── Icon packs ────────────────────────────────────────────────────────────────
+# Each entry is a raw-SVG URL template plus the manifest key its slugs live
+# under, so icons.json can carry slugs for several packs side by side and
+# switching is a one-line change here (or --pack on the command line) rather
+# than a rewrite of the manifest.
+#
+# ionicons is the active pack: it was built by the Ionic team to mirror iOS
+# design language, which is what the Mochi springboard is going for, and its
+# default (unsuffixed) slugs are the FILLED variants — solid glyphs, which is
+# what actually reads at ~26px inside a 46px squircle. Thin-stroke packs
+# (Feather/Lucide/Tabler) disappear at that size on this panel.
+#
+# Note on SF Symbols, the obvious first instinct for an iOS look: Apple's
+# license permits use only in software running on Apple platforms, so it
+# cannot ship inside this firmware. Ionicons is the closest freely-licensed
+# stand-in.
+PACKS = {
+    "mdi": {
+        "url": "https://raw.githubusercontent.com/Templarian/MaterialDesign/master/svg/{slug}.svg",
+        "key": "mdi",
+        "license": "Apache-2.0 / MIT (Pictogrammers)",
+    },
+    "ionicons": {
+        "url": "https://raw.githubusercontent.com/ionic-team/ionicons/main/src/svg/{slug}.svg",
+        "key": "ion",
+        "license": "MIT (Ionic)",
+    },
+}
+
+ACTIVE_PACK = "ionicons"
 
 # ── ANSI ──────────────────────────────────────────────────────────────────────
 
@@ -57,7 +113,7 @@ _svg_cache = {}
 def fetch_svg(slug):
     if slug in _svg_cache:
         return _svg_cache[slug]
-    url = MDI_SVG_URL.format(slug=slug)
+    url = PACKS[ACTIVE_PACK]["url"].format(slug=slug)
     try:
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
@@ -71,24 +127,64 @@ def fetch_svg(slug):
 
 # ── SVG → PIL Image ───────────────────────────────────────────────────────────
 
-def svg_to_image(svg_text, size, tint_color=(255, 255, 255)):
-    """Render SVG at size×size, tint all opaque pixels to tint_color."""
+def _render_cairosvg(svg_text, size):
+    """Preferred path: true alpha straight out of the rasterizer."""
     png_data = cairosvg.svg2png(
         bytestring=svg_text.encode(),
         output_width=size,
         output_height=size,
     )
-    img = Image.open(BytesIO(png_data)).convert("RGBA")
+    return Image.open(BytesIO(png_data)).convert("RGBA")
 
-    # Tint: replace RGB channels with tint_color, preserve alpha
-    r, g, b, a = img.split()
-    tinted = Image.merge("RGBA", (
+
+def _render_svglib(svg_text, size):
+    """
+    Fallback for hosts where cairosvg can't load libcairo — notably Windows,
+    where cairosvg/cairocffi dlopen a native cairo that pip does not provide.
+    svglib parses the SVG and reportlab's renderPM rasterizes it through
+    rlPyCairo -> pycairo, whose wheels ARE self-contained.
+
+    IMPORTANT: install pycairo but NOT cairocffi. rlPyCairo prefers cairocffi
+    when both are present and then dies on the same dlopen cairosvg does.
+
+    renderPM has no usable transparent-background mode here, so the glyph is
+    rendered black-on-white and alpha is recovered from luminance: these are
+    monochrome single-colour icons, so 255-grey is exactly the coverage the
+    rasterizer computed, antialiased edges included.
+    """
+    drawing = svg2rlg(BytesIO(svg_text.encode()))
+    if drawing is None or not drawing.width or not drawing.height:
+        raise ValueError("svglib produced an empty drawing")
+
+    drawing.scale(size / drawing.width, size / drawing.height)
+    drawing.width = size
+    drawing.height = size
+
+    png = renderPM.drawToString(drawing, fmt="PNG", bg=0xFFFFFF)
+    grey = Image.open(BytesIO(png)).convert("L")
+    alpha = grey.point(lambda v: 255 - v)
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    img.putalpha(alpha)
+    return img
+
+
+def svg_to_image(svg_text, size, tint_color=(255, 255, 255)):
+    """Render SVG at size×size, tint all opaque pixels to tint_color."""
+    if _HAVE_CAIROSVG:
+        img = _render_cairosvg(svg_text, size)
+    else:
+        img = _render_svglib(svg_text, size)
+
+    # Tint: replace RGB channels with tint_color, preserve alpha. White is the
+    # default because these sit on a coloured background — a white glyph on a
+    # tinted squircle is exactly how an iOS app icon is built.
+    a = img.split()[3]
+    return Image.merge("RGBA", (
         Image.new("L", img.size, tint_color[0]),
         Image.new("L", img.size, tint_color[1]),
         Image.new("L", img.size, tint_color[2]),
         a,
     ))
-    return tinted
 
 # ── PIL Image → LVGL C array ──────────────────────────────────────────────────
 
@@ -168,7 +264,7 @@ def convert_one(slug, size, label=None):
     try:
         img   = svg_to_image(svg, size)
         c_src = image_to_lvgl_c(img, c_label, size)
-        with open(out_path, "w") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             f.write(c_src)
         ok(f"{label} @ {size}px  →  generated/{size}/{c_label}.c")
         return True
@@ -215,7 +311,7 @@ def gen_header(entries):
 
     lines.append("")
 
-    with open(HEADER_OUT, "w") as f:
+    with open(HEADER_OUT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     ok(f"blackpurr_icons.h  →  {os.path.relpath(HEADER_OUT)}")
 
@@ -225,21 +321,44 @@ def load_manifest():
     with open(MANIFEST) as f:
         return json.load(f)
 
+def _slug_for(meta):
+    """
+    Slug for the active pack, falling back to any other pack's slug present on
+    the entry. The fallback keeps a partially-migrated manifest converting
+    instead of erroring out — an entry that has no slug for the new pack yet
+    still produces its old icon rather than a missing symbol at link time.
+    Returns (slug, is_fallback).
+    """
+    key = PACKS[ACTIVE_PACK]["key"]
+    if meta.get(key):
+        return meta[key], False
+    for other in PACKS.values():
+        if meta.get(other["key"]):
+            return meta[other["key"]], True
+    return None, False
+
 def all_icons(manifest):
     """Yield (label, slug, size) for every icon in the manifest."""
     for section in ("status_bar", "apps"):
         for label, meta in manifest.get(section, {}).items():
-            slug  = meta["mdi"]
+            slug, fallback = _slug_for(meta)
+            if not slug:
+                warn(f"{label}: no slug for any known pack — skipped")
+                continue
+            if fallback:
+                warn(f"{label}: no '{PACKS[ACTIVE_PACK]['key']}' slug, using '{slug}' from another pack")
             for size in meta.get("sizes", [48]):
                 yield label, slug, size
 
 def cmd_list(manifest):
-    div("icon manifest")
+    div(f"icon manifest — pack: {ACTIVE_PACK} ({PACKS[ACTIVE_PACK]['license']})")
     for section in ("status_bar", "apps"):
         print(f"\n  {C_CYN}{section}{C_RST}")
         for label, meta in manifest.get(section, {}).items():
             sizes = ", ".join(str(s) for s in meta["sizes"])
-            print(f"    {label:<25} mdi:{meta['mdi']:<35} [{sizes}px]")
+            slug, fallback = _slug_for(meta)
+            mark = f"{C_YLW}*{C_RST}" if fallback else " "
+            print(f"    {label:<25}{mark}{slug or '(none)':<35} [{sizes}px]")
     div()
 
 def cmd_convert_all(manifest):

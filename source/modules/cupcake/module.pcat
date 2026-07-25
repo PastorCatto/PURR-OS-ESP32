@@ -15,7 +15,12 @@ kernel_min  = "1.0.0"
 # directory slug, with a semver constraint.
 [depends]
 app_manager = ">=0.1.0"
+# systemui — Cupcake hosts it (status bar, nav bar, Recents, lock screen);
+# see cupcake_ui.c's purr_systemui_host_t table. A hard dependency even though
+# systemui.c stubs itself out when CONFIG_PURR_SYSTEMUI is off, because
+# cupcake_ui.c calls purr_systemui_*() unconditionally and needs the symbols.
+systemui    = ">=0.1.0"
 
 [build]
 sources     = "cupcake_module.c cupcake_hal.c cupcake_ui.c cupcake_win.c"
-requires    = "lvgl app_manager"
+requires    = "lvgl app_manager systemui"

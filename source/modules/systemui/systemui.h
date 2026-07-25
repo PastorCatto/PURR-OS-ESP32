@@ -1,0 +1,171 @@
+#pragma once
+// systemui.h — PURR OS system UI: the persistent chrome that sits above every
+// app window. Status bar, drag-down Notifications/Running-Apps panels, the
+// Back/Home/Recents nav bar, the Recents card carousel, and the idle lock
+// screen.
+//
+// Extracted from Cupcake (was cupcake_ui.c, then cupcake_systemui.c) so the
+// UI backend hosting it is left as *just a launcher* — home screen, wallpaper,
+// favourites dock, app drawer. Nothing in here knows what a launcher looks
+// like; it reaches back through purr_systemui_host_t for the handful of things
+// only the host can answer.
+//
+// ── Threading ───────────────────────────────────────────────────────────────
+// This module has NO task of its own, deliberately. LVGL is not thread-safe
+// and the whole UI serializes on the host backend's render loop under
+// purr_kernel_ui_lock() — so the host calls purr_systemui_init() once and
+// purr_systemui_tick() periodically from inside that loop, and every function
+// here runs on the host's task. Giving this module its own task would mean
+// taking the UI lock from two places and is not worth the deadlock surface.
+//
+// ── Portability ─────────────────────────────────────────────────────────────
+// Currently LVGL-only: every surface is built on lv_layer_top(), a compositing
+// layer LVGL paints and hit-tests above the active screen's entire tree, which
+// is what lets this chrome persist over full-screen app windows without the
+// layout reserving space for it. MiniWin has no equivalent top layer (see
+// miniwin_lock.h), which is why it keeps its own separate implementation
+// rather than consuming this module.
+//
+// When CONFIG_PURR_SYSTEMUI is off, systemui.c compiles to stubs for every
+// function below — same approach meshtastic_module.c already uses for its own
+// gate. Callers need no #ifdef; purr_systemui_navbar_height() just returns 0
+// and nothing is drawn.
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "lvgl.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Height of the status strip along the top, and of the nav bar along the
+// bottom. Prefer purr_systemui_navbar_height() over the raw constant when
+// laying out host content — it accounts for the module being compiled out.
+#define PURR_SYSTEMUI_STATUS_H 22
+#define PURR_SYSTEMUI_NAVBAR_H 40
+
+// All bundled icon assets are 48x48 source images; lv_img_set_zoom() takes
+// 256 = 100%, so this converts a desired on-screen pixel size into that scale
+// factor. Used here for Recents cards; the host backend that provides
+// icon_for_app() below has its own copy for its own tiles/dock, since a
+// pixel size that looks right on a small launcher tile and one that looks
+// right on a large Recents card are different call sites, not a value worth
+// sharing.
+#define ICON_ZOOM(px) (uint16_t)(((px) * 256) / 48)
+
+// Everything the system UI needs from whichever backend is hosting it. All
+// fields are required (no NULL checks) except as noted — the host builds one
+// of these as a static const and hands it to purr_systemui_init().
+//
+// Deliberately no lv_obj_t* anywhere: the host and the system UI each own
+// their own object trees and never reach into each other's.
+typedef struct {
+    // Screen geometry, straight from the host's HAL.
+    uint16_t (*width)(void);
+    uint16_t (*height)(void);
+
+    // Per-app visual identity, so Recents cards match the launcher's own
+    // tiles/dock rather than inventing a second look for the same app.
+    // icon_for_app() must never return NULL — return a fallback icon.
+    const lv_img_dsc_t *(*icon_for_app)(const char *name);
+    lv_color_t          (*tint_color)(const char *name, uint8_t base);
+
+    // Hide the host's app drawer/overlay, if it has one and it's open.
+    // Called by the "return to home screen" paths, which have to clear the
+    // drawer along with every app window. May be NULL if the host has no
+    // such overlay.
+    void (*hide_drawer)(void);
+
+    // Hide *every* window the foreground app currently has open — not just
+    // the one app_manager tracked at launch. Backs the nav bar's Home
+    // button; an app that opened a sub-window on top of its root would
+    // otherwise leave that sub-window visible after Home.
+    void (*hide_foreground_windows)(void);
+
+    // uptime_ms() of the last real input event, for the idle-lock timeout.
+    uint64_t (*last_activity_ms)(void);
+
+    // The wallpaper currently in effect, or NULL for none. Used by the lock
+    // screen so it matches the home screen rather than being a flat slab.
+    //
+    // A hook rather than a shared asset because each host resolves "current
+    // wallpaper" differently — Mochi has one compiled into the firmware,
+    // Cupcake loads a user-selected image off SPIFFS or SD and may have no
+    // image at all if that load failed. Returning NULL is a normal answer, not
+    // an error, and the lock screen falls back to a plain dark background.
+    //
+    // May itself be NULL on a host with no concept of a wallpaper.
+    const lv_img_dsc_t *(*wallpaper)(void);
+
+    // Omit the Back/Home/Recents nav bar, leaving every other surface (status
+    // bar, drag-down panels, Recents, lock screen) intact. For hosts whose
+    // design language has no such bar — an iOS-style springboard uses a home
+    // indicator and gestures instead, and an Android nav bar under it looks
+    // simply wrong.
+    //
+    // Defaults to false for any host that doesn't mention it, which is why
+    // this is a plain bool rather than a callback: a static const initializer
+    // that omits the field zero-fills it, so existing hosts keep their nav bar
+    // with no edit. When true, purr_systemui_navbar_height() also reports 0,
+    // so a host laying content out against it reclaims the space.
+    bool suppress_navbar;
+} purr_systemui_host_t;
+
+// Builds every surface. Call once, from the host's UI task, after the host's
+// own screens exist and its HAL is up. `host` must outlive the call (a static
+// const is the expected shape) — it is retained, not copied.
+void purr_systemui_init(const purr_systemui_host_t *host);
+
+// Per-tick housekeeping: refreshes status icons/notifications/running apps,
+// checks the idle timeout, services the nav bar's and status row's auto-hide
+// countdowns. ~200ms cadence is plenty. Safe to call before init (no-op).
+void purr_systemui_tick(void);
+
+// Height the host should keep its own bottom-docked content clear of — the
+// nav bar's footprint, or 0 when this module is compiled out. App windows
+// themselves need no such allowance: they go genuinely full-screen and this
+// chrome draws over them.
+int16_t purr_systemui_navbar_height(void);
+
+// Which app_manager index is currently foregrounded, or -1 for "home screen".
+// Owned here because every mutation point except the host's own launcher taps
+// (nav Back/Home, Running Apps Open/Kill, Recents card tap/kill) lives here.
+int purr_systemui_foreground_idx(void);
+
+// An app just came to the foreground: records `idx` and auto-hides the nav
+// bar and status row. The host calls this after launching/restoring a window.
+void purr_systemui_enter_app(int idx);
+
+// Back to the home screen: clears the foreground index and restores the nav
+// bar and status row permanently (no auto-hide countdown). Does NOT itself
+// hide or stop any app window — callers decide whether "leaving" means hide
+// (Home) or stop (Back).
+void purr_systemui_return_home(void);
+
+// Opens the app switcher. Exists on the contract because a host whose design
+// language has no nav bar (see suppress_navbar) still needs a way in — Mochi
+// binds it to a long-press on its home indicator, the way iOS does. Safe to
+// call with nothing running; the switcher shows its own empty state.
+void purr_systemui_open_recents(void);
+
+// True while the app switcher is showing. Lets a host route a "go home"
+// gesture to closing the switcher first, rather than skipping past it.
+bool purr_systemui_recents_open(void);
+
+// Closes the switcher if it is open; no-op otherwise.
+void purr_systemui_close_recents(void);
+
+// True once the idle timeout has fired and the lock overlay is showing (or
+// the screen is dark waiting to be woken) — cleared only by the overlay's own
+// dismiss gesture.
+bool purr_systemui_is_locked(void);
+
+// Called the moment new input arrives while locked: makes the (still-locked)
+// lock screen visible again by restoring brightness. Does NOT clear the
+// locked state — that's a separate, deliberate dismiss gesture on the overlay.
+void purr_systemui_wake(void);
+
+#ifdef __cplusplus
+}
+#endif

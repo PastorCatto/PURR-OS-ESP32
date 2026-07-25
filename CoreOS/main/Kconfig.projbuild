@@ -54,6 +54,58 @@ menu "PURR OS"
                 Status bar + drag-down notification panel forked from
                 Cardstack. Requires LVGL 8 and the kernel notification API.
 
+        config PURR_UI_BACKEND_MOCHI
+            bool "Mochi (LVGL 8, iOS-style springboard)"
+            help
+                iOS-style home screen: a paged grid of rounded-square
+                ("squircle") app icons with captions, page dots, a
+                translucent dock along the bottom, and a home indicator
+                instead of an Android-style Back/Home/Recents row. Uses
+                Apple's own light system palette (systemGroupedBackground
+                ground, systemBlue accent) and a fixed saturated icon palette
+                rather than hash-derived colours, which is what makes a grid
+                read as a springboard rather than as arbitrary tiles.
+
+                Not touch-only, unlike real iOS: a selection cursor spans the
+                grid and dock as one space, driven by the trackball or arrow
+                keys, with Enter or a ball click to open. Touching an icon
+                moves the cursor to it, so the two input models never
+                disagree about what is selected.
+
+                Hosts source/modules/systemui/ for the status bar, drag-down
+                panels, Recents and lock screen, but sets its suppress_navbar
+                host flag — those four surfaces map onto iOS equivalents
+                (Notification Center, Control Center, the app switcher, the
+                lock screen) while the nav bar does not.
+
+        config PURR_UI_BACKEND_TABBY
+            bool "Tabby (LVGL 8, keyboard-first type-to-filter launcher)"
+            help
+                Keyboard-first shell for thumb-keyboard handhelds (T-Deck /
+                T-Deck Plus). The home screen is a vertical app list rather
+                than a grid, and typing any printable character filters it
+                live — no search field to open first, no paging as the app
+                count grows. The trackball is registered as a real LVGL
+                ENCODER (roll to move, click to open) instead of being
+                rewritten into synthetic PREV/NEXT keypresses, which keeps
+                "typed a character" and "rolled the ball" distinguishable —
+                the distinction a type-to-filter shell depends on. Touch
+                works throughout as a third input.
+
+                Unlike Cupcake, every focusable widget joins the keyboard
+                focus group, not just textareas, so buttons and lists inside
+                ordinary apps are reachable without touching the screen.
+
+                Hosts source/modules/systemui/ for the status bar, drag-down
+                panels, nav bar, Recents and lock screen — the same module
+                Cupcake hosts, making Tabby its second consumer.
+
+                Compare PURR_UI_BACKEND_POUNCE below, which targets the same
+                class of device but drops LVGL entirely for a direct
+                framebuffer widget model: Pounce trades text/widget fidelity
+                (6x8 bitmap font, own minimal widget set) for speed, Tabby
+                keeps LVGL's rendering and widget coverage.
+
         config PURR_UI_BACKEND_LVGLDEBUG
             bool "LVGL Debug (touch/HAL diagnostics)"
             help
@@ -160,6 +212,65 @@ menu "PURR OS"
             rather than risking a regression on tdeck/waveshare169, which
             haven't reported this symptom and aren't part of active hardware
             testing right now.
+
+    config PURR_SYSTEMUI
+        bool "System UI (status bar, nav bar, Recents, lock screen)"
+        default n
+        help
+            Gates source/modules/systemui/ — the persistent chrome that draws
+            above every app window: the top status bar and its two drag-down
+            panels (Notifications / Running Apps), the Back/Home/Recents nav
+            bar, the Recents card carousel, and the idle-timeout lock screen.
+
+            Set automatically by purrstrap from a device.pcat [modules]
+            systemui = "systemui" entry — same mechanism as bt/mesh/meshcore —
+            so devices opt in there rather than here.
+
+            When off, systemui.c compiles to a stub implementation of every
+            function systemui.h declares, so a host UI backend keeps calling
+            purr_systemui_init()/_tick() unconditionally with no #ifdef of its
+            own. Nothing is drawn, purr_systemui_navbar_height() returns 0 so
+            the host reclaims that space, and purr_systemui_is_locked() always
+            reports false. Same shape as PURR_FEATURE_MESHTASTIC below.
+
+            LVGL-only today: every surface is built on lv_layer_top(). MiniWin
+            has no equivalent compositing layer (see miniwin_lock.h) and keeps
+            its own separate implementation, so this is only meaningful on
+            LVGL-backed devices (cupcake/kittenui/nougat/cardstack).
+
+    choice PURR_SYSTEMUI_STYLE
+        prompt "System UI style"
+        depends on PURR_SYSTEMUI
+        default PURR_SYSTEMUI_STYLE_ANDROID
+        help
+            Which visual language the system chrome uses. Both styles
+            implement the identical purr_systemui_* contract, so the UI
+            backend hosting them needs no changes either way — exactly one
+            of systemui_android.c / systemui_ios.c compiles in.
+
+            Set automatically by purrstrap from device.pcat's
+            [ui] systemui_style key.
+
+        config PURR_SYSTEMUI_STYLE_ANDROID
+            bool "Android System UI"
+            help
+                Back/Home/Recents nav bar, drag-down Notifications and
+                Running Apps panels as plain text rows, battery-left status
+                bar, and a centred lock screen. The original implementation;
+                what Cupcake and Tabby are designed around.
+
+        config PURR_SYSTEMUI_STYLE_IOS
+            bool "iOS UI"
+            help
+                No nav bar (the host draws a home indicator instead).
+                Notifications are rounded cards carrying the posting app's
+                icon, accent colour and a relative timestamp, and the SAME
+                card builder renders them both in the Notification Center
+                and on the lock screen — so the two always match, which is
+                how iOS behaves. Both scroll like the Recents carousel.
+                Clock-left status bar with indicators right.
+
+    endchoice
 
     config PURR_FEATURE_MESHTASTIC
         bool "Meshtastic-compatible mesh module"

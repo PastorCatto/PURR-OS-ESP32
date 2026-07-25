@@ -15,17 +15,13 @@
 extern "C" {
 #endif
 
-// Height of the persistent status-bar strip at the top of the screen —
-// shared between cupcake_ui.c (which builds the strip) and cupcake_win.c
-// (which must keep app windows, and their close buttons, entirely below it).
-#define CUPCAKE_STATUS_PEEK_H 22
-
-// Height of the Lollipop nav bar (Back/Apps/Recents) pinned to the bottom of
-// the screen — lives on lv_layer_top() (see cupcake_ui.c's build_lp_navbar())
-// so it renders above every app window regardless of z-order, same trick the
-// status bar above already uses. Shared with cupcake_win.c so app windows
-// (and anything they dock to their own bottom edge) stay clear of it.
-#define CUPCAKE_NAVBAR_H 40
+// The status bar and nav bar are no longer Cupcake's — they live in the
+// systemui module (source/modules/systemui/), which Cupcake hosts. Their
+// geometry constants moved there too: see PURR_SYSTEMUI_STATUS_H and
+// purr_systemui_navbar_height() in systemui.h. Nothing in Cupcake needs the
+// status height any more (app windows go genuinely full-screen and the bars
+// draw over them); cupcake_ui.c uses the nav bar height only to sit the home
+// dock above it.
 
 int      cupcake_hal_init(void);
 uint16_t cupcake_hal_width(void);
@@ -47,21 +43,23 @@ uint64_t cupcake_hal_last_activity_ms(void);
 // after the HAL and app_manager are both up.
 void cupcake_ui_init(void);
 
-// Per-tick housekeeping: refreshes the status bar/notification panel, and
-// checks the idle timeout (purr_kernel_screen_timeout_min()) against
-// cupcake_hal_last_activity_ms() to trigger the lock screen.
+// Per-tick housekeeping. The launcher itself is static once built, so this
+// just drives the hosted system UI's own tick (status bar, notifications,
+// running apps, idle lock, the bars' auto-hide countdowns).
 // Call periodically (every ~200ms is plenty).
 void cupcake_ui_tick(void);
 
 // True once the idle timeout has fired and the lock overlay is showing
 // (or the screen is dark waiting to be woken) — cleared only by the
-// overlay's own tap/swipe-to-dismiss handler.
+// overlay's own tap/swipe-to-dismiss handler. Thin forwarder to
+// purr_systemui_is_locked(); kept as a cupcake_* name because cupcake_hal.c
+// is the caller and shouldn't need to know who owns the lock screen.
 bool cupcake_ui_is_locked(void);
 
 // Called by cupcake_hal.c the moment new input arrives while locked: makes
 // the (still-locked) lock screen visible again by restoring brightness.
 // Does NOT clear the locked state — that's a separate, deliberate dismiss
-// gesture on the overlay itself.
+// gesture on the overlay itself. Forwards to purr_systemui_wake().
 void cupcake_ui_wake(void);
 
 // Icon-enhanced variant of purr_win_list_set_items() — same deferred-rebuild

@@ -41,14 +41,33 @@ bt          = true
 # "Vendor Meshtastic's real radio/crypto code" plan).
 lora        = "sx1262_rl"
 
+# Presentation choices that select between implementations rather than naming
+# a module to register. Deliberately NOT in [modules]: purrstrap turns every
+# modules.* value into a static module registration, so a style name there
+# would emit a reference to a module that doesn't exist.
+[ui]
+# systemui_style — "android" (nav bar, text-row notification panels) or "ios"
+# (no nav bar, card notifications shared between the shade and the lock
+# screen). Pairs with the Mochi springboard below.
+systemui_style = "ios"
+
 [modules]
-# ui — MiniWin (WinCE desktop, CONFIG_PURR_MINIWIN_DESKTOP_WINCE=y in
-# sdkconfig_tdeck_plus.overrides) in place of Cupcake for this pass —
-# already confirmed booting live on this exact hardware before tonight's
-# Cupcake work (see that override's own comment: "apps render and launch,
-# but this is new and rough-edged code, not a proven default yet"). Carries
-# the new Win95-style lock screen (miniwin_lockscreen.c).
-ui          = "miniwin"
+# ui — back to Cupcake. The MiniWin WinCE desktop was selected here for the
+# 4-window-split pass (commit 9ef61b97), but that rewrite is broken on
+# hardware and hasn't been fixed yet, so this device stays off it rather
+# than shipping a known-bad desktop. MiniWin's code is still compiled and
+# selectable — only this device's default moved back.
+# ui — Mochi: iOS-style springboard (squircle icon grid, dock, home indicator),
+# with trackball/arrow-key cursor navigation layered on top so it isn't
+# touch-only on a device that has better inputs than touch. Cupcake and Tabby
+# both still build; this is a one-word revert either way.
+ui          = "mochi"
+# systemui — the status bar, drag-down panels, Back/Home/Recents nav bar,
+# Recents carousel and lock screen, split out of Cupcake into their own
+# module (source/modules/systemui/). Cupcake hosts it; this entry is what
+# both statically registers it and sets CONFIG_PURR_SYSTEMUI. Drop this line
+# and Cupcake still boots as a bare launcher with no chrome.
+systemui    = "systemui"
 app_manager = "app_manager"
 # mesh — re-enabled for active Meshtastic diagnosis (was off, gated behind
 # CONFIG_PURR_FEATURE_MESHTASTIC, see CoreOS/main/Kconfig.projbuild).

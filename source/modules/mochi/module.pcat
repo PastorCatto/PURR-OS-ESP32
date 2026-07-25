@@ -1,0 +1,26 @@
+[module]
+name        = "mochi"
+version     = "0.1.0"
+type        = "ui"
+description = "Mochi — iOS-style springboard (squircle icon grid, dock, home indicator)"
+author      = "PURR OS"
+
+[requires]
+catcalls    = "display"
+kernel_min  = "1.0.0"
+
+# PURR package dependencies (resolved by `purrstrap pkg add`), distinct from
+# [build].requires below which lists IDF/C component names for the compiler —
+# this section only names other PURR packages by their device.pcat/source
+# directory slug, with a semver constraint.
+[depends]
+app_manager = ">=0.1.0"
+# systemui — Mochi hosts it for the status bar, drag-down panels, Recents and
+# lock screen, with its Back/Home/Recents nav bar suppressed (iOS uses a home
+# indicator instead; see purr_systemui_host_t::suppress_navbar). Requires the
+# version that carries that field.
+systemui    = ">=0.1.0"
+
+[build]
+sources     = "mochi_module.c mochi_hal.c mochi_springboard.c mochi_win.c"
+requires    = "lvgl app_manager systemui"

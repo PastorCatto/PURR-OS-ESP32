@@ -1220,6 +1220,9 @@ static int  s_battery_voltage_mv = -1;   // -1 = unknown
 static bool s_lora_available  = false;
 static bool s_dev_mode        = false;   // off by default — see purr_kernel.h's doc comment
 static bool s_navbar_always_visible = false;   // off by default — see purr_kernel.h's doc comment
+// Privacy-by-default: a lock screen is what an unauthenticated onlooker sees,
+// so contents stay hidden behind a count until deliberately revealed.
+static bool s_lock_hide_notifications = true;
 // Default 1 minute, not 0 — a 0 timeout would make cupcake_ui.c's
 // "elapsed_ms >= timeout_min * 60000" idle check true on every tick,
 // locking the screen in a permanent loop. Settings overwrites this from
@@ -1234,6 +1237,7 @@ void purr_kernel_set_battery_voltage_mv(int mv) { s_battery_voltage_mv = mv; }
 void purr_kernel_set_lora_available(bool v)  { s_lora_available  = v; }
 void purr_kernel_set_dev_mode(bool v)        { s_dev_mode        = v; }
 void purr_kernel_set_navbar_always_visible(bool v) { s_navbar_always_visible = v; }
+void purr_kernel_set_lock_hide_notifications(bool v) { s_lock_hide_notifications = v; }
 void purr_kernel_set_screen_timeout_min(uint8_t v) { s_screen_timeout_min = v; }
 
 bool purr_kernel_sd_available(void)    { return s_sd_available; }
@@ -1243,6 +1247,7 @@ int  purr_kernel_battery_voltage_mv(void) { return s_battery_voltage_mv; }
 bool purr_kernel_lora_available(void)  { return s_lora_available; }
 bool purr_kernel_dev_mode_enabled(void) { return s_dev_mode; }
 bool purr_kernel_navbar_always_visible(void) { return s_navbar_always_visible; }
+bool purr_kernel_lock_hide_notifications(void) { return s_lock_hide_notifications; }
 uint8_t purr_kernel_screen_timeout_min(void) { return s_screen_timeout_min; }
 
 void purr_kernel_reboot(void) {
@@ -1440,6 +1445,29 @@ void purr_kernel_notify_clear(void)
 {
     s_notify_head  = 0;
     s_notify_count = 0;
+}
+
+// Remove one entry, newest-first index, keeping the rest contiguous.
+//
+// The ring stores oldest..newest ending at (head-1), so "index k" lives at
+// slot (head-1-k). Closing the gap means walking the entries NEWER than k
+// (indices k-1 .. 0) one slot older each, which overwrites k's slot and frees
+// the slot just below head — so head steps back by one and count drops.
+// Walking newer-to-older rather than the reverse means each copy reads a slot
+// that has not been written yet this pass.
+bool purr_kernel_notify_remove(int idx)
+{
+    if (idx < 0 || idx >= s_notify_count) return false;
+
+    for (int i = idx; i > 0; i--) {
+        int dst = (s_notify_head - 1 - i     + PURR_NOTIFY_MAX) % PURR_NOTIFY_MAX;
+        int src = (s_notify_head - 1 - (i-1) + PURR_NOTIFY_MAX) % PURR_NOTIFY_MAX;
+        s_notify_buf[dst] = s_notify_buf[src];
+    }
+
+    s_notify_head = (s_notify_head - 1 + PURR_NOTIFY_MAX) % PURR_NOTIFY_MAX;
+    s_notify_count--;
+    return true;
 }
 
 // ── Service health registry ───────────────────────────────────────────────────

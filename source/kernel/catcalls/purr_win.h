@@ -136,6 +136,20 @@ static inline void purr_win_list_set_items(purr_wid_t wid,
                                             const char **items, int count) {
     _UI_VOID(list_set_items, wid, items, count);
 }
+// Same as purr_win_list_set_items(), plus a per-row glyph. Falls back to the
+// icon-less version on any backend that doesn't implement it, so callers need
+// no #ifdef — see catcall_ui.h's list_set_items_icon for why that matters.
+//
+// Same lifetime contract as list_set_items(): backends may defer the rebuild
+// to their next render tick, so both arrays must stay valid until then.
+static inline void purr_win_list_set_items_icon(purr_wid_t wid, const char **items,
+                                                 const char **icons, int count) {
+    purr_kernel_ui_lock();
+    const catcall_ui_t *_ui = purr_kernel_ui();
+    if (_ui && _ui->list_set_items_icon) _ui->list_set_items_icon(wid, items, icons, count);
+    else if (_ui && _ui->list_set_items)  _ui->list_set_items(wid, items, count);
+    purr_kernel_ui_unlock();
+}
 static inline void purr_win_list_clear(purr_wid_t wid) {
     _UI_VOID(list_clear, wid);
 }

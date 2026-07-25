@@ -40,6 +40,12 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Local virtualenv for the asset converters (source/assets/icons/convert_icons.py
+# and wallpapers/convert_wallpaper.py). Host-specific and rebuildable — see
+# convert_icons.py's header for the exact package set, including the Windows
+# svglib/pycairo path and the cairocffi trap.
+.iconvenv/
+
 # VSCode
 .vscode/
 

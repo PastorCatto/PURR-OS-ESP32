@@ -18,7 +18,12 @@ extern "C" {
 
 // ── Version ───────────────────────────────────────────────────────────────────
 
-#define PURR_KERNEL_VERSION  "1.0.0-dp7"
+// NOTE: this is a hand-maintained duplicate of purrstrap.py's PURROS_VERSION,
+// which drives release/bake naming. The two drifted once already (this said
+// dp7 for a whole dp8 cycle, so the About page reported the wrong version
+// while every baked artifact said otherwise) — bump BOTH, or better, make
+// purrstrap generate this header the way it already generates sdkconfig.
+#define PURR_KERNEL_VERSION  "1.0.0-dp8"
 #define KITT_VERSION         "1.0.0"
 
 // ── Module loader ─────────────────────────────────────────────────────────────
@@ -242,6 +247,21 @@ void     purr_kernel_set_dev_mode(bool v);
 bool     purr_kernel_navbar_always_visible(void);
 void     purr_kernel_set_navbar_always_visible(bool v);
 
+// Lock screen notification privacy. When true (the default), the lock screen
+// shows only a count — "3 Notifications" — instead of the notification
+// contents, and the list is revealed by swiping up on the lock screen. When
+// false, the cards are listed immediately.
+//
+// Defaults to hidden because a lock screen is, by definition, what someone who
+// has not authenticated can see: message bodies and sender names should not be
+// readable across a desk by default. Settings' Customization panel exposes the
+// choice, and both system UI styles honour it.
+//
+// Set from settings.c on boot (from NVS "purr_settings"/"lock_hide_notifs")
+// and on every toggle, same shape as the navbar flag above.
+bool     purr_kernel_lock_hide_notifications(void);
+void     purr_kernel_set_lock_hide_notifications(bool v);
+
 // Screen idle timeout, minutes — off by default until Settings loads the
 // persisted value (same "purr_settings" NVS namespace, synced on
 // settings' own init()), defaulting to 1 minute in the meantime. Only
@@ -278,6 +298,17 @@ int  purr_kernel_notify_count(void);
 bool purr_kernel_notify_at(int idx, purr_notification_t *out);
 
 void purr_kernel_notify_clear(void);
+
+// Remove a single notification by the same newest-first index
+// purr_kernel_notify_at() uses, closing the gap so indices stay contiguous.
+// Returns false if idx is out of range.
+//
+// Exists because a UI that shows notifications as individually dismissible
+// items (the iOS system UI's swipe-to-clear) otherwise has no way to drop one
+// without clearing the lot. Callers iterating while removing should re-read
+// purr_kernel_notify_count() after each removal — every index above the one
+// removed shifts down by one.
+bool purr_kernel_notify_remove(int idx);
 
 // ── Service health registry ───────────────────────────────────────────────────
 // Lets any module register a cheap "am I alive" check (e.g. meshtastic's

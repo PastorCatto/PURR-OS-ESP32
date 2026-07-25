@@ -3,9 +3,12 @@
 
 # WinCE-style taskbar+start-menu desktop instead of the default icon-grid
 # desktop — EXPERIMENTAL, opted into on this device for testing/dogfooding
-# ahead of a possible wider rollout to the T-Deck series. Semi-workable as
-# of introduction: apps render and launch, but this is new and rough-edged
-# code, not a proven default yet.
+# ahead of a possible wider rollout to the T-Deck series.
+#
+# CURRENTLY INERT: this device's [modules] ui is back to "cupcake" (see
+# device.pcat), so no MiniWin desktop of either style is built for it. Kept
+# rather than deleted because it's the setting to restore once the 4-window
+# desktop split from commit 9ef61b97 — which broke on hardware — is fixed.
 CONFIG_PURR_MINIWIN_DESKTOP_WINCE=y
 
 # This panel batch is physically wired BGR — every colour's red/blue channels

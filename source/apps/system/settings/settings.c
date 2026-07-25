@@ -80,6 +80,10 @@ static uint8_t     s_dev_mode     = 0;   // 0/1 — see purr_kernel.h's doc comm
 
 static purr_wid_t  s_navbar_visible_lbl     = 0;
 static uint8_t     s_navbar_always_visible  = 0;   // 0/1 — see purr_kernel.h's doc comment
+static purr_wid_t  s_lock_notifs_lbl        = 0;
+// 1 = lock screen shows only a count. Defaults to 1 to match the kernel's own
+// privacy default, so a device with no stored preference hides them.
+static uint8_t     s_lock_hide_notifs       = 1;
 
 static purr_wid_t  s_about_lbl = 0;
 
@@ -155,6 +159,7 @@ static void nvs_load(void) {
     nvs_get_u8(h, "screen_timeout", &s_screen_timeout_min);
     nvs_get_u8(h, "dev_mode", &s_dev_mode);
     nvs_get_u8(h, "navbar_always_visible", &s_navbar_always_visible);
+    nvs_get_u8(h, "lock_hide_notifs", &s_lock_hide_notifs);
     nvs_close(h);
     // Sync into the kernel-global cupcake_ui.c's idle check actually reads
     // — nvs_get_u8() only touched our own local copy above. Without this,
@@ -162,6 +167,10 @@ static void nvs_load(void) {
     // the idle check until Settings happens to be reopened and a button
     // pressed again.
     purr_kernel_set_screen_timeout_min(s_screen_timeout_min);
+    // Same reasoning for the lock screen's notification privacy: the system UI
+    // reads the kernel flag, not this app's local copy, so a stored preference
+    // is invisible until pushed across at boot.
+    purr_kernel_set_lock_hide_notifications(s_lock_hide_notifs != 0);
 }
 
 static void set_general_status(const char *msg) {
@@ -549,6 +558,24 @@ static void on_dev_mode_toggle(purr_wid_t w, purr_event_t e, void *u) {
 // comment in purr_kernel.h. Off by default (auto-hide), persisted like
 // Developer Mode above.
 
+// Lock screen notification privacy — see purr_kernel_lock_hide_notifications().
+// Both system UI styles honour the kernel flag, so this one toggle covers the
+// Android and iOS lock screens alike.
+static void on_lock_notifs_toggle(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    s_lock_hide_notifs = s_lock_hide_notifs ? 0 : 1;
+    purr_kernel_set_lock_hide_notifications(s_lock_hide_notifs != 0);
+    nvs_save_u8("lock_hide_notifs", s_lock_hide_notifs);
+    if (s_lock_notifs_lbl) {
+        purr_win_label_set(s_lock_notifs_lbl,
+            s_lock_hide_notifs ? "Notifications: Hidden (count only)"
+                                : "Notifications: Shown");
+    }
+    set_customization_status(s_lock_hide_notifs
+        ? "Lock screen shows a count; swipe up to reveal."
+        : "Lock screen lists notifications.");
+}
+
 static void on_navbar_visible_toggle(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
     s_navbar_always_visible = s_navbar_always_visible ? 0 : 1;
@@ -733,6 +760,16 @@ static void on_open_customization(purr_wid_t w, purr_event_t e, void *u) {
     s_wallpaper_list = purr_win_list(s_customization_win, 90, 30);
     purr_win_list_on_select(s_wallpaper_list, on_wallpaper_select, NULL);
     refresh_wallpaper_list();
+
+    // Lock screen notification privacy. Lives here rather than under Display
+    // because it is a "what does my device show about me" choice, not a
+    // panel/backlight one — and it sits next to Wallpaper, which is the other
+    // setting that changes what the lock screen looks like.
+    purr_win_label(s_customization_win, "Lock Screen");
+    s_lock_notifs_lbl = purr_win_label(s_customization_win,
+        s_lock_hide_notifs ? "Notifications: Hidden (count only)"
+                            : "Notifications: Shown");
+    purr_win_button(s_customization_win, "Toggle Notifications", on_lock_notifs_toggle, NULL);
 
     s_customization_status_lbl = purr_win_label(s_customization_win, "Ready.");
     purr_win_show(s_customization_win);

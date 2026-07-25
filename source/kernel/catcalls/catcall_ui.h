@@ -12,7 +12,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
-#define CATCALL_UI_VERSION 6
+#define CATCALL_UI_VERSION 7
 
 typedef uint32_t purr_win_t;   // window handle
 typedef uint32_t purr_wid_t;   // widget handle (label, button, textarea, etc.)
@@ -111,6 +111,23 @@ typedef struct {
     int        (*list_get_selected) (purr_wid_t wid);   // -1 if none
     void       (*list_set_selected) (purr_wid_t wid, int index);
     void       (*list_cb)           (purr_wid_t wid, purr_win_cb_t cb, void *user);
+
+    // Icon-per-row variant of list_set_items. icons[i] is an LV_SYMBOL_*-style
+    // glyph string (a font codepoint, not a bitmap asset — so no shared image
+    // resources are needed) or NULL for that row.
+    //
+    // Optional, like label_set_big above: purr_win_list_set_items_icon() falls
+    // back to plain list_set_items() when a backend leaves this NULL, so it is
+    // always safe to call and rows simply lose their glyphs.
+    //
+    // This began life as cupcake_win_list_set_items_icon(), a Cupcake-only
+    // extern that callers reached behind #ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE.
+    // That silently dropped every row icon in Milkbar and MSN the moment the
+    // device moved to any other backend — the bug that motivated promoting it
+    // here. Anything backend-specific that apps actually want ends up like
+    // this; better in the contract than behind a preprocessor guard.
+    void       (*list_set_items_icon)(purr_wid_t wid, const char **items,
+                                       const char **icons, int count);
 
     // ── Tile grid (scrollable grid of icon+label tiles, e.g. an app's own
     // internal navigation menu) ─────────────────────────────────────────────

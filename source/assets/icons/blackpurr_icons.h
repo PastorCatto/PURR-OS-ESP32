@@ -36,14 +36,22 @@ extern const lv_img_dsc_t bp_icon_about_48;
 extern const lv_img_dsc_t bp_icon_add_app_48;
 extern const lv_img_dsc_t bp_icon_all_apps_48;
 extern const lv_img_dsc_t bp_icon_calculator_48;
+extern const lv_img_dsc_t bp_icon_drivermgr_48;
 extern const lv_img_dsc_t bp_icon_fileman_48;
 extern const lv_img_dsc_t bp_icon_gps_48;
+extern const lv_img_dsc_t bp_icon_hwtest_48;
 extern const lv_img_dsc_t bp_icon_magicmac_48;
 extern const lv_img_dsc_t bp_icon_magidos_48;
+extern const lv_img_dsc_t bp_icon_meshdiag_48;
 extern const lv_img_dsc_t bp_icon_messages_48;
+extern const lv_img_dsc_t bp_icon_milkbar_48;
+extern const lv_img_dsc_t bp_icon_msn_48;
+extern const lv_img_dsc_t bp_icon_nearby_48;
 extern const lv_img_dsc_t bp_icon_radio_48;
 extern const lv_img_dsc_t bp_icon_sd_card_48;
+extern const lv_img_dsc_t bp_icon_services_48;
 extern const lv_img_dsc_t bp_icon_settings_48;
+extern const lv_img_dsc_t bp_icon_taskmgr_48;
 extern const lv_img_dsc_t bp_icon_terminal_48;
 extern const lv_img_dsc_t bp_icon_tools_48;
 
@@ -63,22 +71,30 @@ extern const lv_img_dsc_t bp_icon_tools_48;
 #define BP_ICON_BELL_OFF_24   (&bp_icon_bell_off_24)
 #define BP_ICON_BLUETOOTH_24   (&bp_icon_bluetooth_24)
 #define BP_ICON_CALCULATOR_48   (&bp_icon_calculator_48)
+#define BP_ICON_DRIVERMGR_48   (&bp_icon_drivermgr_48)
 #define BP_ICON_FILEMAN_48   (&bp_icon_fileman_48)
 #define BP_ICON_GPS_48   (&bp_icon_gps_48)
 #define BP_ICON_GPS_ACTIVE_24   (&bp_icon_gps_active_24)
 #define BP_ICON_GPS_OFF_24   (&bp_icon_gps_off_24)
 #define BP_ICON_GPS_SEARCHING_24   (&bp_icon_gps_searching_24)
+#define BP_ICON_HWTEST_48   (&bp_icon_hwtest_48)
 #define BP_ICON_MAGICMAC_48   (&bp_icon_magicmac_48)
 #define BP_ICON_MAGIDOS_48   (&bp_icon_magidos_48)
+#define BP_ICON_MESHDIAG_48   (&bp_icon_meshdiag_48)
 #define BP_ICON_MESSAGES_48   (&bp_icon_messages_48)
+#define BP_ICON_MILKBAR_48   (&bp_icon_milkbar_48)
+#define BP_ICON_MSN_48   (&bp_icon_msn_48)
+#define BP_ICON_NEARBY_48   (&bp_icon_nearby_48)
 #define BP_ICON_RADIO_48   (&bp_icon_radio_48)
 #define BP_ICON_RADIO_TOWER_24   (&bp_icon_radio_tower_24)
 #define BP_ICON_SD_CARD_24   (&bp_icon_sd_card_24)
 #define BP_ICON_SD_CARD_48   (&bp_icon_sd_card_48)
 #define BP_ICON_SD_OFF_24   (&bp_icon_sd_off_24)
+#define BP_ICON_SERVICES_48   (&bp_icon_services_48)
 #define BP_ICON_SETTINGS_48   (&bp_icon_settings_48)
 #define BP_ICON_SIGNAL_FULL_24   (&bp_icon_signal_full_24)
 #define BP_ICON_SIGNAL_OFF_24   (&bp_icon_signal_off_24)
+#define BP_ICON_TASKMGR_48   (&bp_icon_taskmgr_48)
 #define BP_ICON_TERMINAL_48   (&bp_icon_terminal_48)
 #define BP_ICON_TOOLS_48   (&bp_icon_tools_48)
 #define BP_ICON_VOLUME_OFF_24   (&bp_icon_volume_off_24)

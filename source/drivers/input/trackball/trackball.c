@@ -2,20 +2,25 @@
 //
 // Supports T-Deck and T-Deck Plus. Five active-low GPIO pins with internal
 // pullups. Directions emit INPUT_EVENT_POINTER deltas; click emits KEY_DOWN/UP
-// with keycode 0x0028 (Enter/OK). Held-direction acceleration kicks in after
-// 200 ms.
+// with keycode 0x0028 (Enter/OK).
 //
-// This is the original held-direction-repeat design (restored) — a from-
-// scratch rewrite to pure single-edge-per-roll was tried in between and
-// reverted: it fixed a real stuck-pin spam bug (see TRACKBALL_MAX_HOLD_MS
-// below for the actual fix) but felt badly unresponsive in exchange
-// ("have to roll it 5-6 times for one step to register"), because repeat-
-// while-held is what gave normal rolling its felt sensitivity — confirmed
-// live, this is the same input model BlackPurr's shell was built and
-// tuned against (blackpurr_module.c/blackpurr_shell.c consume this same
-// driver's poll_event() output with no different logic of their own, so
-// "port what BlackPurr had" means this configuration, not a different
-// consumer-side algorithm).
+// ── Repeat history, because this has been round the loop twice ──────────────
+// Design 1 — free-running repeat while held. Felt responsive, but emitted a
+//   movement event every interval for as long as the switch was closed, with
+//   nothing separating "rolled once" from "holding to scroll". A deliberate
+//   roll holds contact ~300-600ms, so one roll produced 3-6 events. Present
+//   since 0.13 and visible directly in the hardware tester.
+// Design 2 — pure single-edge-per-roll, no repeat at all. Killed the spam but
+//   felt badly unresponsive ("have to roll it 5-6 times for one step"), and
+//   was reverted.
+// Design 3 (current) — typematic, the way keyboards have always done it: the
+//   leading edge emits one step immediately (design 2's missing piece, and the
+//   real source of design 1's felt sensitivity), then nothing until the
+//   direction has been held past TRACKBALL_REPEAT_DELAY_MS, after which it
+//   repeats steadily. One roll = one step; hold-to-scroll still works.
+//
+// The distinction design 1 lacked is the whole point, so resist "simplifying"
+// this back to a single flat interval. See the repeat-model block below.
 //
 // Register with kernel via purr_kernel_register_input() at init.
 
@@ -58,14 +63,38 @@ static const char *TAG = "trackball";
 // as real input at all — see update_state()'s past_deadzone comment.
 #define TRACKBALL_DEADZONE_MS 40
 
-// Minimum time between emitted movement events. update_state() gets called
-// once per poll_event() call, which can happen many times per tick (the
-// caller drains its queue) — without this throttle, a held direction floods
-// the queue faster than it drains, producing the "darting"/erratic motion.
-// Now driving discrete focus-navigation steps (encoder indev) rather than
-// smooth pointer motion, so this can — and should — be much more
-// deliberate than a cursor would want.
-#define TRACKBALL_MOVE_INTERVAL_MS  120
+// ── Repeat model: typematic, not free-running ────────────────────────────────
+//
+// A single flat repeat interval was the long-standing bug here (present since
+// 0.13): the driver emitted one movement event every interval for as long as a
+// direction switch stayed closed, with nothing distinguishing "the user rolled
+// the ball once" from "the user is holding a direction to scroll". A single
+// deliberate roll keeps contact for roughly 300-600ms, so at a 120ms interval
+// it produced three to six events — observed directly in the hardware tester,
+// and downstream as the cursor jumping several cells per roll.
+//
+// Fixed the way keyboards have always solved it: one event immediately on
+// contact, then silence until the direction has been held long enough that
+// repeating is obviously intended, and only then a steady repeat. A normal
+// roll now yields exactly one step; hold-to-scroll still works.
+//
+// The initial step is emitted on the leading edge rather than after a delay,
+// so the driver stays as responsive as the held-repeat design it replaced —
+// the earlier pure-single-edge rewrite was reverted for feeling unresponsive
+// ("have to roll it 5-6 times for one step"), and that was because it dropped
+// the immediate edge, not because free-running repeat was needed.
+
+// How long a direction must be continuously held before repeating begins.
+// Comfortably longer than a deliberate single roll's contact time.
+#define TRACKBALL_REPEAT_DELAY_MS   500
+
+// Repeat rate once repeating has started.
+#define TRACKBALL_REPEAT_INTERVAL_MS 140
+
+// Floor between any two emitted movement events. update_state() runs once per
+// poll_event() call and a consumer drains its queue in a tight loop, so
+// without this a single drain pass could emit several events back to back.
+#define TRACKBALL_MOVE_INTERVAL_MS  40
 
 // Safety cap: if a direction has been continuously held (post-deadzone) for
 // longer than any real deliberate scroll-hold would plausibly need, stop
@@ -98,6 +127,9 @@ static const gpio_num_t s_pins[DIR_COUNT] = {
 static bool        s_prev_state[DIR_COUNT]; // true = pressed (pin low), debounced
 static int64_t     s_hold_start[DIR_COUNT]; // esp_timer_get_time() when press began
 static int64_t     s_last_move_emit;        // esp_timer_get_time() of last movement event
+// True while at least one direction is held. Its false->true transition is the
+// "leading edge" that emits a roll's single immediate step; see update_state().
+static bool        s_move_active;
 static bool        s_raw_prev[DIR_COUNT];      // last raw GPIO reading, pre-debounce
 static int64_t     s_raw_change_time[DIR_COUNT]; // when the raw reading last changed
 static QueueHandle_t s_queue;
@@ -204,6 +236,9 @@ static void update_state(void)
     int16_t combined_dx = 0;
     int16_t combined_dy = 0;
     bool any_held = false;
+    // True once any held direction is past the repeat delay — see the
+    // typematic emission block below.
+    bool any_repeating = false;
 
     for (int i = 0; i < 4; i++) {
         dir_t d = dirs[i];
@@ -234,27 +269,61 @@ static void update_state(void)
         }
 
         if (past_deadzone) {
-            bool accel = held_us > (int64_t)(TRACKBALL_ACCEL_MS * 1000);
+            // Step magnitude stays 1 until the direction is genuinely being
+            // held for repeat; the old code accelerated to 3 purely on elapsed
+            // hold time, which inflated a single roll's delta as well as its
+            // event count.
+            bool repeating = held_us > (int64_t)(TRACKBALL_REPEAT_DELAY_MS * 1000);
+            bool accel     = repeating &&
+                              held_us > (int64_t)((TRACKBALL_REPEAT_DELAY_MS +
+                                                   TRACKBALL_ACCEL_MS) * 1000);
             int16_t step = accel ? 3 : 1;
             combined_dx += dx[i] * step;
             combined_dy += dy[i] * step;
             any_held = true;
+            // Any one direction being past the delay is enough: on a diagonal
+            // hold, a second direction added later must not reset the repeat
+            // that the first one already earned.
+            if (repeating) any_repeating = true;
         }
     }
 
-    // Throttle movement events to a fixed rate regardless of how often this
-    // function gets called — see TRACKBALL_MOVE_INTERVAL_MS.
-    if (any_held && (now - s_last_move_emit) >= (int64_t)(TRACKBALL_MOVE_INTERVAL_MS * 1000)) {
-        s_last_move_emit = now;
-        input_event_t ev = {
-            .type      = INPUT_EVENT_POINTER,
-            .keycode   = 0,
-            .delta_x   = combined_dx,
-            .delta_y   = combined_dy,
-            .modifiers = 0,
-        };
-        enqueue(&ev);
+    // Typematic emission — see the repeat-model comment near the top.
+    //
+    //   * leading edge (nothing was held last pass): emit once, immediately;
+    //   * held but not yet past the repeat delay: emit nothing;
+    //   * past the delay: emit at the repeat interval.
+    //
+    // TRACKBALL_MOVE_INTERVAL_MS is a floor under all of that, because a
+    // consumer draining its queue calls this function many times in a row.
+    if (any_held) {
+        bool leading_edge = !s_move_active;
+        bool due = (now - s_last_move_emit) >=
+                    (int64_t)((any_repeating ? TRACKBALL_REPEAT_INTERVAL_MS
+                                              : TRACKBALL_MOVE_INTERVAL_MS) * 1000);
+
+        // Suppress everything between the initial step and the repeat delay:
+        // that gap is what makes one roll produce exactly one event.
+        bool in_quiet_gap = !leading_edge && !any_repeating;
+
+        if ((leading_edge || (due && !in_quiet_gap)) &&
+            (now - s_last_move_emit) >= (int64_t)(TRACKBALL_MOVE_INTERVAL_MS * 1000)) {
+            s_last_move_emit = now;
+            input_event_t ev = {
+                .type      = INPUT_EVENT_POINTER,
+                .keycode   = 0,
+                .delta_x   = combined_dx,
+                .delta_y   = combined_dy,
+                .modifiers = 0,
+            };
+            enqueue(&ev);
+        }
+        s_move_active = true;
+    } else {
+        // Everything released — the next contact is a fresh leading edge.
+        s_move_active = false;
     }
+
 
     // Click — capture-before-call, matching the directions above. (A
     // previous version compared s_prev_state[DIR_CLICK] *after* calling

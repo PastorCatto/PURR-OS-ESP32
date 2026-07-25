@@ -45,7 +45,7 @@ C_YLW  = "\033[93m"
 C_CYN  = "\033[96m"
 C_WHT  = "\033[97m"
 
-PURROS_VERSION = "1.0.0-dp7"
+PURROS_VERSION = "1.0.0-dp8"
 KITT_VERSION   = "1.0.0"
 
 def info(msg):        print(f"{C_GRN}[purrstrap]{C_RST} {msg}")
@@ -216,7 +216,7 @@ def bootloader_offset(chip):
 # direction — force it on for a WiFi device this doesn't detect correctly,
 # or off for one that technically has WiFi but shouldn't carry this (e.g. a
 # stripped-down diagnostic/test kernel).
-PURR_WIN_UI_BACKENDS = {"miniwin", "cupcake", "kittenui", "cardstack", "pounce"}
+PURR_WIN_UI_BACKENDS = {"miniwin", "cupcake", "kittenui", "cardstack", "pounce", "tabby", "mochi"}
 
 def apply_radio_companion_defaults(cfg):
     """Mutates cfg in place, adding proximity/pairing (+ msn/nearby where the
@@ -761,6 +761,8 @@ UI_BACKEND_MAP = {
     "blackpurr": "BLACKPURR",
     "cardstack": "CARDSTACK",
     "cupcake":   "CUPCAKE",
+    "tabby":     "TABBY",
+    "mochi":     "MOCHI",
     "lvgldebug": "LVGLDEBUG",
     "pounce":    "POUNCE",
     "nougat":    "NOUGAT",
@@ -843,6 +845,23 @@ def _sdkconfig_lines(device, cfg):
         lines.append("# Bluetooth (NimBLE)")
         lines.append("CONFIG_BT_ENABLED=y")
         lines.append("CONFIG_BT_NIMBLE_ENABLED=y")
+
+    # [modules] systemui -> the Kconfig gate that compiles the real half of
+    # source/modules/systemui/ in (status bar, nav bar, Recents, lock screen)
+    # rather than its stubs. Same mapping shape as bt/mesh below.
+    if cfg.get("modules.systemui", ""):
+        lines.append("")
+        lines.append("# System UI (status bar / nav bar / Recents / lock)")
+        lines.append("CONFIG_PURR_SYSTEMUI=y")
+        # [ui] systemui_style -> which of the two implementations compiles in.
+        # Deliberately NOT a [modules] key: _generate_glue() turns every
+        # modules.* value into a static module registration, so a style name
+        # there would emit a bogus `extern purr_module_ios;`.
+        style = cfg.get("ui.systemui_style", "android").strip().lower()
+        if style not in ("android", "ios"):
+            die(f"{device}: device.pcat [ui] systemui_style = \"{style}\" "
+                f"is not one of: android, ios")
+        lines.append(f"CONFIG_PURR_SYSTEMUI_STYLE_{style.upper()}=y")
 
     if cfg.get("modules.mesh", ""):
         lines.append("")

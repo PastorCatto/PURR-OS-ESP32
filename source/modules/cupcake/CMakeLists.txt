@@ -21,7 +21,7 @@ if(CONFIG_PURR_UI_BACKEND_CUPCAKE)
         ../../assets/icons/generated/48/tools.c
         ../../assets/icons/generated/48/all_apps.c
     )
-    set(CUPCAKE_REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager)
+    set(CUPCAKE_REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager systemui)
 else()
     set(CUPCAKE_SRCS "")
     set(CUPCAKE_REQUIRES "")
@@ -35,5 +35,6 @@ idf_component_register(
         ../../kernel/catcalls
         ../../assets/icons
         ../meshtastic
-    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager meshtastic
+        ../systemui
+    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager meshtastic systemui
 )

@@ -1,0 +1,27 @@
+[module]
+name        = "systemui"
+version     = "0.1.0"
+type        = "module"
+description = "System UI — status bar, drag-down panels, nav bar, Recents, lock screen"
+author      = "PURR OS"
+
+[requires]
+catcalls    = "display"
+kernel_min  = "1.0.0"
+
+# PURR package dependencies (resolved by `purrstrap pkg add`), distinct from
+# [build].requires below which lists IDF/C component names for the compiler —
+# this section only names other PURR packages by their device.pcat/source
+# directory slug, with a semver constraint.
+#
+# No dependency on any specific UI backend: this module is driven by whichever
+# backend hosts it, through the purr_systemui_host_t hook table in systemui.h.
+# It does need LVGL, so today only LVGL-based backends (cupcake/kittenui/
+# nougat/cardstack) can host it — MiniWin has no compositing top layer to hang
+# a persistent overlay off, and keeps its own implementation instead.
+[depends]
+app_manager = ">=0.1.0"
+
+[build]
+sources     = "systemui_module.c systemui.c"
+requires    = "lvgl app_manager"

@@ -1,0 +1,27 @@
+[module]
+name        = "tabby"
+version     = "0.1.0"
+type        = "ui"
+description = "Tabby — keyboard-first type-to-filter launcher (T-Deck class devices)"
+author      = "PURR OS"
+
+[requires]
+catcalls    = "display"
+kernel_min  = "1.0.0"
+
+# PURR package dependencies (resolved by `purrstrap pkg add`), distinct from
+# [build].requires below which lists IDF/C component names for the compiler —
+# this section only names other PURR packages by their device.pcat/source
+# directory slug, with a semver constraint.
+[depends]
+app_manager = ">=0.1.0"
+# systemui — Tabby hosts it for the status bar, drag-down panels, nav bar,
+# Recents and lock screen, exactly as Cupcake does (see tabby_shell.c's
+# purr_systemui_host_t table). Being its second host is deliberate: that
+# module is meant to be backend-agnostic, and a second consumer is what
+# actually proves it.
+systemui    = ">=0.1.0"
+
+[build]
+sources     = "tabby_module.c tabby_hal.c tabby_shell.c tabby_win.c"
+requires    = "lvgl app_manager systemui"
