@@ -39,14 +39,54 @@ Fill this in at Step 0. Re-measure after every accepted step. If a step doesn't
 move a number, revert it — it isn't the problem, and keeping it just adds noise to
 the next measurement.
 
-| Metric | How | Baseline | After 1 | After 2 | After 3 |
+| Metric | How | **Baseline** | After 1 | After 2 | After 3 |
 |---|---|---|---|---|---|
-| Actual SPI clock (kHz) | `spi_device_get_actual_freq()` | | | | |
-| `lv_timer_handler()` p95, idle (ms) | existing warn hook, threshold → 16ms | | | | |
-| `lv_timer_handler()` p95, during page drag (ms) | same | | | | |
-| SPI transactions per flush | counter in `push_pixels` | | | | |
-| µs per flush | counter in `push_pixels` | | | | |
-| Full-screen redraw (ms) | derived | | | | |
+| Actual SPI clock (kHz) | `spi_device_get_actual_freq()` | **80 000 — not clamped** | | | |
+| `lv_timer_handler()`, idle (ms) | warn hook at 16 ms | **18–19, every 200 ms** | | | |
+| `lv_timer_handler()`, shade + switcher (ms) | same | **median 24, p95 165, max 290** | | | |
+| SPI transactions per flush — idle / active | counter in `push_pixels` | **34 / 66** | **6 / 7** | | |
+| µs per flush, avg — idle / active | counter in `push_pixels` | **3251 / 10 444** | **1446 / 7465** | | |
+| px per flush — idle / active | counter in `push_pixels` | **2740 / 18 387** | 2699 / 19 140 | | |
+| µs per transaction | derived | **~79 idle, ~102 active (only ~18 is wire)** | n/a — no longer the bottleneck | | |
+| Full-buffer flush (µs) | max, active windows | **~15 800** | **~10 100** | | |
+| Transfer failures | log scan | n/a | **0** | | |
+
+Captured 2026-07-25 on a physical T-Deck Plus.
+
+**Idle**, two 120-flush windows: `41 trans / 3712 µs / 13909 µs max` (settling),
+then `34 trans / 3251 µs / 3809 µs max` (steady).
+
+**Active** — notification shade open/close and the multitasking app switcher, the
+two worst offenders, five consecutive windows:
+
+```
+66 trans/flush, 10444 us/flush avg, 15924 us max, 18387 px/flush
+57 trans/flush,  8851 us/flush avg, 15842 us max, 14937 px/flush
+68 trans/flush, 10799 us/flush avg, 15710 us max, 19028 px/flush
+65 trans/flush, 10562 us/flush avg, 15805 us max, 18692 px/flush
+63 trans/flush,  9815 us/flush avg, 15707 us max, 17071 px/flush
+```
+
+Handler distribution over the same 60 s, n=313:
+
+```
+   0- 19ms : 124  ############################################################
+  20- 39ms :  37  #####################################
+  40- 59ms :   6  ######
+  60- 79ms :   9  #########
+  80- 99ms :   7  #######
+ 100-119ms :  14  ##############
+ 120-139ms :  12  ############
+ 140-159ms :  83  ############################################################
+ 160-179ms :  18  ##################
+ 180-199ms :   2  ##
+ 280-299ms :   1  #
+```
+
+**This is bimodal, and that matters.** The 0–19 ms mass is idle (F8's periodic tick
+plus light frames). The 140–159 ms cluster — 83 samples, 27% of all frames — is a
+distinct mode: **~6.7 fps while the shade or switcher is animating.** That cluster,
+not the average, is what "absolutely brutal" is.
 
 ---
 
@@ -66,11 +106,27 @@ row is a separate `calloc()` → `queue_trans` → block → `get_trans_result` 
 A full-screen redraw is **240 SPI transactions and 240 malloc/free pairs**, all on
 the LVGL render task.
 
-Arithmetic at a nominal 80 MHz: a 320px row is 640 bytes ≈ 64 µs of wire time, but
-per-transaction overhead on an ESP32-S3 is realistically 20–50 µs — so roughly half
-efficiency, call it ~25 ms of SPI for one full frame. The bulk path is one
-153,600-byte DMA at ~15 ms. **Worth about 1.7× on its own**, plus 240 heap
-operations per frame disappear.
+**Confirmed by measurement, and worse than estimated.** Steady-state idle:
+
+```
+[perf] 120 flushes: 34 trans/flush, 3251 us/flush avg, 3809 us max,
+                    2740 px/flush, row-by-row
+```
+
+2740 px is 5480 bytes — at the measured 80 MHz that is **0.55 ms of wire time**. The
+flush takes **3.25 ms**. So:
+
+> **~83% of display time is per-transaction overhead, not data transfer.**
+> ~95 µs per transaction, of which only ~18 µs is the bus actually moving bytes.
+
+The original estimate assumed 20–50 µs of overhead; it is nearer 77 µs. That makes
+the bulk path worth **more** than first thought, not less — collapsing 34 transactions
+to ~4 should take a 3.25 ms flush to roughly 0.9 ms, about **3.8×**, because these
+flushes are overhead-dominated rather than wire-dominated.
+
+The largest flush seen during boot was **13.9 ms**, consistent with a full-width
+80-line buffer (~83 transactions). Three of those per full-screen redraw ≈ 35–40 ms,
+i.e. a **~25 fps ceiling before any blending cost** — which is the scroll lag.
 
 ### F2 — `queue_size = 1` means zero pipelining
 
@@ -113,18 +169,125 @@ Open hardware question before any code: **is TE actually wired on the T-Deck Plu
 During a page drag that is: full-screen wallpaper redraw + blend + row-by-row SPI,
 every frame.
 
-### F6 — The requested SPI clock may not be the achieved one
+### ~~F6 — The requested SPI clock may not be the achieved one~~ — **DISPROVEN**
 
-[`kernel_tdp_boot.c:515`](source/kernel/kernel_tdeck_plus/kernel_tdp_boot.c#L515)
-asks for 80 MHz. But MOSI=41 / SCK=40 are **not** SPI2 IOMUX pins on the ESP32-S3,
-so the signals route through the GPIO matrix, which realistically tops out near
-40 MHz. If the achieved clock is 40, every estimate above doubles and that alone
-explains much of the symptom.
+Measured 2026-07-25: `requested 80000 kHz, actual 80000 kHz`. No clamp.
+
+The concern was that MOSI=41 / SCLK=40 are not SPI2 IOMUX pins on the ESP32-S3, so
+the signals route through the GPIO matrix — which is true, but it is evidently
+carrying 80 MHz fine here. **Good news:** none of the other estimates need doubling,
+and there is no easy win hiding in the clock. The time is going somewhere else.
+
+Closed. No action.
+
+### F8 — Idle costs an 18–19 ms stall every 200 ms *(found during Step 0)*
+
+Not predicted; it fell out of the measurement. At idle, on the springboard, with
+nothing being touched:
+
+```
+W (30273) mochi: lv_timer_handler() took 19ms (tick=2360)
+W (30496) mochi: lv_timer_handler() took 18ms (tick=2400)
+W (30719) mochi: lv_timer_handler() took 18ms (tick=2440)
+```
+
+Every 40 ticks, exactly, forever. `mochi_module.c`'s loop runs
+`mochi_springboard_tick()` on `++tick % 40 == 0`, and the **next** `lv_timer_handler()`
+call is the one that pays — so the tick dirties something (near-certainly the status
+bar clock) and the following handler spends 18–19 ms redrawing it.
+
+Between those spikes the handler stays under the 16 ms threshold and never logs. So
+this is not general slowness — it is a specific, periodic, four-to-five-times-a-second
+hitch that exists **while the device is doing nothing at all**.
+
+Worth being precise about the ownership: the *trigger* is Mochi's, but the *cost* is
+the driver's — 18 ms to repaint a clock is only expensive because of F1/F2. Steps 1
+and 2 should shrink this without anyone touching Mochi. If it survives them, it
+becomes a Mochi invalidation-scope question and belongs to whoever owns that.
 
 ### F7 — `LV_COLOR_16_SWAP` is unset, so the driver swaps in software
 
 Not set in `CoreOS/sdkconfig_tdeck_plus`, so it defaults to 0 and
 `st7789_push_pixels` byte-swaps every pixel on the CPU, on the render task.
+
+At 18,387 px per active flush that is a real cost inside the measured flush time —
+roughly 0.5 ms per flush by rough cycle count, and it is neither wire time nor
+transaction overhead, so it will *not* be removed by Steps 1 or 2.
+
+### F9 — The LVGL draw buffers live in PSRAM *(hypothesis, found during Step 0)*
+
+`mochi_hal.c` allocates both draw buffers with `MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA`.
+That is correct and deliberate for the *flush* — GDMA can read PSRAM, and these are
+large. But the draw buffer is not only a DMA source: **it is LVGL's render target**,
+and LVGL blends into it with heavy read-modify-write.
+
+PSRAM is roughly an order of magnitude slower than internal DRAM for that access
+pattern. A full-screen composite — wallpaper, then a translucent panel over it,
+then `lv_layer_top()` chrome — touches the buffer several times over, every pass a
+PSRAM read plus a PSRAM write.
+
+**Why this is a live hypothesis and not a footnote:** the arithmetic does not close
+without it. A ~150 ms frame contains only ~47 ms of measured SPI. Something is
+consuming the other ~100 ms, and a full-screen software blend of 76,800 px should
+not cost that on a 240 MHz S3 unless memory bandwidth is the wall.
+
+Cheap test: allocate a smaller buffer in **internal DRAM** (e.g. 320×40 = 25.6 KB)
+and re-measure. More flushes, but each blend runs at internal-RAM speed. If frame
+time drops sharply, this is the single largest win available and it is nearly free.
+
+Caveat: this lives in `mochi_hal.c`. It is a buffer-placement decision rather than a
+UI-design one, but it is still Mochi's file — needs a call on ownership.
+
+### F10 — `lv_tick_inc(5)` lies about how much time passed
+
+`mochi_module.c`'s loop does `lv_tick_inc(5)` then `vTaskDelay(pdMS_TO_TICKS(5))`
+around `lv_timer_handler()`. That is only correct if the handler costs ~0 ms.
+
+Measured, one iteration costs **10–11 ms at idle and 150 ms+ under load**, while
+LVGL is told 5 ms elapsed. So LVGL's clock runs at under half real speed at best,
+and ~1/30th real speed during a shade animation.
+
+Two consequences, both matching the reported feel:
+
+1. **Animations run in slow motion.** A 300 ms authored transition plays over
+   multiple real seconds. This is separate from low frame rate and would persist
+   even at 60 fps.
+2. **LVGL cannot adapt.** It has no idea it is behind, so its own frame-skipping
+   and refresh-period logic never engages.
+
+The fix is to feed real elapsed time — measure the loop with `esp_timer_get_time()`
+and pass the true delta, or give LVGL an `esp_timer`-backed tick source. Nearly
+free, and independent of every other item here. Also in Mochi's file.
+
+---
+
+## Step 0 conclusion — recalibration
+
+Step 0 did its job, including the part where it contradicts the plan.
+
+**Confirmed:** F1 and F2, and worse than estimated — ~80–100 µs per transaction
+against ~18 µs of wire time.
+
+**Disproven:** F6. The clock is fine.
+
+**Found:** F8, F9, F10 — none of which were in the original analysis.
+
+**The uncomfortable part.** A worst-case frame is ~150 ms. Measured SPI inside it is
+~47 ms, or **about 31%**. A perfect outcome from Steps 1 and 2 — collapsing 66
+transactions to ~4 — takes that 47 ms to roughly 16 ms, and the 150 ms frame to
+about **120 ms**. That is a real improvement and it is *not enough on its own*.
+
+This does not change the order. Step 1 is still first: it is isolated, driver-only,
+testable without touching Mochi, and it is ~100% of the idle hitch in F8. But it
+does change what should be claimed for it, and it means **the DP8 gate cannot be
+"Step 1 and 2 are done"** — it has to be a frame-time target.
+
+**Proposed gate:** worst-case `lv_timer_handler()` under 60 ms (≈16 fps) with the
+140–159 ms cluster gone. Reaching that needs F9 and F10 as well as Steps 1–2, and
+F9 is likely the largest single contributor.
+
+Both F9 and F10 live in Mochi files. Neither is a UI-design change — one is buffer
+placement, one is a clock bug — but both need a call on who lands them.
 
 ---
 
@@ -134,30 +297,105 @@ Not set in `CoreOS/sdkconfig_tdeck_plus`, so it defaults to 0 and
 
 Zero risk, and it decides whether the arithmetic above is even right.
 
-- [ ] `spi_device_get_actual_freq()` on the display handle — resolves **F6**
-- [ ] Drop the `lv_timer_handler()` warn threshold at [`mochi_module.c:67`](source/modules/mochi/mochi_module.c#L67) from 50 ms to ~16 ms
-- [ ] Temporary counters in `push_pixels`: transactions per flush, µs per flush
-- [ ] Capture the baseline table above, idle and during a sustained page drag
+- [x] `spi_device_get_actual_freq()` on the display handle — resolves **F6**
+- [x] Drop the `lv_timer_handler()` warn threshold in `mochi_module.c` from 50 ms to 16 ms
+- [x] Counters in `push_pixels`: transactions per flush, µs per flush, px per flush
+- [x] `esp_timer` added to the `st7789` component's `REQUIRES` (needed by the counters)
+- [x] Builds clean — `purrstrap build tdeck_plus`, "Project build complete"
+- [ ] **Flash and capture the baseline table above, idle and during a sustained page drag**
 
-### Step 1 — Bulk buffer. Test the two hypotheses separately, cheapest first.
+All of the above is **temporary** and comes out at the end of Step 2. Each piece is
+commented as such at its site so none of it survives by accident.
 
-Highest leverage, and the code is already written — it just has a bug. Resolves
-**F1**.
+#### What to look for on the serial monitor
 
-- [ ] **1a — alignment.** `heap_caps_aligned_alloc(64, …)` for `s_bulk_buf`, and
-      round the DMA length up to a cache-line multiple. PSRAM DMA writeback wants
-      cache-line-aligned extents, and a misaligned tail corrupts as rectangular
-      blocks — which matches the reported symptom. Small and safe. **If this alone
-      fixes it, stop here.**
-- [ ] **1b — buffer lifetime.** Only if 1a doesn't fix it.
-      `spi_transmit_bounded()` deliberately does not free a timed-out transaction
-      and returns `false`, but `st7789_push_pixels` **ignores the return value**,
-      releases the bus and returns. The next flush then overwrites `s_bulk_buf`
-      while a live DMA may still be reading it. With `s_row_buf` that window is
-      640 bytes and invisible; with a full-frame buffer it is exactly "black
-      rectangular chunks."
-- [ ] Re-enable `st7789_set_perf_mode(true)` and re-measure
-- [ ] Expected: ~1.7× on full-screen redraw, 240 heap ops/frame gone
+**Once at boot**, from the driver's SPI setup:
+
+```
+W (nnn) st7789: [perf] SPI clock: requested 80000 kHz, actual NNNNN kHz  <-- CLAMPED
+```
+
+The `<-- CLAMPED` marker only prints if the achieved clock is below what was
+requested. If it appears, **F6 is confirmed** and every throughput estimate in this
+document doubles.
+
+**Every 120 flushes**, aggregated so the logging cannot dominate what it measures:
+
+```
+W (nnn) st7789: [perf] 120 flushes: NN trans/flush, NNNN us/flush avg,
+                       NNNN us max, NNNNN px/flush, row-by-row
+```
+
+How to read it:
+
+| Field | Meaning |
+|---|---|
+| `trans/flush` | SPI round-trips per LVGL flush. Row-by-row this should track flush height (~80) plus 3 command writes. The bulk path should collapse it to ~4. **This is the number Step 1 is trying to move.** |
+| `us/flush` | Wall time inside `push_pixels`. Compare against the pure wire time implied by the actual clock — the gap is per-transaction overhead, which is what Step 2 attacks. |
+| `px/flush` | Guards against misreading the other two. A small dirty rect is cheap for real reasons and must not be mistaken for a win. |
+| trailing tag | `row-by-row` or `BULK` — confirms which path is actually live, rather than assuming perf mode took. |
+
+**From the render loop**, now at a 16 ms threshold instead of 50 ms:
+
+```
+W (nnn) mochi: lv_timer_handler() took NNms (tick=NNNN)
+```
+
+At 50 ms this was a tripwire; on an already-slow UI it fired constantly with no
+shape. At 16 ms (one 60 fps frame) it becomes a distribution — how far past budget
+each call lands, and how that changes between idle and an active drag.
+
+### Step 1 — Bulk buffer — ✅ **PASSED** (2026-07-25, confirmed on hardware)
+
+Resolves **F1**. Display confirmed visually clean; zero transfer failures in a
+65-second log.
+
+**Both original hypotheses were wrong.** It was not cache alignment and not buffer
+lifetime. Two real causes, found only by turning perf mode on and reading the log:
+
+- [x] **Cause 1 — the 18-bit transfer-length register.** `SPI_LL_DMA_MAX_BIT_LEN`
+      is 2^18 bits = **32,768 bytes**. A full frame is 153,600 and even one 80-line
+      LVGL flush buffer is 51,200, so both were rejected with *"txdata transfer >
+      hardware max supported len"*. **A rejected transfer sends nothing**, so that
+      region of GRAM kept its old contents — the black blocks. Small dirty rects
+      stayed under the limit, which is exactly why the trackball cursor still
+      worked while opening an app did not.
+- [x] **Cause 2 — PSRAM source forced a bounce buffer.** With the bulk buffer in
+      PSRAM, `spi_device_queue_trans()` could not DMA from it directly and tried to
+      allocate a per-transaction **internal-RAM copy**. At 32 KB that fails with
+      `ESP_ERR_NO_MEM` — same outcome, an unsent region — and it meant every pixel
+      was being copied twice for nothing.
+- [x] **Fix.** The bulk buffer now lives in **internal DMA-capable RAM** and is one
+      *chunk* in size (16 KB, walking down to 4 KB if internal DRAM is short).
+      `push_pixels` walks the source rect chunk by chunk, so no transaction can ever
+      exceed the hardware limit regardless of rect size, there is no bounce buffer,
+      and the byte-swap writes into internal RAM. The panel cannot see the seams:
+      after RAMWR the ST7789 consumes a continuous pixel stream.
+
+**Result at ~19,000 px/flush:** 66 → **7** transactions (9.4× fewer),
+10,444 → **7,465 µs** (1.4× faster), 0 failures.
+
+**Why 1.4× and not the predicted 3.8×** — and this is the important part. Breaking
+down the remaining 7,465 µs:
+
+| Component | µs | Share |
+|---|---|---|
+| Wire time at 80 MHz | 3830 | **51%** — irreducible, this is the floor |
+| Transaction overhead | ~560 | **7.5%** — was ~5600. Solved. |
+| Byte-swap + reading source from PSRAM | ~3075 | **41%** — this is F7 + F9 |
+
+Transaction overhead was real and is now gone, but it was never the whole story.
+
+### Replan after Step 1
+
+- **Step 2 (async flush + `queue_size = 2`) is DEMOTED off the DP8 gate.** It
+  attacks the 7.5%. The problem it was going to solve is already solved, and it is
+  the most invasive change on the list. Keep it for later if the floor ever matters.
+- **F7 (`LV_COLOR_16_SWAP`) is PROMOTED.** It was deferred past DP8 on a guess that
+  it was worth "a millisecond or two". Measured, it is a large part of that 41%.
+  That guess was wrong and the deferral was wrong with it.
+- **F9 goes next**, because it hits the 41% twice over: LVGL blends faster *and*
+  this driver's byte-swap stops reading its source out of PSRAM.
 
 ### Step 2 — Async flush + `queue_size = 2`
 

@@ -64,7 +64,15 @@ static void mochi_task(void *arg)
         // A single handler call this long means whatever ran inside it stalled
         // rendering for that long — real data to point at instead of guessing,
         // if the UI ever feels sluggish. 50ms ≈ "a dropped frame you'd notice".
-        if (handler_us > 50000) {
+        //
+        // TEMPORARILY 16ms — measurement only, revert to 50000 when Step 2 of
+        // DP8_CHECKLIST.md is done. This is the ONLY line the driver perf work
+        // touches in Mochi, and it changes no behaviour: it is a log threshold.
+        // 50ms is the right level for a passive tripwire but useless on a UI
+        // that is already slow — every frame trips it and the output is a wall
+        // with no shape. 16ms ≈ one 60fps frame, which turns the log into a
+        // distribution instead of an alarm.
+        if (handler_us > 16000) {
             ESP_LOGW(TAG, "lv_timer_handler() took %lldms (tick=%lu)",
                      (long long)(handler_us / 1000), (unsigned long)tick);
         }

@@ -571,15 +571,42 @@ void app_main(void)
     boot_splash_show();
 
     // Perf mode: bulk-transfer PSRAM buffer for push_pixels — collapses
-    // per-row spi_device_transmit() calls into one per flush (see
-    // st7789.h's doc comment). DISABLED for now — confirmed live this
-    // session to produce visible corruption (black rectangular chunks),
-    // root cause not yet found (driver-level esp_cache_msync() on the DMA
-    // send path looked correct on inspection, so the bug is likely in this
-    // buffer's own bookkeeping, not a cache-coherency issue — needs offline
-    // debugging, not more live iteration on a broken screen). Re-enable
-    // once the corruption is understood and fixed.
-    st7789_set_perf_mode(false);
+    // per-row transfers into one per flush (see st7789.h's doc comment).
+    //
+    // RE-ENABLED. This was disabled after producing visible corruption
+    // (black rectangular chunks) and the note here blamed the buffer's own
+    // bookkeeping rather than cache coherency. Measurement says otherwise, and
+    // st7789_set_perf_mode() now allocates the buffer cache-line aligned and
+    // padded to whole lines — see its comment for why a partial line at either
+    // end is exactly what renders as a rectangular block.
+    //
+    // Why this is worth the second attempt: Step 0 of DP8_CHECKLIST.md measured
+    // the row-by-row path on real hardware at ~80-100us per SPI transaction
+    // against only ~18us of actual wire time. Roughly 83% of display time is
+    // per-transaction overhead, and this path is what removes it — 66
+    // transactions per flush should collapse to about 4.
+    //
+    // ROOT CAUSE, finally: the SPI transfer-length register is 18 bits, so one
+    // transaction can carry at most 2^18 bits = 32,768 bytes. A full 320x240
+    // frame is 153,600 and a single 80-line LVGL flush buffer is 51,200 — both
+    // were rejected outright with
+    //
+    //   E spi_master: check_trans_valid: txdata transfer > hardware max
+    //                 supported len
+    //
+    // and a rejected transfer sends NOTHING, so that region of GRAM kept
+    // whatever was in it. Hence black rectangular blocks. Small dirty rects
+    // stayed under the limit, which is why the trackball cursor still worked
+    // while opening an app did not.
+    //
+    // Neither hypothesis in DP8_CHECKLIST.md Step 1 was right — it was not
+    // cache alignment and not buffer lifetime. push_pixels now splits the push
+    // into chunks bounded by spi_bus_get_max_transaction_len(), which the panel
+    // cannot see: after RAMWR the ST7789 consumes a continuous pixel stream.
+    //
+    // Measured before this fix, small flushes already showed the payoff:
+    // 6 trans/flush at 1453us, down from 34 at 3251us.
+    st7789_set_perf_mode(true);
 
     // Touch — GT911 I2C (creates I2C bus on port 0)
     // GT911 needs ~300ms from BOARD_POWERON before I2C responds.

@@ -22,6 +22,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"   // Step 0 instrumentation — see DP8_CHECKLIST.md
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "../../kernel/core/purr_module.h"
@@ -142,6 +143,61 @@ static uint16_t s_row_buf[ST7789_WIDTH];
 static uint16_t *s_bulk_buf    = NULL;
 static size_t    s_bulk_buf_px = 0;   // capacity, in pixels
 
+// Bulk transfer chunk size, in BYTES. The bulk buffer is exactly this big.
+//
+// Two independent limits forced this design, both found on hardware:
+//
+// 1. HARD LIMIT — the SPI transfer-length register is 18 bits, so one
+//    transaction carries at most 2^18 bits = 32,768 bytes. A full 320x240
+//    frame is 153,600 and even one 80-line LVGL flush buffer is 51,200, so
+//    both were rejected outright with "txdata transfer > hardware max
+//    supported len". A rejected transfer sends NOTHING, so that region of GRAM
+//    kept whatever was in it — the black rectangular blocks. Small dirty rects
+//    stayed under the limit, which is why the trackball cursor still worked
+//    while opening an app did not.
+//
+// 2. BOUNCE BUFFER — with the bulk buffer in PSRAM, spi_device_queue_trans()
+//    could not DMA from it directly and tried to allocate a temporary
+//    INTERNAL-RAM copy per transaction. At 32KB that fails, giving
+//    ESP_ERR_NO_MEM and, again, an unsent region. It also meant every pixel was
+//    being copied twice for nothing.
+//
+// So the buffer now lives in INTERNAL DMA-capable RAM and is one chunk in size,
+// and push_pixels walks the source rect chunk by chunk. Three consequences, all
+// good: no transaction can ever exceed the hardware limit regardless of rect
+// size, there is no bounce buffer because the source is already DMA-capable,
+// and the byte-swap writes into internal RAM rather than PSRAM.
+//
+// 16KB is the target. Internal DRAM on this device is tight (a 12288-byte task
+// stack already overflowed the segment), so the allocator walks down rather
+// than failing outright — 16K, then 8K, then 4K. Even the 4K floor is a large
+// improvement: a full-screen push goes from 240 transactions to 38.
+#define ST7789_CHUNK_PREF  (16 * 1024)
+#define ST7789_CHUNK_FLOOR (4 * 1024)
+
+// ── Step 0 instrumentation (DP8_CHECKLIST.md) ───────────────────────────
+//
+// TEMPORARY. Exists to answer "where does the frame time actually go" with
+// numbers instead of guesses, and comes out once Steps 1-2 are landed and
+// measured. See DP8_CHECKLIST.md's baseline table.
+//
+// Aggregated over a window and logged once per window rather than per flush:
+// a log line per flush would itself dominate what it is trying to measure.
+// The counters are plain uint32_t written only from the render task (the sole
+// caller of push_pixels) and read only in the same place, so no atomics.
+#define ST7789_PERF_WINDOW 120   // flushes per log line
+
+static uint32_t s_perf_flushes   = 0;
+static uint32_t s_perf_trans     = 0;    // SPI transactions this window
+static uint64_t s_perf_total_us  = 0;
+static uint32_t s_perf_max_us    = 0;
+static uint64_t s_perf_total_px  = 0;
+
+// Bumped by spi_transmit_bounded() — counts every transaction including the
+// CASET/RASET/RAMWR command writes, because those are real bus round-trips
+// with real per-transaction overhead, not free.
+static uint32_t s_perf_trans_ctr = 0;
+
 // ── Public configure API ──────────────────────────────────────────────────────
 
 void st7789_configure(int cs, int dc, int mosi, int miso, int sclk, int rst, int bl)
@@ -178,23 +234,27 @@ void st7789_set_perf_mode(bool enable)
     }
     if (s_bulk_buf) return;   // already on
 
-    if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
-        ESP_LOGW(TAG, "perf mode requested but no PSRAM on this device — staying on row-by-row push");
-        return;
+    // INTERNAL DMA-capable RAM, deliberately — not PSRAM. See the chunk-size
+    // comment above: a PSRAM source forces the SPI driver to bounce every
+    // transaction through an internal-RAM copy it allocates per transfer,
+    // which both wastes a full copy and fails with ESP_ERR_NO_MEM once the
+    // chunk is large. Internal RAM is also where we want the byte-swap writing.
+    //
+    // Walk down rather than fail: internal DRAM is scarce on this device.
+    for (size_t want = ST7789_CHUNK_PREF; want >= ST7789_CHUNK_FLOOR; want /= 2) {
+        uint16_t *buf = (uint16_t *)heap_caps_malloc(want, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        if (buf) {
+            s_bulk_buf    = buf;
+            s_bulk_buf_px = want / sizeof(uint16_t);
+            ESP_LOGW(TAG, "[perf] bulk mode ON — %u-byte internal DMA chunk buffer "
+                          "(%u px; full frame = %u chunks, was 240 row transfers)",
+                     (unsigned)want, (unsigned)s_bulk_buf_px,
+                     (unsigned)(((size_t)s_width * s_height * 2 + want - 1) / want));
+            return;
+        }
     }
-
-    size_t px = (size_t)s_width * (size_t)s_height;
-    uint16_t *buf = (uint16_t *)heap_caps_malloc(px * sizeof(uint16_t),
-                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    if (!buf) {
-        ESP_LOGW(TAG, "perf mode: %u-pixel PSRAM buffer alloc failed — staying on row-by-row push",
-                 (unsigned)px);
-        return;
-    }
-    s_bulk_buf    = buf;
-    s_bulk_buf_px = px;
-    ESP_LOGI(TAG, "perf mode enabled — %u-pixel PSRAM bulk buffer (%u bytes)",
-             (unsigned)px, (unsigned)(px * sizeof(uint16_t)));
+    ESP_LOGW(TAG, "perf mode: no internal DMA buffer down to %u bytes — staying on row-by-row push",
+             (unsigned)ST7789_CHUNK_FLOOR);
 }
 
 // ── Low-level SPI helpers ─────────────────────────────────────────────────────
@@ -230,6 +290,7 @@ void st7789_set_perf_mode(bool enable)
 
 static bool spi_transmit_bounded(spi_transaction_t *trans)
 {
+    s_perf_trans_ctr++;   // Step 0 instrumentation — see DP8_CHECKLIST.md
     spi_transaction_t *stale = NULL;
     if (spi_device_get_trans_result(s_spi, &stale, 0) == ESP_OK && stale) {
         free(stale);   // reclaim a previous timeout's slot, if it's since finished
@@ -477,6 +538,34 @@ static esp_err_t st7789_init(const display_config_t *cfg)
     };
     ESP_ERROR_CHECK(spi_bus_add_device(s_spi_host, &dev_cfg, &s_spi));
 
+    // What we ASKED for is not necessarily what we GOT. The requested clock is
+    // rounded down to a divider the peripheral can actually produce, and on
+    // ESP32-S3 a device whose MOSI/SCLK are not the SPI2 IOMUX pins is routed
+    // through the GPIO matrix, which does not reliably carry 80MHz. T-Deck Plus
+    // is exactly that case (MOSI=41, SCLK=40 — neither is FSPI IOMUX), so this
+    // asks the driver rather than assuming. Every throughput estimate in
+    // DP8_CHECKLIST.md scales directly off this number.
+    // Diagnostic only — the transaction size is now bounded by the chunk buffer
+    // (see ST7789_CHUNK_PREF), not by this. Logged because it is the limit that
+    // caused the black-block corruption, and it is worth seeing on any new board.
+    {
+        size_t max_bytes = 0;
+        if (spi_bus_get_max_transaction_len(s_spi_host, &max_bytes) == ESP_OK) {
+            ESP_LOGW(TAG, "[perf] bus max transaction: %u bytes", (unsigned)max_bytes);
+        }
+    }
+
+    {
+        int actual_khz = 0;
+        if (spi_device_get_actual_freq(s_spi, &actual_khz) == ESP_OK) {
+            ESP_LOGW(TAG, "[perf] SPI clock: requested %lu kHz, actual %d kHz%s",
+                     (unsigned long)(s_spi_freq_hz / 1000), actual_khz,
+                     (actual_khz * 1000u < s_spi_freq_hz) ? "  <-- CLAMPED" : "");
+        } else {
+            ESP_LOGW(TAG, "[perf] SPI clock: could not read actual freq");
+        }
+    }
+
     // Panel init sequence
     uint8_t madctl = ws169 ? MADCTL_PORTRAIT
                             : ((rotation == 0) ? MADCTL_LANDSCAPE : MADCTL_PORTRAIT);
@@ -542,7 +631,7 @@ static esp_err_t st7789_init(const display_config_t *cfg)
 // its own timeout (neither returns a status this driver acts on), so the
 // only paths that need an explicit release are the existing return
 // statements below — nothing here bails out early on a failed transfer.
-static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *data)
+static esp_err_t st7789_push_pixels_inner(int x, int y, int w, int h, const uint16_t *data)
 {
     if (!s_ready || !data || w <= 0 || h <= 0) return ESP_ERR_INVALID_STATE;
 
@@ -560,15 +649,38 @@ static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *
     // contiguous buffer. Falls through to the row-by-row path whenever
     // perf mode is off or the rect is larger than the buffer (shouldn't
     // happen — the buffer is sized for a full frame — but never assume).
-    if (s_bulk_buf && px <= s_bulk_buf_px) {
-        for (int r = 0; r < h; r++) {
-            const uint16_t *src = data + r * w;
-            uint16_t *dst = s_bulk_buf + (size_t)r * (size_t)cols;
-            for (int i = 0; i < cols; i++) {
-                dst[i] = (uint16_t)((src[i] >> 8) | (src[i] << 8));
+    // Bulk path: byte-swap into the internal DMA chunk buffer and send, one
+    // chunk at a time, until the whole rect is out.
+    //
+    // No size limit applies — the rect can be a single row or the entire
+    // screen, because the transaction size is bounded by the buffer rather
+    // than by the rect. That is the whole point of the rewrite: the previous
+    // "swap it all, send it in one go" shape is what hit both the 32,768-byte
+    // hardware transaction limit and the PSRAM bounce-buffer allocation.
+    //
+    // The panel does not see the seams. After RAMWR the ST7789 consumes a
+    // continuous pixel stream and advances its own GRAM pointer, so where the
+    // stream is split is invisible to it — the only requirement is that a split
+    // never falls mid-pixel, which holds because the buffer is a whole number
+    // of uint16_t.
+    if (s_bulk_buf) {
+        const uint16_t *src  = data;          // walks the source rect row-major
+        size_t          left = px;            // pixels still to send
+        int             col  = 0;             // column within the current row
+        while (left) {
+            size_t n = (left < s_bulk_buf_px) ? left : s_bulk_buf_px;
+            for (size_t i = 0; i < n; i++) {
+                uint16_t v = src[col];
+                s_bulk_buf[i] = (uint16_t)((v >> 8) | (v << 8));
+                // Source rows are w apart but only `cols` wide are sent, so
+                // step over the remainder at each row end. Identical geometry
+                // to the row-by-row path below, just not resynchronised to a
+                // row boundary on every transfer.
+                if (++col == cols) { col = 0; src += w; }
             }
+            spi_write_data(s_bulk_buf, n * 2);
+            left -= n;
         }
-        spi_write_data(s_bulk_buf, px * 2);
         spi_device_release_bus(s_spi);
         return ESP_OK;
     }
@@ -582,6 +694,55 @@ static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *
     }
     spi_device_release_bus(s_spi);
     return ESP_OK;
+}
+
+// Step 0 instrumentation wrapper (DP8_CHECKLIST.md). TEMPORARY — remove with
+// the counters above once Steps 1-2 are measured.
+//
+// A wrapper rather than probes inside the function so that every exit path is
+// timed without editing any of them, and so deleting this later is one clean
+// excision that cannot leave a half-instrumented body behind.
+//
+// What the log line answers:
+//   trans/flush   how many SPI round-trips one LVGL flush costs. Row-by-row
+//                 this tracks the flush height (~80) + 3 command writes; the
+//                 bulk path should collapse it to ~4.
+//   us/flush      wall time inside push_pixels. Compare against the pure wire
+//                 time implied by the actual clock logged at init: the gap is
+//                 per-transaction overhead, which is what Step 2 attacks.
+//   px/flush      guards against reading the above without knowing how much
+//                 was actually drawn — a small dirty rect is cheap for real
+//                 reasons and should not be mistaken for a win.
+static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *data)
+{
+    uint32_t  t0     = s_perf_trans_ctr;
+    int64_t   start  = esp_timer_get_time();
+
+    esp_err_t ret    = st7789_push_pixels_inner(x, y, w, h, data);
+
+    uint32_t  us     = (uint32_t)(esp_timer_get_time() - start);
+    s_perf_flushes++;
+    s_perf_trans    += (s_perf_trans_ctr - t0);
+    s_perf_total_us += us;
+    s_perf_total_px += (uint64_t)(w > 0 ? w : 0) * (uint64_t)(h > 0 ? h : 0);
+    if (us > s_perf_max_us) s_perf_max_us = us;
+
+    if (s_perf_flushes >= ST7789_PERF_WINDOW) {
+        ESP_LOGW(TAG, "[perf] %lu flushes: %lu trans/flush, %lu us/flush avg, "
+                      "%lu us max, %lu px/flush, %s",
+                 (unsigned long)s_perf_flushes,
+                 (unsigned long)(s_perf_trans   / s_perf_flushes),
+                 (unsigned long)(s_perf_total_us / s_perf_flushes),
+                 (unsigned long)s_perf_max_us,
+                 (unsigned long)(s_perf_total_px / s_perf_flushes),
+                 s_bulk_buf ? "BULK" : "row-by-row");
+        s_perf_flushes  = 0;
+        s_perf_trans    = 0;
+        s_perf_total_us = 0;
+        s_perf_max_us   = 0;
+        s_perf_total_px = 0;
+    }
+    return ret;
 }
 
 // See st7789_push_pixels()'s doc comment — same reasoning applies here.
