@@ -43,7 +43,7 @@ the next measurement.
 |---|---|---|---|---|---|
 | Actual SPI clock (kHz) | `spi_device_get_actual_freq()` | **80 000 — not clamped** | | | |
 | `lv_timer_handler()`, idle (ms) | warn hook at 16 ms | **18–19, every 200 ms** | | | |
-| `lv_timer_handler()`, shade + switcher (ms) | same | **median 24, p95 165, max 290** | | | |
+| `lv_timer_handler()`, shade + switcher (ms) | same | **median 24, p95 165, max 290** | median 164, p95 281, max 348 *(F9, reverting)* | **median 49, p95 50, max 53** ✅ | |
 | SPI transactions per flush — idle / active | counter in `push_pixels` | **34 / 66** | **6 / 7** | | |
 | µs per flush, avg — idle / active | counter in `push_pixels` | **3251 / 10 444** | **1446 / 7465** | | |
 | px per flush — idle / active | counter in `push_pixels` | **2740 / 18 387** | 2699 / 19 140 | | |
@@ -258,6 +258,50 @@ Two consequences, both matching the reported feel:
 The fix is to feed real elapsed time — measure the loop with `esp_timer_get_time()`
 and pass the true delta, or give LVGL an `esp_timer`-backed tick source. Nearly
 free, and independent of every other item here. Also in Mochi's file.
+
+---
+
+### F11 — The whole firmware was built at `-Og` ✅ **FIXED — the single biggest win**
+
+Found by pulling an unrelated thread: a question about IRAM headroom led to reading
+the resolved sdkconfig, which said `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y`.
+
+Every line of the image — including all of LVGL's per-pixel alpha-blending inner
+loops, which Step 1 had just shown to be ~87% of frame time — was compiled at debug
+optimisation. `-Og` keeps values in memory across statements and does not unroll,
+which is worst-case for exactly that kind of tight arithmetic loop over a pixel
+buffer. It was never a decision; it is the IDF default nobody revisited.
+
+Fix: `CONFIG_COMPILER_OPTIMIZATION_PERF=y` in `sdkconfig_tdeck_plus.overrides`.
+
+Measured at matched pixel load (~4,000 px/flush), everything else held constant:
+
+| Metric | Before | After | |
+|---|---|---|---|
+| Median `lv_timer_handler()` | 164 ms | **49 ms** | 3.3× |
+| Mean | 137 ms | **48.8 ms** | 2.8× |
+| p95 | 281 ms | **50 ms** | 5.6× |
+| Max | 348 ms | **53 ms** | 6.6× |
+| Idle flush | 1446 µs | **1249 µs** | 1.16× |
+| DIRAM free | 48,693 | **64,429** | +15.7 KB |
+
+The shape matters as much as the numbers. The distribution was bimodal with an
+83-sample cluster at 140–159 ms and a tail to 348 ms. It is now a **single 40–59 ms
+band, 239 samples, 7 ms wide**. And **F8 is gone** — the periodic 18–19 ms idle
+hitch dropped from ~300 warnings/minute to 7.
+
+Cost: one config line, plus one real `-Werror=format-truncation` in `taskmgr.c` that
+`-Og` had been hiding (a long app name would silently have eaten the `(no window)`
+suffix — the one thing that row exists to show). `-O2` also came out **smaller** in
+DIRAM, so it paid for itself twice.
+
+Two lessons worth keeping:
+
+1. **The build configuration was never examined.** Six findings were derived from
+   reading source before anyone asked what flags that source was compiled with —
+   and the flags were worth more than all of them together.
+2. **It surfaced from an off-hand question about IRAM**, not from the plan. The
+   plan's own ordering would never have reached it.
 
 ---
 

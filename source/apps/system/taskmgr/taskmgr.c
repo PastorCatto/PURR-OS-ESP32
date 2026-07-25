@@ -53,8 +53,18 @@ static void refresh_task_list(void) {
         const app_entry_t *app = app_manager_get(i);
         if (!app || app->state != APP_STATE_RUNNING) continue;
 
+        // Name is explicitly bounded at 38 chars rather than left to snprintf's
+        // own truncation. 38 + " [kitten]" (9) + " (no window)" (12) + NUL fits
+        // the 64-byte row exactly, which means the two suffixes always survive.
+        // Letting the whole string truncate instead would drop them first — and
+        // "(no window)" is the one piece of state this row exists to show, so
+        // losing it to a long app name is precisely backwards.
+        //
+        // GCC only reports this at -O2 (-Werror=format-truncation needs the
+        // analysis passes -Og skips), so it surfaced when this device moved off
+        // the debug optimisation level, not from any change to this file.
         snprintf(s_row_labels[s_row_count], sizeof(s_row_labels[s_row_count]),
-                 "%s [%s]%s", app->name, tier_label(app->tier),
+                 "%.38s [%s]%s", app->name, tier_label(app->tier),
                  app->window ? "" : " (no window)");
         s_row_label_ptrs[s_row_count] = s_row_labels[s_row_count];
         s_row_idx[s_row_count] = i;

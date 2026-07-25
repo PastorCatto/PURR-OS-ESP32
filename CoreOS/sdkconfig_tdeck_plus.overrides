@@ -1,6 +1,25 @@
 # PURR OS — tdeck_plus manual overrides (hand-maintained; chained after the
 # AUTO-GENERATED CoreOS/sdkconfig_tdeck_plus in SDKCONFIG_DEFAULTS)
 
+# Compile at -O2 instead of -Og. The project default is
+# CONFIG_COMPILER_OPTIMIZATION_DEBUG, which is a reasonable default for a
+# kernel being brought up on new hardware and a bad one for this device now.
+#
+# Why it matters HERE specifically, from measurement rather than principle
+# (DP8_CHECKLIST.md Step 0/1): after the st7789 bulk-transfer fix, the display
+# driver accounts for only ~13% of wall time on this board. Roughly 87% is
+# LVGL's software rendering — per-pixel alpha blending of the translucent
+# system UI over the wallpaper, in tight inner loops. Tight arithmetic loops
+# over a pixel buffer are the single case where -Og vs -O2 differs most:
+# -Og keeps values in memory across statements and does not unroll or
+# vectorise, so it can cost well over a factor of two on exactly this code.
+#
+# The debug build was never a deliberate choice for a release image — it is
+# the IDF default nobody revisited. Assertions are deliberately left at their
+# current level; that is a separate change with separate risk, and only one
+# variable moves at a time here.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
 # WinCE-style taskbar+start-menu desktop instead of the default icon-grid
 # desktop — EXPERIMENTAL, opted into on this device for testing/dogfooding
 # ahead of a possible wider rollout to the T-Deck series.
