@@ -1,7 +1,7 @@
 # PURR OS — v1.0.0-dp8
 
-> **Docs current as of DP8.** Documentation was deliberately left to drift
-> through the DP cycle while the focus was stability; it has now been brought
+> **Docs current as of Developer Preview 8.** Documentation was deliberately left to drift
+> through the Developer Preview cycle while the focus was stability; it has now been brought
 > back in line with the code ahead of a 1.0 RC. Every version number, module,
 > driver, device and command listed across `docs/` was verified against the
 > tree. Reach out with any issues or concerns.
