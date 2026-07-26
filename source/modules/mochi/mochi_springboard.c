@@ -331,7 +331,7 @@ static lv_obj_t *build_icon(lv_obj_t *parent, int registry_idx,
     lv_obj_remove_style_all(sq);
     lv_obj_set_size(sq, size, size);
     lv_obj_set_pos(sq, x, y);
-    lv_obj_set_style_radius(sq, radius, 0);
+    purr_fx_radius(sq, radius);
     lv_obj_set_style_bg_color(sq, mochi_color_for_app(app->name), 0);
     lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
     lv_obj_clear_flag(sq, LV_OBJ_FLAG_SCROLLABLE);
@@ -355,7 +355,7 @@ static lv_obj_t *build_icon(lv_obj_t *parent, int registry_idx,
         lv_obj_t *dot = lv_obj_create(parent);
         lv_obj_remove_style_all(dot);
         lv_obj_set_size(dot, 4, 4);
-        lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+        purr_fx_radius(dot, LV_RADIUS_CIRCLE);
         lv_obj_set_style_bg_color(dot, COL_LABEL_2, 0);
         lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
         lv_obj_set_pos(dot, (lv_coord_t)(x + size / 2 - 2), (lv_coord_t)(y + size + 1));
@@ -449,7 +449,7 @@ static void render_all(void)
             lv_obj_t *d = lv_obj_create(s_screen);
             lv_obj_remove_style_all(d);
             lv_obj_set_size(d, DOT_SIZE, DOT_SIZE);
-            lv_obj_set_style_radius(d, LV_RADIUS_CIRCLE, 0);
+            purr_fx_radius(d, LV_RADIUS_CIRCLE);
             lv_obj_set_pos(d, dx, s_m.dots_y);
             lv_obj_clear_flag(d, LV_OBJ_FLAG_CLICKABLE);
             s_dots[i] = d;
@@ -467,7 +467,7 @@ static void render_all(void)
         lv_obj_remove_style_all(dock);
         lv_obj_set_size(dock, dock_w, s_m.dock_h);
         lv_obj_set_pos(dock, 12, s_m.dock_y);
-        lv_obj_set_style_radius(dock, 16, 0);
+        purr_fx_radius(dock, 16);
         lv_obj_set_style_bg_color(dock, COL_PANEL, 0);
         // Translucent rather than solid: iOS's dock is a blur over the
         // wallpaper. Real blur is far too expensive per frame here, but
@@ -562,7 +562,7 @@ static void build_home_button(uint16_t w, uint16_t h)
     lv_obj_t *pill = lv_obj_create(s_home_btn);
     lv_obj_remove_style_all(pill);
     lv_obj_set_size(pill, pill_w, HOME_PILL_H);
-    lv_obj_set_style_radius(pill, HOME_PILL_H / 2, 0);
+    purr_fx_radius(pill, HOME_PILL_H / 2);
     lv_obj_set_style_bg_color(pill, COL_INDICATOR, 0);
     purr_systemui_fx_bg_opa(pill, LV_OPA_40);
     lv_obj_align(pill, LV_ALIGN_BOTTOM_MID, 0, -4);

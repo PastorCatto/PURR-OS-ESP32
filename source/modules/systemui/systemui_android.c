@@ -217,7 +217,7 @@ static lv_obj_t *build_lp_navbtn(lv_obj_t *parent, const char *symbol, lv_event_
     lv_obj_t *btn = lv_obj_create(parent);
     lv_obj_remove_style_all(btn);
     lv_obj_set_size(btn, LP_NAVBTN_SIZE, LP_NAVBTN_SIZE);
-    lv_obj_set_style_radius(btn, (lv_coord_t)(LP_NAVBTN_SIZE / 2), 0);
+    purr_fx_radius(btn, (lv_coord_t)(LP_NAVBTN_SIZE / 2));
     lv_obj_set_style_bg_color(btn, lv_color_make(0x30, 0x30, 0x30), 0);
     purr_systemui_fx_bg_opa_keep(btn, LV_OPA_70);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
@@ -240,7 +240,7 @@ static lv_obj_t *build_lp_home_navbtn(lv_obj_t *parent, lv_event_cb_t click_cb)
     lv_obj_t *btn = lv_obj_create(parent);
     lv_obj_remove_style_all(btn);
     lv_obj_set_size(btn, LP_NAVBTN_SIZE, LP_NAVBTN_SIZE);
-    lv_obj_set_style_radius(btn, (lv_coord_t)(LP_NAVBTN_SIZE / 2), 0);
+    purr_fx_radius(btn, (lv_coord_t)(LP_NAVBTN_SIZE / 2));
     lv_obj_set_style_bg_color(btn, lv_color_make(0x30, 0x30, 0x30), 0);
     purr_systemui_fx_bg_opa_keep(btn, LV_OPA_70);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
@@ -251,7 +251,7 @@ static lv_obj_t *build_lp_home_navbtn(lv_obj_t *parent, lv_event_cb_t click_cb)
     lv_obj_t *circle = lv_obj_create(btn);
     lv_obj_remove_style_all(circle);
     lv_obj_set_size(circle, dot, dot);
-    lv_obj_set_style_radius(circle, (lv_coord_t)(dot / 2), 0);
+    purr_fx_radius(circle, (lv_coord_t)(dot / 2));
     lv_obj_set_style_bg_color(circle, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(circle, LV_OPA_COVER, 0);
     lv_obj_clear_flag(circle, LV_OBJ_FLAG_SCROLLABLE);
@@ -504,7 +504,7 @@ static void ck_build_panel(ck_panel_t *p, uint16_t w, const char *title, lv_obj_
     lv_obj_set_size(p->handle, 40, 5);
     lv_obj_set_style_bg_color(p->handle, lv_color_make(0x80, 0x80, 0x80), 0);
     lv_obj_set_style_bg_opa(p->handle, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(p->handle, 3, 0);
+    purr_fx_radius(p->handle, 3);
     lv_obj_clear_flag(p->handle, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(p->handle, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_align(p->handle, LV_ALIGN_BOTTOM_MID, 0, -4);
@@ -635,7 +635,7 @@ static void ck_build_status_icons(uint16_t w)
     lv_obj_set_size(s_icon_mail_badge, 6, 6);
     lv_obj_set_style_bg_color(s_icon_mail_badge, lv_color_make(0xE0, 0x30, 0x30), 0);
     lv_obj_set_style_bg_opa(s_icon_mail_badge, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(s_icon_mail_badge, LV_RADIUS_CIRCLE, 0);
+    purr_fx_radius(s_icon_mail_badge, LV_RADIUS_CIRCLE);
     lv_obj_set_pos(s_icon_mail_badge, (lv_coord_t)(w - 8), 2);
     lv_obj_clear_flag(s_icon_mail_badge, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(s_icon_mail_badge, LV_OBJ_FLAG_SCROLLABLE);
@@ -928,7 +928,7 @@ static void lp_recents_open(void)
             lv_obj_remove_style_all(card);
             lv_obj_set_size(card, card_w, card_h);
             lv_obj_set_pos(card, (w - card_w) / 2, top_pad + shown * step);
-            lv_obj_set_style_radius(card, 16, 0);
+            purr_fx_radius(card, 16);
             lv_obj_set_style_bg_color(card, s_host->tint_color(app->name, 0x30), 0);
             purr_systemui_fx_bg_opa_keep(card, LV_OPA_80);
             lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);

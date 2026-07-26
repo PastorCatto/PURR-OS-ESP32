@@ -40,6 +40,32 @@
 extern "C" {
 #endif
 
+// ── TEMPORARY DIAGNOSTIC: corner radius on/off ──────────────────────────────
+//
+// Set to 1 to force every rounded corner square. Purely a measurement switch —
+// nothing ships with this on.
+//
+// Why it is worth measuring: LVGL's software renderer draws a rounded corner by
+// computing per-pixel arc coverage for anti-aliasing, which is among the more
+// expensive things it does. Crucially it costs the SAME whether the surface is
+// opaque or translucent — which fits the observation that turning effects off
+// changed the frame rate not at all. If corners are the cost, this flag will
+// show it immediately in the frame histogram; if it changes nothing, the
+// biggest remaining candidate is eliminated and the next step is per-frame
+// render-vs-flush instrumentation rather than another guess.
+// Measured on hardware: corners cost roughly a third of a frame during a
+// full-screen scroll (mean frame 47-76ms with, 22-43ms without). Left OFF —
+// i.e. corners restored — because the look is deliberate and the half-height
+// shade below recovers area cost more cheaply. Flip to 1 to re-measure.
+#ifndef PURR_FX_TEST_NO_RADIUS
+#define PURR_FX_TEST_NO_RADIUS 0
+#endif
+
+static inline void purr_fx_radius(lv_obj_t *obj, lv_coord_t r)
+{
+    lv_obj_set_style_radius(obj, PURR_FX_TEST_NO_RADIUS ? 0 : r, 0);
+}
+
 // ── Translucency, in one place ──────────────────────────────────────────────
 //
 // Every surface that is deliberately see-through sets its background opacity

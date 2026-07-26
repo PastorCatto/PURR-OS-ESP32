@@ -112,6 +112,9 @@ static bool      s_locked = false;
 
 static void panel_set_state(panel_t *p, panel_state_t s);
 static void set_status_visible(bool show);
+// Defined with the lock screen further down; called from the shade's drag
+// handler, which sits above it.
+static void lock_engage(bool dim);
 
 // ── Relative timestamps ─────────────────────────────────────────────────────
 
@@ -195,7 +198,7 @@ static lv_obj_t *build_notif_card(lv_obj_t *parent, const purr_notification_t *n
     lv_obj_t *card = lv_obj_create(parent);
     lv_obj_remove_style_all(card);
     lv_obj_set_size(card, w, CARD_H);
-    lv_obj_set_style_radius(card, CARD_RADIUS, 0);
+    purr_fx_radius(card, CARD_RADIUS);
     lv_obj_set_style_bg_color(card, COL_CARD, 0);
     // Frosted rather than solid: iOS notification cards are translucent over
     // whatever is behind them. Real blur is not affordable per-frame here, but
@@ -209,7 +212,7 @@ static lv_obj_t *build_notif_card(lv_obj_t *parent, const purr_notification_t *n
     lv_obj_remove_style_all(mark);
     lv_obj_set_size(mark, CARD_ICON, CARD_ICON);
     lv_obj_set_pos(mark, 8, 7);
-    lv_obj_set_style_radius(mark, 5, 0);
+    purr_fx_radius(mark, 5);
     lv_obj_set_style_bg_color(mark,
         (s_host && s_host->tint_color) ? s_host->tint_color(n->source, 0x30) : COL_GREY, 0);
     lv_obj_set_style_bg_opa(mark, LV_OPA_COVER, 0);
@@ -305,7 +308,7 @@ static void fill_notif_cards(lv_obj_t *scroll, lv_coord_t card_w, bool on_dark)
             lv_obj_remove_style_all(del);
             lv_obj_set_size(del, CARD_H, CARD_H);
             lv_obj_set_pos(del, (lv_coord_t)(card_w - CARD_H), 0);
-            lv_obj_set_style_radius(del, CARD_RADIUS, 0);
+            purr_fx_radius(del, CARD_RADIUS);
             lv_obj_set_style_bg_color(del, COL_RED, 0);
             lv_obj_set_style_bg_opa(del, LV_OPA_COVER, 0);
             lv_obj_clear_flag(del, LV_OBJ_FLAG_SCROLLABLE);
@@ -372,9 +375,30 @@ static lv_obj_t *make_scroll(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
 // hiding it: the drag is caught by the always-present hotzones (see
 // purr_systemui_init), not by the panel itself, so there is no need for any
 // part of the panel to be on-screen to start the gesture.
+// How much of the panel is on screen when open. HALF, not all of it.
+//
+// Two reasons, and the second is measured rather than aesthetic:
+//
+//   * A full-height shade covers the display, so there is nowhere to see what
+//     the notification relates to. Half leaves the app or springboard visible
+//     behind it, which is what iOS does with its own Notification Centre peek.
+//   * Redraw cost is proportional to area. Reported from hardware: "if it takes
+//     more than 50% of the display it starts lagging", and measured at 18fps
+//     with the shade half down against 10fps full. Halving the open height
+//     roughly doubles the frame rate of the drag itself.
+#define PANEL_OPEN_H  (PANEL_EXPANDED_H / 2)
+
+// Extra travel allowed past the open position. Dragging into this band and
+// releasing is the gesture that drops to the lock screen — see panel_drag_cb().
+// Wide enough to be deliberate, narrow enough to reach in one thumb motion.
+#define PANEL_OVERPULL 44
+
 static lv_coord_t panel_y_for(panel_state_t s)
 {
-    return (s == PANEL_EXPANDED) ? 0 : (lv_coord_t)(-PANEL_EXPANDED_H);
+    // Open shows PANEL_OPEN_H of a PANEL_EXPANDED_H-tall object, so the object
+    // sits partly above the top edge.
+    return (s == PANEL_EXPANDED) ? (lv_coord_t)(PANEL_OPEN_H - PANEL_EXPANDED_H)
+                                  : (lv_coord_t)(-PANEL_EXPANDED_H);
 }
 
 static void panel_set_state(panel_t *p, panel_state_t s)
@@ -415,11 +439,38 @@ static void panel_drag_cb(lv_event_t *e)
         lv_point_t pt; lv_indev_get_point(indev, &pt);
         lv_coord_t ny = (lv_coord_t)(p->base_y + (pt.y - p->press_y0));
         if (ny < panel_y_for(PANEL_PEEK)) ny = panel_y_for(PANEL_PEEK);
-        if (ny > 0) ny = 0;
+        // Travel is allowed PAST the open position, into the overpull band, so
+        // the lock gesture below has somewhere to happen and the user can feel
+        // the shade give before it commits.
+        lv_coord_t max_y = (lv_coord_t)(panel_y_for(PANEL_EXPANDED) + PANEL_OVERPULL);
+        if (ny > max_y) ny = max_y;
         lv_obj_set_y(p->panel, ny);
+        // Handle appears as soon as there is anything to grab, not only once
+        // open — that is the "little thing to grab" while mid-pull.
+        if (ny > panel_y_for(PANEL_PEEK)) lv_obj_clear_flag(p->handle, LV_OBJ_FLAG_HIDDEN);
     } else if (code == LV_EVENT_RELEASED) {
-        lv_coord_t y = lv_obj_get_y(p->panel);
-        panel_set_state(p, (y > -(PANEL_EXPANDED_H / 2)) ? PANEL_EXPANDED : PANEL_PEEK);
+        lv_coord_t y      = lv_obj_get_y(p->panel);
+        lv_coord_t open_y = panel_y_for(PANEL_EXPANDED);
+
+        // Three outcomes from one rule: released BELOW the open position means
+        // the lock screen.
+        //
+        // That single test covers both gestures the user asked for. From closed
+        // it is an overpull — one long drag straight past half. From already
+        // open it is any further downward drag, because the panel is already
+        // sitting at open_y and cannot go lower without exceeding it. No state
+        // flag or double-tap timer needed.
+        if (y > open_y + PANEL_OVERPULL / 3) {
+            panel_set_state(p, PANEL_PEEK);
+            lock_engage(false);   // deliberate: keep the backlight on
+            return;
+        }
+
+        // Otherwise settle to whichever end is nearer, measured against the
+        // OPEN position rather than the panel's full height — the panel is
+        // taller than the distance it travels.
+        panel_set_state(p, (y > (open_y + panel_y_for(PANEL_PEEK)) / 2)
+                            ? PANEL_EXPANDED : PANEL_PEEK);
     }
 }
 
@@ -443,7 +494,7 @@ static void build_panel(panel_t *p, uint16_t w, const char *title)
     lv_obj_set_pos(p->panel, 0, panel_y_for(PANEL_PEEK));
     lv_obj_set_style_bg_color(p->panel, COL_SCRIM, 0);
     purr_systemui_fx_bg_opa(p->panel, LV_OPA_80);
-    lv_obj_set_style_radius(p->panel, 0, 0);
+    purr_fx_radius(p->panel, 0);
     lv_obj_clear_flag(p->panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(p->panel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(p->panel, panel_drag_cb, LV_EVENT_PRESSED, p);
@@ -464,7 +515,7 @@ static void build_panel(panel_t *p, uint16_t w, const char *title)
     p->handle = lv_obj_create(p->panel);
     lv_obj_remove_style_all(p->handle);
     lv_obj_set_size(p->handle, 40, 5);
-    lv_obj_set_style_radius(p->handle, 3, 0);
+    purr_fx_radius(p->handle, 3);
     lv_obj_set_style_bg_color(p->handle, COL_GREY, 0);
     lv_obj_set_style_bg_opa(p->handle, LV_OPA_COVER, 0);
     lv_obj_align(p->handle, LV_ALIGN_BOTTOM_MID, 0, -4);
@@ -508,7 +559,7 @@ static void refresh_ctrl(void)
         lv_obj_t *row = lv_obj_create(s_ctrl_panel.scroll);
         lv_obj_remove_style_all(row);
         lv_obj_set_size(row, w, 34);
-        lv_obj_set_style_radius(row, 10, 0);
+        purr_fx_radius(row, 10);
         lv_obj_set_style_bg_color(row, COL_CARD, 0);
         purr_systemui_fx_bg_opa_keep(row, LV_OPA_20);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
@@ -521,7 +572,7 @@ static void refresh_ctrl(void)
 
         lv_obj_t *open = lv_btn_create(row);
         lv_obj_set_size(open, 46, 24);
-        lv_obj_set_style_radius(open, 12, 0);
+        purr_fx_radius(open, 12);
         lv_obj_set_style_bg_color(open, COL_ACCENT, 0);
         lv_obj_align(open, LV_ALIGN_RIGHT_MID, -56, 0);
         lv_obj_t *ol = lv_label_create(open);
@@ -531,7 +582,7 @@ static void refresh_ctrl(void)
 
         lv_obj_t *kill = lv_btn_create(row);
         lv_obj_set_size(kill, 46, 24);
-        lv_obj_set_style_radius(kill, 12, 0);
+        purr_fx_radius(kill, 12);
         lv_obj_set_style_bg_color(kill, COL_RED, 0);
         lv_obj_align(kill, LV_ALIGN_RIGHT_MID, -6, 0);
         lv_obj_t *kl = lv_label_create(kill);
@@ -820,6 +871,35 @@ static void refresh_lock_notifs(void)
     }
 }
 
+// Engage the lock screen.
+//
+// `dim` separates the two ways in: an IDLE timeout blanks the backlight because
+// the point is to stop burning power at something nobody is looking at, whereas
+// a DELIBERATE swipe must leave the screen lit — the user asked to see the lock
+// screen and is about to scroll its notifications. Blanking on a gesture would
+// read as the device switching off in your hand.
+static void lock_engage(bool dim)
+{
+    if (s_locked) return;
+    s_locked = true;
+    if (dim) {
+        const catcall_display_t *disp = purr_kernel_display();
+        if (disp && disp->set_brightness) disp->set_brightness(0);
+    }
+    refresh_lock();
+    s_lock_notifs_revealed = false;
+    refresh_lock_notifs();
+    // The lock screen takes precedence. Collapse both panels rather than
+    // leaving one open underneath it: whatever gesture got here is finished,
+    // and an open shade behind the lock screen would still be there on unlock,
+    // which is not what anyone meant by "lock".
+    if (s_notif_panel.panel) panel_set_state(&s_notif_panel, PANEL_PEEK);
+    if (s_ctrl_panel.panel)  panel_set_state(&s_ctrl_panel,  PANEL_PEEK);
+
+    lv_obj_clear_flag(s_lock_screen, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_lock_screen);
+}
+
 static void lock_check_idle(void)
 {
     if (s_locked) return;
@@ -939,7 +1019,7 @@ void purr_systemui_open_recents(void)
         lv_obj_t *card = lv_obj_create(s_recents_scroll);
         lv_obj_remove_style_all(card);
         lv_obj_set_size(card, card_w, card_h);
-        lv_obj_set_style_radius(card, 16, 0);
+        purr_fx_radius(card, 16);
         lv_obj_set_style_bg_color(card, COL_CARD, 0);
         purr_systemui_fx_bg_opa_keep(card, LV_OPA_90);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
@@ -949,7 +1029,7 @@ void purr_systemui_open_recents(void)
         lv_obj_t *mark = lv_obj_create(card);
         lv_obj_remove_style_all(mark);
         lv_obj_set_size(mark, 44, 44);
-        lv_obj_set_style_radius(mark, 11, 0);
+        purr_fx_radius(mark, 11);
         lv_obj_set_style_bg_color(mark,
             s_host->tint_color ? s_host->tint_color(app->name, 0x30) : COL_GREY, 0);
         lv_obj_set_style_bg_opa(mark, LV_OPA_COVER, 0);
@@ -978,7 +1058,7 @@ void purr_systemui_open_recents(void)
         lv_obj_t *kill = lv_obj_create(card);
         lv_obj_remove_style_all(kill);
         lv_obj_set_size(kill, 26, 26);
-        lv_obj_set_style_radius(kill, LV_RADIUS_CIRCLE, 0);
+        purr_fx_radius(kill, LV_RADIUS_CIRCLE);
         lv_obj_set_style_bg_color(kill, COL_RED, 0);
         lv_obj_set_style_bg_opa(kill, LV_OPA_COVER, 0);
         lv_obj_align(kill, LV_ALIGN_TOP_RIGHT, -6, 6);

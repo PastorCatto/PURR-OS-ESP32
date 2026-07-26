@@ -560,7 +560,7 @@ static void tb_tile_grid_set_items_async_cb(void *user) {
             lv_obj_t *tile = lv_obj_create(grid);
             lv_obj_remove_style_all(tile);
             lv_obj_set_size(tile, TILE_W, TILE_H);
-            lv_obj_set_style_radius(tile, 10, 0);
+            purr_fx_radius(tile, 10);
             uint32_t color = (sctx->colors && sctx->colors[i]) ? sctx->colors[i] : 0x3A3A3Cu;
             lv_obj_set_style_bg_color(tile, lv_color_hex(color), 0);
             // _keep, not the accent variant: each tile's colour identifies the
