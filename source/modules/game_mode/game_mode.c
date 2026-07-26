@@ -36,6 +36,9 @@ static const char *TAG = "game_mode";
 //
 // 32 matches purr_module_header_t::name.
 static char s_suspended[MAX_SUSPENDED][32];
+// Which entries actually came out. An entry that failed to unload must not be
+// "restored" later - it never left.
+static bool s_unloaded[MAX_SUSPENDED];
 static int  s_suspended_n = 0;
 static bool s_active      = false;
 
@@ -47,6 +50,11 @@ static bool s_active      = false;
 // often; two consecutive misses (10s of silence) is treated as a hang.
 #define GAME_MODE_BEAT_MS      5000
 #define GAME_MODE_MISSED_BEATS 2
+
+// Per-module ceiling on deinit(). Generous - some modules legitimately wait on
+// a task to finish - but finite, because a hung deinit with the UI already
+// unloaded is an unrecoverable black screen.
+#define GAME_MODE_UNLOAD_TIMEOUT_MS 3000
 
 bool purr_game_mode_active(void) { return s_active; }
 
@@ -80,6 +88,10 @@ static bool is_kept(const purr_module_header_t *h)
     return false;
 }
 
+// Trampoline for purr_kernel_run_bounded(), which runs its callee on a helper
+// task so a deinit that never returns cannot take the caller with it.
+static void unload_one(void *arg) { purr_kernel_unload_module((const char *)arg); }
+
 static size_t free_internal(void) { return heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
 
 int purr_game_mode_enter(const char *label)
@@ -96,6 +108,7 @@ int purr_game_mode_enter(const char *label)
     // Concretely: the UI backend must go before systemui, because the backend's
     // task calls purr_systemui_tick() every frame.
     s_suspended_n = 0;
+    memset(s_unloaded, 0, sizeof(s_unloaded));
     for (int i = purr_kernel_module_count() - 1; i >= 0; i--) {
         const purr_module_header_t *h = purr_kernel_module_at(i);
         if (is_kept(h)) continue;
@@ -165,9 +178,52 @@ int purr_game_mode_enter(const char *label)
     s_active = true;   // set before unloading: the UI backend's deinit may run
                        // code that asks whether game mode is active.
 
+    // PHASE 1 — UI backends, directly, with the lock still held.
+    //
+    // These are the ones that must not be deleted mid-draw (see the lock
+    // comment above), and they must go before systemui, whose tick they call
+    // every frame. Unloaded directly rather than through the bounded helper
+    // below, because that helper runs the deinit on ANOTHER task — and several
+    // backends take purr_kernel_ui_lock() in their own deinit, which this task
+    // is currently holding. Recursive mutexes only re-enter for the same task,
+    // so a helper task would block on it forever.
     for (int i = 0; i < s_suspended_n; i++) {
+        const purr_module_header_t *h = purr_kernel_get_static_module(s_suspended[i]);
+        if (!h || h->module_type != PURR_MOD_UI) continue;
         purr_splash_status(s_suspended[i]);
         purr_kernel_unload_module(s_suspended[i]);
+        s_unloaded[i] = true;
+        purr_splash_advance();
+    }
+
+    // Lock released before phase 2 so a deinit that wants it can have it.
+    // Safe now: every UI backend is gone, so nothing else is drawing.
+    purr_kernel_ui_unlock();
+
+    // PHASE 2 — everything else, BOUNDED.
+    //
+    // Game mode is the first thing in this OS to call deinit() at runtime, so
+    // every one of these paths is effectively unexercised. proximity_deinit()
+    // proved the point: it deletes its own task and only THEN unregisters its
+    // ESP-NOW callbacks, so the task can be killed mid-callback holding an
+    // internal lock that esp_now_deinit() then waits on forever — hanging the
+    // whole transition with the UI already gone.
+    //
+    // One badly-behaved deinit must not be able to wedge the device. A module
+    // that overruns is logged and left loaded; game mode continues with less
+    // memory freed, which is strictly better than never returning.
+    for (int i = 0; i < s_suspended_n; i++) {
+        if (s_unloaded[i]) continue;   // already done in phase 1
+        purr_splash_status(s_suspended[i]);
+        if (purr_kernel_run_bounded("gm_unload", unload_one,
+                                     s_suspended[i], GAME_MODE_UNLOAD_TIMEOUT_MS)) {
+            s_unloaded[i] = true;
+        } else {
+            // Left loaded, and left FALSE in s_unloaded so exit() does not try
+            // to restore something that never came out.
+            ESP_LOGW(TAG, "%s deinit did not return in %dms — leaving it loaded",
+                     s_suspended[i], GAME_MODE_UNLOAD_TIMEOUT_MS);
+        }
         purr_splash_advance();
     }
 
@@ -178,10 +234,8 @@ int purr_game_mode_enter(const char *label)
     purr_splash_status(label ? label : "loading");
     purr_splash_advance();
 
-    // Released only now. Every UI backend that could have been drawing is gone,
-    // so from here the caller owns the panel outright and takes the SPI bus
-    // per-push through the display driver like anyone else.
-    purr_kernel_ui_unlock();
+    // NOTE: the UI lock was already released after phase 1 — it must be, so
+    // phase 2's helper task can take it. Do not add a second unlock here.
     return s_suspended_n;
 }
 
@@ -205,6 +259,7 @@ int purr_game_mode_exit(void)
     // Reverse of the suspend list = original load order.
     int restored = 0;
     for (int i = s_suspended_n - 1; i >= 0; i--) {
+        if (!s_unloaded[i]) continue;   // never came out; nothing to put back
         purr_splash_status(s_suspended[i]);
         if (purr_kernel_enable_static_module(s_suspended[i]) == 0) restored++;
         else ESP_LOGW(TAG, "failed to restore %s", s_suspended[i]);

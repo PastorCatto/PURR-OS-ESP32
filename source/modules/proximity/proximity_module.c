@@ -451,6 +451,20 @@ int proximity_init(void) {
 }
 
 void proximity_deinit(void) {
+    // Callbacks OFF FIRST, before the task is deleted.
+    //
+    // The original order deleted the task and only then unregistered — which
+    // left a window where the task could be killed inside an ESP-NOW callback
+    // holding an internal lock, after which esp_now_deinit() below waits on
+    // that lock forever. Confirmed on hardware: game mode hung here, with the
+    // UI backend already unloaded, so the device was a black screen with no way
+    // back.
+    //
+    // Unregistering first means no new callback can start, and any in flight
+    // completes before vTaskDelete() is reached.
+    esp_now_unregister_recv_cb();
+    esp_now_unregister_send_cb();
+
     if (s_task) {
         // Must match whichever allocator actually created this task's
         // stack (see proximity_init()'s comment) — vTaskDelete() on a
@@ -461,8 +475,6 @@ void proximity_deinit(void) {
         else                         vTaskDelete(s_task);
         s_task = NULL;
     }
-    esp_now_unregister_recv_cb();
-    esp_now_unregister_send_cb();
     esp_now_deinit();
     if (s_rx_queue) {
         vQueueDelete(s_rx_queue);
