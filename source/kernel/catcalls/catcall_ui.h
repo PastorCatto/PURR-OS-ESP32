@@ -12,7 +12,10 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
-#define CATCALL_UI_VERSION 7
+// 8: added the menu primitive (menu_create/set_sections/cb/get_selected).
+//    See the menu block below for why it belongs in the contract rather than
+//    in a backend.
+#define CATCALL_UI_VERSION 8
 
 typedef uint32_t purr_win_t;   // window handle
 typedef uint32_t purr_wid_t;   // widget handle (label, button, textarea, etc.)
@@ -58,6 +61,19 @@ typedef enum {
     PURR_LAYOUT_ROW = 0,
     PURR_LAYOUT_COL = 1,
 } purr_layout_t;
+
+// One group of a menu — see catcall_ui_t::menu_set_sections below.
+//
+// values[] is optional (NULL, or NULL per row) and holds right-aligned detail
+// text: "Brightness  80%", "Backend  Meshtastic". That is what turns a list of
+// actions into a settings screen, and it is why a plain list_set_items() could
+// never replace this.
+typedef struct {
+    const char  *header;   // section header, or NULL for an unheaded group
+    const char **items;    // row labels, `count` of them
+    const char **values;   // optional right-hand text, or NULL
+    int          count;
+} purr_menu_section_t;
 
 typedef struct {
     const char  *name;
@@ -145,6 +161,39 @@ typedef struct {
                                          const char **labels, const char **symbols,
                                          const uint32_t *colors,
                                          purr_win_cb_t *cbs, void **users, int count);
+
+    // ── Menu (sectioned list of actions) ───────────────────────────────────
+    //
+    // The primitive this contract was missing, and the reason apps are full of
+    // scattered buttons.
+    //
+    // A settings screen, a backend chooser, an app's own navigation — these are
+    // all ONE THING: a grouped list of actions, optionally with a header per
+    // group and a value on the right. The contract had no word for it, so every
+    // app spelled it out as a pile of btn_create() calls. That is why they look
+    // inconsistent, why they are slow (each themed button carries its own
+    // background, border, radius and shadow, re-rendered every scroll frame),
+    // and why restyling a backend cannot fix it — a backend can only change how
+    // a button LOOKS, not the fact that the app asked for twenty of them.
+    //
+    // With this, an app declares its sections once and every backend renders
+    // them natively: an iOS grouped table under Mochi, an Android-style list
+    // under Cupcake, plain rows under MiniWin. Same app code, no #ifdefs.
+    //
+    // Optional in the same sense as label_set_big/list_set_items_icon, but with
+    // an important difference: purr_win_menu() in purr_win.h provides a REAL
+    // fallback built from label + list, rather than returning 0 and making the
+    // caller cope. A menu is too fundamental to leave apps writing two versions
+    // of every screen — the whole point is that they stop doing that.
+    //
+    // Selection is reported as a FLAT row index across all sections, matching
+    // list_get_selected()'s shape. Apps built the sections, so they can map an
+    // index back; adding a second coordinate would buy nothing.
+    purr_wid_t (*menu_create)       (purr_win_t win);
+    void       (*menu_set_sections) (purr_wid_t wid,
+                                      const purr_menu_section_t *sections, int n);
+    void       (*menu_cb)           (purr_wid_t wid, purr_win_cb_t cb, void *user);
+    int        (*menu_get_selected) (purr_wid_t wid);
 
     // ── Layout helpers ─────────────────────────────────────────────────────
     // Begin a row or column container inside win. Returns container widget.

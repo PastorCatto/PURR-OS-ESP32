@@ -70,7 +70,20 @@ static const purr_systemui_host_t *s_host = NULL;
 #define COL_RED          lv_color_hex(0xFF3B30)
 #define COL_GREY         lv_color_hex(0x8E8E93)
 
-#define PANEL_EXPANDED_H 220
+// The shade's REAL height — it is this tall, not a taller panel slid upward.
+//
+// It was 220 on a 240px screen. Halving it was asked for on both looks and
+// speed: redraw cost is proportional to area, reported from hardware as "if it
+// takes more than 50% of the display it starts lagging" and measured at 18fps
+// half-open against 10fps full.
+//
+// The first attempt kept the object at 220 and positioned it at y=-110 so only
+// half showed. That is wrong, and it showed up immediately: the panel's top
+// half — its header and the first few notification cards — sat ABOVE the screen
+// edge, unreachable, because they were outside the visible region rather than
+// merely scrolled out of view. Making the object genuinely half-height puts all
+// of its content on screen and lets the scroll container do its job.
+#define PANEL_EXPANDED_H 116
 #define CARD_RADIUS      14
 #define CARD_H           56   // body text sits close to the lower edge at 54
 #define CARD_GAP         6
@@ -375,19 +388,6 @@ static lv_obj_t *make_scroll(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
 // hiding it: the drag is caught by the always-present hotzones (see
 // purr_systemui_init), not by the panel itself, so there is no need for any
 // part of the panel to be on-screen to start the gesture.
-// How much of the panel is on screen when open. HALF, not all of it.
-//
-// Two reasons, and the second is measured rather than aesthetic:
-//
-//   * A full-height shade covers the display, so there is nowhere to see what
-//     the notification relates to. Half leaves the app or springboard visible
-//     behind it, which is what iOS does with its own Notification Centre peek.
-//   * Redraw cost is proportional to area. Reported from hardware: "if it takes
-//     more than 50% of the display it starts lagging", and measured at 18fps
-//     with the shade half down against 10fps full. Halving the open height
-//     roughly doubles the frame rate of the drag itself.
-#define PANEL_OPEN_H  (PANEL_EXPANDED_H / 2)
-
 // Extra travel allowed past the open position. Dragging into this band and
 // releasing is the gesture that drops to the lock screen — see panel_drag_cb().
 // Wide enough to be deliberate, narrow enough to reach in one thumb motion.
@@ -395,10 +395,7 @@ static lv_obj_t *make_scroll(lv_obj_t *parent, lv_coord_t x, lv_coord_t y,
 
 static lv_coord_t panel_y_for(panel_state_t s)
 {
-    // Open shows PANEL_OPEN_H of a PANEL_EXPANDED_H-tall object, so the object
-    // sits partly above the top edge.
-    return (s == PANEL_EXPANDED) ? (lv_coord_t)(PANEL_OPEN_H - PANEL_EXPANDED_H)
-                                  : (lv_coord_t)(-PANEL_EXPANDED_H);
+    return (s == PANEL_EXPANDED) ? 0 : (lv_coord_t)(-PANEL_EXPANDED_H);
 }
 
 static void panel_set_state(panel_t *p, panel_state_t s)
@@ -1161,11 +1158,24 @@ void purr_systemui_init(const purr_systemui_host_t *host)
     uint16_t h = s_host->height();
 
     build_panel(&s_notif_panel, w, "Notifications");
-    build_panel(&s_ctrl_panel,  w, "Control Center");
 
+    // Control Center is NOT built. It listed running apps, which duplicates the
+    // taskmgr app exactly — same information, second place to find it, and a
+    // second surface to keep working. It also inherited the shade's geometry
+    // problems. Removing the panel is the fix; taskmgr remains the one place
+    // that manages running apps.
+    //
+    // Everything else that touches s_ctrl_panel is already guarded on
+    // `.panel` being non-NULL or `.state == PANEL_EXPANDED`, and the struct is
+    // static — so those all become correct no-ops rather than needing removal.
+
+    // The notification hotzone now spans the FULL width. Previously the top bar
+    // was split left/right between two panels; with one panel there is no
+    // reason to make the user find the correct half, and a full-width target is
+    // easier to hit on a 320px screen.
     s_hotzone_left = lv_obj_create(lv_layer_top());
     lv_obj_remove_style_all(s_hotzone_left);
-    lv_obj_set_size(s_hotzone_left, (lv_coord_t)(w / 2), PURR_SYSTEMUI_STATUS_H);
+    lv_obj_set_size(s_hotzone_left, (lv_coord_t)w, PURR_SYSTEMUI_STATUS_H);
     lv_obj_set_pos(s_hotzone_left, 0, 0);
     lv_obj_set_style_bg_opa(s_hotzone_left, LV_OPA_TRANSP, 0);
     lv_obj_clear_flag(s_hotzone_left, LV_OBJ_FLAG_SCROLLABLE);
@@ -1175,17 +1185,8 @@ void purr_systemui_init(const purr_systemui_host_t *host)
     lv_obj_add_event_cb(s_hotzone_left, panel_drag_cb, LV_EVENT_PRESSING, &s_notif_panel);
     lv_obj_add_event_cb(s_hotzone_left, panel_drag_cb, LV_EVENT_RELEASED, &s_notif_panel);
 
-    s_hotzone_right = lv_obj_create(lv_layer_top());
-    lv_obj_remove_style_all(s_hotzone_right);
-    lv_obj_set_size(s_hotzone_right, (lv_coord_t)(w - w / 2), PURR_SYSTEMUI_STATUS_H);
-    lv_obj_set_pos(s_hotzone_right, (lv_coord_t)(w / 2), 0);
-    lv_obj_set_style_bg_opa(s_hotzone_right, LV_OPA_TRANSP, 0);
-    lv_obj_clear_flag(s_hotzone_right, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(s_hotzone_right, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(s_hotzone_right, hotzone_right_cb, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(s_hotzone_right, panel_drag_cb, LV_EVENT_PRESSED,  &s_ctrl_panel);
-    lv_obj_add_event_cb(s_hotzone_right, panel_drag_cb, LV_EVENT_PRESSING, &s_ctrl_panel);
-    lv_obj_add_event_cb(s_hotzone_right, panel_drag_cb, LV_EVENT_RELEASED, &s_ctrl_panel);
+    // No right hotzone — see the Control Center note above. The left hotzone is
+    // now full width and owns the whole top edge.
 
     build_status(w);
     build_lock(w, h);

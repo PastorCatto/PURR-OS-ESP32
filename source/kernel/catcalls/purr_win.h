@@ -181,6 +181,71 @@ static inline void purr_win_tile_grid_set_items(purr_wid_t wid,
     _UI_VOID(tile_grid_set_items, wid, labels, symbols, colors, cbs, users, count);
 }
 
+// ── Menu (sectioned list of actions) ─────────────────────────────────────────
+//
+// Use this instead of a run of purr_win_button() calls. A settings screen, a
+// backend chooser, an app's own navigation — declare the sections once and
+// every backend renders them the way that backend should look.
+//
+//   static const char *rows[]  = { "WiFi", "Bluetooth", "Mesh" };
+//   static const char *vals[]  = { "Off",  "On",        "Meshtastic" };
+//   purr_menu_section_t sec = { .header = "Connectivity", .items = rows,
+//                               .values = vals, .count = 3 };
+//   purr_wid_t m = purr_win_menu(win);
+//   purr_win_menu_set_sections(m, &sec, 1);
+//   purr_win_menu_on_select(m, on_pick, NULL);
+//
+// on_pick reads purr_win_menu_get_selected() for a FLAT row index across all
+// sections, in declaration order.
+//
+// UNLIKE tile_grid, this is never a "check for 0 and write a second version".
+// A backend that does not implement menu_* gets a working menu built from
+// label + list below. That is deliberate: the whole point is that apps stop
+// carrying two designs, so the fallback has to be real rather than a stub.
+
+static inline purr_wid_t purr_win_menu(purr_win_t win) {
+    purr_wid_t w = _UI_CALL(purr_wid_t, 0, menu_create, win);
+    if (w) return w;
+    // Fallback: a full-size list. Sections are flattened by
+    // purr_win_menu_set_sections() below.
+    return purr_win_list(win, 100, 100);
+}
+
+static inline void purr_win_menu_set_sections(purr_wid_t wid,
+                                               const purr_menu_section_t *sections,
+                                               int n) {
+    const catcall_ui_t *ui = purr_kernel_ui();
+    if (ui && ui->menu_set_sections) {
+        _UI_VOID(menu_set_sections, wid, sections, n);
+        return;
+    }
+    // Flatten to a plain list, preserving the flat-index contract exactly:
+    // headers are NOT emitted as rows, because doing so would shift every
+    // index and silently break the caller's mapping. A backend without native
+    // menus loses the grouping, never the behaviour.
+    static const char *flat[48];
+    int k = 0;
+    for (int s = 0; s < n && k < (int)(sizeof(flat) / sizeof(flat[0])); s++) {
+        for (int i = 0; i < sections[s].count &&
+                        k < (int)(sizeof(flat) / sizeof(flat[0])); i++) {
+            flat[k++] = sections[s].items[i];
+        }
+    }
+    purr_win_list_set_items(wid, flat, k);
+}
+
+static inline void purr_win_menu_on_select(purr_wid_t wid, purr_win_cb_t cb, void *user) {
+    const catcall_ui_t *ui = purr_kernel_ui();
+    if (ui && ui->menu_cb) { _UI_VOID(menu_cb, wid, cb, user); return; }
+    purr_win_list_on_select(wid, cb, user);
+}
+
+static inline int purr_win_menu_get_selected(purr_wid_t wid) {
+    const catcall_ui_t *ui = purr_kernel_ui();
+    if (ui && ui->menu_get_selected) return _UI_CALL(int, -1, menu_get_selected, wid);
+    return purr_win_list_get_selected(wid);
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────────
 
 static inline purr_wid_t purr_win_row(purr_win_t win, uint8_t pad) {

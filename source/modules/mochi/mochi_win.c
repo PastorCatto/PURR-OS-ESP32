@@ -133,6 +133,10 @@ static lv_obj_t *get_wid(purr_wid_t h) {
     return s_wids[h - 1];
 }
 
+// Ends the open iOS-style cell group for this window. Defined with the grouped
+// table further down; called from clear/label/list/textarea/layout above it.
+static void group_close(purr_win_t h);
+
 // Make a widget reachable from keyboard/trackball.
 static void group_add(lv_obj_t *obj) {
     lv_group_t *g = mochi_hal_group();
@@ -190,6 +194,11 @@ static purr_win_t tb_win_create(const char *title) {
     lv_obj_t *content = lv_win_get_content(win);
     lv_obj_set_style_pad_all(content, 6, 0);
     lv_obj_set_style_pad_row(content, 6, 0);
+    // iOS 7 groupedTableViewBackground. The white cells read as cells because
+    // of what sits behind them; on the default dark background they would just
+    // look like floating white slabs.
+    lv_obj_set_style_bg_color(content, lv_color_hex(0xEFEFF4), 0);
+    lv_obj_set_style_bg_opa(content, LV_OPA_COVER, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_style_text_font(content, &lv_font_montserrat_14, 0);
@@ -214,6 +223,7 @@ static void tb_win_destroy(purr_win_t h) {
     if (w) lv_async_call(win_del_async_cb, w);
     if (h >= 1 && h <= MAX_WINS) {
         s_active_layout[h - 1] = NULL;
+        group_close(h);
         s_close_hooks[h - 1].cb = NULL;
         s_close_hooks[h - 1].user = NULL;
     }
@@ -259,6 +269,10 @@ static void tb_win_clear(purr_win_t h) {
     if (!w) return;
     lv_obj_t *content = lv_win_get_content(w);
     if (content) lv_obj_clean(content);
+    // The group container was a child of `content` and has just been freed —
+    // clearing the pointer as well, or the next button would be parented to
+    // deleted memory.
+    group_close(h);
     if (h >= 1 && h <= MAX_WINS) s_active_layout[h - 1] = NULL;
 }
 
@@ -267,7 +281,13 @@ static void tb_win_clear(purr_win_t h) {
 static purr_wid_t tb_label_create(purr_win_t h, const char *text) {
     lv_obj_t *parent = content_parent(h);
     if (!parent) return 0;
+    // A label ends any open group and reads as its section header, which is
+    // how iOS Settings separates groups. Small, grey, indented to line up with
+    // the cell text below it.
+    group_close(h);
     lv_obj_t *lbl = lv_label_create(parent);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x6D6D72), 0);
+    lv_obj_set_style_pad_left(lbl, 12, 0);
     lv_label_set_text(lbl, text);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(lbl, LV_PCT(100));
@@ -296,21 +316,240 @@ static void tb_label_align(purr_wid_t wid, purr_align_t align) {
     lv_obj_set_style_text_align(o, a, 0);
 }
 
+// ── iOS 7 grouped table ─────────────────────────────────────────────────────
+//
+// Buttons in the default vertical flow render as ROWS OF A GROUPED LIST, not as
+// individual buttons. This is both the look and a performance fix, and the two
+// happen to want the same thing.
+//
+// lv_btn_create() gives LVGL's themed button: its own background, border,
+// radius AND shadow, per instance. A settings page is twenty of those — twenty
+// separately-styled rounded, shadowed objects, every one re-rendered on every
+// scroll frame. Corners alone measured at roughly a third of a frame, and
+// shadows are worse (LV_SHADOW_CACHE_SIZE is 0, so blur is recomputed each
+// draw). Reported from the device as "scrolling the settings page is laggy as
+// shit", which is exactly what that adds up to.
+//
+// A grouped table pays radius ONCE for the group container and renders each row
+// as a flat fill with a one-pixel separator — no per-row radius, no shadow, no
+// border. Same information, a fraction of the drawing.
+//
+// Rows still get their own object because each needs its own click target and
+// its own place in the focus group; the saving is in what each object COSTS to
+// draw, not in how many there are.
+#define IOS_CELL_BG      lv_color_hex(0xFFFFFF)
+#define IOS_CELL_TEXT    lv_color_hex(0x000000)
+#define IOS_SEPARATOR    lv_color_hex(0xC8C7CC)
+#define IOS_GROUP_RADIUS 10
+#define IOS_ROW_H        38
+
+// The group a button lands in. Consecutive buttons share one; anything else
+// (a label, list, textarea, or an explicit row/col) closes it, so a label acts
+// as a section header exactly as it does in iOS Settings.
+static lv_obj_t *s_group[MAX_WINS];
+
+static void group_close(purr_win_t h) {
+    if (h >= 1 && h <= MAX_WINS) s_group[h - 1] = NULL;
+}
+
+static lv_obj_t *group_open(purr_win_t h, lv_obj_t *parent) {
+    if (h < 1 || h > MAX_WINS) return parent;
+    if (s_group[h - 1]) return s_group[h - 1];
+
+    lv_obj_t *g = lv_obj_create(parent);
+    lv_obj_remove_style_all(g);
+    lv_obj_set_width(g, LV_PCT(100));
+    lv_obj_set_height(g, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(g, IOS_CELL_BG, 0);
+    lv_obj_set_style_bg_opa(g, LV_OPA_COVER, 0);
+    // Radius paid once here, for the whole group — the point of the exercise.
+    lv_obj_set_style_radius(g, IOS_GROUP_RADIUS, 0);
+    lv_obj_set_style_clip_corner(g, true, 0);
+    lv_obj_set_flex_flow(g, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+    s_group[h - 1] = g;
+    return g;
+}
+
+// ── Menu (sectioned list of actions) ────────────────────────────────────────
+//
+// The native rendering of catcall_ui_t's menu primitive: an iOS 7 grouped
+// table. Headers are grey and inset, each group is one rounded white container,
+// rows are flat with a hairline separator and optional right-aligned value.
+//
+// Radius is paid once per GROUP, never per row — which is the performance point
+// of having this in the contract at all. The alternative an app used to write,
+// a run of btn_create() calls, produced one themed button per action with its
+// own background, border, radius and shadow, all re-rendered on every scroll
+// frame.
+
+#define MAX_MENUS 8
+typedef struct {
+    purr_wid_t    wid;
+    purr_win_cb_t cb;
+    void         *user;
+    int           selected;
+} menu_state_t;
+static menu_state_t s_menus[MAX_MENUS];
+
+static menu_state_t *menu_find(purr_wid_t wid) {
+    for (int i = 0; i < MAX_MENUS; i++) if (s_menus[i].wid == wid) return &s_menus[i];
+    return NULL;
+}
+
+static void menu_row_cb(lv_event_t *e) {
+    // user_data packs (menu wid << 16 | flat row index) so one callback serves
+    // every row without allocating a context per row — rows are the thing this
+    // primitive exists to make cheap.
+    uint32_t packed = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    purr_wid_t mw   = (purr_wid_t)(packed >> 16);
+    int        row  = (int)(packed & 0xFFFF);
+    menu_state_t *m = menu_find(mw);
+    if (!m) return;
+    m->selected = row;
+    if (m->cb) m->cb(mw, PURR_EVENT_ACTIVATED, m->user);
+}
+
+static purr_wid_t tb_menu_create(purr_win_t h) {
+    lv_obj_t *parent = content_parent(h);
+    if (!parent) return 0;
+    group_close(h);
+
+    lv_obj_t *root = lv_obj_create(parent);
+    lv_obj_remove_style_all(root);
+    lv_obj_set_width(root, LV_PCT(100));
+    lv_obj_set_flex_grow(root, 1);          // fill the window; the menu IS the screen
+    lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(root, 6, 0);
+    lv_obj_set_scroll_dir(root, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(root, LV_SCROLLBAR_MODE_OFF);
+
+    purr_wid_t wid = alloc_wid(root);
+    for (int i = 0; i < MAX_MENUS; i++) {
+        if (!s_menus[i].wid) {
+            s_menus[i].wid = wid; s_menus[i].cb = NULL;
+            s_menus[i].user = NULL; s_menus[i].selected = -1;
+            break;
+        }
+    }
+    return wid;
+}
+
+static void tb_menu_set_sections(purr_wid_t wid, const purr_menu_section_t *sections, int n) {
+    lv_obj_t *root = get_wid(wid);
+    if (!root || !sections) return;
+    lv_obj_clean(root);
+
+    int flat = 0;   // flat row index across sections — the contract's index space
+    for (int s = 0; s < n; s++) {
+        if (sections[s].header) {
+            lv_obj_t *hd = lv_label_create(root);
+            lv_label_set_text(hd, sections[s].header);
+            lv_obj_set_style_text_color(hd, lv_color_hex(0x6D6D72), 0);
+            lv_obj_set_style_pad_left(hd, 12, 0);
+        }
+
+        lv_obj_t *g = lv_obj_create(root);
+        lv_obj_remove_style_all(g);
+        lv_obj_set_width(g, LV_PCT(100));
+        lv_obj_set_height(g, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_color(g, IOS_CELL_BG, 0);
+        lv_obj_set_style_bg_opa(g, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(g, IOS_GROUP_RADIUS, 0);
+        lv_obj_set_style_clip_corner(g, true, 0);
+        lv_obj_set_flex_flow(g, LV_FLEX_FLOW_COLUMN);
+        lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+
+        for (int i = 0; i < sections[s].count; i++, flat++) {
+            lv_obj_t *row = lv_obj_create(g);
+            lv_obj_remove_style_all(row);
+            lv_obj_set_width(row, LV_PCT(100));
+            lv_obj_set_height(row, IOS_ROW_H);
+            lv_obj_set_style_bg_color(row, IOS_CELL_BG, 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+            // Last row of a group has no separator — iOS draws the group edge
+            // instead, and a trailing hairline reads as a broken cell.
+            if (i + 1 < sections[s].count) {
+                lv_obj_set_style_border_color(row, IOS_SEPARATOR, 0);
+                lv_obj_set_style_border_width(row, 1, 0);
+                lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+            }
+            lv_obj_set_style_pad_hor(row, 12, 0);
+            lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(row, menu_row_cb, LV_EVENT_CLICKED,
+                                 (void *)(uintptr_t)(((uint32_t)wid << 16) | (uint32_t)flat));
+            group_add(row);
+
+            lv_obj_t *l = lv_label_create(row);
+            lv_label_set_text(l, sections[s].items[i]);
+            lv_obj_set_style_text_color(l, IOS_CELL_TEXT, 0);
+            lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+
+            const char *val = sections[s].values ? sections[s].values[i] : NULL;
+            if (val) {
+                lv_obj_t *v = lv_label_create(row);
+                lv_label_set_text(v, val);
+                lv_obj_set_style_text_color(v, lv_color_hex(0x8E8E93), 0);
+                lv_obj_align(v, LV_ALIGN_RIGHT_MID, 0, 0);
+            }
+        }
+    }
+}
+
+static void tb_menu_cb(purr_wid_t wid, purr_win_cb_t cb, void *user) {
+    menu_state_t *m = menu_find(wid);
+    if (m) { m->cb = cb; m->user = user; }
+}
+
+static int tb_menu_get_selected(purr_wid_t wid) {
+    menu_state_t *m = menu_find(wid);
+    return m ? m->selected : -1;
+}
+
 // ── Buttons ─────────────────────────────────────────────────────────────────
 
 static purr_wid_t tb_btn_create(purr_win_t h, const char *label,
                                  purr_win_cb_t cb, void *user) {
     lv_obj_t *parent = content_parent(h);
     if (!parent) return 0;
-    lv_obj_t *btn = lv_btn_create(parent);
-    // Fixed compact height, content-sized width — LVGL's ~100px default
-    // overflows a 320px-class screen once row layouts actually place buttons
-    // side by side.
-    lv_obj_set_height(btn, 32);
-    lv_obj_set_width(btn, LV_SIZE_CONTENT);
-    lv_obj_t *lbl = lv_label_create(btn);
-    lv_label_set_text(lbl, label);
-    lv_obj_center(lbl);
+
+    // Inside an explicit purr_win_row()/col() the app has asked for side-by-side
+    // placement — a grouped table row would fight that. Keep a compact button
+    // there, and reserve the list style for the default vertical flow, which is
+    // what nearly every settings-style screen actually uses.
+    bool in_layout = (h >= 1 && h <= MAX_WINS && s_active_layout[h - 1] != NULL);
+
+    lv_obj_t *btn;
+    if (in_layout) {
+        btn = lv_btn_create(parent);
+        lv_obj_set_height(btn, 32);
+        lv_obj_set_width(btn, LV_SIZE_CONTENT);
+        lv_obj_t *l = lv_label_create(btn);
+        lv_label_set_text(l, label);
+        lv_obj_center(l);
+    } else {
+        lv_obj_t *g = group_open(h, parent);
+        btn = lv_obj_create(g);
+        lv_obj_remove_style_all(btn);          // no theme bg/border/radius/shadow
+        lv_obj_set_width(btn, LV_PCT(100));
+        lv_obj_set_height(btn, IOS_ROW_H);
+        lv_obj_set_style_bg_color(btn, IOS_CELL_BG, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        // Separator is a bottom border, not a child object — one less object
+        // per row, and it renders as a straight fill rather than a widget.
+        lv_obj_set_style_border_color(btn, IOS_SEPARATOR, 0);
+        lv_obj_set_style_border_width(btn, 1, 0);
+        lv_obj_set_style_border_side(btn, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_pad_left(btn, 12, 0);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+
+        lv_obj_t *l = lv_label_create(btn);
+        lv_label_set_text(l, label);
+        lv_obj_set_style_text_color(l, IOS_CELL_TEXT, 0);
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+    }
 
     purr_wid_t wid = alloc_wid(btn);
     group_add(btn);   // buttons are keyboard/trackball reachable
@@ -337,6 +576,7 @@ static void tb_btn_enable(purr_wid_t wid, bool enabled) {
 static purr_wid_t tb_ta_create(purr_win_t h, uint16_t w_pct, uint16_t h_pct) {
     lv_obj_t *parent = content_parent(h);
     if (!parent) return 0;
+    group_close(h);
     lv_obj_t *ta = lv_textarea_create(parent);
     lv_obj_set_size(ta, LV_PCT(w_pct), LV_PCT(h_pct));
     lv_textarea_set_one_line(ta, false);
@@ -419,6 +659,7 @@ static void list_btn_event_cb(lv_event_t *e) {
 static purr_wid_t tb_list_create(purr_win_t h, uint16_t w_pct, uint16_t h_pct) {
     lv_obj_t *parent = content_parent(h);
     if (!parent) return 0;
+    group_close(h);
     lv_obj_t *list = lv_list_create(parent);
     lv_obj_set_size(list, LV_PCT(w_pct), LV_PCT(h_pct));
     purr_wid_t wid = alloc_wid(list);
@@ -632,6 +873,7 @@ static purr_wid_t tb_layout_begin(purr_win_t h, purr_layout_t dir, uint8_t pad, 
     if (grow) lv_obj_set_flex_grow(cont, 1);
 
     purr_wid_t wid = alloc_wid(cont);
+    group_close(h);   // an explicit layout is its own section
     if (h >= 1 && h <= MAX_WINS) s_active_layout[h - 1] = cont;
     if (wid >= 1 && wid <= MAX_WIDS) s_layout_owner_win[wid - 1] = (int)(h - 1);
     return wid;
@@ -669,6 +911,10 @@ static void tb_kb_hide(purr_win_t h) {
 static const catcall_ui_t s_mochi_win = {
     .name            = "mochi",
     .catcall_version = CATCALL_UI_VERSION,
+    .menu_create       = tb_menu_create,
+    .menu_set_sections = tb_menu_set_sections,
+    .menu_cb           = tb_menu_cb,
+    .menu_get_selected = tb_menu_get_selected,
     .win_create      = tb_win_create,
     .win_destroy     = tb_win_destroy,
     .win_show        = tb_win_show,
