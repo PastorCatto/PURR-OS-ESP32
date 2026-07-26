@@ -161,6 +161,65 @@ The largest flush seen during boot was **13.9 ms**, consistent with a full-width
 80-line buffer (~83 transactions). Three of those per full-screen redraw ≈ 35–40 ms,
 i.e. a **~25 fps ceiling before any blending cost** — which is the scroll lag.
 
+### F2 / F3 — Async flush + double buffering ✅ **FIXED — `catcall_display` v2**
+
+Closed together on 2026-07-26, because they were never really two findings: F3 said
+the second draw buffer buys nothing *while the flush is synchronous*, and F2 said
+the SPI queue never pipelines. Both are the same missing piece.
+
+**What shipped.** An optional `push_pixels_async` / `flush_done_cb` pair on
+`catcall_display_t` (v1 → v2), same optional-member-with-NULL-fallback pattern the
+UI contract already uses. Drivers that don't implement it leave both NULL and every
+caller keeps the blocking path.
+
+**One transaction, no chunking** — and that falls out of the geometry rather than
+being a shortcut. Mochi's draw buffer is 48 lines, so a flush is 320 × 48 × 2 =
+**30,720 bytes, just under the 32,768-byte hardware ceiling** that caused the black
+blocks in F1. Chunking asynchronously would have meant either reusing the staging
+buffer while DMA was still reading it, or carrying several and blocking between
+them — which gives back most of the overlap.
+
+**Measured, T-Deck Plus:**
+
+| | before | async, separate buffers | async, shared buffer |
+|---|---|---|---|
+| render fps | 8.7–10.9 | 7.2 | **11.4** |
+| mean frame | ~47 ms | 27–32 ms | **23 ms** |
+| frames < 16 ms | — | 71/120 | **87/120** |
+| `dma_free` | — | 5,295 | **21,547** |
+| `largest_dma` | — | 4,096 | **15,872** |
+| memory watchdog | — | 93%, *stopping worst offender* | 85%, no action |
+
+**The middle column is the interesting one.** Async alone measured *slower than
+baseline*. The cause was not the async path: standing a 30,720-byte internal DMA
+staging buffer next to the existing 16 KB chunk buffer committed 47 KB of the
+scarcest memory on the device, and the kernel's own memory watchdog started killing
+a module every cycle to reclaim it.
+
+The fix was to notice the chunk buffer had become **redundant** — every UI flush now
+goes through the async path, leaving the sync path to rare full-frame pushes (boot
+splash, MagiDOS). Sharing one buffer is strictly better on both axes: it returns
+16 KB *and* gives the sync path a larger chunk than it had (a full frame is 5
+transactions, not 10).
+
+Safety rests entirely on **bus ownership**: the sync path touches the shared buffer
+only while holding the SPI bus, and the completion task clears the in-flight flag
+*before* releasing the bus. That release order is load-bearing, not style.
+
+`queue_size` went 1 → 2. One slot covers the steady state; the second covers a push
+too large for the staging buffer falling back to the chunked path, and a transfer
+abandoned on timeout leaving its slot occupied — with one slot either wedges every
+subsequent transfer for the rest of the boot, which is the failure mode F2's
+original note was worried about.
+
+> **Generalisable lesson, third time this session:** a change that allocates from a
+> contended resource must be measured against the *system*, not the subsystem. Async
+> flush did exactly what it was designed to do in both runs. The first run still
+> looked like a regression because the win was being spent elsewhere by a watchdog
+> reacting to the memory it cost. Same shape as F9 and F12.
+
+Original entries follow.
+
 ### F2 — `queue_size = 1` means zero pipelining
 
 [`st7789.c:476`](source/drivers/display/st7789/st7789.c#L476). Every transaction is

@@ -107,12 +107,41 @@ uint64_t mochi_hal_last_activity_ms(void) { return s_last_activity_ms; }
 lv_group_t *mochi_hal_group(void)         { return s_group; }
 bool mochi_hal_has_physical_keyboard(void) { return s_kbd != NULL; }
 
+// Set once at init if the display driver offers the async push pair. Kept as a
+// separate flag rather than re-testing the members every flush so the hot path
+// stays a single branch.
+static bool s_async_flush = false;
+
+// Fired by the display driver once a band has actually gone out. This is what
+// tells LVGL it may reuse the buffer it handed us, and it is the entire reason
+// double buffering does anything here.
+//
+// Runs on the driver's completion task, NOT an ISR — see catcall_display.h. The
+// only thing it may touch is the flush-ready signal.
+static void flush_done(void *user)
+{
+    lv_disp_flush_ready((lv_disp_drv_t *)user);
+}
+
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
     const catcall_display_t *d = purr_kernel_display();
-    if (d && d->push_pixels) {
-        int32_t w = area->x2 - area->x1 + 1;
-        int32_t h = area->y2 - area->y1 + 1;
+    if (!d) { lv_disp_flush_ready(drv); return; }
+
+    int32_t w = area->x2 - area->x1 + 1;
+    int32_t h = area->y2 - area->y1 + 1;
+
+    // Async: hand the band over and return NOW. LVGL immediately starts
+    // rendering the next band into the other draw buffer while this one is
+    // still being clocked out over SPI, and flush_done() releases it when the
+    // transfer finishes. On T-Deck Plus that overlap is worth roughly half the
+    // frame, because flushing and rendering were previously strictly serialised.
+    if (s_async_flush) {
+        d->push_pixels_async(area->x1, area->y1, (int)w, (int)h, (uint16_t *)color_p);
+        return;   // flush_done() calls lv_disp_flush_ready(), not us
+    }
+
+    if (d->push_pixels) {
         d->push_pixels(area->x1, area->y1, (int)w, (int)h, (uint16_t *)color_p);
     }
     lv_disp_flush_ready(drv);
@@ -337,10 +366,15 @@ int mochi_hal_init(void)
     // this is trying to avoid. The linker cannot lose that race. Same technique,
     // and same reason, as this module's static render-task stack.
     //
-    // SINGLE, not double. LVGL's double-buffering only pays off when flush_cb is
-    // asynchronous — return immediately, signal lv_disp_flush_ready() from the
-    // DMA completion. flush_cb here is fully synchronous, so a second buffer is
-    // memory spent for no benefit whatsoever.
+    // DOUBLE, when the driver supports it. This was single for most of DP8, and
+    // correctly so: LVGL's double buffering pays off only if flush_cb returns
+    // immediately, and while flush_cb was synchronous a second buffer was memory
+    // spent for no benefit whatsoever. That precondition is now met — see
+    // catcall_display_t::push_pixels_async — so the second buffer earns its
+    // keep: LVGL renders band N+1 into it while band N is still going out.
+    //
+    // If the driver does not offer the async pair we stay single-buffered, for
+    // the original reason, which still holds.
     //
     // ── Why the size is small, and why that is NOT obviously a loss ──────────
     // 16 lines means ~15 flushes per full screen rather than 3. Measured at -Og
@@ -400,7 +434,24 @@ int mochi_hal_init(void)
         ESP_LOGE(TAG, "draw buffer alloc failed (%u bytes)", (unsigned)buf_bytes);
         return -1;
     }
+    // Ask the display driver for an async path sized to one flush, and only
+    // allocate the second draw buffer if it agrees. Both must succeed together:
+    // a second buffer without async flushing is wasted memory, and async
+    // flushing without a second buffer gains nothing because LVGL would have
+    // nowhere to render while the first is in flight.
     s_buf2 = NULL;
+    const catcall_display_t *dsp = purr_kernel_display();
+    if (dsp && dsp->push_pixels_async && dsp->flush_done_cb) {
+        s_buf2 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+        if (s_buf2) {
+            dsp->flush_done_cb(flush_done, &s_disp_drv);
+            s_async_flush = true;
+            ESP_LOGW(TAG, "[perf] async flush + double buffering ON (2 x %u bytes)",
+                     (unsigned)buf_bytes);
+        } else {
+            ESP_LOGW(TAG, "[perf] second draw buffer alloc failed — staying single/sync");
+        }
+    }
 
     lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, s_disp_w * lines);
 

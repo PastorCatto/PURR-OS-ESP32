@@ -43,5 +43,6 @@ void st7789_set_spi_freq(uint32_t freq_hz);
 // after st7789_drv_init() — allocates/frees the buffer on the fly.
 void st7789_set_perf_mode(bool enable);
 
+
 int  st7789_drv_init(void);      // returns 0 on success, -1 on failure
 void st7789_fill_screen(uint16_t color); // push uniform color to full GRAM (post-init)

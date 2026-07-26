@@ -142,6 +142,9 @@ static uint16_t s_row_buf[ST7789_WIDTH];
 // device (and any device without PSRAM) is completely unaffected.
 static uint16_t *s_bulk_buf    = NULL;
 static size_t    s_bulk_buf_px = 0;   // capacity, in pixels
+// True once s_bulk_buf points at the async staging buffer rather than one we
+// allocated — see async_arm(). Guards against freeing memory we don't own.
+static bool      s_bulk_shared = false;
 
 // Bulk transfer chunk size, in BYTES. The bulk buffer is exactly this big.
 //
@@ -225,8 +228,12 @@ void st7789_set_perf_mode(bool enable)
 {
     if (!enable) {
         if (s_bulk_buf) {
-            heap_caps_free(s_bulk_buf);
+            // Only free what we own. Once async arms, this points at the async
+            // staging buffer rather than a buffer of our own (see async_arm) —
+            // freeing it here would be a double free the next time a flush ran.
+            if (!s_bulk_shared) heap_caps_free(s_bulk_buf);
             s_bulk_buf    = NULL;
+            s_bulk_shared = false;
             s_bulk_buf_px = 0;
             ESP_LOGI(TAG, "perf mode disabled — back to row-by-row push");
         }
@@ -269,7 +276,7 @@ void st7789_set_perf_mode(bool enable)
 // this device -- the same task the crash-guard heartbeat watchdog
 // monitors) forever, with no way to recover short of a full reboot.
 //
-// dev_cfg.queue_size is 1 (see st7789_init(), below) -- confirmed live
+// dev_cfg.queue_size is small (see st7789_init(), below) -- confirmed live
 // this session on the radio's own bounded-transfer attempt that a queue
 // this small means a single timed-out, un-reclaimed transaction
 // permanently exhausts the only slot, failing every transfer after it for
@@ -534,7 +541,16 @@ static esp_err_t st7789_init(const display_config_t *cfg)
         .clock_speed_hz = s_spi_freq_hz,
         .mode           = 0,
         .spics_io_num   = s_pins.cs_pin,
-        .queue_size     = 1,
+        // 2, not 1. One slot is enough for the steady state — the async path
+        // keeps a single transfer in flight and the caller's double buffering
+        // stops a second flush arriving before the first completes. The second
+        // slot covers the edges: a push too large for the async staging buffer
+        // falls back to the chunked synchronous path, and a transfer abandoned
+        // on timeout leaves its slot occupied until it is reclaimed. With one
+        // slot either of those wedges every subsequent transfer for the rest of
+        // the boot (observed live on the radio's bounded transfer — see the
+        // reclaim comment above); with two, they degrade instead of failing.
+        .queue_size     = 2,
     };
     ESP_ERROR_CHECK(spi_bus_add_device(s_spi_host, &dev_cfg, &s_spi));
 
@@ -696,6 +712,183 @@ static esp_err_t st7789_push_pixels_inner(int x, int y, int w, int h, const uint
     return ESP_OK;
 }
 
+// ── Asynchronous push ───────────────────────────────────────────────────────
+//
+// Queues the transfer and returns; a completion task releases the bus and fires
+// the registered callback once the pixels are actually out. See
+// catcall_display.h's push_pixels_async comment for why this exists.
+//
+// ONE TRANSACTION, no chunking. That falls out of the geometry rather than
+// being a simplification: the UI backend's draw buffer is 48 lines, so a full
+// flush is 320 x 48 x 2 = 30,720 bytes — under the 32,768-byte hardware limit.
+// Chunking exists for the SYNCHRONOUS path, which must handle a caller pushing
+// a whole 153,600-byte frame in one go (MagiDOS does). Async never sees that,
+// because it is fed by LVGL a band at a time.
+//
+// That matters for correctness, not just tidiness: chunking asynchronously would
+// mean either reusing the staging buffer while a DMA is still reading it, or
+// carrying several buffers and blocking between them — which would give back
+// most of the overlap this is for.
+
+// Both live further down — push_pixels next to its chunking comment, async_arm
+// next to the buffer it allocates. Declared here so the async push can sit with
+// the contract members it implements rather than being ordered by the compiler.
+static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *data);
+static void      async_arm(size_t max_px);
+
+static uint16_t *s_async_buf     = NULL;   // internal DMA staging, one flush
+static size_t    s_async_buf_px  = 0;
+static bool      s_async_active  = false;  // a transfer is in flight
+static bool      s_async_failed  = false;  // staging alloc failed; stop retrying
+static spi_transaction_t s_async_trans;
+static TaskHandle_t s_async_task = NULL;
+static void (*s_done_cb)(void *user) = NULL;
+static void *s_done_user = NULL;
+
+static void st7789_flush_done_cb(void (*cb)(void *user), void *user)
+{
+    s_done_cb   = cb;
+    s_done_user = user;
+}
+
+// Completion runs on a task, never in the SPI ISR.
+//
+// Two things here are not ISR-safe and that is the whole reason this task
+// exists: spi_device_release_bus(), and the callback itself, which calls into a
+// UI backend (lv_disp_flush_ready). Doing either from post_trans_cb would be a
+// latent crash rather than a design choice.
+static void async_completion_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        spi_transaction_t *r = NULL;
+        // Bounded, not portMAX_DELAY: a wedged bus must not park this task
+        // forever holding the bus handle — same reasoning as
+        // spi_transmit_bounded()'s own timeout.
+        if (spi_device_get_trans_result(s_spi, &r, pdMS_TO_TICKS(ST7789_SPI_TIMEOUT_MS)) != ESP_OK) {
+            ESP_LOGW(TAG, "async flush timed out");
+        }
+        // Clear BEFORE releasing the bus, not after. The synchronous path shares
+        // this staging buffer (see async_arm) and reaches it only by acquiring
+        // the bus, so releasing last makes bus ownership the single thing that
+        // guarantees the buffer is no longer being DMA'd out of. The other order
+        // leaves a window where a sync push holds the bus and overwrites a
+        // buffer still marked in flight.
+        s_async_active = false;
+        spi_device_release_bus(s_spi);
+
+        if (s_done_cb) s_done_cb(s_done_user);
+    }
+}
+
+static esp_err_t st7789_push_pixels_async(int x, int y, int w, int h, const uint16_t *data)
+{
+    if (!s_ready || !data || w <= 0 || h <= 0) return ESP_ERR_INVALID_STATE;
+
+    int    cols = (w <= ST7789_WIDTH) ? w : ST7789_WIDTH;
+    size_t px   = (size_t)cols * (size_t)h;
+
+    async_arm(px);
+
+    // Anything this path cannot take asynchronously falls back to the blocking
+    // push and reports completion immediately — the caller's contract is "the
+    // callback fires when the pixels are out", which a synchronous push has
+    // already satisfied by the time it returns.
+    if (!s_async_buf || px > s_async_buf_px || s_async_active) {
+        esp_err_t e = st7789_push_pixels(x, y, w, h, data);
+        if (s_done_cb) s_done_cb(s_done_user);
+        return e;
+    }
+
+    // Copy out of the caller's buffer NOW, byte-swapping as we go. After this
+    // the caller's memory is free even though the DMA has not started — which
+    // is what lets a UI backend hand us one draw buffer and immediately render
+    // into the other.
+    for (size_t i = 0; i < px; i++) {
+        uint16_t v = data[i];
+        s_async_buf[i] = (uint16_t)((v >> 8) | (v << 8));
+    }
+
+    spi_device_acquire_bus(s_spi, portMAX_DELAY);
+    set_addr_window((uint16_t)x, (uint16_t)y,
+                    (uint16_t)(x + w - 1), (uint16_t)(y + h - 1));
+
+    memset(&s_async_trans, 0, sizeof(s_async_trans));
+    s_async_trans.length    = px * 2 * 8;
+    s_async_trans.tx_buffer = s_async_buf;
+    gpio_set_level((gpio_num_t)s_pins.dc_pin, 1);
+
+    s_async_active = true;
+    if (spi_device_queue_trans(s_spi, &s_async_trans, pdMS_TO_TICKS(ST7789_SPI_TIMEOUT_MS)) != ESP_OK) {
+        s_async_active = false;
+        spi_device_release_bus(s_spi);
+        if (s_done_cb) s_done_cb(s_done_user);
+        return ESP_FAIL;
+    }
+    xTaskNotifyGive(s_async_task);
+    return ESP_OK;
+}
+
+// Arms the async path on first use, sizing the staging buffer to the first
+// flush we are asked for — which is the caller's band size and stays constant.
+//
+// Self-arming rather than an exported setup call, deliberately: the UI backend
+// must not know which display driver is behind the contract, and it is the only
+// party that knows how big a flush will be. Lazy sizing lets both facts hold.
+//
+// If the allocation fails, async simply never engages and every caller keeps
+// using the blocking push — hence a log line, not an error.
+static void async_arm(size_t max_px)
+{
+    if (s_async_buf || s_async_failed) return;
+    size_t bytes = max_px * sizeof(uint16_t);
+    if (bytes > 32768) bytes = 32768;   // hardware transaction ceiling
+    s_async_buf = heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    if (!s_async_buf) {
+        s_async_failed = true;   // don't retry a failing alloc every single flush
+        ESP_LOGW(TAG, "[perf] async flush unavailable — no %u-byte internal DMA buffer",
+                 (unsigned)bytes);
+        return;
+    }
+    s_async_buf_px = bytes / sizeof(uint16_t);
+    xTaskCreatePinnedToCore(async_completion_task, "st7789_done", 2560, NULL, 6,
+                            &s_async_task, 1);
+    ESP_LOGW(TAG, "[perf] async flush ON — %u-byte staging buffer (%u px)",
+             (unsigned)bytes, (unsigned)s_async_buf_px);
+
+    // Hand the synchronous path this buffer too, and give back its own.
+    //
+    // Measured on hardware the moment async first ran: standing up a second
+    // internal DMA buffer alongside the 16KB chunk buffer took dma_free to 5,295
+    // bytes with a 4,096-byte largest block, and tripped the kernel's own
+    // "93% internal SRAM used" watchdog. Internal DMA RAM is the scarcest thing
+    // on this device and 47KB of it was now committed to display buffers.
+    //
+    // The chunk buffer had become nearly redundant: every UI flush goes through
+    // the async path, leaving the synchronous one to rare full-frame pushes
+    // (boot splash, MagiDOS). Sharing is a strict improvement on both axes — it
+    // returns 16KB, AND the sync path gets a LARGER chunk than it had, so a full
+    // frame costs 5 transactions instead of 10.
+    //
+    // Safety rests entirely on bus ownership: the sync path only touches this
+    // buffer while holding the SPI bus, and the completion task does not release
+    // the bus until the DMA has finished reading it. The two can therefore never
+    // overlap, which is why the release order there is load-bearing.
+    // Only if perf mode was actually on. A device that deliberately left it off
+    // wants the row-by-row path, and quietly upgrading it here would be this
+    // function making a policy decision that isn't its to make.
+    if (s_bulk_buf) {
+        heap_caps_free(s_bulk_buf);
+        s_bulk_buf    = s_async_buf;
+        s_bulk_shared = true;
+        s_bulk_buf_px = s_async_buf_px;
+        ESP_LOGW(TAG, "[perf] freed the 16KB chunk buffer — sync path now shares "
+                      "the %u-byte async buffer", (unsigned)bytes);
+    }
+}
+
 // Step 0 instrumentation wrapper (DP8_CHECKLIST.md). TEMPORARY — remove with
 // the counters above once Steps 1-2 are measured.
 //
@@ -799,6 +992,8 @@ static const catcall_display_t s_catcall = {
     .catcall_version = CATCALL_DISPLAY_VERSION,
     .init            = st7789_init,
     .push_pixels     = st7789_push_pixels,
+    .push_pixels_async = st7789_push_pixels_async,
+    .flush_done_cb     = st7789_flush_done_cb,
     .fill_rect       = st7789_fill_rect,
     .set_brightness  = st7789_set_brightness,
     .get_info        = st7789_get_info,
