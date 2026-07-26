@@ -1659,6 +1659,16 @@ void purr_kernel_watch_end(void)
     s_watch_owner      = NULL;
     s_watch_timeout_ms = 0;
     s_watch_last_ms    = 0;
+
+    // Hand the UI check a fresh grace period rather than a stale timestamp.
+    //
+    // The UI heartbeat stopped the moment game mode unloaded the backend, so
+    // when the watch lifts, s_ui_last_heartbeat_ms is however long the whole
+    // session lasted — instantly past the threshold. The restored backend's
+    // first beat is several hundred ms away (task start, LVGL re-init, first
+    // frame), so without this the UI check would fire the moment it re-enables
+    // and blame the backend for a hang that is really just a restart.
+    s_ui_last_heartbeat_ms = purr_kernel_uptime_ms();
 }
 
 static void health_watchdog_task(void *arg)
@@ -1677,8 +1687,25 @@ static void health_watchdog_task(void *arg)
         // once a UI backend is registered AND has heartbeated at least
         // once — a headless/serial-only build, or the brief window before
         // the UI task's very first loop iteration, must not trip this.
+        // A generic watch SUPERSEDES the UI check — see s_watch_owner below.
+        //
+        // Unloading a UI backend does not unregister its catcall: nothing in
+        // purr_kernel_unload_module() clears the registry, and no backend's
+        // deinit does it either, so purr_kernel_ui() keeps returning the
+        // module's static catcall_ui_t after its task is gone. The check below
+        // then measures a heartbeat that can never arrive again and declares a
+        // hang ~6s later.
+        //
+        // That is exactly what happened on the first working game-mode session:
+        // MagiDOS ran, then died ~9s in (6s threshold + up to 2s poll
+        // granularity + the transition), and the panic was attributed to the UI
+        // backend that game mode had deliberately removed.
+        //
+        // Game mode arms its own watch precisely because the UI one cannot
+        // cover it, so while that is in force this check has nothing useful to
+        // say and must stand down.
         const catcall_ui_t *ui = purr_kernel_ui();
-        if (ui && s_ui_last_heartbeat_ms != 0) {
+        if (!s_watch_owner && ui && s_ui_last_heartbeat_ms != 0) {
             uint64_t now = purr_kernel_uptime_ms();
             if (now - s_ui_last_heartbeat_ms > UI_HANG_THRESHOLD_MS) {
                 // Include the last breadcrumb (purr_kernel_ui_breadcrumb())
