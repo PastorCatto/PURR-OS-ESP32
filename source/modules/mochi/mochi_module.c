@@ -55,7 +55,9 @@ static StaticTask_t s_mochi_tcb;
 // So: bucket EVERY frame, and emit ONE line per window. The histogram is in
 // frame-rate terms rather than round numbers, because "how many frames missed
 // 60fps / 30fps / 20fps" is the question actually being asked.
-#define FRAME_WINDOW      600     // frames per log line
+#define FRAME_WINDOW      120     // RENDERED frames per log line
+                                  // (was 600, which took minutes once
+                                  //  no-op iterations stopped counting)
 #define FRAME_BUCKETS     8
 // Upper bound (ms, exclusive) of each bucket. 8/16 = better than 120/60fps,
 // 33 = 30fps, 50 = 20fps, then the hitch territory.
@@ -66,9 +68,28 @@ static uint32_t s_frame_count;
 static uint64_t s_frame_total_us;
 static uint32_t s_frame_max_us;
 static int64_t  s_frame_window_start_us;
+// Iterations where lv_timer_handler() had nothing to do. Reported so the
+// render rate can be read against how hard the loop was actually spinning.
+static uint32_t s_idle_iters;
+
+// An iteration only counts as a FRAME if LVGL actually drew something.
+//
+// This threshold is the whole point. lv_timer_handler() returns in microseconds
+// when there is nothing to redraw, and the loop spins ~185 times a second doing
+// exactly that. Counting those as frames produced "185 fps, 585/600 under 8ms"
+// while the screen was visibly managing a few updates a second during a scroll —
+// the average was dominated by no-ops and said nothing about rendering at all.
+//
+// 1ms is comfortably above a no-op handler and far below any real render (the
+// cheapest observed is ~15ms).
+#define FRAME_DREW_MIN_US 1000
 
 static void frame_record(int64_t handler_us)
 {
+    // Iterations that drew nothing are counted only as loop spin, so the
+    // reported fps is renders per second rather than iterations per second.
+    if (handler_us < FRAME_DREW_MIN_US) { s_idle_iters++; return; }
+
     uint32_t ms = (uint32_t)(handler_us / 1000);
     int b = 0;
     while (b < FRAME_BUCKETS - 1 && ms >= k_frame_bucket_ms[b]) b++;
@@ -87,10 +108,11 @@ static void frame_record(int64_t handler_us)
     uint32_t fps_x10 = span > 0 ? (uint32_t)((int64_t)s_frame_count * 10000000LL / span) : 0;
 
     ESP_LOGW(TAG,
-        "[frames] n=%lu  fps=%lu.%lu  mean=%lums  max=%lums  | <8:%lu 8-16:%lu 16-33:%lu "
-        "33-50:%lu 50-100:%lu 100-200:%lu 200-400:%lu 400+:%lu",
+        "[frames] rendered=%lu  RENDER-fps=%lu.%lu  idle_iters=%lu  mean=%lums  max=%lums  "
+        "| <8:%lu 8-16:%lu 16-33:%lu 33-50:%lu 50-100:%lu 100-200:%lu 200-400:%lu 400+:%lu",
         (unsigned long)s_frame_count,
         (unsigned long)(fps_x10 / 10), (unsigned long)(fps_x10 % 10),
+        (unsigned long)s_idle_iters,
         (unsigned long)(s_frame_total_us / s_frame_count / 1000),
         (unsigned long)(s_frame_max_us / 1000),
         (unsigned long)s_frame_hist[0], (unsigned long)s_frame_hist[1],
@@ -102,6 +124,7 @@ static void frame_record(int64_t handler_us)
     s_frame_count           = 0;
     s_frame_total_us        = 0;
     s_frame_max_us          = 0;
+    s_idle_iters            = 0;
     s_frame_window_start_us = now;
 }
 

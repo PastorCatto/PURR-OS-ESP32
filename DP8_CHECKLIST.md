@@ -180,7 +180,27 @@ signal ready from the DMA completion ISR.
 
 As written, `s_buf2` is **50 KB of PSRAM for zero benefit**.
 
-### F4 — Tearing: nothing reads the TE pin
+### ~~F4 — Tearing: nothing reads the TE pin~~ — **CLOSED: not wired on this hardware**
+
+Answered 2026-07-26. The T-Deck Plus breaks out six display pins and TE is not one
+of them:
+
+```
+display_cs = 12   display_dc = 11    display_mosi = 41
+display_sclk = 40 display_rst = -1   display_bl = 42
+```
+
+`display_rst = -1` — LilyGo did not wire reset either, let alone TE. These values
+came from LilyGo's own `utilities.h` (see `meshplan.md`), and there is no TE
+reference anywhere in the tree. There is no signal to read, so this cannot be
+implemented on this board regardless of whether it would help.
+
+Worth recording for the next device: **TE addresses tearing, not frame rate.**
+Waiting for vblank before writing costs up to one refresh period per frame, so on
+a panel that is already render-bound it would *reduce* fps. It is the right fix
+for a sheared or torn image during motion, and the wrong one for slowness.
+
+Original entry follows.
 
 The ST7789 exposes a tearing-effect output that pulses at vertical blank. The
 driver never touches it. Writing GRAM while the panel scans out tears by

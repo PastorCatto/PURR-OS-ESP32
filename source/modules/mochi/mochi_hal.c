@@ -41,8 +41,30 @@ static const char *TAG = "mochi_hal";
 // DMA straight out of PSRAM. MALLOC_CAP_DMA alongside MALLOC_CAP_SPIRAM is
 // what actually guarantees a DMA-usable PSRAM allocation — MALLOC_CAP_SPIRAM
 // on its own does not.
+// Sized to FIT THE DATA CACHE, which is the constraint that actually binds here.
+//
+// CONFIG_ESP32S3_DATA_CACHE_SIZE is 0x8000 = 32,768 bytes on this device. At 80
+// lines the buffer is 320 x 80 x 2 = 51,200 bytes — 1.6x the entire data cache,
+// and it lives in PSRAM. Every render pass therefore streams the whole buffer
+// through a cache too small to hold any of it, so nothing survives to be reused
+// and every access is a miss.
+//
+// 48 lines is 320 x 48 x 2 = 30,720 bytes, which fits with headroom, and gives 5
+// passes per screen (240 / 48).
+//
+// This is a deliberate middle between two measured points, not a guess:
+//   16 lines (15 passes) — much WORSE. Per-pass cost dominates: each pass
+//                          re-walks the object tree and re-clips every widget.
+//                          Measured fps 48-72 vs 125-160.
+//   80 lines (3 passes)  — fewest passes, but exceeds the data cache.
+// If per-pass cost and cache residency are both real, the optimum is between
+// them, and 48 is the largest size that still fits the cache.
+//
+// Re-measure with the frame histogram (mochi_module.c) before changing this.
+// Both earlier buffer-size conclusions in this project were drawn from a broken
+// instrument — see DP8_CHECKLIST.md F12.
 #ifndef MOCHI_BUF_LINES
-#define MOCHI_BUF_LINES 80
+#define MOCHI_BUF_LINES 48
 #endif
 
 static lv_color_t *s_buf1;
