@@ -325,7 +325,16 @@ static void magidos_task(void *arg)
     // PSRAM: this is a pure pixel payload handed to push_pixels, which is
     // exactly what PSRAM is abundant for here. Internal DRAM is the scarce
     // resource and must not be spent on it.
-    s_fb = heap_caps_malloc((size_t)s_scr_w * s_scr_h * 2, MALLOC_CAP_SPIRAM);
+    //
+    // ZEROED, not just allocated. The CGA grid does not cover the panel: cell
+    // height is out_h / rows, so at 240px and 25 rows that is 9px per row and
+    // 9 x 25 = 225 — the bottom 15 rows are never written by the renderer. An
+    // uninitialised buffer left those rows showing whatever PSRAM happened to
+    // hold, which appeared on hardware as a band of colour static along the
+    // bottom edge, coincidentally about the height of the nav bar. Clearing
+    // once is enough: the renderer covers rows 0..224 on every frame and never
+    // touches the remainder, so it stays black.
+    s_fb = heap_caps_calloc(1, (size_t)s_scr_w * s_scr_h * 2, MALLOC_CAP_SPIRAM);
     if (!s_fb) {
         ESP_LOGE(TAG, "framebuffer alloc failed (%ux%u)", s_scr_w, s_scr_h);
         purr_game_mode_exit();

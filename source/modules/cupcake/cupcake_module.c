@@ -128,7 +128,23 @@ int cupcake_init(void)
 
 void cupcake_deinit(void)
 {
-    if (s_task) { vTaskDelete(s_task); s_task = NULL; }
+    // Unsubscribe from the task watchdog BEFORE deleting the task.
+    //
+    // esp_task_wdt_add(NULL) in the task above registers its handle with the
+    // TWDT. vTaskDelete() does not unregister it, so the watchdog keeps waiting
+    // for resets from a task that no longer exists and panics when
+    // CONFIG_ESP_TASK_WDT_TIMEOUT_S (4s here) elapses.
+    //
+    // This never mattered while this module was only unloaded at shutdown. Game
+    // mode unloads it at runtime, and the result was a hard panic roughly four
+    // seconds into every game-mode session, which then struck the crash guard
+    // and rebooted. Harmless if the task was never subscribed - delete just
+    // returns ESP_ERR_NOT_FOUND.
+    if (s_task) {
+        esp_task_wdt_delete(s_task);
+        vTaskDelete(s_task);
+        s_task = NULL;
+    }
     // lv_deinit() only exists when LV_MEM_CUSTOM is off (or GC is on) —
     // see lv_obj.c's matching guard. Cupcake never actually gets unloaded
     // at runtime today, so this is defensive rather than load-bearing.

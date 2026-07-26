@@ -111,7 +111,16 @@ int tabby_init(void)
 
 void tabby_deinit(void)
 {
-    if (s_task) { vTaskDelete(s_task); s_task = NULL; }
+    // esp_task_wdt_delete() before vTaskDelete(): the task subscribed itself to
+    // the TWDT, and deleting it without unsubscribing leaves the watchdog
+    // waiting on a handle that no longer exists — it then panics after
+    // CONFIG_ESP_TASK_WDT_TIMEOUT_S. Only reachable now that game mode unloads
+    // UI backends at runtime. Harmless if never subscribed.
+    if (s_task) {
+        esp_task_wdt_delete(s_task);
+        vTaskDelete(s_task);
+        s_task = NULL;
+    }
     // lv_deinit() only exists when LV_MEM_CUSTOM is off (or GC is on) — see
     // lv_obj.c's matching guard. Defensive: Tabby is never unloaded at runtime.
 #if LV_ENABLE_GC || !LV_MEM_CUSTOM
