@@ -258,12 +258,21 @@ def generate_components_manifest(targets):
             rel = os.path.relpath(src_dir, REPO_DIR).replace(os.sep, "/")
             lines.append(f"    ${{CMAKE_SOURCE_DIR}}/../{rel}")
 
-    # System apps: source/apps/system/<name>/app.pcat + CMakeLists.txt
-    # These are compiled into firmware as static modules, not loaded from SPIFFS.
-    apps_system_dir = os.path.join(SOURCE_DIR, "apps", "system")
-    if os.path.isdir(apps_system_dir):
-        for app_name in sorted(os.listdir(apps_system_dir)):
-            app_dir = os.path.join(apps_system_dir, app_name)
+    # Built-in apps: source/apps/<group>/<name>/app.pcat + CMakeLists.txt
+    # Compiled into firmware as static modules, not loaded from SPIFFS.
+    #
+    # "exclusive" was previously missing from this list, which is why the
+    # in-house exclusives could never build: device.pcat's [apps] would put them
+    # in the generated glue, the glue would reference purr_module_<name>, and the
+    # link would then fail with an undefined reference because the component
+    # directory was never added to EXTRA_COMPONENT_DIRS in the first place.
+    # Adding an app.pcat alone does not fix it — the directory has to be scanned.
+    for group in ("system", "exclusive"):
+        group_dir = os.path.join(SOURCE_DIR, "apps", group)
+        if not os.path.isdir(group_dir):
+            continue
+        for app_name in sorted(os.listdir(group_dir)):
+            app_dir = os.path.join(group_dir, app_name)
             if (os.path.isdir(app_dir)
                     and os.path.isfile(os.path.join(app_dir, "app.pcat"))
                     and os.path.isfile(os.path.join(app_dir, "CMakeLists.txt"))):

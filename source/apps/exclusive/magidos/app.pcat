@@ -1,0 +1,9 @@
+# apps/exclusive/magidos/app.pcat
+
+name        = "magidos"
+version     = "0.2.0"
+tier        = "claw"
+author      = "PURR OS"
+description = "MagiDOS: DOS shell and 8086 emulator, runs under game mode with C: mapped to /sdcard/dos."
+
+idf_requires = "esp_common driver freertos game_mode"

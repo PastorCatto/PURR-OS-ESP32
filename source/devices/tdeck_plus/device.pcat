@@ -102,6 +102,10 @@ msn         = true
 services    = true
 taskmgr     = true
 nearby      = true
+# MagiDOS enters game mode on launch: it unloads the UI backend, systemui, the
+# mesh stack and the radios to take the panel and keyboard for itself, then
+# restores all of them on exit. See modules/game_mode/game_mode.h.
+magidos     = true
 
 [flash]
 display/st7789    = 1
