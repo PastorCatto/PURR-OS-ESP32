@@ -219,7 +219,7 @@ static lv_obj_t *build_lp_navbtn(lv_obj_t *parent, const char *symbol, lv_event_
     lv_obj_set_size(btn, LP_NAVBTN_SIZE, LP_NAVBTN_SIZE);
     lv_obj_set_style_radius(btn, (lv_coord_t)(LP_NAVBTN_SIZE / 2), 0);
     lv_obj_set_style_bg_color(btn, lv_color_make(0x30, 0x30, 0x30), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
+    purr_systemui_fx_bg_opa_keep(btn, LV_OPA_70);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn, click_cb, LV_EVENT_CLICKED, NULL);
@@ -242,7 +242,7 @@ static lv_obj_t *build_lp_home_navbtn(lv_obj_t *parent, lv_event_cb_t click_cb)
     lv_obj_set_size(btn, LP_NAVBTN_SIZE, LP_NAVBTN_SIZE);
     lv_obj_set_style_radius(btn, (lv_coord_t)(LP_NAVBTN_SIZE / 2), 0);
     lv_obj_set_style_bg_color(btn, lv_color_make(0x30, 0x30, 0x30), 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
+    purr_systemui_fx_bg_opa_keep(btn, LV_OPA_70);
     lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(btn, click_cb, LV_EVENT_CLICKED, NULL);
@@ -322,7 +322,7 @@ static void build_lp_navbar(uint16_t w)
     lv_obj_set_size(s_lp_navbar, w, PURR_SYSTEMUI_NAVBAR_H);
     lv_obj_align(s_lp_navbar, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_color(s_lp_navbar, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_lp_navbar, LV_OPA_50, 0);
+    purr_systemui_fx_bg_opa(s_lp_navbar, LV_OPA_50);
     lv_obj_clear_flag(s_lp_navbar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_layout(s_lp_navbar, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(s_lp_navbar, LV_FLEX_FLOW_ROW);
@@ -870,7 +870,7 @@ static void lp_recents_open(void)
         lv_obj_set_size(s_lp_recents_backdrop, w, h);
         lv_obj_set_pos(s_lp_recents_backdrop, 0, 0);
         lv_obj_set_style_bg_color(s_lp_recents_backdrop, lv_color_black(), 0);
-        lv_obj_set_style_bg_opa(s_lp_recents_backdrop, LV_OPA_70, 0);
+        purr_systemui_fx_bg_opa(s_lp_recents_backdrop, LV_OPA_70);
         lv_obj_clear_flag(s_lp_recents_backdrop, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(s_lp_recents_backdrop, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(s_lp_recents_backdrop, lp_recents_backdrop_click_cb, LV_EVENT_CLICKED, NULL);
@@ -930,7 +930,7 @@ static void lp_recents_open(void)
             lv_obj_set_pos(card, (w - card_w) / 2, top_pad + shown * step);
             lv_obj_set_style_radius(card, 16, 0);
             lv_obj_set_style_bg_color(card, s_host->tint_color(app->name, 0x30), 0);
-            lv_obj_set_style_bg_opa(card, LV_OPA_80, 0);
+            purr_systemui_fx_bg_opa_keep(card, LV_OPA_80);
             lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
             lv_obj_add_event_cb(card, lp_recents_card_open_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -1105,7 +1105,7 @@ static void ck_build_lock_screen(uint16_t w, uint16_t h)
         lv_obj_set_size(dim, w, h);
         lv_obj_set_pos(dim, 0, 0);
         lv_obj_set_style_bg_color(dim, lv_color_black(), 0);
-        lv_obj_set_style_bg_opa(dim, LV_OPA_60, 0);
+        purr_systemui_fx_bg_opa(dim, LV_OPA_60);
         lv_obj_clear_flag(dim, LV_OBJ_FLAG_CLICKABLE);
     }
 
@@ -1286,6 +1286,19 @@ int16_t purr_systemui_navbar_height(void)
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
+// See systemui.h. The nav bar is built once by purr_systemui_init() and never
+// rebuilt, so it would otherwise keep whatever styling it was born with until
+// the next boot. The recents backdrop persists across open/close too.
+//
+// Panels are not listed here because this style's own panels are already
+// LV_OPA_COVER — the Android shade was never translucent. Notification rows are
+// rebuilt on every panel refresh and pick the setting up on their own.
+void purr_systemui_fx_refresh(void)
+{
+    if (s_lp_navbar)            purr_systemui_fx_bg_opa(s_lp_navbar, LV_OPA_50);
+    if (s_lp_recents_backdrop)  purr_systemui_fx_bg_opa(s_lp_recents_backdrop, LV_OPA_70);
+}
+
 void purr_systemui_init(const purr_systemui_host_t *host)
 {
     if (!host) { ESP_LOGE(TAG, "init called with NULL host — system UI disabled"); return; }
@@ -1344,6 +1357,7 @@ void purr_systemui_tick(void)
 
 void purr_systemui_init(const purr_systemui_host_t *host) { (void)host; }
 void purr_systemui_tick(void)                             { }
+void purr_systemui_fx_refresh(void)                       { }
 int16_t purr_systemui_navbar_height(void)                 { return 0; }
 int  purr_systemui_foreground_idx(void)                   { return -1; }
 void purr_systemui_enter_app(int idx)                     { (void)idx; }

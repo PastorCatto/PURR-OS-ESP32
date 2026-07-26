@@ -52,8 +52,8 @@
 #include "app_manager_remote.h"
 #include "meshtastic.h"
 
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
-#include "cupcake.h"
+#ifdef CONFIG_PURR_UI_LVGL
+#include "lvgl.h"
 #endif
 
 #define REFRESH_MS        2000
@@ -89,7 +89,7 @@ static volatile bool s_have_selection = false;
 
 static char        s_app_row_bufs[MAX_APP_ROWS][64];
 static const char *s_app_row_ptrs[MAX_APP_ROWS];
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
 // Every row currently gets the same generic icon — remote app entries
 // (remote_app_entry_t, app_manager_remote.h) carry no icon data at all
 // (the LOCAL app_entry_t doesn't either; icons are a UI-layer-only lookup
@@ -184,7 +184,7 @@ static void set_milkbottle_row(int row) {
     snprintf(s_app_row_bufs[row], sizeof(s_app_row_bufs[row]), "Milk Bottle%s",
              s_msg_win ? "  (open)" : "");
     s_app_row_ptrs[row] = s_app_row_bufs[row];
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
     s_app_row_icons[row] = LV_SYMBOL_CALL;
 #endif
 }
@@ -208,8 +208,8 @@ static void refresh_app_list_from_remote(void) {
     if (!ok) {
         s_app_count = 1;   // Milk Bottle row still stands even with no remote app list
         if (s_app_list) {
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
-            cupcake_win_list_set_items_icon(s_app_list, s_app_row_ptrs, s_app_row_icons, s_app_count);
+#ifdef CONFIG_PURR_UI_LVGL
+            purr_win_list_set_items_icon(s_app_list, s_app_row_ptrs, s_app_row_icons, s_app_count);
 #else
             purr_win_list_set_items(s_app_list, s_app_row_ptrs, s_app_count);
 #endif
@@ -226,15 +226,15 @@ static void refresh_app_list_from_remote(void) {
         snprintf(s_app_row_bufs[row], sizeof(s_app_row_bufs[row]), "%s%s",
                  s_last_apps[i].name, s_last_apps[i].state == 1 /* APP_STATE_RUNNING */ ? "  (running)" : "");
         s_app_row_ptrs[row] = s_app_row_bufs[row];
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
         s_app_row_icons[row] = LV_SYMBOL_FILE;
 #endif
     }
     s_app_count = n + 1;
 
     if (s_app_list) {
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
-        cupcake_win_list_set_items_icon(s_app_list, s_app_row_ptrs, s_app_row_icons, s_app_count);
+#ifdef CONFIG_PURR_UI_LVGL
+        purr_win_list_set_items_icon(s_app_list, s_app_row_ptrs, s_app_row_icons, s_app_count);
 #else
         purr_win_list_set_items(s_app_list, s_app_row_ptrs, s_app_count);
 #endif

@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>   // strtoul() — accent colour hex parsing
 #include <stdint.h>
 #include <dirent.h>
 #include "freertos/FreeRTOS.h"
@@ -22,13 +23,14 @@
 #include "wifi_mgr.h"
 #include "bt_mgr.h"
 #include "mesh_ble.h"
+#include "systemui.h"   // purr_systemui_fx_refresh() — see on_effects_toggle()
 #include "sdkconfig.h"
 
 // LV_SYMBOL_* glyphs for the category tile grid below — meaningless (and
 // their backing font absent) under MiniWin/Pounce, same as msn.c's own
 // tile grid.
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
-#include "cupcake.h"
+#ifdef CONFIG_PURR_UI_LVGL
+#include "lvgl.h"
 #endif
 
 #define NVS_NS  "purr_settings"
@@ -84,6 +86,17 @@ static purr_wid_t  s_lock_notifs_lbl        = 0;
 // 1 = lock screen shows only a count. Defaults to 1 to match the kernel's own
 // privacy default, so a device with no stored preference hides them.
 static uint8_t     s_lock_hide_notifs       = 1;
+// UI effects (translucency) + the accent colour that replaces it when off.
+// Defaults match purr_kernel.c's own — effects on, dark blue-grey accent — so a
+// device with nothing stored behaves identically to one that never had this
+// setting. Accent is kept as a u32 and persisted as a hex STRING rather than a
+// blob, because that is exactly what the user types and what they would see if
+// they ever dumped NVS.
+static uint8_t     s_ui_effects             = 1;
+static uint32_t    s_accent_color           = 0x1C1C2E;
+static purr_wid_t  s_effects_lbl            = 0;
+static purr_wid_t  s_accent_lbl             = 0;
+static purr_wid_t  s_accent_input           = 0;
 
 static purr_wid_t  s_about_lbl = 0;
 
@@ -160,6 +173,18 @@ static void nvs_load(void) {
     nvs_get_u8(h, "dev_mode", &s_dev_mode);
     nvs_get_u8(h, "navbar_always_visible", &s_navbar_always_visible);
     nvs_get_u8(h, "lock_hide_notifs", &s_lock_hide_notifs);
+    nvs_get_u8(h, "ui_effects", &s_ui_effects);
+    // Accent is stored as the same "RRGGBB" text the user types. strtoul with
+    // base 16 on a buffer that nvs_get_str left untouched would parse whatever
+    // garbage was on the stack, so the read is only trusted when it succeeds
+    // AND produces the 6 characters we wrote.
+    {
+        char hex[8] = {0};
+        size_t hlen = sizeof(hex);
+        if (nvs_get_str(h, "accent_color", hex, &hlen) == ESP_OK && hlen >= 7) {
+            s_accent_color = (uint32_t)strtoul(hex, NULL, 16) & 0x00FFFFFFu;
+        }
+    }
     nvs_close(h);
     // Sync into the kernel-global cupcake_ui.c's idle check actually reads
     // — nvs_get_u8() only touched our own local copy above. Without this,
@@ -171,6 +196,11 @@ static void nvs_load(void) {
     // reads the kernel flag, not this app's local copy, so a stored preference
     // is invisible until pushed across at boot.
     purr_kernel_set_lock_hide_notifications(s_lock_hide_notifs != 0);
+    // Same again: every translucent surface in both System UI styles reads the
+    // kernel flag at build time, so a stored preference is invisible until
+    // pushed across here at boot.
+    purr_kernel_set_ui_effects(s_ui_effects != 0);
+    purr_kernel_set_accent_color(s_accent_color);
 }
 
 static void set_general_status(const char *msg) {
@@ -576,6 +606,102 @@ static void on_lock_notifs_toggle(purr_wid_t w, purr_event_t e, void *u) {
         : "Lock screen lists notifications.");
 }
 
+// ── UI effects + accent colour ──────────────────────────────────────────────
+//
+// One toggle and one hex field, both of which every translucent surface in both
+// System UI styles honours through purr_systemui_fx_bg_opa(). Lives in
+// Customization next to Theme and Wallpaper because it is the same kind of
+// choice: what the device looks like.
+//
+// Worth being honest in the UI about the second reason it exists — turning
+// effects off measurably speeds the UI up, because a translucent surface forces
+// what is beneath it to be redrawn and alpha-blended per pixel instead of being
+// skipped. That is why the status line says so rather than presenting this as
+// purely cosmetic.
+//
+// Rebuild note: surfaces read the flag when they are CONSTRUCTED, not on every
+// redraw, so already-built panels keep their old look until they are next
+// rebuilt. The status text tells the user that instead of pretending otherwise.
+
+static void refresh_effects_labels(void) {
+    if (s_effects_lbl) {
+        purr_win_label_set(s_effects_lbl,
+            s_ui_effects ? "Effects: ON (translucent)" : "Effects: OFF (solid accent)");
+    }
+    if (s_accent_lbl) {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "Accent: #%06lX", (unsigned long)s_accent_color);
+        purr_win_label_set(s_accent_lbl, buf);
+    }
+}
+
+static void on_effects_toggle(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    s_ui_effects = s_ui_effects ? 0 : 1;
+    purr_kernel_set_ui_effects(s_ui_effects != 0);
+    nvs_save_u8("ui_effects", s_ui_effects);
+    // Restyle what is already built. The shade panel and nav bar are created
+    // once at systemui init and only ever slid around afterwards, so without
+    // this the toggle silently does nothing to them until the next reboot.
+    // Safe to call straight from here: widget callbacks run on the UI task with
+    // the UI lock already held.
+    purr_systemui_fx_refresh();
+    refresh_effects_labels();
+    set_customization_status(s_ui_effects
+        ? "Translucency on."
+        : "Solid accent. Faster, and easier to read over a wallpaper.");
+}
+
+// Strict on purpose. strtoul() would happily accept "zzz" as 0 (silently
+// turning the accent black) and "12" as 0x12, so a typo would look like it
+// worked. Requiring exactly six hex digits means a bad entry is REPORTED rather
+// than quietly applied — the user gets their old colour back and a message.
+// Accepts an optional leading '#' and either case, because both are what people
+// actually type.
+static bool parse_hex_rgb(const char *s, uint32_t *out) {
+    if (!s) return false;
+    while (*s == ' ' || *s == '#') s++;
+    uint32_t v = 0;
+    int n = 0;
+    for (; s[n]; n++) {
+        char c = s[n];
+        uint32_t d;
+        if      (c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') d = (uint32_t)(c - 'A' + 10);
+        else return false;              // any non-hex character rejects outright
+        if (n >= 6) return false;       // too long
+        v = (v << 4) | d;
+    }
+    if (n != 6) return false;           // too short (covers the empty string)
+    *out = v;
+    return true;
+}
+
+static void on_accent_apply(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    const char *txt = s_accent_input ? purr_win_textarea_get(s_accent_input) : "";
+    uint32_t rgb;
+    if (!parse_hex_rgb(txt, &rgb)) {
+        set_customization_status("Need 6 hex digits, e.g. 1C1C2E or #FF8800.");
+        return;
+    }
+    s_accent_color = rgb;
+    purr_kernel_set_accent_color(s_accent_color);
+    char hex[8];
+    snprintf(hex, sizeof(hex), "%06lX", (unsigned long)s_accent_color);
+    nvs_save_str("accent_color", hex);
+    purr_systemui_fx_refresh();   // see on_effects_toggle() for why
+    refresh_effects_labels();
+    if (s_ui_effects) {
+        // Saying "applied" here would be a lie — nothing accent-coloured is on
+        // screen while effects are on.
+        set_customization_status("Accent saved. Turn Effects OFF to see it.");
+    } else {
+        set_customization_status("Accent applied.");
+    }
+}
+
 static void on_navbar_visible_toggle(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
     s_navbar_always_visible = s_navbar_always_visible ? 0 : 1;
@@ -771,6 +897,22 @@ static void on_open_customization(purr_wid_t w, purr_event_t e, void *u) {
                             : "Notifications: Shown");
     purr_win_button(s_customization_win, "Toggle Notifications", on_lock_notifs_toggle, NULL);
 
+    // Effects + accent. Sits under Lock Screen because turning effects off is
+    // most visible there — the lock screen scrim over the wallpaper is the
+    // largest translucent surface in the system.
+    purr_win_label(s_customization_win, "Effects");
+    s_effects_lbl = purr_win_label(s_customization_win, "");
+    purr_win_button(s_customization_win, "Toggle Effects", on_effects_toggle, NULL);
+
+    s_accent_lbl = purr_win_label(s_customization_win, "");
+    purr_win_label(s_customization_win, "Accent colour (hex, e.g. 1C1C2E)");
+    s_accent_input = purr_win_textarea(s_customization_win, 60, 12);
+    purr_win_button(s_customization_win, "Apply Accent", on_accent_apply, NULL);
+
+    // Both labels are created empty above and filled here, so the initial text
+    // and every later update go through exactly one formatting path.
+    refresh_effects_labels();
+
     s_customization_status_lbl = purr_win_label(s_customization_win, "Ready.");
     purr_win_show(s_customization_win);
 }
@@ -897,7 +1039,7 @@ static void on_cat_list_event(purr_wid_t w, purr_event_t e, void *user) {
 static void build_category_nav(void) {
     s_cat_tile_grid = purr_win_tile_grid(s_win, 100, 75);
     if (s_cat_tile_grid) {
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
         static const char *symbols[CAT_COUNT] = { LV_SYMBOL_SETTINGS, LV_SYMBOL_IMAGE, LV_SYMBOL_EDIT, LV_SYMBOL_WIFI, LV_SYMBOL_LIST };
 #else
         // Active backend implements tile_grid but isn't Cupcake — no

@@ -297,19 +297,90 @@ int mochi_hal_init(void)
 
     lv_init();
 
-    // Sized from the real display width, never a compile-time constant — a
-    // mismatch here renders past the allocation and sprays pixels across the
-    // PSRAM heap (see cupcake_hal.c's note on the tab5 corruption this caused).
-    size_t buf_bytes = sizeof(lv_color_t) * s_disp_w * MOCHI_BUF_LINES;
-    s_buf1 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    s_buf2 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    if (!s_buf1 || !s_buf2) {
-        ESP_LOGE(TAG, "PSRAM DMA alloc failed for display buffers (2x %u bytes)",
-                 (unsigned)buf_bytes);
+    // Draw buffer: ONE buffer, 16 lines, reserved in INTERNAL RAM at link time.
+    //
+    // Three deliberate departures from the obvious (two big PSRAM buffers), all
+    // of them measured — see DP8_CHECKLIST.md F3/F9:
+    //
+    // INTERNAL, not PSRAM. This buffer is not merely a DMA source; it is LVGL's
+    // RENDER TARGET, blended into with heavy read-modify-write, and internal RAM
+    // is roughly an order of magnitude better for that pattern. The st7789
+    // driver also reads it pixel-by-pixel to byte-swap, so it is read twice per
+    // frame by the CPU either way.
+    //
+    // RESERVED IN .bss, not malloc'd. Asking the heap here is far too late: this
+    // runs at t=8.3s, free internal DRAM flatlines at ~1-2KB by ~14s once WiFi,
+    // NimBLE and the mesh stack have taken their share, and the allocator
+    // refused even 12 lines — silently falling back to PSRAM, i.e. exactly what
+    // this is trying to avoid. The linker cannot lose that race. Same technique,
+    // and same reason, as this module's static render-task stack.
+    //
+    // SINGLE, not double. LVGL's double-buffering only pays off when flush_cb is
+    // asynchronous — return immediately, signal lv_disp_flush_ready() from the
+    // DMA completion. flush_cb here is fully synchronous, so a second buffer is
+    // memory spent for no benefit whatsoever.
+    //
+    // ── Why the size is small, and why that is NOT obviously a loss ──────────
+    // 16 lines means ~15 flushes per full screen rather than 3. Measured at -Og
+    // that was a clear regression (median lv_timer_handler() 146ms -> 164ms) and
+    // it was reverted on that basis. That measurement is no longer valid: it
+    // predates the -O2 switch, which cut frame time ~3.3x and changed what the
+    // extra flushes are being weighed against. The build that measured best on
+    // hardware (median 49ms, max 53ms, a single tight 40-59ms band) had THIS
+    // buffer configuration in it — the revert was applied afterwards, on the
+    // strength of the stale pre--O2 number, and was never re-measured.
+    //
+    // So: keep the two variables straight. If this is ever changed again,
+    // re-measure at the CURRENT optimisation level rather than trusting the
+    // paragraph above.
+    //
+    // A width wider than the array would render past it and corrupt adjacent
+    // .bss, so the guard below is load-bearing, not defensive style.
+    // EXPERIMENT (DP8_CHECKLIST.md): pass count vs buffer locality.
+    //
+    // Measured with the FIXED frame instrument, a full-screen redraw costs
+    // ~150ms even with effects off — about 470 CPU cycles per pixel, which is
+    // an order of magnitude too high to be per-pixel blending. That points at
+    // PER-PASS cost, not per-pixel: at 16 lines a full screen is 15 render
+    // passes, and every pass re-walks the whole object tree and re-clips every
+    // widget against its band.
+    //
+    // Set to 0 to use the large PSRAM buffer (3 passes, slower memory) instead
+    // of the small internal one (15 passes, faster memory). The earlier
+    // comparison of these two was made with the old censored per-frame warning
+    // and is not trustworthy — see frame_record() in mochi_module.c for why
+    // that instrument was misleading.
+    #define MOCHI_USE_INTERNAL_DRAW_BUF 0
+
+    #define MOCHI_DRAW_LINES 16
+    static lv_color_t s_draw_mem[320 * MOCHI_DRAW_LINES];
+
+    size_t buf_bytes;
+    int    lines;
+
+    if (MOCHI_USE_INTERNAL_DRAW_BUF && s_disp_w <= 320) {
+        s_buf1    = s_draw_mem;
+        buf_bytes = sizeof(s_draw_mem);
+        lines     = (int)(sizeof(s_draw_mem) / sizeof(lv_color_t) / s_disp_w);
+        ESP_LOGW(TAG, "[perf] draw buffer: INTERNAL .bss, single, %d lines (%u bytes), "
+                      "%d passes per screen",
+                 lines, (unsigned)buf_bytes, (s_disp_h + lines - 1) / lines);
+    } else {
+        // Large PSRAM buffer: fewer, larger passes. Also the only option on a
+        // panel wider than the static array was sized for.
+        lines     = MOCHI_BUF_LINES;
+        buf_bytes = sizeof(lv_color_t) * s_disp_w * lines;
+        s_buf1    = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+        ESP_LOGW(TAG, "[perf] draw buffer: PSRAM, single, %d lines (%u bytes), %d passes per screen",
+                 lines, (unsigned)buf_bytes, (s_disp_h + lines - 1) / lines);
+    }
+    if (!s_buf1) {
+        ESP_LOGE(TAG, "draw buffer alloc failed (%u bytes)", (unsigned)buf_bytes);
         return -1;
     }
+    s_buf2 = NULL;
 
-    lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, s_disp_w * MOCHI_BUF_LINES);
+    lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, s_disp_w * lines);
 
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res      = (lv_coord_t)s_disp_w;

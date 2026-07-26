@@ -58,16 +58,22 @@
 #include "msn_backend.h"
 #include <mbedtls/sha256.h>
 
-// Cupcake-only: richer list rows (a real icon glyph per row, matching
-// Meshtastic's own device-ui look) instead of the plain-text-only rendering
-// every other backend gets. cupcake.h is always compiled (every UI backend's
-// component builds for every device — see modulestrap's component-manifest
-// comment), so this include is safe even on non-Cupcake devices; only the
-// actual cupcake_win_list_set_items_icon() *calls* below are guarded, since
-// LV_SYMBOL_* glyphs are meaningless (and their backing font absent) under
-// MiniWin/Pounce.
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
-#include "cupcake.h"
+// Richer list rows — a real icon glyph per row, matching Meshtastic's own
+// device-ui look, instead of the plain-text rendering a non-LVGL backend gets.
+//
+// Guarded on CONFIG_PURR_UI_LVGL — "is LVGL present" — and NOT on a specific
+// backend. This previously said CONFIG_PURR_UI_BACKEND_CUPCAKE and called
+// Cupcake's private cupcake_win_list_set_items_icon(), so every row icon here
+// silently vanished the moment this device moved to Mochi. The feature was
+// never removed; it was compiled out. LV_SYMBOL_* glyphs come from LVGL's
+// built-in font, so LVGL's presence is the actual dependency.
+//
+// The call is now purr_win_list_set_items_icon(), which dispatches through
+// catcall_ui_t and falls back to a plain list on any backend that leaves it
+// NULL. So the guard is only about whether LV_SYMBOL_* exists to name — never
+// about whether the call is safe to make.
+#ifdef CONFIG_PURR_UI_LVGL
+#include "lvgl.h"
 #endif
 
 #define MAX_CHATS      16
@@ -126,7 +132,7 @@ static char         s_buddy_id_strs[MAX_CHATS][24];
 static char         s_buddy_labels[MAX_CHATS][80];
 static const char   *s_buddy_label_ptrs[MAX_CHATS];
 static int           s_buddy_count = 0;
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
 // Cupcake-only per-row icon glyphs — parallel to s_buddy_label_ptrs, only
 // ever populated/read when the active backend is Cupcake (see
 // refresh_buddy_list()).
@@ -155,7 +161,7 @@ static char        s_room_names[MAX_ROOMS][12];
 static char        s_room_labels[MAX_ROOMS][24];
 static const char  *s_room_label_ptrs[MAX_ROOMS];
 static int          s_room_count = 0;
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
 // Cupcake-only per-row icon glyphs — parallel to s_room_label_ptrs, only
 // ever populated/read when the active backend is Cupcake (see
 // refresh_room_list()).
@@ -282,7 +288,7 @@ static void append_node_status(char *buf, size_t buf_max, const msn_contact_t *i
     }
 }
 
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
 // Per-node icon glyph for Cupcake's richer list rendering — battery level
 // takes priority (thresholds match cupcake_ui.c's own status-bar battery
 // icon selection, for a consistent look), falling back to a generic
@@ -327,15 +333,15 @@ static void refresh_buddy_list(void) {
         }
         append_node_status(s_buddy_labels[i], sizeof(s_buddy_labels[i]), &info);
         s_buddy_label_ptrs[i] = s_buddy_labels[i];
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
         s_buddy_icon_ptrs[i] = node_icon_symbol(&info);
 #endif
     }
 
     if (s_buddy_list) {
         purr_kernel_ui_breadcrumb("msn:buddy_list_set_items");
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
-        cupcake_win_list_set_items_icon(s_buddy_list, s_buddy_label_ptrs, s_buddy_icon_ptrs, s_buddy_count);
+#ifdef CONFIG_PURR_UI_LVGL
+        purr_win_list_set_items_icon(s_buddy_list, s_buddy_label_ptrs, s_buddy_icon_ptrs, s_buddy_count);
 #else
         purr_win_list_set_items(s_buddy_list, s_buddy_label_ptrs, s_buddy_count);
 #endif
@@ -363,7 +369,7 @@ static void refresh_room_list(void) {
         snprintf(s_room_labels[i], sizeof(s_room_labels[i]), "%s %s",
                  s_room_names[i], i == 0 ? "(default)" : "(private)");
         s_room_label_ptrs[i] = s_room_labels[i];
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
         // No lock/key glyph exists in this LVGL build's symbol set (checked
         // lv_symbol_def.h) — WIFI for the public default channel (broadcast
         // metaphor) and EYE_CLOSE for a private/PSK room ("not visible
@@ -375,8 +381,8 @@ static void refresh_room_list(void) {
 
     if (s_room_list) {
         purr_kernel_ui_breadcrumb("msn:room_list_set_items");
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
-        cupcake_win_list_set_items_icon(s_room_list, s_room_label_ptrs, s_room_icon_ptrs, s_room_count);
+#ifdef CONFIG_PURR_UI_LVGL
+        purr_win_list_set_items_icon(s_room_list, s_room_label_ptrs, s_room_icon_ptrs, s_room_count);
 #else
         purr_win_list_set_items(s_room_list, s_room_label_ptrs, s_room_count);
 #endif
@@ -1002,7 +1008,7 @@ static void on_home_list_event(purr_wid_t w, purr_event_t e, void *user) {
 static void build_home_screen_nav(void) {
     s_home_tile_grid = purr_win_tile_grid(s_home_win, 100, 75);
     if (s_home_tile_grid) {
-#ifdef CONFIG_PURR_UI_BACKEND_CUPCAKE
+#ifdef CONFIG_PURR_UI_LVGL
         static const char *symbols[4] = { LV_SYMBOL_LIST, LV_SYMBOL_ENVELOPE, LV_SYMBOL_WIFI, LV_SYMBOL_TRASH };
 #else
         // Backend implements tile_grid but isn't Cupcake (a future LVGL-

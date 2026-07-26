@@ -34,10 +34,69 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "lvgl.h"
+#include "../../kernel/core/purr_kernel.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// ── Translucency, in one place ──────────────────────────────────────────────
+//
+// Every surface that is deliberately see-through sets its background opacity
+// through this instead of calling lv_obj_set_style_bg_opa() directly. With
+// effects on it behaves exactly as the call it replaces. With effects off the
+// surface becomes fully opaque and is filled with the user's accent colour.
+//
+// Centralised rather than left as an `if` at each of the ~16 call sites for
+// two reasons: the sites are spread across four files and two System UI styles,
+// and a site that forgets the check does not fail loudly — it just quietly
+// stays translucent, so the setting appears to half-work. One helper means
+// "which surfaces are effects?" is answered by which ones call this.
+//
+// Deliberately NOT applied to:
+//   LV_OPA_TRANSP — invisible hit-zones. Filling those with accent would paint
+//                   opaque blocks over the UI.
+//   LV_OPA_COVER  — already opaque, so there is no effect to disable.
+//
+// The colour is written after the opacity so it wins over whatever bg_color
+// the call site set moments earlier; that ordering is why this takes the object
+// rather than returning a value.
+static inline void purr_systemui_fx_bg_opa(lv_obj_t *obj, lv_opa_t translucent_opa)
+{
+    if (purr_kernel_ui_effects_enabled()) {
+        lv_obj_set_style_bg_opa(obj, translucent_opa, 0);
+    } else {
+        lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(obj, lv_color_hex(purr_kernel_accent_color()), 0);
+    }
+}
+
+// Variant for surfaces whose OWN colour carries meaning — per-app tile colours,
+// the active/inactive page dots. These are translucent for depth, but flooding
+// them with a single accent would destroy the thing they encode: every tile
+// would look alike, and the page dots would stop showing which page you are on.
+// So effects-off makes them opaque at the colour the call site already chose.
+//
+// The rule of thumb: if the surface is CHROME (panels, bars, scrims, cards)
+// use purr_systemui_fx_bg_opa(). If the surface is CONTENT whose colour is
+// information, use this one.
+static inline void purr_systemui_fx_bg_opa_keep(lv_obj_t *obj, lv_opa_t translucent_opa)
+{
+    lv_obj_set_style_bg_opa(obj,
+        purr_kernel_ui_effects_enabled() ? translucent_opa : LV_OPA_COVER, 0);
+}
+
+// Same decision for a border/outline that is only there to suggest depth
+// through a translucent edge. Collapses to fully opaque accent when off.
+static inline void purr_systemui_fx_border_opa(lv_obj_t *obj, lv_opa_t translucent_opa)
+{
+    if (purr_kernel_ui_effects_enabled()) {
+        lv_obj_set_style_border_opa(obj, translucent_opa, 0);
+    } else {
+        lv_obj_set_style_border_opa(obj, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(obj, lv_color_hex(purr_kernel_accent_color()), 0);
+    }
+}
 
 // Height of the status strip along the top, and of the nav bar along the
 // bottom. Prefer purr_systemui_navbar_height() over the raw constant when
@@ -165,6 +224,24 @@ bool purr_systemui_is_locked(void);
 // lock screen visible again by restoring brightness. Does NOT clear the
 // locked state — that's a separate, deliberate dismiss gesture on the overlay.
 void purr_systemui_wake(void);
+
+// Re-apply the effects/accent styling to surfaces that are ALREADY BUILT.
+//
+// Necessary because the fx helpers above decide translucent-vs-accent at
+// CONSTRUCTION time, and the long-lived chrome is constructed exactly once:
+// build_panel() runs from purr_systemui_init(), and opening the shade only
+// slides that same object back down. So without this, toggling the setting
+// appears to do nothing to the notification shade until the next reboot —
+// which is precisely how it failed the first time it was tried on hardware.
+//
+// Transient surfaces (notification cards, recents cards) are rebuilt every time
+// they are shown and pick the setting up on their own; this only has to reach
+// the persistent ones, plus a notification rebuild so cards refresh in place.
+//
+// MUST be called from the UI task with the UI lock held — it touches LVGL
+// objects. Settings' own widget callbacks already satisfy both, since they run
+// inside the host backend's render loop.
+void purr_systemui_fx_refresh(void);
 
 #ifdef __cplusplus
 }

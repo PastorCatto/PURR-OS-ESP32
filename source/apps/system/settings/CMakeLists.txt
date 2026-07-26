@@ -9,5 +9,6 @@ idf_component_register(
         ../../../modules/wifi_mgr
         ../../../modules/bt_mgr
         ../../../modules/meshtastic
-    REQUIRES esp_common driver freertos nvs_flash esp_hw_support spi_flash miniwin cupcake app_manager wifi_mgr bt_mgr meshtastic
+        ../../../modules/systemui
+    REQUIRES esp_common driver freertos nvs_flash esp_hw_support spi_flash miniwin cupcake app_manager wifi_mgr bt_mgr meshtastic systemui
 )

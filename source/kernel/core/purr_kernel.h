@@ -262,6 +262,38 @@ void     purr_kernel_set_navbar_always_visible(bool v);
 bool     purr_kernel_lock_hide_notifications(void);
 void     purr_kernel_set_lock_hide_notifications(bool v);
 
+// ── UI effects (translucency) and the accent colour that replaces them ───────
+//
+// purr_kernel_ui_effects_enabled() is ON by default — translucent chrome is the
+// intended look. When it is turned OFF, every surface that would have been
+// translucent becomes fully opaque and is filled with purr_kernel_accent_color()
+// instead. Surfaces that were already opaque, and invisible hit-zones that are
+// deliberately fully transparent, are unaffected either way.
+//
+// Two independent reasons this exists, and both matter:
+//
+//   Legibility. Translucent chrome over an arbitrary user wallpaper has no
+//   guaranteed contrast — a busy or light wallpaper can make the status bar and
+//   notification text genuinely hard to read.
+//
+//   Performance. Measured on T-Deck Plus (DP8_CHECKLIST.md): a translucent
+//   surface forces whatever is beneath it to be redrawn and then alpha-blended
+//   per pixel, which also defeats LVGL's occlusion culling — it can no longer
+//   skip what is hidden. With the display driver down to ~13% of frame time,
+//   that blending is the dominant remaining cost.
+//
+// accent_color is 0xRRGGBB. The setter masks to 24 bits because Settings parses
+// this from user-entered hex. Backends should read it through
+// purr_systemui_fx_bg_opa() in systemui.h rather than reimplementing the
+// "translucent or accent?" decision at each site.
+//
+// Both are set from settings.c on boot (from NVS "purr_settings"/"ui_effects"
+// and "accent_color") and on every change, same shape as the flags above.
+bool     purr_kernel_ui_effects_enabled(void);
+void     purr_kernel_set_ui_effects(bool v);
+uint32_t purr_kernel_accent_color(void);
+void     purr_kernel_set_accent_color(uint32_t rgb);
+
 // Screen idle timeout, minutes — off by default until Settings loads the
 // persisted value (same "purr_settings" NVS namespace, synced on
 // settings' own init()), defaulting to 1 minute in the meantime. Only

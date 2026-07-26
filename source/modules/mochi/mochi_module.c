@@ -34,6 +34,77 @@ static TaskHandle_t s_task = NULL;
 static StackType_t  s_mochi_stack[MOCHI_STACK_SIZE];
 static StaticTask_t s_mochi_tcb;
 
+// ── Frame-time instrumentation (DP8_CHECKLIST.md) ───────────────────────────
+//
+// TEMPORARY. Remove with the st7789 flush counters once the perf work is done.
+//
+// This replaces a per-frame "lv_timer_handler() took Nms" warning, which was
+// wrong in two ways that between them produced a genuinely misleading picture:
+//
+//   1. CENSORED SAMPLE. It only fired above a threshold, so it never observed a
+//      fast frame. Its "median" was the median of the SLOW frames only, and
+//      comparing that across two builds with different hit rates compares two
+//      different populations. It made a build with 239 uniformly-mediocre
+//      frames look better than one with 108 slow frames and a fast majority,
+//      when the second is arguably the nicer UI.
+//   2. IT PERTURBED WHAT IT MEASURED. ESP_LOG writes are synchronous to a
+//      115200-baud UART — roughly 5ms of blocked render task per line. Emitting
+//      one per slow frame meant the build with more slow frames also paid more
+//      logging tax, exaggerating the very difference being measured.
+//
+// So: bucket EVERY frame, and emit ONE line per window. The histogram is in
+// frame-rate terms rather than round numbers, because "how many frames missed
+// 60fps / 30fps / 20fps" is the question actually being asked.
+#define FRAME_WINDOW      600     // frames per log line
+#define FRAME_BUCKETS     8
+// Upper bound (ms, exclusive) of each bucket. 8/16 = better than 120/60fps,
+// 33 = 30fps, 50 = 20fps, then the hitch territory.
+static const uint16_t k_frame_bucket_ms[FRAME_BUCKETS] =
+    { 8, 16, 33, 50, 100, 200, 400, 0xFFFF };
+static uint32_t s_frame_hist[FRAME_BUCKETS];
+static uint32_t s_frame_count;
+static uint64_t s_frame_total_us;
+static uint32_t s_frame_max_us;
+static int64_t  s_frame_window_start_us;
+
+static void frame_record(int64_t handler_us)
+{
+    uint32_t ms = (uint32_t)(handler_us / 1000);
+    int b = 0;
+    while (b < FRAME_BUCKETS - 1 && ms >= k_frame_bucket_ms[b]) b++;
+    s_frame_hist[b]++;
+    s_frame_count++;
+    s_frame_total_us += (uint64_t)handler_us;
+    if ((uint32_t)handler_us > s_frame_max_us) s_frame_max_us = (uint32_t)handler_us;
+
+    if (s_frame_count < FRAME_WINDOW) return;
+
+    int64_t now  = esp_timer_get_time();
+    int64_t span = now - s_frame_window_start_us;
+    // Real frames per second over wall time — NOT 1000/mean_handler. The loop
+    // also spends a fixed vTaskDelay plus whatever else runs, so deriving fps
+    // from handler time alone would overstate it.
+    uint32_t fps_x10 = span > 0 ? (uint32_t)((int64_t)s_frame_count * 10000000LL / span) : 0;
+
+    ESP_LOGW(TAG,
+        "[frames] n=%lu  fps=%lu.%lu  mean=%lums  max=%lums  | <8:%lu 8-16:%lu 16-33:%lu "
+        "33-50:%lu 50-100:%lu 100-200:%lu 200-400:%lu 400+:%lu",
+        (unsigned long)s_frame_count,
+        (unsigned long)(fps_x10 / 10), (unsigned long)(fps_x10 % 10),
+        (unsigned long)(s_frame_total_us / s_frame_count / 1000),
+        (unsigned long)(s_frame_max_us / 1000),
+        (unsigned long)s_frame_hist[0], (unsigned long)s_frame_hist[1],
+        (unsigned long)s_frame_hist[2], (unsigned long)s_frame_hist[3],
+        (unsigned long)s_frame_hist[4], (unsigned long)s_frame_hist[5],
+        (unsigned long)s_frame_hist[6], (unsigned long)s_frame_hist[7]);
+
+    for (int i = 0; i < FRAME_BUCKETS; i++) s_frame_hist[i] = 0;
+    s_frame_count           = 0;
+    s_frame_total_us        = 0;
+    s_frame_max_us          = 0;
+    s_frame_window_start_us = now;
+}
+
 static void mochi_task(void *arg)
 {
     (void)arg;
@@ -53,6 +124,10 @@ static void mochi_task(void *arg)
     // backtrace of whatever it is stuck in instead of only a breadcrumb.
     esp_task_wdt_add(NULL);
 
+    // Anchor the first window here, not at 0 — otherwise the first fps figure
+    // is computed against all of boot and reads absurdly low.
+    s_frame_window_start_us = esp_timer_get_time();
+
     uint32_t tick = 0;
     while (1) {
         purr_kernel_ui_lock();
@@ -61,19 +136,15 @@ static void mochi_task(void *arg)
         int64_t t0 = esp_timer_get_time();
         lv_timer_handler();
         int64_t handler_us = esp_timer_get_time() - t0;
-        // A single handler call this long means whatever ran inside it stalled
-        // rendering for that long — real data to point at instead of guessing,
-        // if the UI ever feels sluggish. 50ms ≈ "a dropped frame you'd notice".
-        //
-        // TEMPORARILY 16ms — measurement only, revert to 50000 when Step 2 of
-        // DP8_CHECKLIST.md is done. This is the ONLY line the driver perf work
-        // touches in Mochi, and it changes no behaviour: it is a log threshold.
-        // 50ms is the right level for a passive tripwire but useless on a UI
-        // that is already slow — every frame trips it and the output is a wall
-        // with no shape. 16ms ≈ one 60fps frame, which turns the log into a
-        // distribution instead of an alarm.
-        if (handler_us > 16000) {
-            ESP_LOGW(TAG, "lv_timer_handler() took %lldms (tick=%lu)",
+        // Every frame is recorded; one aggregate line is emitted per window.
+        // See frame_record() for why the old per-frame threshold warning was
+        // both a censored sample and a source of its own distortion.
+        frame_record(handler_us);
+        // Genuine-hang tripwire only. Well clear of any legitimate frame, so it
+        // fires when something is actually stuck rather than merely slow, and
+        // it is rare enough that its own UART cost does not matter.
+        if (handler_us > 500000) {
+            ESP_LOGE(TAG, "lv_timer_handler() STALLED %lldms (tick=%lu)",
                      (long long)(handler_us / 1000), (unsigned long)tick);
         }
         if (++tick % 40 == 0) {

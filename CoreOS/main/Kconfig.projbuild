@@ -9,6 +9,7 @@ menu "PURR OS"
 
         config PURR_UI_BACKEND_KITTENUI
             bool "KittenUI (LVGL 8)"
+            select PURR_UI_LVGL
             help
                 KittenUI uses LVGL for rich touch-based UI. Best for devices
                 with sufficient RAM and a colour touchscreen.
@@ -35,6 +36,7 @@ menu "PURR OS"
 
         config PURR_UI_BACKEND_CARDSTACK
             bool "Cardstack (LVGL 8, Rabbit R1-style card stack)"
+            select PURR_UI_LVGL
             help
                 Vertical snap-scrolling card stack — one full-screen card per
                 app, home card (clock/wallpaper/notifications) first, an
@@ -46,6 +48,7 @@ menu "PURR OS"
 
         config PURR_UI_BACKEND_CUPCAKE
             bool "Cupcake (LVGL 8, Android 1.5-style launcher)"
+            select PURR_UI_LVGL
             help
                 Android 1.5 ("Cupcake")-style launcher: a home screen with a
                 small number of pinned app shortcuts plus a bottom dock, and
@@ -56,6 +59,7 @@ menu "PURR OS"
 
         config PURR_UI_BACKEND_MOCHI
             bool "Mochi (LVGL 8, iOS-style springboard)"
+            select PURR_UI_LVGL
             help
                 iOS-style home screen: a paged grid of rounded-square
                 ("squircle") app icons with captions, page dots, a
@@ -80,6 +84,7 @@ menu "PURR OS"
 
         config PURR_UI_BACKEND_TABBY
             bool "Tabby (LVGL 8, keyboard-first type-to-filter launcher)"
+            select PURR_UI_LVGL
             help
                 Keyboard-first shell for thumb-keyboard handhelds (T-Deck /
                 T-Deck Plus). The home screen is a vertical app list rather
@@ -108,6 +113,7 @@ menu "PURR OS"
 
         config PURR_UI_BACKEND_LVGLDEBUG
             bool "LVGL Debug (touch/HAL diagnostics)"
+            select PURR_UI_LVGL
             help
                 Minimal LVGL screen for diagnosing touch mapping: shows live
                 raw + mapped coordinates as text and draws a dot exactly
@@ -133,6 +139,7 @@ menu "PURR OS"
 
         config PURR_UI_BACKEND_NOUGAT
             bool "Nougat (LVGL 9, Android 7.1.2-style chrome)"
+            select PURR_UI_LVGL
             help
                 Cupcake's nav bar/status bar/recents/home screen ported 1:1
                 in spirit onto LVGL v9 — the only UI backend built against
@@ -142,6 +149,23 @@ menu "PURR OS"
                 First and only device: M5Stack Tab5 (ESP32-P4).
 
     endchoice
+
+    config PURR_UI_LVGL
+        bool
+        help
+            Set automatically by every LVGL-based UI backend; not user-selectable.
+
+            Apps use this to decide whether LVGL types and LV_SYMBOL_* glyph
+            constants exist at all, so features that genuinely depend on LVGL
+            compile in without hard-coding WHICH LVGL backend is active. Before
+            this symbol existed, apps guarded such code on
+            CONFIG_PURR_UI_BACKEND_CUPCAKE, which silently dropped every list
+            row icon in MSN and Milkbar the moment a device moved to Mochi or
+            Tabby - the icons were still fully supported, just compiled out.
+
+            Do NOT use this to reach into a specific backend's internals. It
+            means "LVGL headers are available", nothing more; the portable
+            purr_win_* API is still how apps talk to the UI.
 
     config PURR_UI_WINCE_SHELL
         bool "WinCE shell baked directly into kernel (no .purr module wrapper)"

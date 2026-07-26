@@ -802,8 +802,17 @@ static int cmp_reg_priority(const void *a, const void *b)
 // avoids racing it against everything spinning up at once.
 #define BOOT_SETTLE_MS 2500UL
 
+// Defined further down, next to the state it writes. See its own comment for
+// why the kernel loads these rather than the settings app.
+static void kernel_load_persisted_settings(void);
+
 int purr_kernel_load_static_modules(void)
 {
+    // Before the sort, and therefore before any module's init() runs. Hooked
+    // here rather than in each kernel_*_boot.c so that every device — generic
+    // core and specialised kernels alike — gets it without a per-board edit.
+    kernel_load_persisted_settings();
+
     qsort(s_static_reg, s_static_reg_count,
           sizeof(s_static_reg[0]), cmp_reg_priority);
 
@@ -1223,6 +1232,17 @@ static bool s_navbar_always_visible = false;   // off by default — see purr_ke
 // Privacy-by-default: a lock screen is what an unauthenticated onlooker sees,
 // so contents stay hidden behind a count until deliberately revealed.
 static bool s_lock_hide_notifications = true;
+// Translucency/blur across the system UI. ON by default — it is the intended
+// look. Turning it off is both an accessibility choice and a real performance
+// one: measured on T-Deck Plus, per-pixel alpha blending of translucent chrome
+// over the wallpaper dominates frame time (see DP8_CHECKLIST.md), because a
+// translucent surface forces whatever is beneath it to be redrawn and blended
+// rather than skipped.
+static bool     s_ui_effects   = true;
+// Colour every translucent surface collapses to when effects are off. 0xRRGGBB.
+// Default is the iOS-ish blue-grey the chrome already reads as, so switching
+// effects off changes the texture without changing the palette.
+static uint32_t s_accent_color = 0x1C1C2E;
 // Default 1 minute, not 0 — a 0 timeout would make cupcake_ui.c's
 // "elapsed_ms >= timeout_min * 60000" idle check true on every tick,
 // locking the screen in a permanent loop. Settings overwrites this from
@@ -1238,6 +1258,11 @@ void purr_kernel_set_lora_available(bool v)  { s_lora_available  = v; }
 void purr_kernel_set_dev_mode(bool v)        { s_dev_mode        = v; }
 void purr_kernel_set_navbar_always_visible(bool v) { s_navbar_always_visible = v; }
 void purr_kernel_set_lock_hide_notifications(bool v) { s_lock_hide_notifications = v; }
+void purr_kernel_set_ui_effects(bool v)      { s_ui_effects = v; }
+// Masked to 24 bits: the setting is an RGB colour, and letting a stray high
+// byte through would silently become garbage the moment anything treats it as
+// ARGB. Settings parses user-entered hex, so this is a real input path.
+void purr_kernel_set_accent_color(uint32_t rgb) { s_accent_color = rgb & 0x00FFFFFFu; }
 void purr_kernel_set_screen_timeout_min(uint8_t v) { s_screen_timeout_min = v; }
 
 bool purr_kernel_sd_available(void)    { return s_sd_available; }
@@ -1248,6 +1273,57 @@ bool purr_kernel_lora_available(void)  { return s_lora_available; }
 bool purr_kernel_dev_mode_enabled(void) { return s_dev_mode; }
 bool purr_kernel_navbar_always_visible(void) { return s_navbar_always_visible; }
 bool purr_kernel_lock_hide_notifications(void) { return s_lock_hide_notifications; }
+bool     purr_kernel_ui_effects_enabled(void) { return s_ui_effects; }
+uint32_t purr_kernel_accent_color(void)       { return s_accent_color; }
+
+// Load the kernel's own persisted settings, BEFORE any module initialises.
+// Forward-declared up at purr_kernel_load_static_modules(), which calls it.
+//
+// These values used to be pushed into the kernel by settings.c's nvs_load().
+// That is the wrong layer, and it produced a real, visible bug: settings is a
+// PURR_PRIORITY_OPTIONAL app, so it initialises AFTER the UI module
+// (PURR_PRIORITY_IMPORTANT). System UI therefore built every surface against
+// the compiled-in defaults, and a stored preference only took hold once
+// something happened to rebuild them — which is exactly why the symptom was
+// "wrong after a fresh flash, correct again once the device sleeps and wakes".
+// Toggling the setting off and back on by hand papered over it the same way.
+//
+// ui_effects is what exposed it, because it is read at CONSTRUCTION time rather
+// than per frame. Every value below shared the race; the others were just
+// harder to see.
+//
+// settings.c still reads the same keys for its own widget state. That
+// duplication is deliberate: this owns what the KERNEL needs before modules
+// run, settings owns what its UI displays, and neither depends on the other's
+// load order.
+static void kernel_load_persisted_settings(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("purr_settings", NVS_READONLY, &h) != ESP_OK) {
+        return;   // namespace absent (first boot after an erase) — defaults stand
+    }
+    uint8_t v;
+    if (nvs_get_u8(h, "ui_effects",            &v) == ESP_OK) s_ui_effects              = (v != 0);
+    if (nvs_get_u8(h, "lock_hide_notifs",      &v) == ESP_OK) s_lock_hide_notifications = (v != 0);
+    if (nvs_get_u8(h, "navbar_always_visible", &v) == ESP_OK) s_navbar_always_visible   = (v != 0);
+    if (nvs_get_u8(h, "dev_mode",              &v) == ESP_OK) s_dev_mode                = (v != 0);
+    if (nvs_get_u8(h, "screen_timeout",        &v) == ESP_OK) s_screen_timeout_min      = v;
+
+    // Stored as the same "RRGGBB" text the user types into Settings. Trusted
+    // only when the read succeeds AND returns the 6 characters we wrote —
+    // strtoul() on an untouched buffer would parse whatever was on the stack.
+    char   hex[8] = {0};
+    size_t hlen   = sizeof(hex);
+    if (nvs_get_str(h, "accent_color", hex, &hlen) == ESP_OK && hlen >= 7) {
+        s_accent_color = (uint32_t)strtoul(hex, NULL, 16) & 0x00FFFFFFu;
+    }
+    nvs_close(h);
+
+    ESP_LOGI(TAG, "settings: effects=%s accent=#%06lX notifs=%s timeout=%umin",
+             s_ui_effects ? "on" : "off", (unsigned long)s_accent_color,
+             s_lock_hide_notifications ? "hidden" : "shown",
+             (unsigned)s_screen_timeout_min);
+}
 uint8_t purr_kernel_screen_timeout_min(void) { return s_screen_timeout_min; }
 
 void purr_kernel_reboot(void) {

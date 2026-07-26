@@ -326,7 +326,11 @@ static void render_dots(void)
         if (!s_dots[i]) continue;
         bool on = (i == s_page);
         lv_obj_set_style_bg_color(s_dots[i], on ? COL_DOT_ON : COL_DOT_OFF, 0);
-        lv_obj_set_style_bg_opa(s_dots[i], on ? LV_OPA_COVER : LV_OPA_50, 0);
+        // _keep, not the accent variant: the inactive dot's translucency is how
+        // "which page am I on" is communicated. Flooding it with accent would
+        // make both states identical. Opaque-at-own-colour still distinguishes
+        // them via COL_DOT_ON/COL_DOT_OFF.
+        purr_systemui_fx_bg_opa_keep(s_dots[i], on ? LV_OPA_COVER : LV_OPA_50);
     }
 }
 
@@ -412,7 +416,7 @@ static void render_all(void)
         // wallpaper. Real blur is far too expensive per frame here, but
         // partial opacity over the ground colour reads the same way at this
         // size and costs nothing.
-        lv_obj_set_style_bg_opa(dock, LV_OPA_60, 0);
+        purr_systemui_fx_bg_opa(dock, LV_OPA_60);
         lv_obj_clear_flag(dock, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_clear_flag(dock, LV_OBJ_FLAG_CLICKABLE);
 
@@ -503,7 +507,7 @@ static void build_home_button(uint16_t w, uint16_t h)
     lv_obj_set_size(pill, pill_w, HOME_PILL_H);
     lv_obj_set_style_radius(pill, HOME_PILL_H / 2, 0);
     lv_obj_set_style_bg_color(pill, COL_INDICATOR, 0);
-    lv_obj_set_style_bg_opa(pill, LV_OPA_40, 0);
+    purr_systemui_fx_bg_opa(pill, LV_OPA_40);
     lv_obj_align(pill, LV_ALIGN_BOTTOM_MID, 0, -4);
     lv_obj_clear_flag(pill, LV_OBJ_FLAG_CLICKABLE);
 }

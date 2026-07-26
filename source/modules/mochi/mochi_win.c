@@ -42,6 +42,7 @@
 #include "../../kernel/catcalls/catcall_ui.h"
 #include "../../kernel/catcalls/catcall_input.h"
 #include "../../kernel/core/purr_kernel.h"
+#include "../systemui/systemui.h"   // purr_systemui_fx_bg_opa_keep()
 #include "mochi.h"
 
 static const char *TAG = "mochi_win";
@@ -562,7 +563,10 @@ static void tb_tile_grid_set_items_async_cb(void *user) {
             lv_obj_set_style_radius(tile, 10, 0);
             uint32_t color = (sctx->colors && sctx->colors[i]) ? sctx->colors[i] : 0x3A3A3Cu;
             lv_obj_set_style_bg_color(tile, lv_color_hex(color), 0);
-            lv_obj_set_style_bg_opa(tile, LV_OPA_80, 0);
+            // _keep, not the accent variant: each tile's colour identifies the
+            // app it belongs to (sctx->colors), so flooding them all with one
+            // accent would make the grid unreadable. Opaque at their own colour.
+            purr_systemui_fx_bg_opa_keep(tile, LV_OPA_80);
             lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(tile, LV_OBJ_FLAG_CLICKABLE);
             group_add(tile);

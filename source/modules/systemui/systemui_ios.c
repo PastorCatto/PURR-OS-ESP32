@@ -200,7 +200,7 @@ static lv_obj_t *build_notif_card(lv_obj_t *parent, const purr_notification_t *n
     // Frosted rather than solid: iOS notification cards are translucent over
     // whatever is behind them. Real blur is not affordable per-frame here, but
     // partial opacity over a dark scrim reads the same way at this size.
-    lv_obj_set_style_bg_opa(card, on_dark ? LV_OPA_80 : LV_OPA_90, 0);
+    purr_systemui_fx_bg_opa_keep(card, on_dark ? LV_OPA_80 : LV_OPA_90);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_CLICKABLE);
 
@@ -442,7 +442,7 @@ static void build_panel(panel_t *p, uint16_t w, const char *title)
     lv_obj_set_size(p->panel, w, PANEL_EXPANDED_H);
     lv_obj_set_pos(p->panel, 0, panel_y_for(PANEL_PEEK));
     lv_obj_set_style_bg_color(p->panel, COL_SCRIM, 0);
-    lv_obj_set_style_bg_opa(p->panel, LV_OPA_80, 0);
+    purr_systemui_fx_bg_opa(p->panel, LV_OPA_80);
     lv_obj_set_style_radius(p->panel, 0, 0);
     lv_obj_clear_flag(p->panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(p->panel, LV_OBJ_FLAG_CLICKABLE);
@@ -510,7 +510,7 @@ static void refresh_ctrl(void)
         lv_obj_set_size(row, w, 34);
         lv_obj_set_style_radius(row, 10, 0);
         lv_obj_set_style_bg_color(row, COL_CARD, 0);
-        lv_obj_set_style_bg_opa(row, LV_OPA_20, 0);
+        purr_systemui_fx_bg_opa_keep(row, LV_OPA_20);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
         lv_obj_t *lbl = lv_label_create(row);
@@ -739,7 +739,7 @@ static void build_lock(uint16_t w, uint16_t h)
         lv_obj_set_size(dim, w, h);
         lv_obj_set_pos(dim, 0, 0);
         lv_obj_set_style_bg_color(dim, COL_SCRIM, 0);
-        lv_obj_set_style_bg_opa(dim, LV_OPA_50, 0);
+        purr_systemui_fx_bg_opa(dim, LV_OPA_50);
         lv_obj_clear_flag(dim, LV_OBJ_FLAG_CLICKABLE);
     }
 
@@ -903,7 +903,7 @@ void purr_systemui_open_recents(void)
         lv_obj_set_size(s_recents_backdrop, w, h);
         lv_obj_set_pos(s_recents_backdrop, 0, 0);
         lv_obj_set_style_bg_color(s_recents_backdrop, COL_SCRIM, 0);
-        lv_obj_set_style_bg_opa(s_recents_backdrop, LV_OPA_80, 0);
+        purr_systemui_fx_bg_opa(s_recents_backdrop, LV_OPA_80);
         lv_obj_clear_flag(s_recents_backdrop, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(s_recents_backdrop, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(s_recents_backdrop, recents_backdrop_cb, LV_EVENT_CLICKED, NULL);
@@ -941,7 +941,7 @@ void purr_systemui_open_recents(void)
         lv_obj_set_size(card, card_w, card_h);
         lv_obj_set_style_radius(card, 16, 0);
         lv_obj_set_style_bg_color(card, COL_CARD, 0);
-        lv_obj_set_style_bg_opa(card, LV_OPA_90, 0);
+        purr_systemui_fx_bg_opa_keep(card, LV_OPA_90);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(card, recents_open_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -1053,6 +1053,23 @@ void purr_systemui_return_home(void)
 {
     s_lp_foreground_idx = -1;
     set_status_visible(true);
+}
+
+// See systemui.h. The panels here are built once by purr_systemui_init() and
+// only ever slid up and down afterwards, so nothing re-reads the effects flag
+// on its own — this is what makes the Settings toggle take effect immediately
+// rather than at the next boot.
+//
+// Only the persistent surfaces need naming. The notification and recents cards
+// are rebuilt each time they are shown, so notif_rebuild() below is enough to
+// refresh every card currently on screen; the recents cards refresh when the
+// carousel is next opened.
+void purr_systemui_fx_refresh(void)
+{
+    if (s_notif_panel.panel) purr_systemui_fx_bg_opa(s_notif_panel.panel, LV_OPA_80);
+    if (s_ctrl_panel.panel)  purr_systemui_fx_bg_opa(s_ctrl_panel.panel,  LV_OPA_80);
+    if (s_recents_backdrop)  purr_systemui_fx_bg_opa(s_recents_backdrop,  LV_OPA_80);
+    notif_rebuild();
 }
 
 void purr_systemui_init(const purr_systemui_host_t *host)
