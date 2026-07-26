@@ -97,6 +97,32 @@ int purr_game_mode_enter(const char *label)
         s_suspended[s_suspended_n++] = h->name;
     }
 
+    // TAKE THE UI LOCK BEFORE DRAWING OR UNLOADING ANYTHING.
+    //
+    // This is not defensive; without it the first hardware run crashed every
+    // time with:
+    //
+    //   assert failed: spi_device_release_bus spi_master.c:1359 (ret == ESP_OK)
+    //
+    // The UI backend's render task calls push_pixels() from inside
+    // lv_timer_handler(), which sits between spi_device_acquire_bus() and
+    // spi_device_release_bus(). Unloading that module vTaskDelete()s the task —
+    // and if the delete lands between those two calls, the SPI bus stays
+    // acquired by a task that no longer exists. The next release, from anyone,
+    // asserts and panics. That then struck the crash guard, rebooted, and
+    // relaunched into the same crash.
+    //
+    // Every LVGL backend's render loop takes this same lock around its whole
+    // iteration (see mochi_task), so holding it here guarantees no draw is in
+    // flight and no new one can start. It also stops the splash below fighting
+    // the still-running UI for the panel.
+    //
+    // Safe to hold across module deinit: the mutex is RECURSIVE
+    // (xSemaphoreCreateRecursiveMutex in purr_kernel.c), so a deinit that takes
+    // it again on this same task — several backends do — re-enters rather than
+    // deadlocking.
+    purr_kernel_ui_lock();
+
     // +1 step for the final settle, so the bar reaches the end rather than
     // stopping just short of it.
     char title[48];
@@ -138,12 +164,24 @@ int purr_game_mode_enter(const char *label)
 
     purr_splash_status(label ? label : "loading");
     purr_splash_advance();
+
+    // Released only now. Every UI backend that could have been drawing is gone,
+    // so from here the caller owns the panel outright and takes the SPI bus
+    // per-push through the display driver like anyone else.
+    purr_kernel_ui_unlock();
     return s_suspended_n;
 }
 
 int purr_game_mode_exit(void)
 {
     if (!s_active) return -1;
+
+    // Same lock, mirrored — see enter() for the SPI assert this prevents.
+    // Restoring a UI backend starts its render task, which begins drawing
+    // immediately; holding the lock keeps it queued behind this splash until
+    // every module is back, instead of interleaving with it on the panel and
+    // on the SPI bus.
+    purr_kernel_ui_lock();
 
     // The splash is the only thing on screen from here until a UI backend
     // repaints, which is the whole reason it exists — the game has stopped
@@ -176,6 +214,10 @@ int purr_game_mode_exit(void)
              restored, (unsigned)free_internal());
 
     purr_splash_advance();
+
+    // Released last: the restored UI backend's render task has been blocked on
+    // this since it started, and takes over the panel the moment it runs.
+    purr_kernel_ui_unlock();
     return restored;
 }
 
