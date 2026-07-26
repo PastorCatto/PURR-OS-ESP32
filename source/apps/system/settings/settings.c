@@ -45,8 +45,12 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 
 static purr_win_t  s_win       = 0;   // top-level window — just the category picker
-static purr_wid_t  s_cat_tile_grid = 0;   // 0 if the active backend doesn't implement tile grids
-static purr_wid_t  s_cat_list      = 0;   // fallback, built instead when s_cat_tile_grid creation failed
+// One menu replaces the old tile-grid-plus-list-fallback pair. purr_win_menu()
+// renders natively on every backend (iOS grouped table under Mochi, a plain
+// list elsewhere), so there is no longer a second code path to keep working —
+// nor the two #ifdef'd symbol tables the tile grid needed.
+static purr_wid_t  s_cat_menu     = 0;
+static purr_wid_t  s_general_menu = 0;
 
 // Category sub-windows, each built lazily on first tap and cached/reused
 // afterward — same pattern the WiFi/BT windows below already established.
@@ -77,7 +81,6 @@ static uint8_t     s_brightness = 255;
 static uint8_t     s_screen_timeout_min = 1;   // must match purr_kernel.h's own default
 static char        s_theme[16]  = "wce";
 
-static purr_wid_t  s_dev_mode_lbl = 0;
 static uint8_t     s_dev_mode     = 0;   // 0/1 — see purr_kernel.h's doc comment
 
 static purr_wid_t  s_navbar_visible_lbl     = 0;
@@ -577,7 +580,8 @@ static void on_dev_mode_toggle(purr_wid_t w, purr_event_t e, void *u) {
     s_dev_mode = s_dev_mode ? 0 : 1;
     purr_kernel_set_dev_mode(s_dev_mode != 0);
     nvs_save_u8("dev_mode", s_dev_mode);
-    purr_win_label_set(s_dev_mode_lbl, s_dev_mode ? "Developer Mode: ON" : "Developer Mode: OFF");
+    // No separate label any more — the General menu row's VALUE is the state,
+    // and on_general_menu() calls general_refresh() right after this.
     set_general_status(s_dev_mode ? "Developer Mode enabled — unsigned .hiss scripts allowed."
                                    : "Developer Mode disabled — unsigned .hiss scripts blocked.");
 }
@@ -800,6 +804,42 @@ static void on_open_about(purr_wid_t w, purr_event_t e, void *u) {
 // General — it's read-only device info, not a setting to change, and grew
 // large enough on its own to earn a dedicated screen.
 
+// General, as three menu sections.
+//
+// Worth comparing against what this replaced. "Developer Mode" was three
+// widgets plus a layout container: a header label, a second label carrying the
+// ON/OFF state, and a row wrapping a "Toggle" button. It is now ONE row whose
+// VALUE is the state, and tapping it toggles. That is the shape the screen
+// always had — the contract simply had no way to say it, so the app spelled it
+// out in buttons.
+static const char *s_gen_storage[] = { "SD Status" };
+static const char *s_gen_dev[]     = { "Developer Mode" };
+static const char *s_gen_sys[]     = { "Reboot" };
+static const char *s_gen_dev_val[1];
+
+static void general_refresh(void) {
+    if (!s_general_menu) return;
+    s_gen_dev_val[0] = s_dev_mode ? "ON" : "OFF";
+    static purr_menu_section_t secs[3];
+    secs[0] = (purr_menu_section_t){ "Storage",   s_gen_storage, NULL,          1 };
+    secs[1] = (purr_menu_section_t){ "Developer", s_gen_dev,     s_gen_dev_val, 1 };
+    secs[2] = (purr_menu_section_t){ "System",    s_gen_sys,     NULL,          1 };
+    purr_win_menu_set_sections(s_general_menu, secs, 3);
+}
+
+static void on_general_menu(purr_wid_t w, purr_event_t e, void *user) {
+    (void)user;
+    if (e != PURR_EVENT_ACTIVATED) return;
+    switch (purr_win_menu_get_selected(w)) {
+        case 0: on_sd_refresh(0, PURR_EVENT_CLICKED, NULL); break;
+        case 1: on_dev_mode_toggle(0, PURR_EVENT_CLICKED, NULL);
+                general_refresh();   // the row's value IS the state
+                break;
+        case 2: on_reboot(0, PURR_EVENT_CLICKED, NULL);     break;
+        default: break;
+    }
+}
+
 static void on_open_general(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
     if (s_general_win) { purr_win_show(s_general_win); return; }
@@ -807,23 +847,9 @@ static void on_open_general(purr_wid_t w, purr_event_t e, void *u) {
     s_general_win = purr_win_create("General");
     add_back_button(s_general_win);
 
-    purr_win_label(s_general_win, "Storage");
-    purr_wid_t sr = purr_win_row(s_general_win, 4);
-    purr_win_button(s_general_win, "SD Status", on_sd_refresh, NULL);
-    purr_win_layout_end(sr);
-
-    purr_win_label(s_general_win, "Developer");
-    char dev_str[32];
-    snprintf(dev_str, sizeof(dev_str), "Developer Mode: %s", s_dev_mode ? "ON" : "OFF");
-    s_dev_mode_lbl = purr_win_label(s_general_win, dev_str);
-    purr_wid_t devr = purr_win_row(s_general_win, 4);
-    purr_win_button(s_general_win, "Toggle", on_dev_mode_toggle, NULL);
-    purr_win_layout_end(devr);
-
-    purr_win_label(s_general_win, "System");
-    purr_wid_t sys = purr_win_row(s_general_win, 4);
-    purr_win_button(s_general_win, "Reboot", on_reboot, NULL);
-    purr_win_layout_end(sys);
+    s_general_menu = purr_win_menu(s_general_win);
+    purr_win_menu_on_select(s_general_menu, on_general_menu, NULL);
+    general_refresh();
 
     s_general_status_lbl = purr_win_label(s_general_win, "Ready.");
     purr_win_show(s_general_win);
@@ -1020,13 +1046,10 @@ static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
 #define CAT_COUNT 5
 static const char *s_category_labels[CAT_COUNT] = { "General", "Display", "Customization", "Connectivity", "About" };
 
-// Fallback path only — the tile grid path dispatches per-tile via cbs[]
-// below and never reaches this (PURR_EVENT_CLICKED per tile, not a shared
-// list-selection callback).
-static void on_cat_list_event(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)user;
+static void on_cat_menu(purr_wid_t w, purr_event_t e, void *user) {
+    (void)user;
     if (e != PURR_EVENT_ACTIVATED) return;
-    switch (purr_win_list_get_selected(s_cat_list)) {
+    switch (purr_win_menu_get_selected(w)) {
         case 0: on_open_general(0, PURR_EVENT_CLICKED, NULL);       break;
         case 1: on_open_display(0, PURR_EVENT_CLICKED, NULL);       break;
         case 2: on_open_customization(0, PURR_EVENT_CLICKED, NULL); break;
@@ -1036,33 +1059,15 @@ static void on_cat_list_event(purr_wid_t w, purr_event_t e, void *user) {
     }
 }
 
+// One menu, one code path — replacing a tile grid, a hand-written list
+// fallback for backends without one, and two #ifdef'd symbol tables.
 static void build_category_nav(void) {
-    s_cat_tile_grid = purr_win_tile_grid(s_win, 100, 75);
-    if (s_cat_tile_grid) {
-#ifdef CONFIG_PURR_UI_LVGL
-        static const char *symbols[CAT_COUNT] = { LV_SYMBOL_SETTINGS, LV_SYMBOL_IMAGE, LV_SYMBOL_EDIT, LV_SYMBOL_WIFI, LV_SYMBOL_LIST };
-#else
-        // Active backend implements tile_grid but isn't Cupcake — no
-        // LV_SYMBOL_* available at compile time here (cupcake.h/lvgl.h are
-        // only pulled in under the Cupcake ifdef), so tiles render
-        // label-only. Functionally complete either way.
-        static const char *symbols[CAT_COUNT] = { NULL, NULL, NULL, NULL, NULL };
-#endif
-        // A neutral slate accent — distinct from MSN's blue and the App
-        // Drawer's per-app hash-tinted rainbow (catcall_ui.h: tile colors
-        // are caller-supplied, backend-interpreted).
-        static const uint32_t colors[CAT_COUNT] = { 0x4A4A4Cu, 0x4A4A4Cu, 0x4A4A4Cu, 0x4A4A4Cu, 0x4A4A4Cu };
-        static purr_win_cb_t cbs[CAT_COUNT] = { on_open_general, on_open_display, on_open_customization, on_open_connectivity, on_open_about };
-        static void *users[CAT_COUNT] = { NULL, NULL, NULL, NULL, NULL };
-        purr_win_tile_grid_set_items(s_cat_tile_grid, s_category_labels, symbols, colors, cbs, users, CAT_COUNT);
-    } else {
-        // Active backend doesn't implement the tile grid (e.g. MiniWin,
-        // until/unless it's added there) — plain list of the same
-        // categories, fully functional, just less decorated.
-        s_cat_list = purr_win_list(s_win, 100, 75);
-        purr_win_list_set_items(s_cat_list, s_category_labels, CAT_COUNT);
-        purr_win_list_on_select(s_cat_list, on_cat_list_event, NULL);
-    }
+    static const purr_menu_section_t sec = {
+        .header = NULL, .items = s_category_labels, .values = NULL, .count = CAT_COUNT,
+    };
+    s_cat_menu = purr_win_menu(s_win);
+    purr_win_menu_set_sections(s_cat_menu, &sec, 1);
+    purr_win_menu_on_select(s_cat_menu, on_cat_menu, NULL);
 }
 
 // ── Build UI ──────────────────────────────────────────────────────────────────
@@ -1101,7 +1106,7 @@ static void settings_deinit(void) {
     if (s_about_win)         { purr_win_destroy(s_about_win);         s_about_win         = 0; s_about_lbl = 0; }
     if (s_mesh_switch_confirm_win) { purr_win_destroy(s_mesh_switch_confirm_win); s_mesh_switch_confirm_win = 0; }
     purr_win_destroy(s_win);
-    s_win = 0; s_cat_tile_grid = 0; s_cat_list = 0;
+    s_win = 0; s_cat_menu = 0; s_general_menu = 0;
 }
 
 // ── Module header ─────────────────────────────────────────────────────────────
