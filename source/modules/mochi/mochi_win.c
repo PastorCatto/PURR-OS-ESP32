@@ -522,11 +522,40 @@ static purr_wid_t tb_btn_create(purr_win_t h, const char *label,
 
     lv_obj_t *btn;
     if (in_layout) {
+        // FLAT, not raised. A genuine multi-choice row (Low/Mid/High brightness,
+        // screen timeout) is what layouts are for, so these stay buttons — but
+        // they do not need to look or cost like LVGL's default themed button.
+        //
+        // The shadow is the expensive part, not the corner:
+        // CONFIG_LV_SHADOW_CACHE_SIZE is 0, so the blur is recomputed on EVERY
+        // draw of every button, and a row of three redraws all three on any
+        // frame that touches them. Radius at least scales with corner size;
+        // an uncached shadow is a fixed per-draw cost for a visual effect that
+        // reads as dated anyway.
+        //
+        // Result is a flat fill with a modest corner — "flat rounded rather
+        // than full depth".
         btn = lv_btn_create(parent);
         lv_obj_set_height(btn, 32);
         lv_obj_set_width(btn, LV_SIZE_CONTENT);
+        lv_obj_set_style_shadow_width(btn, 0, 0);
+        lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, 0);
+        // Pressed state too — the theme sets its own shadow there, so clearing
+        // only the default state leaves it reappearing on touch.
+        lv_obj_set_style_shadow_width(btn, 0, LV_STATE_PRESSED);
+        lv_obj_set_style_shadow_opa(btn, LV_OPA_TRANSP, LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(btn, 0, 0);
+        // Flat fill: no gradient. The default theme ramps the background, which
+        // is a per-pixel interpolation across the whole button for a gradient
+        // nobody asked for.
+        lv_obj_set_style_bg_grad_dir(btn, LV_GRAD_DIR_NONE, 0);
+        lv_obj_set_style_radius(btn, 6, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x007AFF), 0);   // systemBlue
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+
         lv_obj_t *l = lv_label_create(btn);
         lv_label_set_text(l, label);
+        lv_obj_set_style_text_color(l, lv_color_hex(0xFFFFFF), 0);
         lv_obj_center(l);
     } else {
         lv_obj_t *g = group_open(h, parent);
