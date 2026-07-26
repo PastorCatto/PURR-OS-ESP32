@@ -21,9 +21,23 @@ static const char *TAG = "game_mode";
 // "unload fewer things" rather than misbehaving — see the guard in enter().
 #define MAX_SUSPENDED 32
 
-static const char *s_suspended[MAX_SUSPENDED];
-static int         s_suspended_n = 0;
-static bool        s_active      = false;
+// Names are COPIED, not pointed at. purr_kernel_module_at() returns
+// &s_modules[idx].header — a copy inside a mutable array, not the static
+// PURR_MODULE_REGISTER header in rodata. Unloading COMPACTS that array, so a
+// stored h->name pointer silently starts referring to whatever slot shifted
+// into its place.
+//
+// That produced a spectacular failure on hardware: the first unload was
+// correct, and every one after it targeted a different module than intended.
+// Apps live later in the registry, so game mode tore down settings, terminal,
+// fileman, msn, milkbar — and magidos itself, the caller — while leaving the UI
+// backend and mesh stack running. "unloads nearby twice" in the log was the
+// same shift showing up as a duplicate.
+//
+// 32 matches purr_module_header_t::name.
+static char s_suspended[MAX_SUSPENDED][32];
+static int  s_suspended_n = 0;
+static bool s_active      = false;
 
 // Crash-guard entity name. Distinct from any module name so it cannot collide
 // with a module's own strike bookkeeping.
@@ -90,11 +104,10 @@ int purr_game_mode_enter(const char *label)
                      MAX_SUSPENDED);
             break;
         }
-        // Storing the name pointer, not a copy: module headers are static
-        // (PURR_MODULE_REGISTER puts them in rodata), so the string outlives
-        // the unload. purr_kernel_get_static_module() needs exactly this name
-        // to find the header again on the way back.
-        s_suspended[s_suspended_n++] = h->name;
+        // COPIED — see s_suspended's declaration for the registry-compaction
+        // bug that storing the pointer caused.
+        snprintf(s_suspended[s_suspended_n], sizeof(s_suspended[0]), "%s", h->name);
+        s_suspended_n++;
     }
 
     // TAKE THE UI LOCK BEFORE DRAWING OR UNLOADING ANYTHING.
