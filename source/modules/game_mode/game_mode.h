@@ -72,6 +72,20 @@ int purr_game_mode_exit(void);
 
 bool purr_game_mode_active(void);
 
+// Liveness beacon — call from the game's main loop, at least every 5 seconds.
+// Two consecutive misses (10s of silence) is treated as a hang and routed into
+// purr_crash_guard's hang path, giving the same reboot-and-recover behaviour a
+// UI hang gets.
+//
+// This is not optional supervision. The kernel's own UI-hang watchdog is gated
+// on a registered UI backend, and game mode unloads it — so between enter() and
+// exit() this beacon is the ONLY thing watching the device, at the one time
+// nothing else is left running to notice a freeze.
+//
+// Once per frame is fine; it costs a timestamp write. Harmless outside game
+// mode, so a game need not guard the call.
+void purr_game_mode_heartbeat(void);
+
 #ifdef __cplusplus
 }
 #endif

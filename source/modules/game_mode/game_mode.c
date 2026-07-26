@@ -29,6 +29,11 @@ static bool        s_active      = false;
 // with a module's own strike bookkeeping.
 #define GAME_MODE_GUARD_ENTITY "game_mode"
 
+// Liveness beacon. The game calls purr_game_mode_heartbeat() at least this
+// often; two consecutive misses (10s of silence) is treated as a hang.
+#define GAME_MODE_BEAT_MS      5000
+#define GAME_MODE_MISSED_BEATS 2
+
 bool purr_game_mode_active(void) { return s_active; }
 
 // Modules that stay no matter what.
@@ -105,6 +110,19 @@ int purr_game_mode_enter(const char *label)
     // a clean exit — the next boot must not walk straight back into it.
     purr_crash_guard_mark_start(GAME_MODE_GUARD_ENTITY);
 
+    // Liveness watch. The kernel's UI-hang check is gated on a registered UI
+    // backend, and the next few lines unload it — so without this the device
+    // runs completely unsupervised for the whole of game mode, which is exactly
+    // the window where a hang is unrecoverable: one app owns the display and
+    // input, and nothing is left running to notice it stopped.
+    //
+    // 5s beat, react after 2 missed. Deliberately slacker than the UI's 6s: a
+    // game legitimately spends longer between beats than a render loop does —
+    // loading a level, seeking a WAD on SD — and a false positive here reboots
+    // the device out from under someone who is playing.
+    purr_kernel_watch_begin(GAME_MODE_GUARD_ENTITY,
+                            GAME_MODE_BEAT_MS, GAME_MODE_MISSED_BEATS);
+
     s_active = true;   // set before unloading: the UI backend's deinit may run
                        // code that asks whether game mode is active.
 
@@ -145,6 +163,11 @@ int purr_game_mode_exit(void)
     s_suspended_n = 0;
     s_active      = false;
 
+    // Watch off before the guard: once the OS is back, the UI backend's own
+    // heartbeat resumes covering the device, and leaving this armed would trip
+    // on the first slow frame after restore.
+    purr_kernel_watch_end();
+
     // Only now: a clean exit is what proves the game did not take the device
     // down with it.
     purr_crash_guard_mark_stop(GAME_MODE_GUARD_ENTITY, true, NULL);
@@ -154,4 +177,17 @@ int purr_game_mode_exit(void)
 
     purr_splash_advance();
     return restored;
+}
+
+// The beacon. A game calls this from its main loop — once per frame is fine and
+// costs a timestamp write; the requirement is only that no two consecutive
+// GAME_MODE_BEAT_MS windows pass without one.
+//
+// Thin wrapper rather than exposing purr_kernel_watch_beat() directly, so a
+// game never has to know which watch it is under, and so calling it outside
+// game mode is harmless.
+void purr_game_mode_heartbeat(void)
+{
+    if (!s_active) return;
+    purr_kernel_watch_beat();
 }

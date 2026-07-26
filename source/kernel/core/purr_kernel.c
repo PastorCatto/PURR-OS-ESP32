@@ -1621,6 +1621,46 @@ void purr_kernel_ui_breadcrumb(const char *step)
     s_ui_breadcrumb = step ? step : "?";
 }
 
+// ── Generic liveness watch ──────────────────────────────────────────────────
+// See purr_kernel.h for why this exists separately from the UI-hang check:
+// that one is gated on a UI backend being registered, and game mode's entire
+// purpose is to unload it.
+static const char *s_watch_owner      = NULL;
+static uint64_t    s_watch_last_ms    = 0;
+static uint32_t    s_watch_timeout_ms = 0;
+
+void purr_kernel_watch_begin(const char *owner, uint32_t interval_ms, int missed_beats)
+{
+    if (!owner || interval_ms == 0) return;
+    if (missed_beats < 1) missed_beats = 1;
+
+    s_watch_owner      = owner;
+    s_watch_timeout_ms = interval_ms * (uint32_t)missed_beats;
+    // Seeded to "now", not 0: the owner has not missed anything yet, and a 0
+    // here would read as one full timeout's worth of silence the instant the
+    // watchdog next polls.
+    s_watch_last_ms    = purr_kernel_uptime_ms();
+
+    ensure_health_watchdog_started();
+    ESP_LOGI(TAG, "watch: %s every %ums, react after %d missed (%ums)",
+             owner, (unsigned)interval_ms, missed_beats, (unsigned)s_watch_timeout_ms);
+}
+
+void purr_kernel_watch_beat(void)
+{
+    if (!s_watch_owner) return;   // no-op outside a watch — see header
+    s_watch_last_ms = purr_kernel_uptime_ms();
+}
+
+void purr_kernel_watch_end(void)
+{
+    if (!s_watch_owner) return;
+    ESP_LOGI(TAG, "watch: %s ended", s_watch_owner);
+    s_watch_owner      = NULL;
+    s_watch_timeout_ms = 0;
+    s_watch_last_ms    = 0;
+}
+
 static void health_watchdog_task(void *arg)
 {
     (void)arg;
@@ -1650,6 +1690,35 @@ static void health_watchdog_task(void *arg)
                 // Loops forever inside purr_kernel_panic_ex() (blue,
                 // recoverable) — nothing after this point runs again
                 // this boot.
+            }
+        }
+
+        // Generic watch — same hang path, no UI dependency.
+        //
+        // This is what covers game mode. The check above cannot: it requires
+        // purr_kernel_ui() to be non-NULL, and game mode unloads the UI backend
+        // outright, so an unsupervised window would open at precisely the point
+        // where one app owns the display and input and nothing else is left
+        // running to notice it stopped.
+        //
+        // Routed through purr_crash_guard_mark_hang() rather than a bespoke
+        // reboot so a game hang is recorded, strike-counted and recovered
+        // identically to a UI hang — including the pending-recovery marker the
+        // next boot reads to show "Recovering from Game Mode" instead of the
+        // usual splash.
+        if (s_watch_owner && s_watch_timeout_ms) {
+            uint64_t now = purr_kernel_uptime_ms();
+            if (now - s_watch_last_ms > (uint64_t)s_watch_timeout_ms) {
+                char reason[64];
+                snprintf(reason, sizeof(reason), "NO HEARTBEAT FOR %ums",
+                         (unsigned)(now - s_watch_last_ms));
+                const char *owner = s_watch_owner;
+                // Cleared before marking: mark_hang() does not return, and a
+                // stale watch surviving into the recovery path would be a
+                // second, spurious trip.
+                s_watch_owner      = NULL;
+                s_watch_timeout_ms = 0;
+                purr_crash_guard_mark_hang(owner, reason);
             }
         }
 

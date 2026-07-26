@@ -151,6 +151,36 @@ void purr_kernel_ui_heartbeat(void);
 // above.
 void purr_kernel_ui_breadcrumb(const char *step);
 
+// ── Generic liveness watch ──────────────────────────────────────────────────
+//
+// The UI-hang check above is gated on purr_kernel_ui() being non-NULL, which is
+// correct for its purpose and leaves a hole: game mode deliberately UNLOADS the
+// UI backend, so that check silently stops running at exactly the moment the
+// device is most exposed — one app holding the display and input outright, with
+// no UI left to recover to. A hang there is a black brick until someone pulls
+// the power.
+//
+// This is the same mechanism without the UI dependency. An owner declares how
+// often it will beat and how many beats may be missed; the existing health
+// watchdog task enforces it and routes a failure into purr_crash_guard's hang
+// path, exactly as the UI check does — so recovery, strike counting and the
+// pending-recovery marker all behave identically.
+//
+//   purr_kernel_watch_begin("game_mode", 5000, 2);   // beat every 5s, react after 2 missed
+//   ... purr_kernel_watch_beat() from the owner's loop ...
+//   purr_kernel_watch_end();
+//
+// Only one watch at a time — this is for whole-device exclusive states, not
+// general task supervision (FreeRTOS's own TWDT covers that, and modules
+// subscribe to it individually). A second begin() replaces the first.
+//
+// watch_beat() before begin(), or after end(), is a harmless no-op — a game
+// that beats on a frame boundary need not care whether the transition has
+// finished yet.
+void purr_kernel_watch_begin(const char *owner, uint32_t interval_ms, int missed_beats);
+void purr_kernel_watch_beat(void);
+void purr_kernel_watch_end(void);
+
 // ── Kernel log tail ───────────────────────────────────────────────────────────
 // Captures every ESP_LOG* call system-wide into a small in-RAM scrollback
 // buffer — call purr_kernel_klog_init() once, early in boot, then any
