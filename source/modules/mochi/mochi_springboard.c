@@ -9,7 +9,7 @@
 //   │ status bar (systemui, lv_layer_top)    │  PURR_SYSTEMUI_STATUS_H
 //   │                                        │
 //   │    ▢      ▢      ▢      ▢              │  page grid: squircle + label,
-//   │   Term   Set    File   Calc            │  GRID_COLS x GRID_ROWS
+//   │   Term   Set    File   Calc            │  s_cols x s_rows
 //   │                                        │
 //   │    ▢      ▢      ▢      ▢              │
 //   │   Msn    Mesh   Drv    Milk            │
@@ -21,10 +21,10 @@
 //   │              ▂▂▂▂▂▂▂▂                  │  home indicator (on layer_top,
 //   └────────────────────────────────────────┘  so it persists over apps)
 //
-// Grid columns deliberately equal DOCK_SLOTS so the two line up vertically —
-// see GRID_COLS below for why that matters to cursor movement, not just looks.
+// Grid columns deliberately equal s_dock_slots so the two line up vertically —
+// see s_cols below for why that matters to cursor movement, not just looks.
 //
-// The dock holds the first DOCK_SLOTS apps in registry order — there is no
+// The dock holds the first s_dock_slots apps in registry order — there is no
 // separate favourites concept in app_manager yet, and inventing one here would
 // be state this backend has no business owning. Those apps deliberately still
 // appear in the grid too: hiding them would make the grid's contents depend on
@@ -71,20 +71,50 @@ static const char *TAG = "mochi_sb";
 #define COL_DOT_OFF     lv_color_hex(0xC7C7CC)
 #define COL_INDICATOR   lv_color_hex(0x1C1C1E)
 
-// 4 columns, matching DOCK_SLOTS exactly. Beyond looking right, that alignment
-// makes the cursor's grid<->dock transition a straight 1:1 column mapping in
-// move_cursor(): pressing down from grid column N lands on dock slot N, which
-// is the icon physically underneath it, rather than an approximate clamp.
+// Grid shape is DERIVED FROM THE PANEL at runtime, not fixed.
 //
-// At 320px this yields 80px cells for 46px icons — the surplus becomes
-// horizontal breathing room, which is closer to iOS's own generous icon
-// spacing than packing 5 across was. Icon size is NOT increased to fill it:
-// the row pitch is capped by grid height (icon + caption must fit in cell_h),
-// and 46 + caption already sits close to that ceiling.
-#define GRID_COLS   4
-#define GRID_ROWS   2
-#define DOCK_SLOTS  4
-#define MAX_APPS    64
+// Mochi was written against the T-Deck Plus's 320x240 and hard-coded 4x2. On
+// the Tab5 (640x360 as PURR sees it - the ST7123 driver renders half-size and
+// lets the PPA scale 2x during its rotate pass) that same 4x2 would show 8 apps
+// on a screen with room for about 24, with enormous dead space between them.
+//
+// The iOS behaviour being copied is: icons stay the SAME PHYSICAL SIZE and a
+// bigger screen simply holds MORE of them. So ICON_SIZE stays constant and the
+// column/row counts scale instead. Cupcake gets this for free from
+// LV_FLEX_FLOW_ROW_WRAP; Mochi positions absolutely (it needs stable cell
+// coordinates for paging and the trackball cursor), so it computes the counts.
+//
+// Column target reproduces the original 4 columns at 320px (320/80).
+//
+// The ROW divisor is deliberately derived from what a cell must actually
+// CONTAIN rather than picked to hit a number: an icon, its caption, and a few
+// pixels of separation. Sizing it by content means the grid claims a row only
+// when it can genuinely draw one.
+//
+// This was first written as a guessed 67, which produced 4x1 on the T-Deck Plus
+// instead of 4x2 — its usable grid band is 132px, and 132/67 floors to 1. Two
+// pixels of estimation error silently halved the home screen. The value below
+// cannot drift that way, because it is the same constants the cell is built
+// from: 132/64 = 2 rows here, and Tab5's ~254px band gives 3.
+#define CELL_W_TARGET   80
+#define CELL_H_MIN      (ICON_SIZE + LABEL_H + 4)
+
+// Array bounds. Generous enough for any panel this OS runs on, and the runtime
+// counts are clamped to them - a larger display gets a full grid rather than
+// overflowing one.
+#define MAX_COLS        8
+#define MAX_ROWS        4
+#define MAX_DOCK        6
+#define MAX_PAGE_CAP    (MAX_COLS * MAX_ROWS)
+#define MAX_APPS        64
+
+// Live values, set by compute_metrics() before anything is laid out. Defaults
+// match the original constants so a device whose get_info() fails still builds
+// the T-Deck Plus layout rather than a degenerate one.
+static int s_cols        = 4;
+static int s_rows        = 2;
+static int s_dock_slots  = 4;
+static int s_page_cap    = 8;
 
 #define ICON_SIZE       46
 #define ICON_RADIUS     12   // ~26% of size — approximates iOS's superellipse
@@ -93,25 +123,24 @@ static const char *TAG = "mochi_sb";
 #define LABEL_H         14
 #define DOT_SIZE         6
 
-#define PAGE_CAP (GRID_COLS * GRID_ROWS)
 
 // ── State ───────────────────────────────────────────────────────────────────
 
 static int s_page       = 0;   // current grid page
 static int s_page_count = 1;
-static int s_sel        = 0;   // cursor: [0,PAGE_CAP) = grid, then dock slots
+static int s_sel        = 0;   // cursor: [0,s_page_cap) = grid, then dock slots
 static int s_app_count  = 0;
 static int s_last_app_count = -1;
 
 static lv_obj_t *s_screen;
-static lv_obj_t *s_grid_cells[PAGE_CAP];   // squircle objects, NULL if empty
-static lv_obj_t *s_dock_cells[DOCK_SLOTS];
+static lv_obj_t *s_grid_cells[MAX_PAGE_CAP];   // squircle objects, NULL if empty
+static lv_obj_t *s_dock_cells[MAX_DOCK];
 static lv_obj_t *s_dots[8];
 static int       s_dot_count = 0;
 
 // Registry index backing each visible cell, -1 when the cell is empty.
-static int s_grid_app[PAGE_CAP];
-static int s_dock_app[DOCK_SLOTS];
+static int s_grid_app[MAX_PAGE_CAP];
+static int s_dock_app[MAX_DOCK];
 
 // Whether the selection ring is drawn. Touch is a direct pointing device — iOS
 // has no cursor, and showing one while someone is tapping icons is just noise —
@@ -122,9 +151,9 @@ static int s_dock_app[DOCK_SLOTS];
 // (much further up) is its main reader.
 static bool s_cursor_visible = false;
 
-// Cursor indices past PAGE_CAP address the dock.
-#define SEL_IS_DOCK(s)  ((s) >= PAGE_CAP)
-#define SEL_DOCK_SLOT(s) ((s) - PAGE_CAP)
+// Cursor indices past s_page_cap address the dock.
+#define SEL_IS_DOCK(s)  ((s) >= s_page_cap)
+#define SEL_DOCK_SLOT(s) ((s) - s_page_cap)
 
 // Defined with the input handlers further down, but every icon gets them at
 // build time — see sb_touch_cb for why a swipe has to be caught on the icons
@@ -213,8 +242,36 @@ static void compute_metrics(uint16_t w, uint16_t h)
     s_m.grid_y = (lv_coord_t)(top + 6);
     s_m.grid_h = (lv_coord_t)(s_m.dots_y - 4 - s_m.grid_y);
 
-    s_m.cell_w = (lv_coord_t)(w / GRID_COLS);
-    s_m.cell_h = (lv_coord_t)(s_m.grid_h / GRID_ROWS);
+    // Grid shape first — cell sizes depend on it.
+    //
+    // Columns come from width, rows from the grid band that is actually left
+    // after the status bar, page dots, dock and home indicator have taken
+    // theirs. Deriving rows from grid_h rather than from screen height is what
+    // stops a tall-but-cramped panel from claiming a row it cannot draw.
+    s_cols = (int)(w / CELL_W_TARGET);
+    if (s_cols < 1)         s_cols = 1;
+    if (s_cols > MAX_COLS)  s_cols = MAX_COLS;
+
+    s_rows = (int)(s_m.grid_h / CELL_H_MIN);
+    if (s_rows < 1)         s_rows = 1;
+    if (s_rows > MAX_ROWS)  s_rows = MAX_ROWS;
+
+    // The dock tracks the columns so the two stay vertically aligned, which is
+    // what makes move_cursor()'s grid<->dock step a straight 1:1 column mapping
+    // instead of an approximation. Capped at MAX_DOCK because a dock spanning
+    // eight slots stops reading as a dock — past that the cursor code's
+    // existing clamp handles the mismatch (it already did, since a partially
+    // populated dock has always been possible).
+    s_dock_slots = s_cols < MAX_DOCK ? s_cols : MAX_DOCK;
+
+    s_page_cap = s_cols * s_rows;
+
+    s_m.cell_w = (lv_coord_t)(w / s_cols);
+    s_m.cell_h = (lv_coord_t)(s_m.grid_h / s_rows);
+
+    ESP_LOGI(TAG, "grid %dx%d (%d/page), dock %d, cell %dx%d on %ux%u",
+             s_cols, s_rows, s_page_cap, s_dock_slots,
+             (int)s_m.cell_w, (int)s_m.cell_h, w, h);
 }
 
 // ── Data ────────────────────────────────────────────────────────────────────
@@ -223,7 +280,7 @@ static void recompute_pages(void)
 {
     s_app_count  = app_manager_count();
     if (s_app_count > MAX_APPS) s_app_count = MAX_APPS;
-    s_page_count = (s_app_count + PAGE_CAP - 1) / PAGE_CAP;
+    s_page_count = (s_app_count + s_page_cap - 1) / s_page_cap;
     if (s_page_count < 1) s_page_count = 1;
     if (s_page >= s_page_count) s_page = s_page_count - 1;
 }
@@ -250,11 +307,11 @@ static void render_selection(void)
     // s_cursor_visible false => no ring anywhere, which is the touch-driven
     // state. The selected index is still tracked underneath so switching back
     // to the trackball resumes from where the cursor actually is.
-    for (int i = 0; i < PAGE_CAP; i++) {
+    for (int i = 0; i < s_page_cap; i++) {
         apply_selection_style(s_grid_cells[i],
             s_cursor_visible && !SEL_IS_DOCK(s_sel) && i == s_sel);
     }
-    for (int i = 0; i < DOCK_SLOTS; i++) {
+    for (int i = 0; i < s_dock_slots; i++) {
         apply_selection_style(s_dock_cells[i],
             s_cursor_visible && SEL_IS_DOCK(s_sel) && i == SEL_DOCK_SLOT(s_sel));
     }
@@ -364,18 +421,18 @@ static void render_all(void)
     memset(s_dock_cells, 0, sizeof(s_dock_cells));
     memset(s_dots, 0, sizeof(s_dots));
     s_dot_count = 0;
-    for (int i = 0; i < PAGE_CAP;    i++) s_grid_app[i] = -1;
-    for (int i = 0; i < DOCK_SLOTS;  i++) s_dock_app[i] = -1;
+    for (int i = 0; i < s_page_cap;    i++) s_grid_app[i] = -1;
+    for (int i = 0; i < s_dock_slots;  i++) s_dock_app[i] = -1;
 
     uint16_t w = mochi_hal_width();
 
     // ── Grid ────────────────────────────────────────────────────────────────
-    int base = s_page * PAGE_CAP;
-    for (int cell = 0; cell < PAGE_CAP; cell++) {
+    int base = s_page * s_page_cap;
+    for (int cell = 0; cell < s_page_cap; cell++) {
         int idx = base + cell;
         if (idx >= s_app_count) break;
-        int col = cell % GRID_COLS;
-        int row = cell / GRID_COLS;
+        int col = cell % s_cols;
+        int row = cell / s_cols;
         lv_coord_t cx = (lv_coord_t)(col * s_m.cell_w + (s_m.cell_w - ICON_SIZE) / 2);
         lv_coord_t cy = (lv_coord_t)(s_m.grid_y + row * s_m.cell_h);
         s_grid_cells[cell] = build_icon(s_screen, idx, cx, cy,
@@ -403,7 +460,7 @@ static void render_all(void)
     }
 
     // ── Dock ────────────────────────────────────────────────────────────────
-    int dock_n = s_app_count < DOCK_SLOTS ? s_app_count : DOCK_SLOTS;
+    int dock_n = s_app_count < s_dock_slots ? s_app_count : s_dock_slots;
     if (dock_n > 0) {
         lv_coord_t dock_w = (lv_coord_t)(w - 24);
         lv_obj_t *dock = lv_obj_create(s_screen);
@@ -426,7 +483,7 @@ static void render_all(void)
             lv_coord_t iy = (lv_coord_t)(s_m.dock_y + (s_m.dock_h - DOCK_ICON_SIZE) / 2);
             s_dock_cells[i] = build_icon(s_screen, i, ix, iy,
                                           DOCK_ICON_SIZE, DOCK_ICON_RADIUS, false,
-                                          PAGE_CAP + i);
+                                          s_page_cap + i);
             s_dock_app[i] = i;
         }
     }
@@ -531,10 +588,10 @@ static int sel_to_registry(int sel)
 {
     if (SEL_IS_DOCK(sel)) {
         int slot = SEL_DOCK_SLOT(sel);
-        if (slot < 0 || slot >= DOCK_SLOTS) return -1;
+        if (slot < 0 || slot >= s_dock_slots) return -1;
         return s_dock_app[slot];
     }
-    if (sel < 0 || sel >= PAGE_CAP) return -1;
+    if (sel < 0 || sel >= s_page_cap) return -1;
     return s_grid_app[sel];
 }
 
@@ -596,43 +653,43 @@ static void move_cursor(int dcol, int drow)
         if (drow < 0) {
             // Back up into the last populated grid row, same column-ish.
             int last = -1;
-            for (int i = 0; i < PAGE_CAP; i++) if (s_grid_app[i] >= 0) last = i;
+            for (int i = 0; i < s_page_cap; i++) if (s_grid_app[i] >= 0) last = i;
             if (last >= 0) {
-                int row = last / GRID_COLS;
-                int col = slot < GRID_COLS ? slot : GRID_COLS - 1;
-                int cand = row * GRID_COLS + col;
+                int row = last / s_cols;
+                int col = slot < s_cols ? slot : s_cols - 1;
+                int cand = row * s_cols + col;
                 if (cand > last) cand = last;
                 s_sel = cand;
             }
         } else if (dcol != 0) {
             int n = 0;
-            for (int i = 0; i < DOCK_SLOTS; i++) if (s_dock_app[i] >= 0) n++;
+            for (int i = 0; i < s_dock_slots; i++) if (s_dock_app[i] >= 0) n++;
             slot += dcol;
             if (slot < 0)  slot = 0;
             if (slot >= n) slot = n > 0 ? n - 1 : 0;
-            s_sel = PAGE_CAP + slot;
+            s_sel = s_page_cap + slot;
         }
         render_selection();
         return;
     }
 
-    int col = s_sel % GRID_COLS;
-    int row = s_sel / GRID_COLS;
+    int col = s_sel % s_cols;
+    int row = s_sel / s_cols;
 
     if (drow > 0) {
-        if (row + 1 < GRID_ROWS && s_grid_app[(row + 1) * GRID_COLS + col] >= 0) {
-            s_sel = (row + 1) * GRID_COLS + col;
+        if (row + 1 < s_rows && s_grid_app[(row + 1) * s_cols + col] >= 0) {
+            s_sel = (row + 1) * s_cols + col;
         } else {
             // Falling off the bottom of the grid drops into the dock.
             int n = 0;
-            for (int i = 0; i < DOCK_SLOTS; i++) if (s_dock_app[i] >= 0) n++;
-            if (n > 0) s_sel = PAGE_CAP + (col < n ? col : n - 1);
+            for (int i = 0; i < s_dock_slots; i++) if (s_dock_app[i] >= 0) n++;
+            if (n > 0) s_sel = s_page_cap + (col < n ? col : n - 1);
         }
         render_selection();
         return;
     }
     if (drow < 0) {
-        if (row > 0) s_sel = (row - 1) * GRID_COLS + col;
+        if (row > 0) s_sel = (row - 1) * s_cols + col;
         render_selection();
         return;
     }
@@ -640,10 +697,10 @@ static void move_cursor(int dcol, int drow)
     int next = col + dcol;
     if (next < 0) {
         if (s_page > 0) { set_page(s_page - 1); return; }
-    } else if (next >= GRID_COLS) {
+    } else if (next >= s_cols) {
         if (s_page + 1 < s_page_count) { set_page(s_page + 1); return; }
     } else {
-        int cand = row * GRID_COLS + next;
+        int cand = row * s_cols + next;
         if (s_grid_app[cand] >= 0) s_sel = cand;
     }
     render_selection();
