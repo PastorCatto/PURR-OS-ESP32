@@ -11,6 +11,29 @@
 >
 > Steps 0–4 are the gate. Step 5 is explicitly deferred past DP8 (see its entry).
 > Step 6 is an audit whose *findings* are required before release, not its fixes.
+>
+> ### Gate status — 2026-07-26
+>
+> **Proposed bar:** worst-case `lv_timer_handler()` under 60 ms, with the
+> 140–159 ms cluster gone.
+>
+> | | Result |
+> |---|---|
+> | Idle | ✅ **185 fps, max 13 ms, 585/600 frames under 8 ms** |
+> | Active (shade + multitasker) | ✅ 125–160 fps, mean 1–3 ms |
+> | 140–159 ms cluster | ✅ gone |
+> | Residual | ⚠️ 1–6 frames per 600 still reach 100–200 ms under heavy use |
+> | Corruption | ✅ fixed (black blocks) |
+>
+> Starting point for comparison: 6.7 fps worst case, 38 frames per 600 at
+> 200–400 ms, and visible corruption on any full-screen redraw.
+>
+> **The gate is met except for the residual stalls.** Whether those block the
+> bake is a judgement call, not a measurement — they are rare, and they are a
+> tenth of what they were.
+>
+> Landed: `fa69ad17` (driver), `1b89d11e` (`-O2`), `fa3f7bb4` (effects/accent,
+> icons, metric, buffer, NVS order), `f1218611` (adaptive grid).
 
 **Working tracking doc. Scope: Mochi / T-Deck Plus rendering performance.**
 
@@ -35,21 +58,31 @@ rather than a rewrite because there is no hardware to verify them on.
 
 ## Baseline measurements
 
-Fill this in at Step 0. Re-measure after every accepted step. If a step doesn't
-move a number, revert it — it isn't the problem, and keeping it just adds noise to
-the next measurement.
+Re-measure after every accepted step. If a step doesn't move a number, revert it —
+it isn't the problem, and keeping it just adds noise to the next measurement.
 
-| Metric | How | **Baseline** | After 1 | After 2 | After 3 |
+> ⚠️ **Every `lv_timer_handler()` figure in the first three columns came from the
+> broken instrument described in F12** — a censored sample that only observed
+> slow frames, and that added ~5 ms of blocking UART per line it emitted. Those
+> numbers cannot be compared with each other or with the final column. They are
+> kept because they are what decisions were made on, and two of those decisions
+> were wrong as a direct result. The flush counters are unaffected — they were
+> never censored.
+
+| Metric | How | **Baseline** | After driver fix | After `-O2` | **FINAL** |
 |---|---|---|---|---|---|
-| Actual SPI clock (kHz) | `spi_device_get_actual_freq()` | **80 000 — not clamped** | | | |
-| `lv_timer_handler()`, idle (ms) | warn hook at 16 ms | **18–19, every 200 ms** | | | |
-| `lv_timer_handler()`, shade + switcher (ms) | same | **median 24, p95 165, max 290** | median 164, p95 281, max 348 *(F9, reverting)* | **median 49, p95 50, max 53** ✅ | |
-| SPI transactions per flush — idle / active | counter in `push_pixels` | **34 / 66** | **6 / 7** | | |
-| µs per flush, avg — idle / active | counter in `push_pixels` | **3251 / 10 444** | **1446 / 7465** | | |
-| px per flush — idle / active | counter in `push_pixels` | **2740 / 18 387** | 2699 / 19 140 | | |
-| µs per transaction | derived | **~79 idle, ~102 active (only ~18 is wire)** | n/a — no longer the bottleneck | | |
-| Full-buffer flush (µs) | max, active windows | **~15 800** | **~10 100** | | |
-| Transfer failures | log scan | n/a | **0** | | |
+| Actual SPI clock (kHz) | `spi_device_get_actual_freq()` | **80 000 — not clamped** | — | — | — |
+| SPI transactions per flush — idle / active | counter in `push_pixels` | **34 / 66** | **6 / 7** | 6 / 6 | **6 / 6** |
+| µs per flush, avg — idle / active | counter in `push_pixels` | **3251 / 10 444** | **1446 / 7465** | 1249 / 1604 | **1293 / ~1800** |
+| Full-buffer flush (µs) | max, active windows | **~15 800** | **~10 100** | ~3 500 | **~2 100** |
+| Transfer failures | log scan | n/a | **0** | 0 | **0** |
+| *(censored — see F12)* handler, idle | old warn hook | 18–19 ms every 200 ms | — | mostly <16 ms | — |
+| *(censored — see F12)* handler, active | old warn hook | median 24, max 290 | median 164, max 348 | median 49, max 53 | — |
+| **Frames <8 ms, idle** | `frame_record()` | — | — | — | **585 / 600** |
+| **fps, idle** | `frame_record()` | — | — | — | **185** |
+| **fps, active** | `frame_record()` | — | — | — | **125–160** |
+| **mean frame, active** | `frame_record()` | — | — | — | **1–3 ms** |
+| **Stalls ≥100 ms per 600 frames** | `frame_record()` | — | — | — | **1–6** *(was 38 at 200–400 ms)* |
 
 Captured 2026-07-25 on a physical T-Deck Plus.
 
@@ -214,7 +247,44 @@ At 18,387 px per active flush that is a real cost inside the measured flush time
 roughly 0.5 ms per flush by rough cycle count, and it is neither wire time nor
 transaction overhead, so it will *not* be removed by Steps 1 or 2.
 
-### F9 — The LVGL draw buffers live in PSRAM *(hypothesis, found during Step 0)*
+### ~~F9 — The LVGL draw buffers live in PSRAM~~ — **WRONG. Reversed.**
+
+> **Outcome: the exact opposite is true.** The large PSRAM buffer is correct and
+> the small internal one is a significant regression. Kept in full below, because
+> the reasoning was sound, confidently held, acted on twice, and wrong — and
+> because the way it failed is more instructive than the conclusion.
+>
+> **What was actually going on.** The cost was never memory locality. It was
+> **per-pass overhead**: at 16 lines a full screen takes **15 render passes**, and
+> every pass re-walks the whole object tree and re-clips every widget against its
+> band. The tell was in the arithmetic — ~150 ms for a full-screen redraw is about
+> **470 CPU cycles per pixel**, an order of magnitude too high to be blending.
+> Cost that does not scale with pixels is not per-pixel cost.
+>
+> Restoring the 80-line buffer (3 passes), effects **on**, measured with the
+> corrected instrument from F12:
+>
+> | | 16-line (15 passes) | 80-line (3 passes) |
+> |---|---|---|
+> | fps | 48.7 / 72.6 | **158.8 / 124.7** |
+> | mean frame | 15 / 8 ms | **1 / 3 ms** |
+> | 100–200 ms stalls | 59, 29 | **1, 6** |
+>
+> **How it went wrong twice.** The first measurement — at `-Og` — said 16-line was
+> a regression (median 146 → 164 ms). That was correct. It was then overridden on
+> the strength of an `-O2` run showing median 49 ms, which was a **censored-sample
+> artifact of the broken metric** (F12), not a real result. A change this document
+> had already rejected on evidence was re-applied on the basis of a number the
+> instrument was incapable of producing correctly.
+>
+> Two lessons: sound reasoning about a mechanism is not evidence that the
+> mechanism dominates; and when new data contradicts an earlier measurement,
+> check the *instrument* before discarding the measurement.
+>
+> Single-buffering still stands (F3) — `flush_cb` is synchronous, so the second
+> buffer bought nothing and the PSRAM went back.
+
+*Original hypothesis, retained for the record:*
 
 `mochi_hal.c` allocates both draw buffers with `MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA`.
 That is correct and deliberate for the *flush* — GDMA can read PSRAM, and these are
@@ -302,6 +372,95 @@ Two lessons worth keeping:
    and the flags were worth more than all of them together.
 2. **It surfaced from an off-hand question about IRAM**, not from the plan. The
    plan's own ordering would never have reached it.
+
+---
+
+### F12 — The measurement itself was wrong ⚠️ **READ THIS BEFORE TRUSTING ANY NUMBER ABOVE**
+
+The most consequential finding of the whole exercise, and it invalidates several
+conclusions recorded earlier in this document — including two that were acted on.
+
+Step 0's instrument was a per-frame warning: *"lv_timer_handler() took N ms"*,
+emitted whenever a frame exceeded a threshold. It was wrong in two independent
+ways that compounded.
+
+**1. It was a censored sample.** It only fired above the threshold, so it never
+observed a fast frame. Every "median" derived from it was the median of the
+*slow frames only*. Comparing that figure between two builds compares two
+different populations, and it systematically flatters the wrong thing: a build
+with 239 uniformly-mediocre 49 ms frames scored "better" than one with a fast
+majority and 108 slow frames, when the second is arguably the nicer UI. That is
+exactly the disagreement that arose on hardware — the reported experience was
+"smoother, but it stutters", and the metric could not represent that at all.
+
+**2. It perturbed what it measured.** `ESP_LOG` writes are synchronous to a
+115200-baud UART: roughly **5 ms of blocked render task per line**. The build
+emitting 239 lines paid ~1.2 s of logging tax over a 60 s run; the build emitting
+108 paid half that. The instrument penalised whichever build it judged worse.
+
+**The fix:** bucket *every* frame, emit one aggregate line per 600-frame window,
+in frame-rate terms, with true wall-clock fps. See `frame_record()` in
+`mochi_module.c`.
+
+**What it immediately revealed** — invisible to the old metric:
+
+```
+IDLE:    fps=183  mean=0ms  max=15ms   <8ms:585/600
+ACTIVE:  fps=52   mean=14ms max=250ms  <8ms:551 ... 200-400ms:38
+```
+
+Not slow rendering — **a cliff**. ~92% of frames already finished under 8 ms
+while ~6% took 200–400 ms, with almost nothing in between. Those few frames
+consumed roughly **80% of wall time**. Every earlier plan in this document was
+aimed at making rendering broadly faster; the actual problem was a small number
+of catastrophic frames.
+
+**Lesson.** Six findings were derived before anyone checked whether the
+instrument could answer the question. When a measurement and a human report
+disagree, the measurement is not automatically right — and a metric that cannot
+represent the reported symptom is not evidence against it.
+
+### F13 — Kernel settings were loaded by an app, after the UI was built
+
+Reported as *"an NVS bug that seems to go away when the OS goes to sleep"*, which
+is an unusually precise description of a load-order race.
+
+`ui_effects`, `accent_color`, `lock_hide_notifs`, `navbar_always_visible`,
+`dev_mode` and `screen_timeout` were all pushed into the kernel by `settings.c`'s
+`nvs_load()`. Settings is `PURR_PRIORITY_OPTIONAL`, so it initialises **after**
+the UI module (`PURR_PRIORITY_IMPORTANT`). System UI therefore built every
+surface against compiled-in defaults, and a stored preference only took hold once
+something rebuilt them — which sleep/wake does. Toggling the setting by hand
+papered over it identically.
+
+`ui_effects` exposed it because it is read at *construction* time rather than per
+frame. All six shared the race; the others were merely harder to notice.
+
+**Fix:** the kernel loads its own persisted state at the top of
+`purr_kernel_load_static_modules()`, before any module init — hooked there rather
+than per-board so every device gets it. Verified: settings at t=2879 ms, systemui
+at t=3035 ms, Mochi at t=3198 ms.
+
+### F14 — App icons were compiled out, not broken
+
+Row glyphs had vanished from MSN, Milkbar and Settings. Nothing was broken: all
+17 sites guarded on `CONFIG_PURR_UI_BACKEND_CUPCAKE` and called Cupcake's private
+`cupcake_win_list_set_items_icon()`, so every icon silently disappeared the moment
+the device moved to Mochi.
+
+**`catcall_ui.h:123` documents this exact failure**, as the stated reason
+`list_set_items_icon` was promoted into the contract in the first place. The
+contract was fixed; the call sites were never migrated.
+
+**Fix:** `CONFIG_PURR_UI_LVGL`, selected by all seven LVGL backends and no
+others. Guards now test "is LVGL present" — the real dependency, since
+`LV_SYMBOL_*` comes from its built-in font — and calls go through the portable
+`purr_win_list_set_items_icon()`, which falls back to a plain list on any backend
+leaving the hook NULL. **MSN confirmed on hardware; Milkbar untested** (identical
+call path).
+
+Worth a sweep: any other `CONFIG_PURR_UI_BACKEND_*` guard in an app is the same
+latent bug.
 
 ---
 
@@ -441,6 +600,25 @@ Transaction overhead was real and is now gone, but it was never the whole story.
 - **F9 goes next**, because it hits the 41% twice over: LVGL blends faster *and*
   this driver's byte-swap stops reading its source out of PSRAM.
 
+> **This replan was itself wrong, and is kept for the record.** ⚠️
+>
+> Both of its live recommendations were mistakes, and they share one cause: they
+> reason about percentages of **flush** time, when flush had already stopped being
+> the bottleneck.
+>
+> - **F7's promotion used the wrong denominator.** It is ~41% of *flush* time, and
+>   flush is ~13% of *frame* time — so ~5% overall, not 41%. It should have stayed
+>   deferred, which is where it is now.
+> - **F9 was a regression**, not the next win. See its (reversed) entry above.
+>
+> Step 2's demotion was correct and stands. What actually mattered next was
+> **F11** (`-O2`, ~3.3×), which no version of this plan contained and which
+> surfaced from an off-hand question about IRAM headroom.
+>
+> The pattern worth naming: three consecutive rankings were produced by dividing a
+> measured cost by a plausible-looking total, without checking that the total was
+> the thing being optimised.
+
 ### Step 2 — Async flush + `queue_size = 2`
 
 The structural fix that makes the second draw buffer real. Resolves **F2** and
@@ -455,7 +633,65 @@ The structural fix that makes the second draw buffer real. Resolves **F2** and
 - [ ] Rework `spi_transmit_bounded`'s reclaim logic for a queue depth > 1
 - [ ] Re-measure
 
-### Step 3 — Re-measure, then decide about transparency
+### Step 3 — Transparency ✅ **PRICED, AND NOW AFFORDABLE**
+
+Measured both ways, which is what the effects toggle was built for.
+
+**At 15 passes**, transparency was worth about half the stall cost: the 200–400 ms
+bucket (38, 36 frames) emptied completely with effects off, dropping to 100–200 ms
+(59, 29). Real, and the user's own suspicion was correct.
+
+**At 3 passes**, the multiplier is gone. The 158/124 fps figures in the F9 box
+above were captured with **effects ON**. Translucency is no longer the bottleneck,
+so the design does not have to be traded away for speed — which was the whole
+point of pricing it rather than assuming.
+
+The toggle stays as a genuine user preference (legibility over a busy wallpaper,
+and a further speedup on slower panels), not a workaround. See F15.
+
+### F15 — Effects toggle + accent colour *(feature, shipped in `fa3f7bb4`)*
+
+Settings → Customization: a translucency toggle and a hex accent field. With
+effects off, every surface that *would* have been translucent becomes opaque and
+fills with the user's accent colour.
+
+Two implementation notes worth keeping:
+
+- **Chrome takes the accent; content keeps its own colour.** Getting this wrong
+  was the first attempt's real defect — flooding notification cards, recents
+  cards and page dots with one accent destroyed the information their colour
+  carries. Android's recents card uses a *per-app tint*, so accent there erased
+  app identity and made cards indistinguishable from the backdrop behind them.
+  Hence two helpers in `systemui.h`: `fx_bg_opa()` for chrome, `fx_bg_opa_keep()`
+  for content.
+- **Surfaces read the flag at construction.** `build_panel()` runs once from
+  `purr_systemui_init()`; opening the shade only slides the same object. So the
+  toggle appeared to do nothing until reboot until `purr_systemui_fx_refresh()`
+  was added to restyle the persistent surfaces.
+
+### F16 — Mochi's grid is now derived from panel size *(`f1218611`)*
+
+Mochi hard-coded 4×2. It was already resolution-aware for *positioning*, so a
+larger panel rendered correctly — it just refused to use the space. On Tab5
+(640×360 as PURR sees it) that is 8 apps on a screen with room for ~24.
+
+Columns now come from width, rows from the grid band that survives the status
+bar, dots, dock and home indicator. Icon size stays fixed, which is the iOS
+behaviour being copied: a bigger screen holds *more* icons rather than larger
+ones.
+
+**A row divisor was first guessed at 67.** The T-Deck's real usable band is
+132 px, so 132/67 floored to **1 row** — four apps per page across three pages.
+Two pixels of estimation error halved the home screen. It is now
+`ICON_SIZE + LABEL_H + 4`, built from the same constants as the cell, so it
+cannot drift. A boot log of the resolved shape caught this before the screen was
+even looked at, and is the fastest check on any new panel.
+
+Verified: `grid 4x2 (8/page), dock 4, cell 80x66 on 320x240` — T-Deck unchanged.
+Tab5 arithmetic gives 8×3 = 24 per page, **not yet verified on hardware**, and
+`tab5/device.pcat` still selects `cupcake`.
+
+### ~~Step 3 (original) — Re-measure, then decide about transparency~~
 
 Steps 1 and 2 together could plausibly halve frame time. The community likes the
 look — don't spend it until the numbers say you must. Resolves **F5**, or
@@ -505,6 +741,35 @@ Grep each for the same three tells:
 **Gate:** the table must be filled in before DP8 ships. Acting on it must not be.
 If another driver has the same bug, that is worth *knowing* at release time even
 if the fix waits for hardware.
+
+---
+
+## What is actually left
+
+Ordered by what blocks the bake.
+
+- [ ] **Strip the temporary instrumentation.** All of it is commented for removal.
+      Recommend KEEPING the one-shot boot lines — SPI clock, chunk size, draw
+      buffer, grid shape — since each has already caught a real bug on this
+      hardware and costs nothing at runtime. Drop the per-window histograms in
+      `frame_record()` and the flush counters in `push_pixels`.
+- [ ] **Milkbar icons** — untested. Same call path as MSN, which is confirmed.
+- [ ] **Residual stalls** — 1–6 frames per 600 at 100–200 ms under heavy
+      multitasker use. Down from 38 at 200–400 ms. Whether this blocks the bake is
+      a judgement call; it is no longer a measurement question.
+- [ ] **Sweep for other `CONFIG_PURR_UI_BACKEND_*` guards in apps** — F14's bug
+      shape, and there may be more of it.
+
+Not blocking:
+
+- [ ] **Tab5** — Mochi's 8×3 grid is arithmetic, not hardware. `tab5/device.pcat`
+      still selects `cupcake`, so testing it is a deliberate device-config change.
+- [ ] **Light/dark mode as its own axis.** The effects-off look was liked for being
+      *darker*, but "solid" and "dark" are currently welded together — the accent
+      both removes translucency and sets the tone. Splitting them is a separate,
+      deliberate change.
+- [ ] **F4 (TE pin)** — still unanswered as a hardware question, and now largely
+      moot: tearing was a symptom of long flushes, and flushes are ~2 ms.
 
 ---
 
