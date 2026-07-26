@@ -454,9 +454,17 @@ void app_main(void)
     // Computed once, reused for both SD and display below; Phase 1's own
     // module loading (purr_kernel_load_static_modules()) does its own,
     // separate peek for the same reason.
-    bool recovering = purr_crash_guard_pending_recovery(NULL, 0, NULL, 0);
+    // Name captured, not just the bool: a recovery from GAME MODE is worth
+    // telling the user about specifically. That path leaves the device with no
+    // UI backend loaded, so a game that faults during startup produces a black
+    // screen with no indication anything is wrong — the boot splash saying so
+    // is the only feedback available at that point.
+    char recover_name[32] = {0};
+    bool recovering = purr_crash_guard_pending_recovery(recover_name, sizeof(recover_name), NULL, 0);
+    bool from_game  = recovering && strcmp(recover_name, "game_mode") == 0;
     if (recovering) {
-        ESP_LOGW(TAG, "recovering from a hang-triggered reboot — bounding SD/display bring-up this boot");
+        ESP_LOGW(TAG, "recovering from a hang-triggered reboot (%s) — bounding SD/display bring-up this boot",
+                 recover_name[0] ? recover_name : "unknown");
     }
 
     // SD card slot is on the same BOARD_POWERON peripheral rail as touch/etc.
@@ -566,9 +574,20 @@ void app_main(void)
 
     // Raw-framebuffer splash — drawn directly via catcall_display_t, well
     // before any UI backend (Cupcake/MiniWin) has started (that happens in
-    // Phase 1 below). boot_splash_show() is itself a no-op if display init
-    // above degraded to "continuing without display" on a recovery boot.
-    boot_splash_show();
+    // Phase 1 below). A no-op if display init above degraded to "continuing
+    // without display" on a recovery boot.
+    //
+    // A game-mode recovery says so explicitly. That boot is the aftermath of a
+    // game faulting while it owned the whole device with no UI loaded, so the
+    // user's last experience was a black screen with no explanation; the normal
+    // "Starting PURR OS..." would give them no reason to think anything had
+    // gone wrong, and no hint as to what.
+    if (from_game) {
+        purr_splash_show("Recovering from Game Mode", BOOT_SPLASH_STEPS);
+        purr_splash_status("game exited unexpectedly - restoring");
+    } else {
+        boot_splash_show();
+    }
 
     // Perf mode: bulk-transfer PSRAM buffer for push_pixels — collapses
     // per-row transfers into one per flush (see st7789.h's doc comment).

@@ -1,0 +1,17 @@
+# modules/game_mode/module.pcat
+# Tears the OS down to bare hardware for one app, then puts it back — see
+# game_mode.h. No PURR_MODULE_REGISTER, deliberately, and for a stronger reason
+# than boot_splash's: this walks and unloads the module registry, so appearing
+# in that registry would mean unloading itself mid-iteration. It is called
+# directly by an app (a .claw game), not loaded through the P2/P3 static module
+# system. This .pcat exists so modulestrap's manifest scan picks the directory
+# up as a linkable component.
+
+name              = "game_mode"
+version           = "0.1.0"
+module_type       = "PURR_MOD_SYSTEM"
+kernel_min        = "0.11.1"
+kernel_max        = ""
+
+provides          = []
+required_catcalls = ["display"]

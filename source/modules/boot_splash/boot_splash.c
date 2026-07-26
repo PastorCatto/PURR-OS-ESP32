@@ -129,8 +129,11 @@ static const uint8_t s_font6x8[][6] = {
 };
 
 static const catcall_display_t *s_disp = NULL;
-static int      s_step = 0;
+static int      s_step  = 0;
+static int      s_steps = BOOT_SPLASH_STEPS;
 static int16_t  s_bar_x, s_bar_y, s_bar_w, s_bar_h;
+static int16_t  s_status_y = 0;
+static int16_t  s_scr_w    = 320;
 
 // Renders one glyph, scaled by `scale`, via a single push_pixels() call —
 // same "build a small local buffer, push once" shape as oled_ui, just
@@ -166,18 +169,20 @@ static void draw_str(int x, int y, const char *str, uint16_t fg, uint16_t bg, in
 
 static int str_width(const char *str, int scale) { return (int)strlen(str) * FONT_W * scale; }
 
-void boot_splash_show(void)
+void purr_splash_show(const char *title, int steps)
 {
     s_disp = purr_kernel_display();
     if (!s_disp) return;
+    if (!title) title = "PURR OS";
+    s_steps = steps > 0 ? steps : 1;
 
     display_info_t info;
     if (s_disp->get_info) s_disp->get_info(&info);
     else { info.width = 320; info.height = 240; }
+    s_scr_w = (int16_t)info.width;
 
     if (s_disp->fill_rect) s_disp->fill_rect(0, 0, info.width, info.height, COL_BLACK);
 
-    const char *title = "Starting PURR OS...";
     int scale = info.width >= 240 ? 2 : 1;
     draw_str((info.width - str_width(title, scale)) / 2, (int)info.height * 4 / 10,
              title, COL_WHITE, COL_BLACK, scale);
@@ -193,18 +198,54 @@ void boot_splash_show(void)
         s_disp->fill_rect(s_bar_x + 1, s_bar_y + 1, s_bar_w - 2, s_bar_h - 2, COL_BLACK);
     }
 
+    // One line's worth of room below the bar for purr_splash_status().
+    s_status_y = (int16_t)(s_bar_y + s_bar_h + 8);
+
     const char *credit = "(c) PURR OS";
     draw_str(4, (int)info.height - FONT_H - 4, credit, COL_WHITE, COL_BLACK, 1);
 
     s_step = 0;
 }
 
-void boot_splash_advance(void)
+void purr_splash_advance(void)
 {
     if (!s_disp || !s_disp->fill_rect) return;
-    if (s_step >= BOOT_SPLASH_STEPS) return;
+    if (s_step >= s_steps) return;
     s_step++;
 
-    int16_t filled = (int16_t)((s_bar_w - 2) * s_step / BOOT_SPLASH_STEPS);
+    int16_t filled = (int16_t)((s_bar_w - 2) * s_step / s_steps);
     if (filled > 0) s_disp->fill_rect(s_bar_x + 1, s_bar_y + 1, filled, s_bar_h - 2, COL_WHITE);
 }
+
+// Single status line under the bar. Clears the previous line first, so callers
+// can update it freely without accumulating overdraw.
+//
+// Truncated rather than wrapped: this exists to name one short thing that is
+// happening right now ("unloading meshtastic"), and a second line would push the
+// layout around mid-transition, which looks like a fault rather than progress.
+void purr_splash_status(const char *line)
+{
+    if (!s_disp || !s_disp->fill_rect || s_status_y == 0) return;
+
+    s_disp->fill_rect(0, s_status_y, s_scr_w, FONT_H, COL_BLACK);
+    if (!line || !*line) return;
+
+    int max_chars = (int)(s_scr_w / FONT_W) - 2;
+    if (max_chars < 1) return;
+
+    char buf[64];
+    int n = (int)strlen(line);
+    if (n > max_chars) n = max_chars;
+    if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+    memcpy(buf, line, (size_t)n);
+    buf[n] = '\0';
+
+    draw_str((s_scr_w - str_width(buf, 1)) / 2, s_status_y, buf, COL_WHITE, COL_BLACK, 1);
+}
+
+// ── Boot splash wrappers ────────────────────────────────────────────────────
+// Kept as distinct names because several device kernels call them and the title
+// is part of what the OS looks like at boot.
+
+void boot_splash_show(void)    { purr_splash_show("Starting PURR OS...", BOOT_SPLASH_STEPS); }
+void boot_splash_advance(void) { purr_splash_advance(); }

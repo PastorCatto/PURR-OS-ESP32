@@ -1,0 +1,157 @@
+// game_mode.c — see game_mode.h for what this buys and why.
+//
+// Deliberately NOT a registered module (no PURR_MODULE_REGISTER), same as
+// boot_splash. Two reasons: it must not appear in the registry it is walking and
+// unloading, and it has no init/deinit lifecycle worth having — it is a pair of
+// functions an app calls.
+
+#include <string.h>
+#include <stdio.h>
+#include "game_mode.h"
+#include "purr_kernel.h"
+#include "purr_module.h"
+#include "purr_crash_guard.h"
+#include "../boot_splash/boot_splash.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+
+static const char *TAG = "game_mode";
+
+// Enough for every module this OS ships plus room to grow. Overflow degrades to
+// "unload fewer things" rather than misbehaving — see the guard in enter().
+#define MAX_SUSPENDED 32
+
+static const char *s_suspended[MAX_SUSPENDED];
+static int         s_suspended_n = 0;
+static bool        s_active      = false;
+
+// Crash-guard entity name. Distinct from any module name so it cannot collide
+// with a module's own strike bookkeeping.
+#define GAME_MODE_GUARD_ENTITY "game_mode"
+
+bool purr_game_mode_active(void) { return s_active; }
+
+// Modules that stay no matter what.
+//
+// Everything else is decided by TYPE rather than by a name list, deliberately:
+// a name list silently stops covering new modules as they are added, and the
+// failure mode is "game mode quietly got worse over time" with nothing to
+// notice it. Types are structural and do not rot.
+//
+//   PURR_MOD_DRIVER — display, touch, input, radio, gps, battery. The game
+//                     needs the display and input; the rest are inert once
+//                     nothing is driving them, and unloading a driver would
+//                     tear down a catcall that the registry hands out pointers
+//                     to. Not worth the risk for the memory involved.
+//   PURR_MOD_APP    — apps are inert unless launched, and one of them is the
+//                     caller. Unloading the caller would delete the task
+//                     executing this function.
+//
+// driver_manager and app_manager are PURR_MOD_SYSTEM but structural — the same
+// two the kernel's own denylist protects (module_is_denylisted()).
+static bool is_kept(const purr_module_header_t *h)
+{
+    // name is a fixed array in the header, never a pointer — so test its
+    // contents, not its address.
+    if (!h || h->name[0] == '\0') return true;
+    if (h->module_type == PURR_MOD_DRIVER) return true;
+    if (h->module_type == PURR_MOD_APP)    return true;
+    if (strcmp(h->name, "driver_manager") == 0) return true;
+    if (strcmp(h->name, "app_manager")    == 0) return true;
+    return false;
+}
+
+static size_t free_internal(void) { return heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
+
+int purr_game_mode_enter(const char *label)
+{
+    if (s_active) return -1;
+
+    // Snapshot the names to unload BEFORE unloading anything: the registry is
+    // being mutated underneath, so walking and unloading in one pass would skip
+    // entries as indices shift.
+    //
+    // Walked in reverse so the list ends up in reverse load order. Load order
+    // already respects dependencies (priority, then registration), so unloading
+    // its reverse means nothing is torn out from under a module still running.
+    // Concretely: the UI backend must go before systemui, because the backend's
+    // task calls purr_systemui_tick() every frame.
+    s_suspended_n = 0;
+    for (int i = purr_kernel_module_count() - 1; i >= 0; i--) {
+        const purr_module_header_t *h = purr_kernel_module_at(i);
+        if (is_kept(h)) continue;
+        if (s_suspended_n >= MAX_SUSPENDED) {
+            ESP_LOGW(TAG, "more than %d suspendable modules — leaving the rest loaded",
+                     MAX_SUSPENDED);
+            break;
+        }
+        // Storing the name pointer, not a copy: module headers are static
+        // (PURR_MODULE_REGISTER puts them in rodata), so the string outlives
+        // the unload. purr_kernel_get_static_module() needs exactly this name
+        // to find the header again on the way back.
+        s_suspended[s_suspended_n++] = h->name;
+    }
+
+    // +1 step for the final settle, so the bar reaches the end rather than
+    // stopping just short of it.
+    char title[48];
+    snprintf(title, sizeof(title), "%s", label ? label : "Game Mode");
+    purr_splash_show(title, s_suspended_n + 1);
+    purr_splash_status("freeing system resources");
+
+    size_t before = free_internal();
+
+    // Marker first. If the game faults during startup — before it ever manages
+    // a clean exit — the next boot must not walk straight back into it.
+    purr_crash_guard_mark_start(GAME_MODE_GUARD_ENTITY);
+
+    s_active = true;   // set before unloading: the UI backend's deinit may run
+                       // code that asks whether game mode is active.
+
+    for (int i = 0; i < s_suspended_n; i++) {
+        purr_splash_status(s_suspended[i]);
+        purr_kernel_unload_module(s_suspended[i]);
+        purr_splash_advance();
+    }
+
+    size_t after = free_internal();
+    ESP_LOGW(TAG, "entered: %d modules unloaded, internal DRAM %u -> %u (+%d bytes)",
+             s_suspended_n, (unsigned)before, (unsigned)after, (int)(after - before));
+
+    purr_splash_status(label ? label : "loading");
+    purr_splash_advance();
+    return s_suspended_n;
+}
+
+int purr_game_mode_exit(void)
+{
+    if (!s_active) return -1;
+
+    // The splash is the only thing on screen from here until a UI backend
+    // repaints, which is the whole reason it exists — the game has stopped
+    // drawing and nothing has replaced it yet.
+    purr_splash_show("Restoring PURR OS", s_suspended_n + 1);
+    purr_splash_status("restarting services");
+
+    // Reverse of the suspend list = original load order.
+    int restored = 0;
+    for (int i = s_suspended_n - 1; i >= 0; i--) {
+        purr_splash_status(s_suspended[i]);
+        if (purr_kernel_enable_static_module(s_suspended[i]) == 0) restored++;
+        else ESP_LOGW(TAG, "failed to restore %s", s_suspended[i]);
+        purr_splash_advance();
+    }
+
+    s_suspended_n = 0;
+    s_active      = false;
+
+    // Only now: a clean exit is what proves the game did not take the device
+    // down with it.
+    purr_crash_guard_mark_stop(GAME_MODE_GUARD_ENTITY, true, NULL);
+
+    ESP_LOGW(TAG, "exited: %d modules restored, internal DRAM %u free",
+             restored, (unsigned)free_internal());
+
+    purr_splash_advance();
+    return restored;
+}
