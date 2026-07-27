@@ -876,32 +876,38 @@ static app_entry_t *find_app_by_current_task(void) {
     return NULL;
 }
 
-// Called by a native app whose task is about to delete itself, so the manager
-// stops believing it is still running.
+// Called by a native app that ends on its own terms, so the manager stops
+// believing it is still running.
 //
-// Without this, an app that ends on its own terms is never cleared from s_ctxs.
-// Tapping its icon again then takes the "already running, just re-show the
-// tracked window" path — and an exclusive app that owns the panel directly has
-// no window (window == 0), so absolutely nothing happens and the launcher just
-// sits there. Reproduced with MagiDOS: the first launch worked, the second was
-// silently inert.
+// Takes the app NAME rather than using the calling task's handle. That was the
+// first attempt and it silently did nothing: app_manager launches a native app
+// on a short-lived `native_task` that calls init() and exits, so s_ctxs[].task
+// is THAT task's handle. An app like MagiDOS spawns its own long-lived task from
+// init(), and that task's handle was never in s_ctxs at all, so the match never
+// fired.
 //
-// Uses the caller's own task handle rather than a name or index, for the same
-// race-freedom reason as app_manager_on_window_created() above:
-// xTaskGetCurrentTaskHandle() can only ever return the caller's own identity.
+// What actually blocks a relaunch is app->state: app_manager_launch_path() bails
+// with `if (app->state == APP_STATE_RUNNING) return 0;`. Nothing cleared it for
+// an app that exited by itself, so the second tap took that early return — and
+// an exclusive app that drives the panel directly has no window to re-show, so
+// nothing happened at all and the launcher just sat there.
 //
-// Safe to call from the exiting task itself; it only clears bookkeeping and
-// never touches the task. Call it BEFORE vTaskDelete(NULL).
-void app_manager_notify_exited(void) {
-    TaskHandle_t me = xTaskGetCurrentTaskHandle();
+// Safe to call from the exiting task: it only touches bookkeeping.
+void app_manager_notify_exited(const char *name) {
+    if (!name) return;
     for (int i = 0; i < s_app_count; i++) {
-        if (s_ctxs[i].task != me) continue;
-        s_ctxs[i].task = NULL;
-        if (s_ctxs[i].app) s_ctxs[i].app->window = 0;
-        s_ctxs[i].app = NULL;
-        ESP_LOGI(TAG, "native app reported exit — slot %d released", i);
+        if (strcmp(s_apps[i].name, name) != 0) continue;
+        s_apps[i].state  = APP_STATE_STOPPED;
+        s_apps[i].window = 0;
+        // Release the launch context too, so a stale handle can never be
+        // mistaken for a live one by find_app_by_current_task().
+        for (int c = 0; c < s_app_count; c++) {
+            if (s_ctxs[c].app == &s_apps[i]) { s_ctxs[c].task = NULL; s_ctxs[c].app = NULL; }
+        }
+        ESP_LOGI(TAG, "'%s' reported exit — relaunchable again", name);
         return;
     }
+    ESP_LOGW(TAG, "notify_exited: no app named '%s'", name);
 }
 
 static void app_manager_on_window_created(purr_win_t win) {

@@ -83,12 +83,18 @@ int  app_manager_launch_by_name(const char *name);
 // Stop a running app by index
 void app_manager_stop(int idx);
 
-// For a native app whose task ends on its own terms: clears the manager's
-// record that it is running, so tapping its icon launches it again instead of
-// taking the "already running, re-show its window" path. An exclusive app that
-// drives the panel directly has no window, so that path is silently inert.
-// Call from the exiting task, immediately before vTaskDelete(NULL).
-void app_manager_notify_exited(void);
+// For a native app that ends on its own terms: clears the manager's record that
+// it is running, so tapping its icon launches it again instead of taking
+// app_manager_launch_path()'s `state == APP_STATE_RUNNING` early return. An
+// exclusive app that drives the panel directly has no window to re-show, so that
+// early return is silently inert — the app simply never starts again.
+//
+// Takes the app NAME. The calling task's handle cannot be used: native apps are
+// launched on a short-lived task that calls init() and exits, so an app that
+// spawns its own long-lived task from init() is not the task app_manager tracks.
+//
+// Call just before the app's task deletes itself.
+void app_manager_notify_exited(const char *name);
 
 // Registry access (for Cat Apps UI)
 int              app_manager_count(void);

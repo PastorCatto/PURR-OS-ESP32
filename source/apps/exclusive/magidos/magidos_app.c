@@ -389,13 +389,17 @@ static void magidos_task(void *arg)
     // Restores every module game mode unloaded, with its own progress splash.
     purr_game_mode_exit();
 
-    // Tell app_manager we are done. It tracks running native apps by task
-    // handle, and this task is about to delete itself — without this the slot
-    // stays occupied, and the next tap on the MagiDOS icon takes the "already
-    // running, re-show its window" path. This app owns the panel directly and
-    // has no window, so that path does nothing at all: the launcher just sits
-    // there and nothing unloads. Observed exactly that on the second launch.
-    app_manager_notify_exited();
+    // Tell app_manager we are done, or this app can only ever be launched once
+    // per boot. app_manager_launch_path() returns early on
+    // `state == APP_STATE_RUNNING`, and nothing clears that for an app that
+    // exits on its own — the second tap took that early return, and since this
+    // app owns the panel directly and has no window to re-show, absolutely
+    // nothing happened: the launcher just sat there and no modules unloaded.
+    //
+    // By name, not by task handle: app_manager launches native apps on a
+    // short-lived task that calls init() and exits, so the handle it tracks is
+    // not this task's.
+    app_manager_notify_exited("magidos");
 
     s_task = NULL;
     vTaskDelete(NULL);
