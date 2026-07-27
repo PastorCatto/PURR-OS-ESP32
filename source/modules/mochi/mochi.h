@@ -66,6 +66,12 @@ uint64_t mochi_hal_last_activity_ms(void);
 // keyboard, which would otherwise eat a third of a 240px-tall panel.
 bool mochi_hal_has_physical_keyboard(void);
 
+// Shadow suppression, wired to the UI-effects toggle at init. Shadows are the
+// most expensive thing the default theme draws (the blur is O((shadow_width +
+// radius)^2)), and nothing in Mochi sets shadow_width itself, so this is the
+// only lever that reaches them. Takes effect on screens built after the call.
+void mochi_hal_set_shadows_enabled(bool on);
+
 // ── Icon set (mochi_springboard.c) ──────────────────────────────────────────
 // Mochi owns the system icon set and publishes it here, rather than each
 // consumer keeping its own name->icon map (which is how cupcake/tabby/mochi

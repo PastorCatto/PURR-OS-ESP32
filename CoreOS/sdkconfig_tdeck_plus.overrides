@@ -270,4 +270,17 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 # when consecutive shadow draws share a radius. A scrolling list of identical
 # rows is the ideal case; a screen of mixed shapes will thrash it and gain
 # nothing. Measure, do not assume.
-CONFIG_LV_SHADOW_CACHE_SIZE=32
+# ROLLED BACK to 0 on 2026-07-26 at the user's request: enabling it made screen
+# tearing noticeably worse in use. See DP8_CHECKLIST F19 — the tearing is
+# scanout tearing (GRAM written while the panel scans it out), and the cache
+# made frames ~1.6x more frequent, so the seam appears ~1.6x more often. The
+# cache did not CAUSE tearing; it removed the slowness that was hiding it.
+#
+# The measured win is real and is kept on record so this is a deliberate,
+# reversible trade and not a lost finding:
+#   scrolling  6.2 fps / mean 128ms   ->  9.7-10.1 fps / mean 60ms
+#
+# Set back to 32 to take the speed and accept the seam. The proper fix is the
+# TE pin, which is not broken out on this board (F4), so on T-Deck Plus this is
+# a genuine choose-one.
+CONFIG_LV_SHADOW_CACHE_SIZE=0

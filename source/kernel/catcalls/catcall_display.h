@@ -9,7 +9,11 @@
 // 2: added the optional async push pair (push_pixels_async / flush_done_cb).
 //    Drivers that don't implement it leave both NULL and callers keep using
 //    the synchronous push_pixels() — see the members' own comment.
-#define CATCALL_DISPLAY_VERSION 2
+// 3: push_pixels_async gained a `stride` parameter. Changed rather than added
+//    alongside deliberately: the member was one day old with a single
+//    implementer and a single caller, so folding it in now is cheaper than
+//    carrying two near-identical entry points forever.
+#define CATCALL_DISPLAY_VERSION 3
 
 typedef struct {
     uint16_t width;
@@ -52,6 +56,16 @@ typedef struct {
     // buffer B while band N is still being sent out of buffer A. The DMA time
     // disappears behind rendering that had to happen anyway.
     //
+    // `stride` is the distance in PIXELS between consecutive source rows, which
+    // is what lets a caller push a sub-rectangle of a larger buffer without
+    // copying it flat first. Pass `w` when the source is already a tight
+    // w-by-h block; pass the full buffer width when it is a window onto one.
+    //
+    // This matters more than it looks. A UI backend that composes frames into a
+    // full-screen mirror knows the exact dirty rectangle, but without a stride
+    // it can only push FULL-WIDTH rows spanning that rectangle. Measured on
+    // T-Deck Plus, that sent 65-69% more pixels than had actually changed.
+    //
     // `data` must stay valid until the callback fires — the caller owns it, and
     // that is exactly what LVGL's second draw buffer is for. A driver that
     // copies internally may fire the callback as soon as the copy is done.
@@ -63,6 +77,7 @@ typedef struct {
     // is safe to add.
     //
     // Optional: leave both NULL and callers fall back to push_pixels().
-    esp_err_t  (*push_pixels_async)(int x, int y, int w, int h, const uint16_t *data);
+    esp_err_t  (*push_pixels_async)(int x, int y, int w, int h, int stride,
+                                    const uint16_t *data);
     void       (*flush_done_cb)(void (*cb)(void *user), void *user);
 } catcall_display_t;

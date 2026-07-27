@@ -148,6 +148,27 @@ static lv_color_t *s_compose = NULL;
 static lv_area_t s_dirty;
 static bool      s_dirty_any = false;
 
+// Wrapper theme that strips shadows when UI effects are off. See where it is
+// installed, below lv_disp_drv_register(), for why this has to live at the theme
+// level rather than in any widget code.
+static lv_style_t s_no_shadow_style;
+static lv_theme_t s_flat_theme;
+static bool       s_theme_shadows_off = false;
+
+static void flat_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj)
+{
+    (void)th;
+    if (!s_theme_shadows_off) return;
+    // Added AFTER the base theme has had its say, so it wins for the default
+    // state. Objects already created keep their styles — the toggle takes full
+    // effect on the next screen built, which is acceptable for a setting that
+    // is changed rarely and deliberately.
+    lv_obj_add_style(obj, &s_no_shadow_style, LV_PART_MAIN | LV_STATE_DEFAULT);
+}
+
+// Runtime toggle, so the effect can be measured and switched without a reflash.
+void mochi_hal_set_shadows_enabled(bool on) { s_theme_shadows_off = !on; }
+
 
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
@@ -193,22 +214,34 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *colo
         s_dirty_any = false;
 
         if (!single_part) {
-            // Push full-width rows out of the mirror. Full width, not the exact
-            // union, so that the source rows are contiguous and the driver's
-            // stride equals the region width. The extra columns are not stale:
-            // the mirror tracks every pixel ever drawn, so they carry exactly
-            // what the panel already shows.
+            // Push exactly the dirty rectangle out of the mirror — a window onto
+            // it, not a flattened copy, which is what the stride parameter is
+            // for.
+            //
+            // This used to send FULL-WIDTH rows spanning the rectangle, because
+            // without a stride the source rows had to be contiguous. Measured on
+            // hardware, that sent 65-69% more pixels than had actually changed
+            // (sent=15178px vs drawn=9195px). Those wasted pixels cost twice: SPI
+            // time, and time spent writing GRAM while the panel is scanning it
+            // out — which is what a tear line is made of.
+            int32_t dx = s_dirty.x1;
             int32_t dy = s_dirty.y1;
+            int32_t dw = s_dirty.x2 - s_dirty.x1 + 1;
             int32_t dh = s_dirty.y2 - s_dirty.y1 + 1;
-            lv_color_t *src = &s_compose[dy * s_disp_w];
-
+            lv_color_t *src = &s_compose[dy * s_disp_w + dx];
 
             if (s_async_flush) {
-                d->push_pixels_async(0, dy, s_disp_w, dh, (uint16_t *)src);
+                d->push_pixels_async(dx, dy, dw, dh, (int)s_disp_w, (uint16_t *)src);
                 return;   // flush_done() calls lv_disp_flush_ready(), not us
             }
+            // Synchronous fallback goes a row at a time: push_pixels() has no
+            // stride and would otherwise read straight across the mirror and
+            // shear the image.
             if (d->push_pixels) {
-                d->push_pixels(0, dy, s_disp_w, dh, (uint16_t *)src);
+                for (int32_t r = 0; r < dh; r++) {
+                    d->push_pixels(dx, dy + r, dw, 1,
+                                   (uint16_t *)&s_compose[(dy + r) * s_disp_w + dx]);
+                }
             }
             lv_disp_flush_ready(drv);
             return;
@@ -221,7 +254,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *colo
     // transfer finishes. On T-Deck Plus that overlap is worth roughly half the
     // frame, because flushing and rendering were previously strictly serialised.
     if (s_async_flush) {
-        d->push_pixels_async(area->x1, area->y1, (int)w, (int)h, (uint16_t *)color_p);
+        d->push_pixels_async(area->x1, area->y1, (int)w, (int)h, (int)w, (uint16_t *)color_p);
         return;   // flush_done() calls lv_disp_flush_ready(), not us
     }
 
@@ -578,7 +611,39 @@ int mochi_hal_init(void)
     s_disp_drv.flush_cb     = flush_cb;
     s_disp_drv.draw_buf     = &s_draw_buf;
     s_disp_drv.full_refresh = 0;
-    lv_disp_drv_register(&s_disp_drv);
+    lv_disp_t *lv_disp = lv_disp_drv_register(&s_disp_drv);
+
+    // ── Make the UI-effects toggle actually reach shadows ────────────────────
+    //
+    // Until now the toggle only changed systemui's translucency, which is why
+    // turning effects off produced no measurable frame-time change at all — the
+    // user reported exactly that, and it was correct.
+    //
+    // Shadows are the single most expensive thing the default theme draws: the
+    // blur is O((shadow_width + radius)^2) and, before the corner cache was
+    // enabled, was recomputed for every shadow on every frame. Nothing in Mochi
+    // ever sets shadow_width — every shadow on screen comes from the LVGL
+    // default theme's btn style — so the only way to reach them is at the theme
+    // level, which is what this does.
+    //
+    // A wrapper theme rather than an edit to the default one: lv_theme_apply()
+    // walks parent-first and applies ours last, so this overrides whatever the
+    // base theme set without having to vendor or fork it.
+    if (lv_disp) {
+        lv_style_init(&s_no_shadow_style);
+        lv_style_set_shadow_width(&s_no_shadow_style, 0);
+        lv_style_set_shadow_opa(&s_no_shadow_style, LV_OPA_TRANSP);
+
+        lv_theme_t *base = lv_disp_get_theme(lv_disp);
+        s_flat_theme = *base;              // inherit fonts/colours unchanged
+        s_flat_theme.parent   = base;
+        s_flat_theme.apply_cb = flat_theme_apply_cb;
+        s_theme_shadows_off   = !purr_kernel_ui_effects_enabled();
+        lv_disp_set_theme(lv_disp, &s_flat_theme);
+
+        ESP_LOGW(TAG, "[perf] shadow suppression %s (follows the UI effects toggle)",
+                 s_theme_shadows_off ? "ON — effects are off" : "off — effects are on");
+    }
 
     resolve_inputs();
 

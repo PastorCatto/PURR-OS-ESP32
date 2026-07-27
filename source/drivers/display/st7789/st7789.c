@@ -844,9 +844,11 @@ static void async_completion_task(void *arg)
     }
 }
 
-static esp_err_t st7789_push_pixels_async(int x, int y, int w, int h, const uint16_t *data)
+static esp_err_t st7789_push_pixels_async(int x, int y, int w, int h, int stride,
+                                          const uint16_t *data)
 {
     if (!s_ready || !data || w <= 0 || h <= 0) return ESP_ERR_INVALID_STATE;
+    if (stride < w) stride = w;   // tolerate a caller passing 0 for "tight"
 
     int    cols = (w <= ST7789_WIDTH) ? w : ST7789_WIDTH;
     size_t px   = (size_t)cols * (size_t)h;
@@ -858,7 +860,19 @@ static esp_err_t st7789_push_pixels_async(int x, int y, int w, int h, const uint
     // chunked. A sync push here still behaves correctly: it acquires the bus,
     // which cannot be granted until the completion task releases it.
     if (!s_async_buf || s_async_active) {
-        esp_err_t e = st7789_push_pixels(x, y, w, h, data);
+        // st7789_push_pixels() has no stride parameter and treats the source as
+        // tight, so this fallback is only correct for a tight source. A strided
+        // caller that lands here would otherwise get a sheared image — push it
+        // one row at a time instead, which is slow but rare and correct.
+        esp_err_t e;
+        if (stride == w) {
+            e = st7789_push_pixels(x, y, w, h, data);
+        } else {
+            e = ESP_OK;
+            for (int r = 0; r < h && e == ESP_OK; r++) {
+                e = st7789_push_pixels(x, y + r, w, 1, data + (size_t)r * stride);
+            }
+        }
         if (s_done_cb) s_done_cb(s_done_user);
         return e;
     }
@@ -866,7 +880,7 @@ static esp_err_t st7789_push_pixels_async(int x, int y, int w, int h, const uint
     s_tx_row    = data;
     s_tx_left   = px;
     s_tx_cols   = cols;
-    s_tx_stride = w;      // source rows are w apart even if we send `cols` of them
+    s_tx_stride = stride; // may exceed cols: a window onto a wider buffer
     s_tx_col    = 0;
 
     spi_device_acquire_bus(s_spi, portMAX_DELAY);
