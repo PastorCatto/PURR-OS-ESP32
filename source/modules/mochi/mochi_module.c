@@ -84,11 +84,54 @@ static uint32_t s_idle_iters;
 // cheapest observed is ~15ms).
 #define FRAME_DREW_MIN_US 1000
 
+// ── Busy fps: what you actually get while scrolling ─────────────────────────
+//
+// RENDER-fps below is frames divided by the WHOLE window, idle time included.
+// That is the right number for "how busy is the UI overall" and the wrong one
+// for "how fast is it while I am dragging", which is the question that matters
+// when someone is looking at the screen and it feels slow.
+//
+// Measured as the GAP BETWEEN CONSECUTIVE RENDERED FRAMES, not as runs of
+// back-to-back active iterations. The first attempt used the latter and reported
+// a flat zero on hardware: LVGL's refresh period is longer than this loop's poll
+// interval, so lv_timer_handler() returns having drawn nothing most times it is
+// called. There is essentially ALWAYS an idle iteration between two renders,
+// even mid-scroll, so "consecutive active frames" is a state that never occurs.
+//
+// The gap between renders has no such problem. When the user is dragging, frames
+// arrive one after another with only the refresh period between them; when the
+// UI is idle, the gap is arbitrarily long. So: any two renders closer together
+// than BUSY_GAP_MAX_US are treated as part of the same sustained motion, and the
+// reported figure is frames divided by the time actually spent in motion.
+//
+// Reported alongside RENDER-fps rather than replacing it, because the gap
+// between the two is itself informative: if they are close the UI is saturated;
+// if BUSY is much higher the device is mostly idling between bursts.
+#define BUSY_GAP_MAX_US 250000   // 250ms — well beyond a slow frame, well under idle
+
+static int64_t  s_last_frame_us = 0;
+static uint32_t s_busy_frames   = 0;
+static uint64_t s_busy_span_us  = 0;
+static uint32_t s_busy_worst_us = 0;   // slowest gap counted as motion
+
 static void frame_record(int64_t handler_us)
 {
     // Iterations that drew nothing are counted only as loop spin, so the
     // reported fps is renders per second rather than iterations per second.
     if (handler_us < FRAME_DREW_MIN_US) { s_idle_iters++; return; }
+
+    // Fold this frame into the motion total if it followed closely enough on the
+    // previous one to be part of the same drag/scroll.
+    int64_t frame_now = esp_timer_get_time();
+    if (s_last_frame_us) {
+        int64_t gap = frame_now - s_last_frame_us;
+        if (gap > 0 && gap <= BUSY_GAP_MAX_US) {
+            s_busy_frames++;
+            s_busy_span_us += (uint64_t)gap;
+            if ((uint32_t)gap > s_busy_worst_us) s_busy_worst_us = (uint32_t)gap;
+        }
+    }
+    s_last_frame_us = frame_now;
 
     uint32_t ms = (uint32_t)(handler_us / 1000);
     int b = 0;
@@ -107,11 +150,17 @@ static void frame_record(int64_t handler_us)
     // from handler time alone would overstate it.
     uint32_t fps_x10 = span > 0 ? (uint32_t)((int64_t)s_frame_count * 10000000LL / span) : 0;
 
+    uint32_t busy_x10 = s_busy_span_us > 0
+        ? (uint32_t)((uint64_t)s_busy_frames * 10000000ULL / s_busy_span_us) : 0;
+
     ESP_LOGW(TAG,
-        "[frames] rendered=%lu  RENDER-fps=%lu.%lu  idle_iters=%lu  mean=%lums  max=%lums  "
+        "[frames] rendered=%lu  RENDER-fps=%lu.%lu  BUSY-fps=%lu.%lu (%lu fr, worst gap %lums)  "
+        "idle_iters=%lu  mean=%lums  max=%lums  "
         "| <8:%lu 8-16:%lu 16-33:%lu 33-50:%lu 50-100:%lu 100-200:%lu 200-400:%lu 400+:%lu",
         (unsigned long)s_frame_count,
         (unsigned long)(fps_x10 / 10), (unsigned long)(fps_x10 % 10),
+        (unsigned long)(busy_x10 / 10), (unsigned long)(busy_x10 % 10),
+        (unsigned long)s_busy_frames, (unsigned long)(s_busy_worst_us / 1000),
         (unsigned long)s_idle_iters,
         (unsigned long)(s_frame_total_us / s_frame_count / 1000),
         (unsigned long)(s_frame_max_us / 1000),
@@ -126,6 +175,12 @@ static void frame_record(int64_t handler_us)
     s_frame_max_us          = 0;
     s_idle_iters            = 0;
     s_frame_window_start_us = now;
+
+    s_busy_frames   = 0;
+    s_busy_span_us  = 0;
+    s_busy_worst_us = 0;
+    // s_last_frame_us is deliberately NOT reset: a scroll spanning a window
+    // boundary should keep being measured as one continuous motion.
 }
 
 static void mochi_task(void *arg)
