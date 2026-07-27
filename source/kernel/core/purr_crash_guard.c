@@ -5,6 +5,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -299,8 +300,78 @@ bool purr_crash_guard_is_disabled(const char *entity_name)
     return e.disabled != 0;
 }
 
+// Wipe every strike when the running firmware is not the one that earned them.
+//
+// Strikes are evidence about a specific build. A new build has, by definition,
+// not crashed yet — carrying counts across a reflash means the guard punishes
+// code that no longer exists, and it is the FIX that gets blamed.
+//
+// This is not a theoretical tidiness point. During the DP8 game-mode work this
+// counter reached 13/5 and halted the kernel at boot regardless of
+// configuration, three separate times in one session. Each recovery needed
+// `esptool erase_region 0x9000 0x6000` — knowledge that lives nowhere in the
+// device, so an unlucky user simply has a device that no longer boots. It also
+// made a boot loop after any change look like the change had caused it, which
+// cost a full misdiagnosis (see DP8_CHECKLIST F19's note on the systemui style).
+//
+// Keyed on the app's ELF SHA-256, not a version string: version strings are
+// hand-edited and stay identical across the dozens of builds a debugging session
+// produces, which is exactly when this matters most. The SHA changes on every
+// recompile, and equally on a genuine OTA update — where resetting strikes is
+// also the correct behaviour.
+//
+// Deliberately NOT erasing the whole namespace: the pending-recovery record is
+// written immediately before a reboot and must survive into the next boot to be
+// reported. Only strike records are cleared.
+static void reset_strikes_if_new_firmware(void)
+{
+    const esp_app_desc_t *desc = esp_app_get_description();
+    if (!desc) return;
+
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+
+    uint8_t stored[32];
+    size_t  len = sizeof(stored);
+    bool    same = (nvs_get_blob(h, "fwid", stored, &len) == ESP_OK) &&
+                   len == sizeof(stored) &&
+                   memcmp(stored, desc->app_elf_sha256, sizeof(stored)) == 0;
+    if (same) { nvs_close(h); return; }
+
+    // New or first-seen firmware. Drop every per-entity strike record, then
+    // remember this build so the next boot is a no-op.
+    nvs_iterator_t it = NULL;
+    int cleared = 0;
+    if (nvs_entry_find("nvs", NVS_NS, NVS_TYPE_BLOB, &it) == ESP_OK) {
+        while (it) {
+            nvs_entry_info_t info;
+            nvs_entry_info(it, &info);
+            // Strike records only — leave "fwid", the breadcrumb ("cur") and
+            // the pending-recovery record ("rec") alone. entity_key() formats
+            // these as "e%08lx", so the shape is a leading 'e' plus 8 hex
+            // digits; matching on that rather than a bare prefix keeps a future
+            // key beginning with 'e' from being swept up.
+            if (info.key[0] == 'e' && strlen(info.key) == 9) {
+                if (nvs_erase_key(h, info.key) == ESP_OK) cleared++;
+            }
+            if (nvs_entry_next(&it) != ESP_OK) break;
+        }
+        nvs_release_iterator(it);
+    }
+
+    nvs_set_blob(h, "fwid", desc->app_elf_sha256, sizeof(stored));
+    nvs_commit(h);
+    nvs_close(h);
+
+    ESP_LOGW(TAG, "new firmware — cleared %d strike record(s); this build starts clean",
+             cleared);
+}
+
 void purr_crash_guard_check_reset_reason(void)
 {
+    // Before anything reads a strike count this boot.
+    reset_strikes_if_new_firmware();
+
     // Surface the reason for a hang-triggered reboot (see
     // record_strike_and_maybe_panic()'s force_panic branch) — independent
     // of the esp_reset_reason() check below, since that reboot is a clean

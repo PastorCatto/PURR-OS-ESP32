@@ -876,6 +876,34 @@ static app_entry_t *find_app_by_current_task(void) {
     return NULL;
 }
 
+// Called by a native app whose task is about to delete itself, so the manager
+// stops believing it is still running.
+//
+// Without this, an app that ends on its own terms is never cleared from s_ctxs.
+// Tapping its icon again then takes the "already running, just re-show the
+// tracked window" path — and an exclusive app that owns the panel directly has
+// no window (window == 0), so absolutely nothing happens and the launcher just
+// sits there. Reproduced with MagiDOS: the first launch worked, the second was
+// silently inert.
+//
+// Uses the caller's own task handle rather than a name or index, for the same
+// race-freedom reason as app_manager_on_window_created() above:
+// xTaskGetCurrentTaskHandle() can only ever return the caller's own identity.
+//
+// Safe to call from the exiting task itself; it only clears bookkeeping and
+// never touches the task. Call it BEFORE vTaskDelete(NULL).
+void app_manager_notify_exited(void) {
+    TaskHandle_t me = xTaskGetCurrentTaskHandle();
+    for (int i = 0; i < s_app_count; i++) {
+        if (s_ctxs[i].task != me) continue;
+        s_ctxs[i].task = NULL;
+        if (s_ctxs[i].app) s_ctxs[i].app->window = 0;
+        s_ctxs[i].app = NULL;
+        ESP_LOGI(TAG, "native app reported exit — slot %d released", i);
+        return;
+    }
+}
+
 static void app_manager_on_window_created(purr_win_t win) {
     app_entry_t *app = find_app_by_current_task();
     if (!app) return;

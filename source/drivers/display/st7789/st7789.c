@@ -771,6 +771,8 @@ static esp_err_t st7789_push_pixels_inner(int x, int y, int w, int h, const uint
 // the contract members it implements rather than being ordered by the compiler.
 static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *data);
 static void      async_arm(size_t max_px);
+// Defined next to fill_rect, which shares the same hazard.
+static void      async_wait_idle(void);
 
 static uint16_t *s_async_buf     = NULL;   // internal DMA staging, split in two
 static size_t    s_async_buf_px  = 0;      // total capacity, in pixels
@@ -1034,6 +1036,12 @@ static void async_arm(size_t max_px)
 //                 reasons and should not be mistaken for a win.
 static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *data)
 {
+    // Same per-device bus-lock hazard as fill_rect() — see async_wait_idle().
+    // Reached from push_pixels_async()'s own fallback as well, which is correct:
+    // that path is taken precisely because a transfer is already in flight, and
+    // waiting for it is what makes the two safe to interleave.
+    async_wait_idle();
+
     uint32_t  t0     = s_perf_trans_ctr;
     int64_t   start  = esp_timer_get_time();
 
@@ -1064,10 +1072,42 @@ static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *
     return ret;
 }
 
+// Wait for any in-flight asynchronous transfer to finish before touching the bus
+// synchronously. EVERY synchronous entry point must call this first.
+//
+// Not defensive coding — this fixes a real, reproducible crash:
+//
+//   magidos_task -> purr_game_mode_enter -> purr_splash_show
+//                -> st7789_fill_rect -> spi_device_release_bus -> assert
+//
+// ESP-IDF's bus lock is held per DEVICE, not per task. The async path acquires
+// the bus on the render task and returns with it still held, so a second task
+// calling fill_rect() found the lock already owned by this same device: its
+// acquire was a no-op, and its release then dropped the bus out from under a
+// transfer that was still running. The completion task released it again, and
+// spi_device_release_bus() asserted on a lock nobody held.
+//
+// It presented as roughly a 90% failure rate entering game mode, because whether
+// the splash's fill_rect lands inside a transfer window is pure timing.
+//
+// Bounded: a wedged transfer must not hang a caller forever. Proceeding after
+// the timeout is no worse than the crash this replaces.
+static void async_wait_idle(void)
+{
+    for (int i = 0; i < 400 && s_async_active; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (s_async_active) {
+        ESP_LOGW(TAG, "async transfer still active after 400ms — proceeding anyway");
+    }
+}
+
 // See st7789_push_pixels()'s doc comment — same reasoning applies here.
 static esp_err_t st7789_fill_rect(int x, int y, int w, int h, uint16_t color)
 {
     if (!s_ready || w <= 0 || h <= 0) return ESP_ERR_INVALID_STATE;
+
+    async_wait_idle();
 
     int cols = (w <= ST7789_WIDTH) ? w : ST7789_WIDTH;
     uint16_t swapped = (uint16_t)((color >> 8) | (color << 8));

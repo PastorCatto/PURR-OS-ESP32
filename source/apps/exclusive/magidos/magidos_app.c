@@ -41,6 +41,7 @@
 #include "catcall_display.h"
 #include "catcall_input.h"
 #include "game_mode.h"
+#include "app_manager.h"
 #include "magidos_cga.h"
 
 static const char *TAG = "magidos";
@@ -387,6 +388,14 @@ static void magidos_task(void *arg)
 
     // Restores every module game mode unloaded, with its own progress splash.
     purr_game_mode_exit();
+
+    // Tell app_manager we are done. It tracks running native apps by task
+    // handle, and this task is about to delete itself — without this the slot
+    // stays occupied, and the next tap on the MagiDOS icon takes the "already
+    // running, re-show its window" path. This app owns the panel directly and
+    // has no window, so that path does nothing at all: the launcher just sits
+    // there and nothing unloads. Observed exactly that on the second launch.
+    app_manager_notify_exited();
 
     s_task = NULL;
     vTaskDelete(NULL);

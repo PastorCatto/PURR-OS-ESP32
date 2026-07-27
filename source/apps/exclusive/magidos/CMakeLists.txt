@@ -18,5 +18,9 @@ idf_component_register(
         ../../../kernel/core
         ../../../kernel/catcalls
         ../../../modules/game_mode
-    REQUIRES esp_common driver freertos game_mode
+        # app_manager — for app_manager_notify_exited(), so the launcher stops
+        # believing MagiDOS is still running once its task ends. Without it the
+        # second launch silently does nothing.
+        ../../../modules/app_manager
+    REQUIRES esp_common driver freertos game_mode app_manager
 )

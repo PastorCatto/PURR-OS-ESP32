@@ -1613,18 +1613,43 @@ static uint64_t s_last_mem_kill_ms  = 0;       // 0 = never — MEM_KILL_COOLDOW
 
 static void health_watchdog_task(void *arg);
 
+// Static INTERNAL-RAM stack. This was PSRAM-backed, under an exemption that was
+// true when written and silently stopped being true:
+//
+//   "this task only calls is_alive()/heartbeat-staleness checks +
+//    notify()/panic, never touches NVS/flash directly"
+//
+// It does now. health_watchdog_task() gained a memory-pressure path that calls
+// app_manager_kill_worst_offender() -> app_manager_stop() ->
+// purr_crash_guard_mark_stop() -> clear_breadcrumb() -> nvs_set_str(). Writing
+// NVS disables the flash cache, and a PSRAM stack is unreachable while it is
+// disabled, so the task faults on its own stack the moment it does the one thing
+// it exists to do.
+//
+// Confirmed on hardware, decoded from the backtrace:
+//   assert failed: esp_task_stack_is_sane_cache_disabled() (cache_utils.c:152)
+//   health_watchdog_task -> app_manager_kill_worst_offender -> app_manager_stop
+//     -> purr_crash_guard_mark_stop -> clear_breadcrumb -> nvs_set_str
+//
+// It stayed hidden because the kill path only runs under real memory pressure —
+// it first fired after a game-mode round trip left internal DRAM at 26KB.
+//
+// Same protected category as cupcake_task and settings/fileman: any task that
+// can reach flash needs its stack in internal RAM. 3072 bytes is a modest cost
+// for removing a crash that only appears when the system is already struggling.
+#define HEALTH_WD_STACK_SIZE 3072
+static StackType_t  s_health_wd_stack[HEALTH_WD_STACK_SIZE];
+static StaticTask_t s_health_wd_tcb;
+
 static void ensure_health_watchdog_started(void)
 {
-    // PSRAM-backed: this task only calls is_alive()/heartbeat-staleness
-    // checks + notify()/panic, never touches NVS/flash directly, so it's
-    // exempt from the cache-disable-crash constraint documented at
-    // app_manager.c's static-stack exception. Lazily started (by whichever
-    // of purr_kernel_health_register()/purr_kernel_ui_heartbeat() runs
-    // first) rather than unconditionally at kernel boot — some
-    // builds/configs never need either.
+    // Lazily started (by whichever of purr_kernel_health_register()/
+    // purr_kernel_ui_heartbeat() runs first) rather than unconditionally at
+    // kernel boot — some builds/configs never need either.
     if (!s_health_watchdog_task) {
-        xTaskCreateWithCaps(health_watchdog_task, "health_wd", 3072, NULL, 2,
-                             &s_health_watchdog_task, MALLOC_CAP_SPIRAM);
+        s_health_watchdog_task = xTaskCreateStatic(health_watchdog_task, "health_wd",
+                                                   HEALTH_WD_STACK_SIZE, NULL, 2,
+                                                   s_health_wd_stack, &s_health_wd_tcb);
     }
 }
 
