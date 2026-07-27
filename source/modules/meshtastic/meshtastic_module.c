@@ -491,14 +491,25 @@ void mesh_manager_node_forget(uint32_t id)
 // actual flash write, on a plain internal-RAM stack where that's safe. A
 // 1s poll is plenty — this is "known nodes/rooms" bookkeeping, not anything
 // latency-sensitive.
+// Set by mesh_manager_deinit() to ask this task to leave the loop and delete
+// ITSELF, rather than being deleted from outside. See the deinit for the crash
+// that forced this.
+static volatile bool s_persist_stop = false;
+
 static void mesh_persist_task(void *arg)
 {
     (void)arg;
-    for (;;) {
+    while (!s_persist_stop) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        if (s_persist_stop) break;
         mesh_router_flush_nodes_if_dirty();
         mesh_radio_flush_channels_if_dirty();
     }
+    // Self-delete on a known-safe boundary: never inside a flush, so newlib's
+    // per-task reentrancy state (stdio buffers from the SD writes above) is
+    // consistent when the TCB is reclaimed.
+    s_persist_task = NULL;
+    vTaskDelete(NULL);
 }
 
 // ── Module lifecycle ──────────────────────────────────────────────────────────
@@ -600,6 +611,14 @@ int mesh_manager_init(void)
     // mesh_persist_task()'s doc comment. Small and idle almost always, so a
     // failure here (extremely unlikely on a ~2KB ask) just means node/
     // channel-table changes stop persisting, not a hard init failure.
+    // Clear the stop flag BEFORE creating the task. It is a file-static that
+    // survives an unload/reload cycle, so a module restored after
+    // mesh_manager_deinit() set it would otherwise start a task that
+    // immediately exits — meshtastic would come back looking loaded, with node
+    // and channel changes silently never persisting again. Game mode restores
+    // this module on every game exit, so that is the normal path, not an edge
+    // case.
+    s_persist_stop = false;
     ret = xTaskCreatePinnedToCore(mesh_persist_task, "mesh_persist", 3072, NULL, 2, &s_persist_task, 1);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "failed to create mesh persist task — node/channel persistence disabled");
@@ -640,14 +659,35 @@ void mesh_manager_deinit(void)
         s_task = NULL;
     }
     if (s_persist_task) {
-        // Plain internal-RAM task — safe to flush one last time right here
-        // (this function runs on the kernel module loader's own task, not
-        // mesh_task()'s PSRAM stack) before deleting it, so a change made
-        // just before shutdown isn't silently lost.
+        // ASK it to stop, then wait — never vTaskDelete() it from here.
+        //
+        // This task flushes node/channel state to the SD card every second.
+        // Deleting it from outside could land mid-write, and reclaiming the TCB
+        // of a task killed inside stdio leaves newlib's per-task reentrancy
+        // structures inconsistent. Reproduced on the fourth consecutive
+        // game-mode round trip:
+        //
+        //   assert failed: heap_caps_free — "free() target pointer is outside
+        //   heap areas"
+        //   mesh_manager_deinit -> vTaskDelete -> prvDeleteTCB -> _reclaim_reent
+        //
+        // Flushing here first did not help and arguably made it worse: this runs
+        // on a different task, so it could be writing the same files the persist
+        // task was already writing.
+        //
+        // Bounded at ~1.5s, comfortably over the 1s poll. If it somehow does not
+        // exit, leaving it running is strictly better than deleting it mid-write
+        // — the pointer it would corrupt is the whole heap's.
+        s_persist_stop = true;
+        for (int i = 0; i < 150 && s_persist_task; i++) vTaskDelay(pdMS_TO_TICKS(10));
+        if (s_persist_task) {
+            ESP_LOGW(TAG, "persist task did not exit — leaving it running");
+            s_persist_task = NULL;
+        }
+
+        // Safe now: nothing else is touching these files.
         mesh_router_flush_nodes_if_dirty();
         mesh_radio_flush_channels_if_dirty();
-        vTaskDelete(s_persist_task);
-        s_persist_task = NULL;
     }
     // mesh_manager_init() unconditionally creates a new s_tx_queue every
     // call — without freeing the old one here first, a stop/start cycle
