@@ -26,6 +26,8 @@
 #include "lvgl.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/catcalls/catcall_display.h"
 
@@ -169,6 +171,38 @@ static inline void purr_lv_flush_init(purr_lv_flush_t *f, lv_disp_drv_t *drv,
         } else {
             ESP_LOGW(tag, "[perf] second draw buffer alloc failed — staying single/sync");
         }
+    }
+}
+
+// Wait for any in-flight asynchronous flush to finish. MUST be called by a UI
+// backend's deinit() before it deletes its render task.
+//
+// Without this, game mode reproduced `assert failed: spi_device_release_bus`.
+// That assert was fixed once already, by holding purr_kernel_ui_lock() across
+// teardown — which worked while push_pixels() acquired and released the SPI bus
+// inside a single call, so the lock covered the entire window.
+//
+// Asynchronous flushing broke that guarantee: push_pixels_async() acquires the
+// bus and RETURNS, and the bus stays held until the driver's completion task
+// finishes. The UI lock is long since released by then, so teardown could delete
+// the render task with a transfer still in flight and leave the bus
+// acquire/release pair unbalanced.
+//
+// Waiting on LVGL's own `flushing` flag rather than adding a driver query: it is
+// set before flush_cb and cleared by lv_disp_flush_ready(), which for the async
+// path is called from the completion callback — so it is already an exact
+// "transfer outstanding" signal, and it works for any driver.
+//
+// Bounded. A wedged SPI bus must not make an unload hang forever; giving up and
+// tearing down is no worse than the crash this replaces, and it is logged.
+static inline void purr_lv_flush_wait_idle(lv_disp_drv_t *drv, const char *tag)
+{
+    if (!drv || !drv->draw_buf) return;
+    for (int i = 0; i < 200 && drv->draw_buf->flushing; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (drv->draw_buf->flushing) {
+        ESP_LOGW(tag, "flush still in flight after 200ms — tearing down anyway");
     }
 }
 

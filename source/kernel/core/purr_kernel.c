@@ -134,6 +134,26 @@ void purr_kernel_register_ui(const catcall_ui_t *ui) {
     ESP_LOGI(TAG, "ui registered: %s", ui ? ui->name : "null");
 }
 
+// Drop a UI registration on unload. MATCHED, not unconditional: only the module
+// that actually owns the current registration may clear it, so a late or
+// duplicated deinit cannot wipe a backend that has since taken over.
+//
+// This exists because unloading a UI module left s_ui pointing at it forever,
+// and every UI backend begins init with "if (purr_kernel_ui()) skip — something
+// else owns the screen". Game mode therefore restored a backend that
+// immediately short-circuited: the kernel marked the module loaded, but no UI
+// was rebuilt and no render task was started. The crash guard caught it six
+// seconds later as "UI TASK UNRESPONSIVE @ idle", which is a true statement
+// about a task that had never been created.
+//
+// Both backends carry that identical guard, which is why the failure reproduced
+// on Mochi and Cupcake alike — it was never a backend bug.
+void purr_kernel_unregister_ui(const catcall_ui_t *ui) {
+    if (!ui || s_ui != ui) return;
+    s_ui = NULL;
+    ESP_LOGI(TAG, "ui unregistered: %s", ui->name);
+}
+
 const catcall_display_t *purr_kernel_display(void) { return s_display; }
 const catcall_touch_t   *purr_kernel_touch(void)   { return s_touch; }
 const catcall_input_t   *purr_kernel_input(void)    { return s_input_count > 0 ? s_inputs[0] : NULL; }

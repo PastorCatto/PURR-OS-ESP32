@@ -39,6 +39,12 @@ lv_group_t *cupcake_hal_keypad_group(void);
 // cupcake_ui.c's idle-timeout check.
 uint64_t cupcake_hal_last_activity_ms(void);
 
+// Block until any in-flight async flush completes. Must be called before a
+// backend deletes its render task — the SPI bus is held across a
+// push_pixels_async() return, so tearing down mid-transfer unbalances the
+// bus acquire/release and asserts inside spi_device_release_bus().
+void cupcake_hal_wait_flush_idle(void);
+
 // Builds the home screen, dock, and (hidden) app drawer. Safe to call once,
 // after the HAL and app_manager are both up.
 void cupcake_ui_init(void);

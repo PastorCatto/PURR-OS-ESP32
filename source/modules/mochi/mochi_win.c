@@ -981,3 +981,10 @@ static const catcall_ui_t s_mochi_win = {
 void mochi_win_register(void) {
     purr_kernel_register_ui(&s_mochi_win);
 }
+
+// Release the screen so the next backend to load can claim it.
+// Called from mochi's deinit() — see purr_kernel_unregister_ui() for why
+// leaving the registration behind broke game mode's restore.
+void mochi_win_unregister(void) {
+    purr_kernel_unregister_ui(&s_mochi_win);
+}

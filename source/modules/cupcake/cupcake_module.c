@@ -140,11 +140,31 @@ void cupcake_deinit(void)
     // seconds into every game-mode session, which then struck the crash guard
     // and rebooted. Harmless if the task was never subscribed - delete just
     // returns ESP_ERR_NOT_FOUND.
+    //
+    // Drain any asynchronous flush FIRST, for a closely related reason. The SPI
+    // bus can now be held across a push_pixels_async() return, so deleting the
+    // task mid-transfer leaves the bus acquire/release unbalanced and trips
+    // `assert failed: spi_device_release_bus` — the same assert the UI lock
+    // used to prevent, back when a flush began and ended inside one call.
+    cupcake_hal_wait_flush_idle();
+
     if (s_task) {
         esp_task_wdt_delete(s_task);
         vTaskDelete(s_task);
         s_task = NULL;
     }
+
+    // Release the UI catcall, or this module can never be loaded again.
+    //
+    // init() above begins with "if (purr_kernel_ui()) skip — something else owns
+    // the screen". Leaving the registration in place meant game mode restored
+    // Cupcake into exactly that branch: the kernel logged it loaded, but no HAL,
+    // no launcher and no render task. Six seconds later the crash guard reported
+    // "UI TASK UNRESPONSIVE @ idle" — correctly, about a task never created.
+    //
+    // After vTaskDelete, so nothing can observe a live task with no registration.
+    extern void cupcake_win_unregister(void);
+    cupcake_win_unregister();
     // lv_deinit() only exists when LV_MEM_CUSTOM is off (or GC is on) —
     // see lv_obj.c's matching guard. Cupcake never actually gets unloaded
     // at runtime today, so this is defensive rather than load-bearing.

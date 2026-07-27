@@ -60,6 +60,12 @@ lv_group_t *mochi_hal_group(void);
 // systemui module's idle-lock timeout through Mochi's host hook table.
 uint64_t mochi_hal_last_activity_ms(void);
 
+// Block until any in-flight async flush completes. Must be called before a
+// backend deletes its render task — the SPI bus is held across a
+// push_pixels_async() return, so tearing down mid-transfer unbalances the
+// bus acquire/release and asserts inside spi_device_release_bus().
+void mochi_hal_wait_flush_idle(void);
+
 // True when a physical keyboard is among the registered inputs, by the same
 // capability test the rest of the codebase uses (keyboard-class drivers
 // implement set_backlight; a trackball does not). Suppresses the on-screen
@@ -112,6 +118,8 @@ void mochi_springboard_go_home(void);
 
 // Registers Mochi's catcall_ui_t implementation with the kernel.
 void mochi_win_register(void);
+// Release the UI catcall on unload — see purr_kernel_unregister_ui().
+void mochi_win_unregister(void);
 
 // Hides every window the foreground app currently has shown, not just the one
 // app_manager tracked at launch — backs the system UI's Home action, and

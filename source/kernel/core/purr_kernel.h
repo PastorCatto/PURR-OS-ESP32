@@ -102,6 +102,13 @@ void purr_kernel_register_input  (const catcall_input_t   *drv);
 void purr_kernel_register_radio  (const catcall_radio_t   *drv);
 void purr_kernel_register_gps    (const catcall_gps_t     *drv);
 void purr_kernel_register_ui     (const catcall_ui_t      *ui);
+// Clear a UI registration on unload, so the next backend to load can claim the
+// screen. Matched — a module may only clear its OWN registration. Every UI
+// backend starts init with "if (purr_kernel_ui()) skip"; without this, a module
+// unloaded at runtime (game mode) comes back registered-but-uninitialised: no
+// UI rebuilt, no render task, and a UI-unresponsive strike a few seconds later.
+// Call it from the backend's deinit().
+void purr_kernel_unregister_ui   (const catcall_ui_t      *ui);
 
 // Retrieve registered catcall implementations (NULL if none registered).
 const catcall_display_t *purr_kernel_display(void);

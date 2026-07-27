@@ -91,6 +91,14 @@ static purr_lv_flush_t s_flush;
 
 void cupcake_hal_set_shadows_enabled(bool on) { s_flush.shadows_off = !on; }
 
+// Block until any in-flight asynchronous flush has completed. Called from
+// this backend's deinit() before the render task is deleted — see
+// purr_lv_flush_wait_idle() for why that ordering is load-bearing.
+void cupcake_hal_wait_flush_idle(void)
+{
+    purr_lv_flush_wait_idle(&s_disp_drv, TAG);
+}
+
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
     // Owns the lv_disp_flush_ready() contract entirely — either it signals, or
