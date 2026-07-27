@@ -215,9 +215,14 @@ int purr_game_mode_enter(const char *label)
     for (int i = 0; i < s_suspended_n; i++) {
         if (s_unloaded[i]) continue;   // already done in phase 1
         purr_splash_status(s_suspended[i]);
+        size_t before_one = free_internal();
         if (purr_kernel_run_bounded("gm_unload", unload_one,
                                      s_suspended[i], GAME_MODE_UNLOAD_TIMEOUT_MS)) {
             s_unloaded[i] = true;
+            // Paired with the restore-side figure in exit(). A module that gives
+            // back far less than it costs to bring back is the leak.
+            ESP_LOGW(TAG, "[mem] unload  %-20s %6d bytes", s_suspended[i],
+                     (int)free_internal() - (int)before_one);
         } else {
             // Left loaded, and left FALSE in s_unloaded so exit() does not try
             // to restore something that never came out.
@@ -257,12 +262,27 @@ int purr_game_mode_exit(void)
     purr_splash_status("restarting services");
 
     // Reverse of the suspend list = original load order.
+    //
+    // Per-module internal-DRAM accounting (TEMPORARY — remove once the leak
+    // below is closed). A round trip loses roughly 9KB of internal DRAM
+    // permanently: measured 40619 -> 23087 -> 14071 free across three runs, and
+    // the third run exhausts the device and panics. Entry frees only ~4.2KB for
+    // 12 modules while exit costs ~9KB, so unload/reload is not symmetric —
+    // some deinit() does not release what its init() allocated.
+    //
+    // Which one is not guessable from the outside, so measure it: log what each
+    // module costs to bring back. Anything reporting far more than it should is
+    // the culprit. Logged at WARN so it survives the default log level.
     int restored = 0;
     for (int i = s_suspended_n - 1; i >= 0; i--) {
         if (!s_unloaded[i]) continue;   // never came out; nothing to put back
         purr_splash_status(s_suspended[i]);
+        size_t before = free_internal();
         if (purr_kernel_enable_static_module(s_suspended[i]) == 0) restored++;
         else ESP_LOGW(TAG, "failed to restore %s", s_suspended[i]);
+        size_t after = free_internal();
+        ESP_LOGW(TAG, "[mem] restore %-20s %6d bytes", s_suspended[i],
+                 (int)before - (int)after);
         purr_splash_advance();
     }
 

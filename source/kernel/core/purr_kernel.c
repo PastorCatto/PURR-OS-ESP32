@@ -1377,7 +1377,19 @@ static void bounded_trampoline(void *arg)
     // belongs entirely to the waiter (below), and only after it has
     // actually taken the semaphore — never to this task.
     xSemaphoreGive(ctx->done);
-    vTaskDelete(NULL);
+    // vTaskDeleteWithCaps, NOT vTaskDelete — this task was created with
+    // xTaskCreateWithCaps(), and ESP-IDF requires the matching deleter. Plain
+    // vTaskDelete() does not release a caps-allocated stack and TCB, so every
+    // bounded call leaked 8192 bytes of INTERNAL DRAM plus its TCB.
+    //
+    // Measured on hardware with per-module accounting during a game-mode round
+    // trip. One unload consistently reported ALLOCATING ~8540 bytes rather than
+    // freeing anything, and it attached to a different module on each run —
+    // which is what gave it away: it was never the module, it was this task.
+    //
+    // This is the bulk of the ~9KB lost per game-mode cycle, the leak that made
+    // the third consecutive run exhaust the device and panic.
+    vTaskDeleteWithCaps(NULL);
 }
 
 bool purr_kernel_run_bounded(const char *label, purr_bounded_fn_t fn, void *arg, uint32_t timeout_ms)
