@@ -48,8 +48,24 @@ lora        = "sx1262_rl"
 [ui]
 # systemui_style — "android" (nav bar, text-row notification panels) or "ios"
 # (no nav bar, card notifications shared between the shade and the lock
-# screen). Pairs with the Mochi springboard below.
-systemui_style = "ios"
+# screen).
+#
+# Matched to the launcher below: "ios" pairs with Mochi's springboard,
+# "android" with Cupcake's grid (nav bar, Recents carousel, text-row panels).
+#
+# A note on a misdiagnosis, because the wrong version of it was briefly
+# recorded here as fact. Switching this to "android" on 2026-07-26 appeared to
+# boot-loop the device on memory (internal_free=3379, proximity failing 5/5).
+# It was NOT this setting. purr_crash_guard's strike counter lives in NVS and
+# had accumulated past its limit across that day's unrelated crashes, so the
+# kernel halted at boot regardless of configuration — reverting to "ios"
+# reproduced the identical halt. Erasing NVS (0x9000, 0x6000) cleared it and
+# the device came back with 43,695 bytes free.
+#
+# The lesson worth keeping: a boot loop after a config change is not evidence
+# that the config change caused it. Check crash_guard strikes first, and
+# confirm by reverting.
+systemui_style = "android"
 
 [modules]
 # ui — back to Cupcake. The MiniWin WinCE desktop was selected here for the

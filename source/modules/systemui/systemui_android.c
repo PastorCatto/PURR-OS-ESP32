@@ -1001,6 +1001,17 @@ static void restore_brightness(void)
 
 static void ck_lock_refresh_notifs(void);
 
+// Reveal is per-lock, never persistent — re-locking must re-hide, or someone
+// picking the device up later finds the list already open.
+//
+// Declared HERE rather than down with the other lock-screen statics because
+// ck_lock_swipe_cb() below is its first use, and C needs it in scope by then.
+// It sat below that use until 2026-07-26, which built fine only because this
+// file had not been compiled since tdeck_plus moved to the iOS style — the
+// Android style is Kconfig-gated, so the break was invisible until the style
+// was selected again.
+static bool s_lock_notifs_revealed = false;
+
 // Upward swipe reveals hidden notifications instead of unlocking. Must be
 // distinguishable from the dismiss tap, or reaching for the notifications
 // would unlock the device — hence the vector check in both handlers.
@@ -1067,9 +1078,6 @@ static lv_obj_t *s_lock_clock_lbl;
 static lv_obj_t *s_lock_uptime_lbl;
 static lv_obj_t *s_lock_status_lbl;
 static lv_obj_t *s_lock_notif_lbl;
-// Reveal is per-lock, never persistent — re-locking must re-hide, or someone
-// picking the device up later finds the list already open.
-static bool      s_lock_notifs_revealed = false;
 static lv_obj_t *s_lock_battery_lbl;
 
 static void ck_build_lock_screen(uint16_t w, uint16_t h)

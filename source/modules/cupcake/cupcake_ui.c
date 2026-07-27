@@ -224,7 +224,16 @@ static void build_lp_launcher(uint16_t w, uint16_t h)
     lv_obj_add_flag(close_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(close_btn, lp_launcher_close_click_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_coord_t page_h = (lv_coord_t)(h - 32);
+    // Title bar above, nav bar below. The nav bar term was missing entirely, so
+    // the grid ran the full height of the panel and its bottom row of icons sat
+    // underneath the Back/Home/Recents buttons — unreadable, and untappable
+    // since the bar swallows the touch.
+    //
+    // purr_systemui_navbar_height() rather than the PURR_SYSTEMUI_NAVBAR_H
+    // constant: it reports 0 for the iOS style and for a host that suppressed
+    // the bar, so this same expression stays correct on every configuration
+    // instead of reserving a strip of dead space where no bar is ever drawn.
+    lv_coord_t page_h = (lv_coord_t)(h - 32 - purr_systemui_navbar_height());
 
     s_lp_launcher_grid = lv_obj_create(s_lp_launcher);
     lv_obj_remove_style_all(s_lp_launcher_grid);
@@ -457,19 +466,32 @@ void cupcake_ui_init(void)
 {
     uint16_t w = cupcake_hal_width();
     uint16_t h = cupcake_hal_height();
-    // The home screen and drawer get the true full (w,h) — the system UI's
-    // status bar and nav bar are lv_layer_top() overlays that draw over
-    // content rather than needing content to make room for them (same
-    // reasoning as app windows going full screen). build_lp_home_dock()
-    // separately offsets itself clear of the nav bar's footprint, since
-    // that's the one row that actually needs to avoid sitting underneath it.
+
+    // System UI FIRST, then the launcher. Order is load-bearing, not stylistic.
+    //
+    // purr_systemui_navbar_height() reports 0 until purr_systemui_init() has run
+    // — deliberately, so a host that suppresses the bar reclaims the space
+    // rather than leaving a gap. Building the launcher first therefore made
+    // every nav-bar inset in this file evaluate to zero, including
+    // build_lp_home_dock()'s, which only LOOKED like it was offsetting itself.
+    // The bar then drew on top of the bottom row of icons.
+    //
+    // Safe to hoist: purr_systemui_init() calls only host->width() and
+    // host->height(), both of which are HAL queries with no dependency on the
+    // launcher existing. It also builds onto lv_layer_top(), which always
+    // composites above lv_scr_act(), so going first costs it no z-order.
+    //
+    // Called unconditionally — when the module is compiled out it is a stub, so
+    // no #ifdef is needed here.
+    purr_systemui_init(&s_systemui_host);
+
+    // Both screens still get the true full (w,h): the status bar and nav bar are
+    // lv_layer_top() overlays that draw OVER content, and a full-bleed wallpaper
+    // behind them is the intended look. What has to avoid them is anything
+    // INTERACTIVE — the dock and the All-Apps grid — each of which now insets
+    // itself by a height that is finally non-zero at build time.
     build_home_screen(w, h);
     build_lp_launcher(w, h);
-
-    // Status bar, panels, nav bar, Recents, lock — all on lv_layer_top(),
-    // all owned by the systemui module. Called unconditionally: when that
-    // module is compiled out it's a stub, so no #ifdef is needed here.
-    purr_systemui_init(&s_systemui_host);
 
     ESP_LOGI(TAG, "launcher built (%d total apps)", app_manager_count());
 }
