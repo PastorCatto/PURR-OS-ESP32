@@ -28,6 +28,7 @@
 
 #include "mochi.h"
 #include "../systemui/systemui.h"
+#include "../common/purr_lv_flush.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/catcalls/catcall_input.h"
 #include "esp_log.h"
@@ -107,161 +108,19 @@ uint64_t mochi_hal_last_activity_ms(void) { return s_last_activity_ms; }
 lv_group_t *mochi_hal_group(void)         { return s_group; }
 bool mochi_hal_has_physical_keyboard(void) { return s_kbd != NULL; }
 
-// Set once at init if the display driver offers the async push pair. Kept as a
-// separate flag rather than re-testing the members every flush so the hot path
-// stays a single branch.
-static bool s_async_flush = false;
+// Off-screen compose + async flush + shadow suppression now live in a shared
+// header, because Cupcake needed every one of them and had none: all of this was
+// developed here during the DP8 display pass and the two HALs have always been
+// near-copies. See ../common/purr_lv_flush.h for the measurements behind it.
+static purr_lv_flush_t s_flush;
 
-// Fired by the display driver once a band has actually gone out. This is what
-// tells LVGL it may reuse the buffer it handed us, and it is the entire reason
-// double buffering does anything here.
-//
-// Runs on the driver's completion task, NOT an ISR — see catcall_display.h. The
-// only thing it may touch is the flush-ready signal.
-static void flush_done(void *user)
-{
-    lv_disp_flush_ready((lv_disp_drv_t *)user);
-}
-
-// ── Off-screen composition ──────────────────────────────────────────────────
-//
-// A full-screen mirror of what the panel is showing. Bands are rendered into the
-// small draw buffers, copied in here, and only sent to the panel once the whole
-// refresh is assembled — so the display never shows a half-drawn frame.
-//
-// This exists because the two obvious fixes each solve half the problem:
-//
-//   - Small (48-line) draw buffer: renders fast, because 30,720 bytes largely
-//     lives in the 32KB data cache. But LVGL flushes each band as it finishes,
-//     so a full redraw visibly fills in top-to-bottom over ~150ms.
-//   - Full-screen draw buffer: one pass, no banding — but 153,600 bytes cannot
-//     sit in a 32KB cache, so every pixel write becomes a PSRAM miss. Measured
-//     on hardware: mean frame time went 23ms -> 44ms and 26 of 120 frames landed
-//     in the 100-200ms bucket.
-//
-// Composing keeps the cache-friendly render AND the atomic update. The cost is
-// one extra PSRAM-to-PSRAM copy per band, which is memcpy-speed and far cheaper
-// than the cache misses it avoids.
-static lv_color_t *s_compose = NULL;
-
-// Union of the areas composed so far in the current refresh.
-static lv_area_t s_dirty;
-static bool      s_dirty_any = false;
-
-// Wrapper theme that strips shadows when UI effects are off. See where it is
-// installed, below lv_disp_drv_register(), for why this has to live at the theme
-// level rather than in any widget code.
-static lv_style_t s_no_shadow_style;
-static lv_theme_t s_flat_theme;
-static bool       s_theme_shadows_off = false;
-
-static void flat_theme_apply_cb(lv_theme_t *th, lv_obj_t *obj)
-{
-    (void)th;
-    if (!s_theme_shadows_off) return;
-    // Added AFTER the base theme has had its say, so it wins for the default
-    // state. Objects already created keep their styles — the toggle takes full
-    // effect on the next screen built, which is acceptable for a setting that
-    // is changed rarely and deliberately.
-    lv_obj_add_style(obj, &s_no_shadow_style, LV_PART_MAIN | LV_STATE_DEFAULT);
-}
-
-// Runtime toggle, so the effect can be measured and switched without a reflash.
-void mochi_hal_set_shadows_enabled(bool on) { s_theme_shadows_off = !on; }
-
+void mochi_hal_set_shadows_enabled(bool on) { s_flush.shadows_off = !on; }
 
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
-    const catcall_display_t *d = purr_kernel_display();
-    if (!d) { lv_disp_flush_ready(drv); return; }
-
-    int32_t w = area->x2 - area->x1 + 1;
-    int32_t h = area->y2 - area->y1 + 1;
-
-    if (s_compose) {
-        // Mirror this band. Unconditional, including for single-part refreshes
-        // that are pushed directly below: if any drawn region were allowed to
-        // skip this, the mirror would go stale and a later composed push would
-        // send those pixels back to the panel as they used to be.
-        for (int32_t r = 0; r < h; r++) {
-            memcpy(&s_compose[(area->y1 + r) * s_disp_w + area->x1],
-                   &color_p[r * w],
-                   (size_t)w * sizeof(lv_color_t));
-        }
-
-        if (!s_dirty_any) { s_dirty = *area; s_dirty_any = true; }
-        else {
-            if (area->x1 < s_dirty.x1) s_dirty.x1 = area->x1;
-            if (area->y1 < s_dirty.y1) s_dirty.y1 = area->y1;
-            if (area->x2 > s_dirty.x2) s_dirty.x2 = area->x2;
-            if (area->y2 > s_dirty.y2) s_dirty.y2 = area->y2;
-        }
-
-        // More bands still coming: nothing goes to the panel yet. Releasing the
-        // buffer immediately is the point — LVGL renders the next band while we
-        // have already banked this one.
-        if (!lv_disp_flush_is_last(drv)) {
-            lv_disp_flush_ready(drv);
-            return;
-        }
-
-        // Last band. If the whole refresh was a single part, the caller's buffer
-        // is already exactly the rect we want, so push it straight from there and
-        // skip the composed path — this is what keeps small updates (a moving
-        // cursor, a blinking caret) as cheap as they were before composing.
-        bool single_part = (s_dirty.x1 == area->x1) && (s_dirty.y1 == area->y1) &&
-                           (s_dirty.x2 == area->x2) && (s_dirty.y2 == area->y2);
-        s_dirty_any = false;
-
-        if (!single_part) {
-            // Push exactly the dirty rectangle out of the mirror — a window onto
-            // it, not a flattened copy, which is what the stride parameter is
-            // for.
-            //
-            // This used to send FULL-WIDTH rows spanning the rectangle, because
-            // without a stride the source rows had to be contiguous. Measured on
-            // hardware, that sent 65-69% more pixels than had actually changed
-            // (sent=15178px vs drawn=9195px). Those wasted pixels cost twice: SPI
-            // time, and time spent writing GRAM while the panel is scanning it
-            // out — which is what a tear line is made of.
-            int32_t dx = s_dirty.x1;
-            int32_t dy = s_dirty.y1;
-            int32_t dw = s_dirty.x2 - s_dirty.x1 + 1;
-            int32_t dh = s_dirty.y2 - s_dirty.y1 + 1;
-            lv_color_t *src = &s_compose[dy * s_disp_w + dx];
-
-            if (s_async_flush) {
-                d->push_pixels_async(dx, dy, dw, dh, (int)s_disp_w, (uint16_t *)src);
-                return;   // flush_done() calls lv_disp_flush_ready(), not us
-            }
-            // Synchronous fallback goes a row at a time: push_pixels() has no
-            // stride and would otherwise read straight across the mirror and
-            // shear the image.
-            if (d->push_pixels) {
-                for (int32_t r = 0; r < dh; r++) {
-                    d->push_pixels(dx, dy + r, dw, 1,
-                                   (uint16_t *)&s_compose[(dy + r) * s_disp_w + dx]);
-                }
-            }
-            lv_disp_flush_ready(drv);
-            return;
-        }
-    }
-
-    // Async: hand the band over and return NOW. LVGL immediately starts
-    // rendering the next band into the other draw buffer while this one is
-    // still being clocked out over SPI, and flush_done() releases it when the
-    // transfer finishes. On T-Deck Plus that overlap is worth roughly half the
-    // frame, because flushing and rendering were previously strictly serialised.
-    if (s_async_flush) {
-        d->push_pixels_async(area->x1, area->y1, (int)w, (int)h, (int)w, (uint16_t *)color_p);
-        return;   // flush_done() calls lv_disp_flush_ready(), not us
-    }
-
-    if (d->push_pixels) {
-        d->push_pixels(area->x1, area->y1, (int)w, (int)h, (uint16_t *)color_p);
-    }
-    lv_disp_flush_ready(drv);
+    // Owns the lv_disp_flush_ready() contract entirely — either it signals, or
+    // the driver's completion callback does. Do not signal here as well.
+    purr_lv_flush(&s_flush, drv, area, color_p);
 }
 
 static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
@@ -561,49 +420,11 @@ int mochi_hal_init(void)
         return -1;
     }
 
-    // Off-screen composition mirror. calloc, not malloc: it is pushed to the
-    // panel a full row at a time, so any region not yet drawn must be a defined
-    // colour. Uninitialised heap here is what produced the rainbow static band
-    // along the bottom of the screen earlier in this cycle.
-    //
-    // Optional by design — if it does not allocate, flush_cb pushes each band
-    // straight through exactly as before. That is the old visible banding, not a
-    // failure, so it warns rather than aborting init.
-    s_compose = heap_caps_calloc(1, (size_t)s_disp_w * s_disp_h * sizeof(lv_color_t),
-                                 MALLOC_CAP_SPIRAM);
-    if (s_compose) {
-        ESP_LOGW(TAG, "[perf] off-screen compose ON — %ux%u mirror (%u bytes), "
-                      "panel updates once per refresh",
-                 (unsigned)s_disp_w, (unsigned)s_disp_h,
-                 (unsigned)((size_t)s_disp_w * s_disp_h * sizeof(lv_color_t)));
-    } else {
-        ESP_LOGW(TAG, "[perf] compose buffer alloc failed — bands go straight to the "
-                      "panel, expect visible banding on full redraws");
-    }
-    // Second draw buffer, only if the driver offers the async pair. Both must
-    // succeed together: a second buffer without async flushing is wasted memory,
-    // and async flushing without a second buffer gains nothing because LVGL
-    // would have nowhere to render while the first is in flight.
-    //
-    // At full-screen size this is another 153,600 bytes of PSRAM, and it earns
-    // it: with a full-sized buffer LVGL skips the "wait until the other buffer
-    // is freed" path in draw_buf_flush() entirely (it checks `full_sized`), so
-    // rendering the next frame genuinely overlaps the flush of the current one.
+    // Compose mirror, async flush + second draw buffer, and the shadow-
+    // suppression theme all come from the shared unit now — see
+    // ../common/purr_lv_flush.h. Each piece is optional and degrades to the
+    // previous behaviour if its allocation fails.
     s_buf2 = NULL;
-    const catcall_display_t *dsp = purr_kernel_display();
-    if (dsp && dsp->push_pixels_async && dsp->flush_done_cb) {
-        s_buf2 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-        if (s_buf2) {
-            dsp->flush_done_cb(flush_done, &s_disp_drv);
-            s_async_flush = true;
-            ESP_LOGW(TAG, "[perf] async flush + double buffering ON (2 x %u bytes)",
-                     (unsigned)buf_bytes);
-        } else {
-            ESP_LOGW(TAG, "[perf] second draw buffer alloc failed — staying single/sync");
-        }
-    }
-
-    lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, s_disp_w * lines);
 
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res      = (lv_coord_t)s_disp_w;
@@ -611,39 +432,16 @@ int mochi_hal_init(void)
     s_disp_drv.flush_cb     = flush_cb;
     s_disp_drv.draw_buf     = &s_draw_buf;
     s_disp_drv.full_refresh = 0;
+
+    // Before drv_register, because it may allocate s_buf2 and the draw buffer
+    // has to be initialised with both pointers already decided.
+    purr_lv_flush_init(&s_flush, &s_disp_drv, s_disp_w, s_disp_h,
+                       &s_buf2, buf_bytes, TAG);
+
+    lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, s_disp_w * lines);
+
     lv_disp_t *lv_disp = lv_disp_drv_register(&s_disp_drv);
-
-    // ── Make the UI-effects toggle actually reach shadows ────────────────────
-    //
-    // Until now the toggle only changed systemui's translucency, which is why
-    // turning effects off produced no measurable frame-time change at all — the
-    // user reported exactly that, and it was correct.
-    //
-    // Shadows are the single most expensive thing the default theme draws: the
-    // blur is O((shadow_width + radius)^2) and, before the corner cache was
-    // enabled, was recomputed for every shadow on every frame. Nothing in Mochi
-    // ever sets shadow_width — every shadow on screen comes from the LVGL
-    // default theme's btn style — so the only way to reach them is at the theme
-    // level, which is what this does.
-    //
-    // A wrapper theme rather than an edit to the default one: lv_theme_apply()
-    // walks parent-first and applies ours last, so this overrides whatever the
-    // base theme set without having to vendor or fork it.
-    if (lv_disp) {
-        lv_style_init(&s_no_shadow_style);
-        lv_style_set_shadow_width(&s_no_shadow_style, 0);
-        lv_style_set_shadow_opa(&s_no_shadow_style, LV_OPA_TRANSP);
-
-        lv_theme_t *base = lv_disp_get_theme(lv_disp);
-        s_flat_theme = *base;              // inherit fonts/colours unchanged
-        s_flat_theme.parent   = base;
-        s_flat_theme.apply_cb = flat_theme_apply_cb;
-        s_theme_shadows_off   = !purr_kernel_ui_effects_enabled();
-        lv_disp_set_theme(lv_disp, &s_flat_theme);
-
-        ESP_LOGW(TAG, "[perf] shadow suppression %s (follows the UI effects toggle)",
-                 s_theme_shadows_off ? "ON — effects are off" : "off — effects are on");
-    }
+    purr_lv_flush_install_theme(&s_flush, lv_disp, TAG);
 
     resolve_inputs();
 

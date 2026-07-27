@@ -7,6 +7,7 @@
 // tile navigation is by touch only).
 
 #include "cupcake.h"
+#include "../common/purr_lv_flush.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -16,8 +17,26 @@
 
 static const char *TAG = "cupcake_hal";
 
+// Sized to FIT THE DATA CACHE, which is the constraint that actually binds.
+//
+// CONFIG_ESP32S3_DATA_CACHE_SIZE is 0x8000 = 32,768 bytes. At the previous 80
+// lines this buffer was 320 x 80 x 2 = 51,200 bytes — 1.6x the entire data
+// cache, and it lives in PSRAM, so every render pass streamed the whole thing
+// through a cache too small to hold any of it and nothing survived to be reused.
+//
+// 48 lines is 30,720 bytes, which fits with headroom. Measured on T-Deck Plus
+// against Mochi, this is a deliberate middle between two measured points, not a
+// guess:
+//   16 lines (15 passes) — much WORSE. Per-pass cost dominates: each pass
+//                          re-walks the object tree and re-clips every widget.
+//   80 lines  (3 passes) — fewest passes, but exceeds the data cache.
+//
+// Fewer flush round-trips was the original reason for 80, and that reasoning was
+// sound before the flush became asynchronous. It no longer applies: the flush is
+// overlapped with rendering now, so round-trips are close to free, while the
+// cache miss on every pixel written is not.
 #ifndef CUPCAKE_BUF_LINES
-#define CUPCAKE_BUF_LINES 80
+#define CUPCAKE_BUF_LINES 48
 #endif
 #define CUPCAKE_BUF_WIDTH 480
 
@@ -64,15 +83,19 @@ static void mark_activity(void)
 
 uint64_t cupcake_hal_last_activity_ms(void) { return s_last_activity_ms; }
 
+// Off-screen compose + async flush + shadow suppression, shared with Mochi.
+// See ../common/purr_lv_flush.h — all of it was measured on T-Deck Plus during
+// the DP8 display pass, and lived only in mochi_hal.c until this backend was
+// brought level with it.
+static purr_lv_flush_t s_flush;
+
+void cupcake_hal_set_shadows_enabled(bool on) { s_flush.shadows_off = !on; }
+
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
-    const catcall_display_t *d = purr_kernel_display();
-    if (d && d->push_pixels) {
-        int32_t w = area->x2 - area->x1 + 1;
-        int32_t h = area->y2 - area->y1 + 1;
-        d->push_pixels(area->x1, area->y1, (int)w, (int)h, (uint16_t *)color_p);
-    }
-    lv_disp_flush_ready(drv);
+    // Owns the lv_disp_flush_ready() contract entirely — either it signals, or
+    // the driver's completion callback does. Do not signal here as well.
+    purr_lv_flush(&s_flush, drv, area, color_p);
 }
 
 static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
@@ -192,13 +215,19 @@ int cupcake_hal_init(void)
     // expressions only ever agreed by accident on <=480px devices.
     size_t buf_bytes = sizeof(lv_color_t) * s_disp_w * CUPCAKE_BUF_LINES;
     s_buf1 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    s_buf2 = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    if (!s_buf1 || !s_buf2) {
-        ESP_LOGE(TAG, "PSRAM DMA alloc failed for display buffers (2x %u bytes)", (unsigned)buf_bytes);
+    if (!s_buf1) {
+        ESP_LOGE(TAG, "PSRAM DMA alloc failed for display buffer (%u bytes)", (unsigned)buf_bytes);
         return -1;
     }
-
-    lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, s_disp_w * CUPCAKE_BUF_LINES);
+    // s_buf2 is now allocated by purr_lv_flush_init(), and ONLY if the driver
+    // can flush asynchronously. It used to be allocated unconditionally here,
+    // which was pure waste: LVGL's double buffering does nothing while flush_cb
+    // is synchronous, because the second buffer can only be rendered into while
+    // the first is still being sent. That is DP8_CHECKLIST F3.
+    s_buf2 = NULL;
+    ESP_LOGW(TAG, "[perf] draw buffer: PSRAM, %d lines (%u bytes), %d render passes per screen",
+             CUPCAKE_BUF_LINES, (unsigned)buf_bytes,
+             (s_disp_h + CUPCAKE_BUF_LINES - 1) / CUPCAKE_BUF_LINES);
 
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res      = (lv_coord_t)s_disp_w;
@@ -206,7 +235,16 @@ int cupcake_hal_init(void)
     s_disp_drv.flush_cb     = flush_cb;
     s_disp_drv.draw_buf     = &s_draw_buf;
     s_disp_drv.full_refresh = 0;
-    lv_disp_drv_register(&s_disp_drv);
+
+    // Before drv_register, because it may allocate s_buf2 and the draw buffer
+    // has to be initialised with both pointers already decided.
+    purr_lv_flush_init(&s_flush, &s_disp_drv, s_disp_w, s_disp_h,
+                       &s_buf2, buf_bytes, TAG);
+
+    lv_disp_draw_buf_init(&s_draw_buf, s_buf1, s_buf2, s_disp_w * CUPCAKE_BUF_LINES);
+
+    lv_disp_t *lv_disp = lv_disp_drv_register(&s_disp_drv);
+    purr_lv_flush_install_theme(&s_flush, lv_disp, TAG);
 
     const catcall_touch_t *touch = purr_kernel_touch();
     if (touch) {
