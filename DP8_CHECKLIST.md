@@ -242,6 +242,26 @@ so every shadow was blurred from scratch on every draw, at O(corner_size²) wher
 
 **≈1.6× faster scrolling for 1,024 bytes of internal RAM.**
 
+**Follow-up — the bisect, and the cache is not the only way to get this.** With
+shadows suppressed at the theme level instead of cached:
+
+| config | BUSY-fps | mean frame |
+|---|---|---|
+| shadows drawn, no cache | 6.2 | 128 ms |
+| shadows drawn, cached | 7.7–10.1 | 60–98 ms |
+| shadows suppressed entirely | 8.0–10.0 | 42–87 ms |
+
+**Shadows are ~40–50% of scroll frame time.** Caching them and not drawing them
+are worth about the same, so this is now a look-vs-RAM choice rather than a
+performance one. The suppression is wired to the existing UI-effects toggle,
+which until this point only changed systemui translucency — the reason
+"effects off" had never produced a measurable difference.
+
+> **Read the variance before comparing runs.** Identical builds measured 9.7 and
+> 7.7 BUSY-fps in different sessions, because the number depends on what is being
+> scrolled. Single-run A/B across two flashes is not trustworthy here; compare
+> ranges, or toggle within one session.
+
 Two things this exposed that were not obvious:
 
 - **Nothing in Mochi sets `shadow_width`.** The only two call sites set it to *0*
