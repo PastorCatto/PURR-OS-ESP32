@@ -250,3 +250,24 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=4
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 
+
+# Shadow corner mask cache. Defaults to 0 in this component's Kconfig, which
+# means EVERY shadow is blurred from scratch on every single draw — and the
+# blur is O(corner_size^2) where corner_size = shadow_width + radius.
+#
+# Nothing in Mochi sets shadow_width (the only two call sites set it to 0, on
+# the flat buttons), so every shadow on screen comes from the LVGL default
+# theme's btn style at LV_DPX(3). That also means the UI effects toggle does
+# not reach them, which is consistent with the user reporting no change with
+# effects off.
+#
+# 32 costs 32*32 = 1024 bytes of internal RAM for a static uint8_t[] and
+# covers any shadow_width + radius up to 31 — comfortably above the radii in
+# use (grouped-list cells are 10, flat buttons 6).
+#
+# Worth knowing before trusting this: the cache holds exactly ONE geometry
+# (sh_cache_size / sh_cache_r are scalars, not a table), so it only pays off
+# when consecutive shadow draws share a radius. A scrolling list of identical
+# rows is the ideal case; a screen of mixed shapes will thrash it and gain
+# nothing. Measure, do not assume.
+CONFIG_LV_SHADOW_CACHE_SIZE=32
