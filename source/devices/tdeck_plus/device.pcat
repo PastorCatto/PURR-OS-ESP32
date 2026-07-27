@@ -123,9 +123,9 @@ msn         = true
 services    = true
 taskmgr     = true
 nearby      = true
-# MagiDOS enters game mode on launch: it unloads the UI backend, systemui, the
-# mesh stack and the radios to take the panel and keyboard for itself, then
-# restores all of them on exit. See modules/game_mode/game_mode.h.
+# MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
+# systemui, the mesh stack and the radios before it starts, and restores them
+# when it exits. The app calls nothing itself. See docs/15_SpeedDemon.md.
 magidos     = true
 
 [flash]

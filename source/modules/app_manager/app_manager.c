@@ -1,6 +1,7 @@
 // app_manager.c — PURR OS app manager
 
 #include "app_manager.h"
+#include "speed_demon.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/core/purr_module.h"
 #include "../../kernel/core/purr_crash_guard.h"
@@ -470,6 +471,15 @@ static void native_task(void *arg) {
     ESP_LOGI(TAG, "native app task start: %s (core=%d prio=%u)",
              ctx->app->name, xPortGetCoreID(), (unsigned)uxTaskPriorityGet(NULL));
 
+    // Speed demon, if this app declared it (purr_module_header_t::speed_demon).
+    //
+    // Entered HERE and not from the app: init() must never do it, because
+    // init() can run on the UI render task and entering unloads the UI backend
+    // — deleting the very task making the call. native_task is a dedicated
+    // task, so it is the correct place, and doing it centrally means an app
+    // cannot forget the matching exit.
+    if (ctx->app->speed_demon) purr_speed_demon_enter(ctx->app->name);
+
     int rc = ctx->mod->init();
     ESP_LOGI(TAG, "native app task init() returned: %s rc=%d window=%u",
              ctx->app->name, rc, (unsigned)ctx->app->window);
@@ -628,6 +638,8 @@ int app_manager_scan_ex(bool include_sd)
         snprintf(app->path, sizeof(app->path), "prelinked:/%s", hdr->name);
         app->tier  = APP_TIER_CLAW;
         app->state = APP_STATE_IDLE;
+        // Declared by the app itself — see purr_module_header_t::speed_demon.
+        app->speed_demon = (hdr->speed_demon != 0);
 
         ESP_LOGI(TAG, "found [claw/pre-linked] %s", app->name);
         s_app_count++;
@@ -897,6 +909,7 @@ void app_manager_notify_exited(const char *name) {
     if (!name) return;
     for (int i = 0; i < s_app_count; i++) {
         if (strcmp(s_apps[i].name, name) != 0) continue;
+        bool was_speed_demon = s_apps[i].speed_demon;
         s_apps[i].state  = APP_STATE_STOPPED;
         s_apps[i].window = 0;
         // Release the launch context too, so a stale handle can never be
@@ -905,6 +918,9 @@ void app_manager_notify_exited(const char *name) {
             if (s_ctxs[c].app == &s_apps[i]) { s_ctxs[c].task = NULL; s_ctxs[c].app = NULL; }
         }
         ESP_LOGI(TAG, "'%s' reported exit — relaunchable again", name);
+        // Put the OS back. Paired with the enter in native_task, so an app that
+        // asked for the machine can never leave it torn down.
+        if (was_speed_demon && purr_speed_demon_active()) purr_speed_demon_exit();
         return;
     }
     ESP_LOGW(TAG, "notify_exited: no app named '%s'", name);

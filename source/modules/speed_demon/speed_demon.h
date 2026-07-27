@@ -1,8 +1,8 @@
 #pragma once
-// game_mode.h — tear the OS down to bare hardware for one app, then put it back.
+// speed_demon.h — tear the OS down to bare hardware for one app, then put it back.
 //
 // A game wants what an OS normally refuses to give up: the whole display, all of
-// core 1, the shared SPI bus, and whatever internal DRAM it can get. Game mode
+// core 1, the shared SPI bus, and whatever internal DRAM it can get. Speed demon
 // unloads everything that is not load-bearing — the UI backend, System UI, the
 // mesh stack, Bluetooth, WiFi, the proximity family — leaving the drivers, the
 // module registry, and the caller.
@@ -56,21 +56,21 @@ extern "C" {
 
 // Tear down. `label` names the game on the splash ("DOOM"); may be NULL.
 //
-// Returns the number of modules unloaded, or -1 if already in game mode.
+// Returns the number of modules unloaded, or -1 if already in speed demon.
 // Safe to call from an app's own init: the caller is never unloaded, nor are
 // drivers, driver_manager or app_manager.
 //
 // MUST be called from a task that does not belong to a module being unloaded.
 // An app's task qualifies; a UI widget callback does NOT — that runs on the
 // render task this is about to delete.
-int purr_game_mode_enter(const char *label);
+int purr_speed_demon_enter(const char *label);
 
 // Restore exactly what enter() unloaded, in the order it was originally loaded,
 // showing a progress splash while it happens. Returns modules restored, or -1
-// if not in game mode.
-int purr_game_mode_exit(void);
+// if not in speed demon.
+int purr_speed_demon_exit(void);
 
-bool purr_game_mode_active(void);
+bool purr_speed_demon_active(void);
 
 // Liveness beacon — call from the game's main loop, at least every 5 seconds.
 // Two consecutive misses (10s of silence) is treated as a hang and routed into
@@ -78,13 +78,13 @@ bool purr_game_mode_active(void);
 // UI hang gets.
 //
 // This is not optional supervision. The kernel's own UI-hang watchdog is gated
-// on a registered UI backend, and game mode unloads it — so between enter() and
+// on a registered UI backend, and speed demon unloads it — so between enter() and
 // exit() this beacon is the ONLY thing watching the device, at the one time
 // nothing else is left running to notice a freeze.
 //
 // Once per frame is fine; it costs a timestamp write. Harmless outside game
 // mode, so a game need not guard the call.
-void purr_game_mode_heartbeat(void);
+void purr_speed_demon_heartbeat(void);
 
 #ifdef __cplusplus
 }

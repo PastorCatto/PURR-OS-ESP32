@@ -2,7 +2,7 @@
 //
 // Replaces the pre-0.11 purr_wm_app/magidos_app.cpp, which opened a draggable
 // MiniWin window and rendered CGA into it. That window manager no longer exists,
-// and under game mode there is nothing to be a window inside of — MagiDOS owns
+// and under speed demon there is nothing to be a window inside of — MagiDOS owns
 // the whole panel. The replacement is smaller than what it replaces.
 //
 // ── Why the shell is host-side ──────────────────────────────────────────────
@@ -40,7 +40,7 @@
 #include "purr_module.h"
 #include "catcall_display.h"
 #include "catcall_input.h"
-#include "game_mode.h"
+#include "speed_demon.h"
 #include "app_manager.h"
 #include "magidos_cga.h"
 
@@ -310,10 +310,11 @@ static void magidos_task(void *arg)
 {
     (void)arg;
 
-    // Game mode is entered from THIS task, never from init(). init() may be
-    // called on the UI render task, and entering game mode unloads the UI
-    // backend — which would delete the very task making the call.
-    purr_game_mode_enter("MagiDOS");
+    // Speed demon is already active by the time this task runs — app_manager
+    // enters it before init() because this app declares `.speed_demon = 1`.
+    // It is deliberately NOT entered from here or from init(): init() can run
+    // on the UI render task, and entering unloads the UI backend, which would
+    // delete the very task making the call.
 
     const catcall_display_t *d = purr_kernel_display();
     if (d && d->get_info) {
@@ -338,8 +339,12 @@ static void magidos_task(void *arg)
     s_fb = heap_caps_calloc(1, (size_t)s_scr_w * s_scr_h * 2, MALLOC_CAP_SPIRAM);
     if (!s_fb) {
         ESP_LOGE(TAG, "framebuffer alloc failed (%ux%u)", s_scr_w, s_scr_h);
-        purr_game_mode_exit();
+        // Report the exit even on this early-abort path: app_manager restores
+        // everything speed demon unloaded when it sees this, so skipping it
+        // would strand the OS with no launcher and no system UI.
         s_running = false;
+        s_task    = NULL;
+        app_manager_notify_exited("magidos");
         vTaskDelete(NULL);
         return;
     }
@@ -357,7 +362,7 @@ static void magidos_task(void *arg)
 
     while (s_running) {
         // The only thing watching the device while the UI is unloaded.
-        purr_game_mode_heartbeat();
+        purr_speed_demon_heartbeat();
 
         bool dirty = false;
         input_event_t ev;
@@ -386,9 +391,6 @@ static void magidos_task(void *arg)
     heap_caps_free(s_fb);
     s_fb = NULL;
 
-    // Restores every module game mode unloaded, with its own progress splash.
-    purr_game_mode_exit();
-
     // Tell app_manager we are done, or this app can only ever be launched once
     // per boot. app_manager_launch_path() returns early on
     // `state == APP_STATE_RUNNING`, and nothing clears that for an app that
@@ -412,7 +414,8 @@ static int magidos_init(void)
     if (s_task) return 0;
     s_running = true;
     // Own task, and init() returns immediately. See magidos_task()'s first
-    // comment for why game mode must not be entered from here.
+    // comment: app_manager enters speed demon before init() on this app's
+    // behalf, because init() can run on the UI task and entering unloads it.
     if (xTaskCreatePinnedToCore(magidos_task, "magidos", 8192, NULL, 4, &s_task, 1) != pdPASS) {
         ESP_LOGE(TAG, "task create failed");
         s_running = false;
@@ -424,13 +427,18 @@ static int magidos_init(void)
 static void magidos_deinit(void)
 {
     s_running = false;
-    // The task tears down game mode and deletes itself; wait for it rather than
+    // The task reports its exit (which restores the OS) and deletes itself;
+    // wait for it rather than
     // vTaskDelete()ing from outside, which would strand the OS with every
     // module still unloaded.
     for (int i = 0; i < 100 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(20));
 }
 
 PURR_MODULE_REGISTER(magidos) = {
+    // Needs the whole machine — app_manager unloads the launcher, system UI,
+    // mesh stack and radios before init() and restores them on exit. See
+    // purr_module_header_t::speed_demon.
+    .speed_demon       = 1,
     .magic             = PURR_MODULE_MAGIC,
     .abi_version       = PURR_MODULE_ABI_VERSION,
     .module_type       = PURR_MOD_APP,

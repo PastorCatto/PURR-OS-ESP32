@@ -845,7 +845,7 @@ void cupcake_win_register(void) {
 
 // Release the screen so the next backend to load can claim it.
 // Called from cupcake's deinit() — see purr_kernel_unregister_ui() for why
-// leaving the registration behind broke game mode's restore.
+// leaving the registration behind broke speed demon's restore.
 void cupcake_win_unregister(void) {
     purr_kernel_unregister_ui(&s_cupcake_win);
 }

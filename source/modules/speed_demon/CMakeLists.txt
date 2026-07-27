@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS
-        game_mode.c
+        speed_demon.c
     INCLUDE_DIRS
         .
         ../../kernel/core

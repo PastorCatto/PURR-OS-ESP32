@@ -297,7 +297,7 @@ void mochi_deinit(void)
     // Release the UI catcall, or this module can never be loaded again.
     //
     // init() above begins with "if (purr_kernel_ui()) skip — something else owns
-    // the screen". Leaving the registration in place meant game mode restored
+    // the screen". Leaving the registration in place meant speed demon restored
     // Mochi into exactly that branch: the kernel logged it loaded, but no HAL,
     // no launcher and no render task. Six seconds later the crash guard reported
     // "UI TASK UNRESPONSIVE @ idle" — correctly, about a task never created.

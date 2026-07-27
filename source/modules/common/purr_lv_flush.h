@@ -177,7 +177,7 @@ static inline void purr_lv_flush_init(purr_lv_flush_t *f, lv_disp_drv_t *drv,
 // Wait for any in-flight asynchronous flush to finish. MUST be called by a UI
 // backend's deinit() before it deletes its render task.
 //
-// Without this, game mode reproduced `assert failed: spi_device_release_bus`.
+// Without this, speed demon reproduced `assert failed: spi_device_release_bus`.
 // That assert was fixed once already, by holding purr_kernel_ui_lock() across
 // teardown — which worked while push_pixels() acquired and released the SPI bus
 // inside a single call, so the lock covered the entire window.

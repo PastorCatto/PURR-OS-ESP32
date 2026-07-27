@@ -1077,7 +1077,7 @@ static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *
 //
 // Not defensive coding — this fixes a real, reproducible crash:
 //
-//   magidos_task -> purr_game_mode_enter -> purr_splash_show
+//   magidos_task -> purr_speed_demon_enter -> purr_splash_show
 //                -> st7789_fill_rect -> spi_device_release_bus -> assert
 //
 // ESP-IDF's bus lock is held per DEVICE, not per task. The async path acquires
@@ -1087,7 +1087,7 @@ static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *
 // transfer that was still running. The completion task released it again, and
 // spi_device_release_bus() asserted on a lock nobody held.
 //
-// It presented as roughly a 90% failure rate entering game mode, because whether
+// It presented as roughly a 90% failure rate entering speed demon, because whether
 // the splash's fill_rect lands inside a transfer window is pure timing.
 //
 // Bounded: a wedged transfer must not hang a caller forever. Proceeding after

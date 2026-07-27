@@ -15,7 +15,7 @@ extern "C" {
 // pixel to a wider format that then had to be converted back.
 //
 // out_rgb565 must be out_w * out_h * 2 bytes.
-// out_w / out_h: destination pixel dimensions (the full screen under game mode).
+// out_w / out_h: destination pixel dimensions (the full screen under speed demon).
 void magidos_cga_render(const uint8_t *vram, int cols, int rows,
                          uint16_t *out_rgb565, int out_w, int out_h);
 

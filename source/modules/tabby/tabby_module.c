@@ -114,7 +114,7 @@ void tabby_deinit(void)
     // esp_task_wdt_delete() before vTaskDelete(): the task subscribed itself to
     // the TWDT, and deleting it without unsubscribing leaves the watchdog
     // waiting on a handle that no longer exists — it then panics after
-    // CONFIG_ESP_TASK_WDT_TIMEOUT_S. Only reachable now that game mode unloads
+    // CONFIG_ESP_TASK_WDT_TIMEOUT_S. Only reachable now that speed demon unloads
     // UI backends at runtime. Harmless if never subscribed.
     if (s_task) {
         esp_task_wdt_delete(s_task);

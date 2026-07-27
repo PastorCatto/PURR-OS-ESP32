@@ -6,5 +6,8 @@ idf_component_register(
         .
         ../../kernel/core
         ../../kernel/catcalls
-    REQUIRES esp_common driver freertos nvs_flash
+        # speed_demon — app_manager enters and exits it for any app declaring
+        # .speed_demon = 1, so the app never calls it itself.
+        ../speed_demon
+    REQUIRES esp_common driver freertos nvs_flash speed_demon
 )

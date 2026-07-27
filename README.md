@@ -1,4 +1,4 @@
-# PURR OS — v1.0.0-dp8
+# PURR OS — v1.0.0-DeveloperPreview8
 
 > **Docs current as of Developer Preview 8.** Documentation was deliberately left to drift
 > through the Developer Preview cycle while the focus was stability; it has now been brought
@@ -250,6 +250,7 @@ See [docs/02_Catcalls.md](docs/02_Catcalls.md).
 | [docs/12_AppAPI.md](docs/12_AppAPI.md) | purr_win.h complete API reference + backend writing guide |
 | [docs/13_Kernels.md](docs/13_Kernels.md) | Specialized kernel system — when to use, how to write, all existing kernels |
 | [docs/14_Driverstrap.md](docs/14_Driverstrap.md) | driverstrap — driver template generator CLI + wizard reference |
+| [docs/15_SpeedDemon.md](docs/15_SpeedDemon.md) | Speed Demon — give one app the whole machine with `.speed_demon = 1` |
 
 ---
 

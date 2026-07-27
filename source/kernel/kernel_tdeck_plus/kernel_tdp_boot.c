@@ -461,7 +461,7 @@ void app_main(void)
     // is the only feedback available at that point.
     char recover_name[32] = {0};
     bool recovering = purr_crash_guard_pending_recovery(recover_name, sizeof(recover_name), NULL, 0);
-    bool from_game  = recovering && strcmp(recover_name, "game_mode") == 0;
+    bool from_game  = recovering && strcmp(recover_name, "speed_demon") == 0;
     if (recovering) {
         ESP_LOGW(TAG, "recovering from a hang-triggered reboot (%s) — bounding SD/display bring-up this boot",
                  recover_name[0] ? recover_name : "unknown");

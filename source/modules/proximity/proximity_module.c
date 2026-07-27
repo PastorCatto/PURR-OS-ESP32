@@ -456,7 +456,7 @@ void proximity_deinit(void) {
     // The original order deleted the task and only then unregistered — which
     // left a window where the task could be killed inside an ESP-NOW callback
     // holding an internal lock, after which esp_now_deinit() below waits on
-    // that lock forever. Confirmed on hardware: game mode hung here, with the
+    // that lock forever. Confirmed on hardware: speed demon hung here, with the
     // UI backend already unloaded, so the device was a black screen with no way
     // back.
     //

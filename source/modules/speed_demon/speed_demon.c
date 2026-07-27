@@ -1,4 +1,4 @@
-// game_mode.c — see game_mode.h for what this buys and why.
+// speed_demon.c — see speed_demon.h for what this buys and why.
 //
 // Deliberately NOT a registered module (no PURR_MODULE_REGISTER), same as
 // boot_splash. Two reasons: it must not appear in the registry it is walking and
@@ -7,7 +7,7 @@
 
 #include <string.h>
 #include <stdio.h>
-#include "game_mode.h"
+#include "speed_demon.h"
 #include "purr_kernel.h"
 #include "purr_module.h"
 #include "purr_crash_guard.h"
@@ -15,7 +15,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 
-static const char *TAG = "game_mode";
+static const char *TAG = "speed_demon";
 
 // Enough for every module this OS ships plus room to grow. Overflow degrades to
 // "unload fewer things" rather than misbehaving — see the guard in enter().
@@ -29,7 +29,7 @@ static const char *TAG = "game_mode";
 //
 // That produced a spectacular failure on hardware: the first unload was
 // correct, and every one after it targeted a different module than intended.
-// Apps live later in the registry, so game mode tore down settings, terminal,
+// Apps live later in the registry, so speed demon tore down settings, terminal,
 // fileman, msn, milkbar — and magidos itself, the caller — while leaving the UI
 // backend and mesh stack running. "unloads nearby twice" in the log was the
 // same shift showing up as a duplicate.
@@ -44,25 +44,25 @@ static bool s_active      = false;
 
 // Crash-guard entity name. Distinct from any module name so it cannot collide
 // with a module's own strike bookkeeping.
-#define GAME_MODE_GUARD_ENTITY "game_mode"
+#define SPEED_DEMON_GUARD_ENTITY "speed_demon"
 
-// Liveness beacon. The game calls purr_game_mode_heartbeat() at least this
+// Liveness beacon. The game calls purr_speed_demon_heartbeat() at least this
 // often; two consecutive misses (10s of silence) is treated as a hang.
-#define GAME_MODE_BEAT_MS      5000
-#define GAME_MODE_MISSED_BEATS 2
+#define SPEED_DEMON_BEAT_MS      5000
+#define SPEED_DEMON_MISSED_BEATS 2
 
 // Per-module ceiling on deinit(). Generous - some modules legitimately wait on
 // a task to finish - but finite, because a hung deinit with the UI already
 // unloaded is an unrecoverable black screen.
-#define GAME_MODE_UNLOAD_TIMEOUT_MS 3000
+#define SPEED_DEMON_UNLOAD_TIMEOUT_MS 3000
 
-bool purr_game_mode_active(void) { return s_active; }
+bool purr_speed_demon_active(void) { return s_active; }
 
 // Modules that stay no matter what.
 //
 // Everything else is decided by TYPE rather than by a name list, deliberately:
 // a name list silently stops covering new modules as they are added, and the
-// failure mode is "game mode quietly got worse over time" with nothing to
+// failure mode is "speed demon quietly got worse over time" with nothing to
 // notice it. Types are structural and do not rot.
 //
 //   PURR_MOD_DRIVER — display, touch, input, radio, gps, battery. The game
@@ -94,7 +94,7 @@ static void unload_one(void *arg) { purr_kernel_unload_module((const char *)arg)
 
 static size_t free_internal(void) { return heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
 
-int purr_game_mode_enter(const char *label)
+int purr_speed_demon_enter(const char *label)
 {
     if (s_active) return -1;
 
@@ -160,11 +160,11 @@ int purr_game_mode_enter(const char *label)
 
     // Marker first. If the game faults during startup — before it ever manages
     // a clean exit — the next boot must not walk straight back into it.
-    purr_crash_guard_mark_start(GAME_MODE_GUARD_ENTITY);
+    purr_crash_guard_mark_start(SPEED_DEMON_GUARD_ENTITY);
 
     // Liveness watch. The kernel's UI-hang check is gated on a registered UI
     // backend, and the next few lines unload it — so without this the device
-    // runs completely unsupervised for the whole of game mode, which is exactly
+    // runs completely unsupervised for the whole of speed demon, which is exactly
     // the window where a hang is unrecoverable: one app owns the display and
     // input, and nothing is left running to notice it stopped.
     //
@@ -172,11 +172,11 @@ int purr_game_mode_enter(const char *label)
     // game legitimately spends longer between beats than a render loop does —
     // loading a level, seeking a WAD on SD — and a false positive here reboots
     // the device out from under someone who is playing.
-    purr_kernel_watch_begin(GAME_MODE_GUARD_ENTITY,
-                            GAME_MODE_BEAT_MS, GAME_MODE_MISSED_BEATS);
+    purr_kernel_watch_begin(SPEED_DEMON_GUARD_ENTITY,
+                            SPEED_DEMON_BEAT_MS, SPEED_DEMON_MISSED_BEATS);
 
     s_active = true;   // set before unloading: the UI backend's deinit may run
-                       // code that asks whether game mode is active.
+                       // code that asks whether speed demon is active.
 
     // PHASE 1 — UI backends, directly, with the lock still held.
     //
@@ -202,7 +202,7 @@ int purr_game_mode_enter(const char *label)
 
     // PHASE 2 — everything else, BOUNDED.
     //
-    // Game mode is the first thing in this OS to call deinit() at runtime, so
+    // Speed demon is the first thing in this OS to call deinit() at runtime, so
     // every one of these paths is effectively unexercised. proximity_deinit()
     // proved the point: it deletes its own task and only THEN unregisters its
     // ESP-NOW callbacks, so the task can be killed mid-callback holding an
@@ -210,14 +210,14 @@ int purr_game_mode_enter(const char *label)
     // whole transition with the UI already gone.
     //
     // One badly-behaved deinit must not be able to wedge the device. A module
-    // that overruns is logged and left loaded; game mode continues with less
+    // that overruns is logged and left loaded; speed demon continues with less
     // memory freed, which is strictly better than never returning.
     for (int i = 0; i < s_suspended_n; i++) {
         if (s_unloaded[i]) continue;   // already done in phase 1
         purr_splash_status(s_suspended[i]);
         size_t before_one = free_internal();
         if (purr_kernel_run_bounded("gm_unload", unload_one,
-                                     s_suspended[i], GAME_MODE_UNLOAD_TIMEOUT_MS)) {
+                                     s_suspended[i], SPEED_DEMON_UNLOAD_TIMEOUT_MS)) {
             s_unloaded[i] = true;
             // Paired with the restore-side figure in exit(). A module that gives
             // back far less than it costs to bring back is the leak.
@@ -227,7 +227,7 @@ int purr_game_mode_enter(const char *label)
             // Left loaded, and left FALSE in s_unloaded so exit() does not try
             // to restore something that never came out.
             ESP_LOGW(TAG, "%s deinit did not return in %dms — leaving it loaded",
-                     s_suspended[i], GAME_MODE_UNLOAD_TIMEOUT_MS);
+                     s_suspended[i], SPEED_DEMON_UNLOAD_TIMEOUT_MS);
         }
         purr_splash_advance();
     }
@@ -244,7 +244,7 @@ int purr_game_mode_enter(const char *label)
     return s_suspended_n;
 }
 
-int purr_game_mode_exit(void)
+int purr_speed_demon_exit(void)
 {
     if (!s_active) return -1;
 
@@ -296,7 +296,7 @@ int purr_game_mode_exit(void)
 
     // Only now: a clean exit is what proves the game did not take the device
     // down with it.
-    purr_crash_guard_mark_stop(GAME_MODE_GUARD_ENTITY, true, NULL);
+    purr_crash_guard_mark_stop(SPEED_DEMON_GUARD_ENTITY, true, NULL);
 
     ESP_LOGW(TAG, "exited: %d modules restored, internal DRAM %u free",
              restored, (unsigned)free_internal());
@@ -311,12 +311,12 @@ int purr_game_mode_exit(void)
 
 // The beacon. A game calls this from its main loop — once per frame is fine and
 // costs a timestamp write; the requirement is only that no two consecutive
-// GAME_MODE_BEAT_MS windows pass without one.
+// SPEED_DEMON_BEAT_MS windows pass without one.
 //
 // Thin wrapper rather than exposing purr_kernel_watch_beat() directly, so a
 // game never has to know which watch it is under, and so calling it outside
-// game mode is harmless.
-void purr_game_mode_heartbeat(void)
+// speed demon is harmless.
+void purr_speed_demon_heartbeat(void)
 {
     if (!s_active) return;
     purr_kernel_watch_beat();

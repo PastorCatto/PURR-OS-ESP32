@@ -615,7 +615,7 @@ int mesh_manager_init(void)
     // survives an unload/reload cycle, so a module restored after
     // mesh_manager_deinit() set it would otherwise start a task that
     // immediately exits — meshtastic would come back looking loaded, with node
-    // and channel changes silently never persisting again. Game mode restores
+    // and channel changes silently never persisting again. Speed demon restores
     // this module on every game exit, so that is the normal path, not an edge
     // case.
     s_persist_stop = false;

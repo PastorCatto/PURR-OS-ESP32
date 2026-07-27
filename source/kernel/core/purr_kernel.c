@@ -140,7 +140,7 @@ void purr_kernel_register_ui(const catcall_ui_t *ui) {
 //
 // This exists because unloading a UI module left s_ui pointing at it forever,
 // and every UI backend begins init with "if (purr_kernel_ui()) skip — something
-// else owns the screen". Game mode therefore restored a backend that
+// else owns the screen". Speed demon therefore restored a backend that
 // immediately short-circuited: the kernel marked the module loaded, but no UI
 // was rebuilt and no render task was started. The crash guard caught it six
 // seconds later as "UI TASK UNRESPONSIVE @ idle", which is a true statement
@@ -1680,7 +1680,7 @@ void purr_kernel_ui_breadcrumb(const char *step)
 
 // ── Generic liveness watch ──────────────────────────────────────────────────
 // See purr_kernel.h for why this exists separately from the UI-hang check:
-// that one is gated on a UI backend being registered, and game mode's entire
+// that one is gated on a UI backend being registered, and speed demon's entire
 // purpose is to unload it.
 static const char *s_watch_owner      = NULL;
 static uint64_t    s_watch_last_ms    = 0;
@@ -1719,7 +1719,7 @@ void purr_kernel_watch_end(void)
 
     // Hand the UI check a fresh grace period rather than a stale timestamp.
     //
-    // The UI heartbeat stopped the moment game mode unloaded the backend, so
+    // The UI heartbeat stopped the moment speed demon unloaded the backend, so
     // when the watch lifts, s_ui_last_heartbeat_ms is however long the whole
     // session lasted — instantly past the threshold. The restored backend's
     // first beat is several hundred ms away (task start, LVGL re-init, first
@@ -1756,9 +1756,9 @@ static void health_watchdog_task(void *arg)
         // That is exactly what happened on the first working game-mode session:
         // MagiDOS ran, then died ~9s in (6s threshold + up to 2s poll
         // granularity + the transition), and the panic was attributed to the UI
-        // backend that game mode had deliberately removed.
+        // backend that speed demon had deliberately removed.
         //
-        // Game mode arms its own watch precisely because the UI one cannot
+        // Speed demon arms its own watch precisely because the UI one cannot
         // cover it, so while that is in force this check has nothing useful to
         // say and must stand down.
         const catcall_ui_t *ui = purr_kernel_ui();
@@ -1779,8 +1779,8 @@ static void health_watchdog_task(void *arg)
 
         // Generic watch — same hang path, no UI dependency.
         //
-        // This is what covers game mode. The check above cannot: it requires
-        // purr_kernel_ui() to be non-NULL, and game mode unloads the UI backend
+        // This is what covers speed demon. The check above cannot: it requires
+        // purr_kernel_ui() to be non-NULL, and speed demon unloads the UI backend
         // outright, so an unsupervised window would open at precisely the point
         // where one app owns the display and input and nothing else is left
         // running to notice it stopped.

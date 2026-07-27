@@ -63,7 +63,20 @@ typedef struct {
     uint8_t  abi_version;       // must equal PURR_MODULE_ABI_VERSION
     uint8_t  module_type;       // PURR_MOD_*
     uint8_t  load_priority;     // PURR_PRIORITY_REQUIRED / IMPORTANT / OPTIONAL
-    uint8_t  _reserved;         // pad to 4-byte alignment
+    // speed_demon — declare that this app needs the machine to itself.
+    //
+    // Set to 1 and app_manager takes care of everything: before the app's
+    // init() runs it unloads the launcher, the system UI, the mesh stack and
+    // every other non-essential service, and when the app's task ends it puts
+    // all of them back. The app itself calls nothing.
+    //
+    // One line, in the app's own PURR_MODULE_REGISTER block:
+    //     .speed_demon = 1,
+    //
+    // Ignored for anything that is not PURR_MOD_APP. Takes the former _reserved
+    // pad byte, so the header layout and ABI version are unchanged.
+    // See modules/speed_demon/speed_demon.h and docs/15_SpeedDemon.md.
+    uint8_t  speed_demon;
     char     name[32];          // human-readable module name
     char     version[12];       // module semver string e.g. "1.0.0"
     char     kernel_min[12];    // minimum KITT version e.g. "0.9.0"

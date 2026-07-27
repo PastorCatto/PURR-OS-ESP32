@@ -105,7 +105,7 @@ void purr_kernel_register_ui     (const catcall_ui_t      *ui);
 // Clear a UI registration on unload, so the next backend to load can claim the
 // screen. Matched — a module may only clear its OWN registration. Every UI
 // backend starts init with "if (purr_kernel_ui()) skip"; without this, a module
-// unloaded at runtime (game mode) comes back registered-but-uninitialised: no
+// unloaded at runtime (speed demon) comes back registered-but-uninitialised: no
 // UI rebuilt, no render task, and a UI-unresponsive strike a few seconds later.
 // Call it from the backend's deinit().
 void purr_kernel_unregister_ui   (const catcall_ui_t      *ui);
@@ -161,7 +161,7 @@ void purr_kernel_ui_breadcrumb(const char *step);
 // ── Generic liveness watch ──────────────────────────────────────────────────
 //
 // The UI-hang check above is gated on purr_kernel_ui() being non-NULL, which is
-// correct for its purpose and leaves a hole: game mode deliberately UNLOADS the
+// correct for its purpose and leaves a hole: speed demon deliberately UNLOADS the
 // UI backend, so that check silently stops running at exactly the moment the
 // device is most exposed — one app holding the display and input outright, with
 // no UI left to recover to. A hang there is a black brick until someone pulls
@@ -173,7 +173,7 @@ void purr_kernel_ui_breadcrumb(const char *step);
 // path, exactly as the UI check does — so recovery, strike counting and the
 // pending-recovery marker all behave identically.
 //
-//   purr_kernel_watch_begin("game_mode", 5000, 2);   // beat every 5s, react after 2 missed
+//   purr_kernel_watch_begin("speed_demon", 5000, 2);   // beat every 5s, react after 2 missed
 //   ... purr_kernel_watch_beat() from the owner's loop ...
 //   purr_kernel_watch_end();
 //

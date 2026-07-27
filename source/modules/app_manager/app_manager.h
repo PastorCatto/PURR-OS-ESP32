@@ -50,6 +50,10 @@ typedef struct {
     app_tier_t  tier;
     app_state_t state;
     char        error[96];       // populated on APP_STATE_ERROR
+    // Declared by the app via purr_module_header_t::speed_demon. app_manager
+    // enters speed demon before init() and exits it when the app reports it is
+    // done, so the app itself calls neither. See docs/15_SpeedDemon.md.
+    bool        speed_demon;
     purr_win_t  window;          // set automatically when the app calls purr_win_create();
                                   // 0 if it hasn't (yet), or never will
     // Internal-RAM free bytes at the moment this app was launched (0 while
