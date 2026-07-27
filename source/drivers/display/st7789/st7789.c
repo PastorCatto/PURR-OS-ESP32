@@ -412,8 +412,40 @@ static void st7789_init_regs(uint8_t madctl)
     // VDV: 0V
     spi_write_cmd(ST_VDVS); spi_write_byte(0x20);
 
-    // Frame rate: 60Hz
-    spi_write_cmd(ST_FRCTR2); spi_write_byte(0x0F);
+    // Panel refresh rate (FRCTR2 RTNA). 0x0F = 60Hz, 0x00 = ~119Hz.
+    //
+    // Raised to reduce how long a torn frame stays on screen. We cannot prevent
+    // the seam itself: with no TE pin (F4 — not broken out on this board) we
+    // write GRAM asynchronously, so any push that crosses the scan position
+    // splits the image. What we CAN change is how long that split is displayed,
+    // which is one panel refresh period — 16.7ms at 60Hz, 8.4ms at 119Hz.
+    //
+    // This is the last lever available, and it was reached by elimination, all
+    // of it measured rather than assumed:
+    //   - Pushing fewer pixels does nothing. Measured directly: the dirty-rect
+    //     change cut pushed pixels ~40% and the user reported tearing "same".
+    //     A crossing is a crossing regardless of transfer size.
+    //   - Fewer frames per second does help (6.2fps showed none, ~9-10fps does),
+    //     but paying for it with a slower UI is the wrong trade.
+    //   - MADCTL ML only reverses the scan along the same axis. The side-to-side
+    //     scan is a consequence of running a natively-portrait 240x320 panel in
+    //     landscape via MV, so no MADCTL value makes it scan top-to-bottom.
+    //
+    // TRIED AND REVERTED: 0x00 (~119Hz) garbled the display completely.
+    //
+    // RTNA does not set the frame rate on its own — it selects the number of
+    // idle/normal-mode clocks per line, and the resulting rate depends on it
+    // TOGETHER with the porch settings written just above (PORCTRL 0xB2 =
+    // 0x0C,0x0C,0x00,0x33,0x33). Those porches were tuned for 60Hz. Halving the
+    // line period without re-deriving them leaves the panel clocking out lines
+    // faster than the porch timing allows, and the image falls apart.
+    //
+    // Raising the refresh rate is therefore not the one-byte change it looks
+    // like: it needs PORCTRL recomputed for the target rate, verified against
+    // the ST7789V datasheet timing tables for this specific panel. Not worth it
+    // for a partial tearing mitigation. Left at the known-good 60Hz.
+    #define ST7789_FRAME_RATE_RTNA 0x0F   // 60Hz - DO NOT RAISE, see above
+    spi_write_cmd(ST_FRCTR2); spi_write_byte(ST7789_FRAME_RATE_RTNA);
 
     // Power control: AVDD=6.8V AVCL=-4.8V VDDS=2.3V
     { static const uint8_t d[] = {0xA4, 0xA1};

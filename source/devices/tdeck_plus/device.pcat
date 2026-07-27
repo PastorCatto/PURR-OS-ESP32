@@ -57,11 +57,15 @@ systemui_style = "ios"
 # hardware and hasn't been fixed yet, so this device stays off it rather
 # than shipping a known-bad desktop. MiniWin's code is still compiled and
 # selectable — only this device's default moved back.
-# ui — Mochi: iOS-style springboard (squircle icon grid, dock, home indicator),
-# with trackball/arrow-key cursor navigation layered on top so it isn't
-# touch-only on a device that has better inputs than touch. Cupcake and Tabby
-# both still build; this is a one-word revert either way.
-ui          = "mochi"
+# ui — Cupcake: the Android-style launcher. Swapped back from Mochi on
+# 2026-07-26 while the ST7789 display work was in flight. Mochi still builds
+# and carries all of that work (off-screen compose, async flush, the shadow
+# toggle); this is a one-word move either way.
+#
+# Note that the display fixes made this cycle live in mochi_hal.c, so Cupcake
+# does NOT get them — it still flushes each band straight to the panel. Expect
+# the band-by-band fill on full redraws here that Mochi no longer has.
+ui          = "cupcake"
 # systemui — the status bar, drag-down panels, Back/Home/Recents nav bar,
 # Recents carousel and lock screen, split out of Cupcake into their own
 # module (source/modules/systemui/). Cupcake hosts it; this entry is what
