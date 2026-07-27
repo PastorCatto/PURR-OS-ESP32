@@ -220,6 +220,59 @@ original note was worried about.
 
 Original entries follow.
 
+### F17 — The screen visibly rendered in bands ✅ **FIXED — off-screen compose**
+
+Reported 2026-07-26: *"even when opening apps, i can see the screen render in
+layers."* Confirmed and fixed the same day; user verified **"no more tearing."**
+
+**Cause.** Not a driver artifact. LVGL sizes a render pass by how many rows fit in
+the draw buffer — `get_max_row()` is literally `draw_buf->size / area_w` — so a
+48-line buffer split a full-screen redraw into 5 passes, and *each pass was
+flushed to the panel the instant it finished*. The panel therefore displayed a
+half-updated frame for the ~150 ms a redraw took, filling in top to bottom.
+
+**Two obvious fixes, each solving half the problem — both measured:**
+
+| | banded (before) | full-screen draw buf | **compose (shipped)** |
+|---|---|---|---|
+| render fps | 11.4 | 7.7 | **9.8** |
+| mean frame | 23 ms | 44 ms | **30 ms** |
+| frames in 100–200 ms | 3 | **26** | **2** |
+| visible banding | **yes** | no | no |
+
+A full-screen draw buffer gives one pass and no banding, but 153,600 bytes cannot
+sit in a 32 KB data cache, so every pixel write becomes a PSRAM miss — the middle
+column. 48 lines is 30,720 bytes and stays largely cache-resident.
+
+**What shipped** keeps both properties: render into the small cache-friendly
+buffer, copy each finished band into a full-screen PSRAM *mirror*, and push the
+assembled frame to the panel once, on the last band
+(`lv_disp_flush_is_last()`). Cost is one PSRAM→PSRAM memcpy per band, which is far
+cheaper than the cache misses it avoids.
+
+Three details that are load-bearing rather than incidental:
+
+- **The mirror is `calloc`'d.** It is pushed a full row at a time, so any region
+  never drawn must be a defined colour. Uninitialised heap here is exactly what
+  produced the rainbow static band along the bottom of the screen earlier in this
+  cycle.
+- **Single-part refreshes bypass the mirror.** If a refresh fits in one band, the
+  caller's buffer already *is* the rect, so it is pushed directly. This is what
+  keeps a moving cursor or blinking caret as cheap as it was before composing.
+- **Every band is mirrored, including the ones pushed directly.** Skipping any
+  would let the mirror go stale, and a later composed push sends full-width rows —
+  which would put those stale pixels back on the panel.
+
+**Rejected: `lv_disp_drv_t::direct_mode`.** It looks like the intended answer and
+is the wrong one. In direct_mode `refr_area()` sets `buf_area` to the whole
+display, so LVGL hands `flush_cb` the **full screen area on every refresh** — a
+cursor move would push 153,600 bytes. Normal partial mode keeps flushes clipped to
+what actually changed.
+
+The driver side of this is the chunked ping-pong async push (F2/F3 below): the
+composed frame is 153,600 bytes, five times the hardware's single-transaction
+ceiling, so "async" had to stop meaning "one transaction."
+
 ### F2 — `queue_size = 1` means zero pipelining
 
 [`st7789.c:476`](source/drivers/display/st7789/st7789.c#L476). Every transaction is

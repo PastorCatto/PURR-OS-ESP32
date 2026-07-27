@@ -123,6 +123,31 @@ static void flush_done(void *user)
     lv_disp_flush_ready((lv_disp_drv_t *)user);
 }
 
+// ── Off-screen composition ──────────────────────────────────────────────────
+//
+// A full-screen mirror of what the panel is showing. Bands are rendered into the
+// small draw buffers, copied in here, and only sent to the panel once the whole
+// refresh is assembled — so the display never shows a half-drawn frame.
+//
+// This exists because the two obvious fixes each solve half the problem:
+//
+//   - Small (48-line) draw buffer: renders fast, because 30,720 bytes largely
+//     lives in the 32KB data cache. But LVGL flushes each band as it finishes,
+//     so a full redraw visibly fills in top-to-bottom over ~150ms.
+//   - Full-screen draw buffer: one pass, no banding — but 153,600 bytes cannot
+//     sit in a 32KB cache, so every pixel write becomes a PSRAM miss. Measured
+//     on hardware: mean frame time went 23ms -> 44ms and 26 of 120 frames landed
+//     in the 100-200ms bucket.
+//
+// Composing keeps the cache-friendly render AND the atomic update. The cost is
+// one extra PSRAM-to-PSRAM copy per band, which is memcpy-speed and far cheaper
+// than the cache misses it avoids.
+static lv_color_t *s_compose = NULL;
+
+// Union of the areas composed so far in the current refresh.
+static lv_area_t s_dirty;
+static bool      s_dirty_any = false;
+
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
     const catcall_display_t *d = purr_kernel_display();
@@ -130,6 +155,63 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *colo
 
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
+
+    if (s_compose) {
+        // Mirror this band. Unconditional, including for single-part refreshes
+        // that are pushed directly below: if any drawn region were allowed to
+        // skip this, the mirror would go stale and a later composed push would
+        // send those pixels back to the panel as they used to be.
+        for (int32_t r = 0; r < h; r++) {
+            memcpy(&s_compose[(area->y1 + r) * s_disp_w + area->x1],
+                   &color_p[r * w],
+                   (size_t)w * sizeof(lv_color_t));
+        }
+
+        if (!s_dirty_any) { s_dirty = *area; s_dirty_any = true; }
+        else {
+            if (area->x1 < s_dirty.x1) s_dirty.x1 = area->x1;
+            if (area->y1 < s_dirty.y1) s_dirty.y1 = area->y1;
+            if (area->x2 > s_dirty.x2) s_dirty.x2 = area->x2;
+            if (area->y2 > s_dirty.y2) s_dirty.y2 = area->y2;
+        }
+
+        // More bands still coming: nothing goes to the panel yet. Releasing the
+        // buffer immediately is the point — LVGL renders the next band while we
+        // have already banked this one.
+        if (!lv_disp_flush_is_last(drv)) {
+            lv_disp_flush_ready(drv);
+            return;
+        }
+
+        // Last band. If the whole refresh was a single part, the caller's buffer
+        // is already exactly the rect we want, so push it straight from there and
+        // skip the composed path — this is what keeps small updates (a moving
+        // cursor, a blinking caret) as cheap as they were before composing.
+        bool single_part = (s_dirty.x1 == area->x1) && (s_dirty.y1 == area->y1) &&
+                           (s_dirty.x2 == area->x2) && (s_dirty.y2 == area->y2);
+        s_dirty_any = false;
+
+        if (!single_part) {
+            // Push full-width rows out of the mirror. Full width, not the exact
+            // union, so that the source rows are contiguous and the driver's
+            // stride equals the region width. The extra columns are not stale:
+            // the mirror tracks every pixel ever drawn, so they carry exactly
+            // what the panel already shows.
+            int32_t dy = s_dirty.y1;
+            int32_t dh = s_dirty.y2 - s_dirty.y1 + 1;
+            lv_color_t *src = &s_compose[dy * s_disp_w];
+
+            if (s_async_flush) {
+                d->push_pixels_async(0, dy, s_disp_w, dh, (uint16_t *)src);
+                return;   // flush_done() calls lv_disp_flush_ready(), not us
+            }
+            if (d->push_pixels) {
+                d->push_pixels(0, dy, s_disp_w, dh, (uint16_t *)src);
+            }
+            lv_disp_flush_ready(drv);
+            return;
+        }
+    }
 
     // Async: hand the band over and return NOW. LVGL immediately starts
     // rendering the next band into the other draw buffer while this one is
@@ -422,23 +504,56 @@ int mochi_hal_init(void)
                       "%d passes per screen",
                  lines, (unsigned)buf_bytes, (s_disp_h + lines - 1) / lines);
     } else {
-        // Large PSRAM buffer: fewer, larger passes. Also the only option on a
-        // panel wider than the static array was sized for.
+        // BANDED, and deliberately kept small enough to stay cache-resident.
+        //
+        // 48 lines is 30,720 bytes against a 32KB data cache. A full-screen draw
+        // buffer was tried on hardware and is a clear loss: it renders in one
+        // pass, but 153,600 bytes cannot be cached, and mean frame time went
+        // 23ms -> 44ms with 26 of 120 frames falling into the 100-200ms bucket.
+        //
+        // Banding no longer reaches the panel — see s_compose in flush_cb, which
+        // assembles the bands off-screen and pushes the finished frame once. The
+        // visible tearing that motivated the full-screen buffer is fixed there,
+        // where it does not cost the cache.
         lines     = MOCHI_BUF_LINES;
         buf_bytes = sizeof(lv_color_t) * s_disp_w * lines;
         s_buf1    = heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-        ESP_LOGW(TAG, "[perf] draw buffer: PSRAM, single, %d lines (%u bytes), %d passes per screen",
+        ESP_LOGW(TAG, "[perf] draw buffer: PSRAM, %d lines (%u bytes), %d render passes per screen",
                  lines, (unsigned)buf_bytes, (s_disp_h + lines - 1) / lines);
     }
     if (!s_buf1) {
         ESP_LOGE(TAG, "draw buffer alloc failed (%u bytes)", (unsigned)buf_bytes);
         return -1;
     }
-    // Ask the display driver for an async path sized to one flush, and only
-    // allocate the second draw buffer if it agrees. Both must succeed together:
-    // a second buffer without async flushing is wasted memory, and async
-    // flushing without a second buffer gains nothing because LVGL would have
-    // nowhere to render while the first is in flight.
+
+    // Off-screen composition mirror. calloc, not malloc: it is pushed to the
+    // panel a full row at a time, so any region not yet drawn must be a defined
+    // colour. Uninitialised heap here is what produced the rainbow static band
+    // along the bottom of the screen earlier in this cycle.
+    //
+    // Optional by design — if it does not allocate, flush_cb pushes each band
+    // straight through exactly as before. That is the old visible banding, not a
+    // failure, so it warns rather than aborting init.
+    s_compose = heap_caps_calloc(1, (size_t)s_disp_w * s_disp_h * sizeof(lv_color_t),
+                                 MALLOC_CAP_SPIRAM);
+    if (s_compose) {
+        ESP_LOGW(TAG, "[perf] off-screen compose ON — %ux%u mirror (%u bytes), "
+                      "panel updates once per refresh",
+                 (unsigned)s_disp_w, (unsigned)s_disp_h,
+                 (unsigned)((size_t)s_disp_w * s_disp_h * sizeof(lv_color_t)));
+    } else {
+        ESP_LOGW(TAG, "[perf] compose buffer alloc failed — bands go straight to the "
+                      "panel, expect visible banding on full redraws");
+    }
+    // Second draw buffer, only if the driver offers the async pair. Both must
+    // succeed together: a second buffer without async flushing is wasted memory,
+    // and async flushing without a second buffer gains nothing because LVGL
+    // would have nowhere to render while the first is in flight.
+    //
+    // At full-screen size this is another 153,600 bytes of PSRAM, and it earns
+    // it: with a full-sized buffer LVGL skips the "wait until the other buffer
+    // is freed" path in draw_buf_flush() entirely (it checks `full_sized`), so
+    // rendering the next frame genuinely overlaps the flush of the current one.
     s_buf2 = NULL;
     const catcall_display_t *dsp = purr_kernel_display();
     if (dsp && dsp->push_pixels_async && dsp->flush_done_cb) {
