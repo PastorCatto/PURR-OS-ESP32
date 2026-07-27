@@ -220,6 +220,82 @@ original note was worried about.
 
 Original entries follow.
 
+### F18 — Shadows were the scroll bottleneck ✅ **FIXED — `LV_SHADOW_CACHE_SIZE`**
+
+Measured 2026-07-26 after adding a **BUSY-fps** metric (frame rate during actual
+motion, rather than frames ÷ whole window). Answering *"what fps do I get when I
+scroll?"* honestly required that metric first — `RENDER-fps` includes idle time
+and sits between the two real numbers, describing neither.
+
+**Scrolling a settings list was 6.2 fps, mean 128 ms, with 105 of 120 frames in
+the 100–200 ms bucket.** Not hitching — that was the steady state under a drag.
+
+`CONFIG_LV_SHADOW_CACHE_SIZE` defaults to **0** in the LVGL component's Kconfig,
+so every shadow was blurred from scratch on every draw, at O(corner_size²) where
+`corner_size = shadow_width + radius`.
+
+| scrolling | before | after |
+|---|---|---|
+| BUSY-fps | 6.2 | **9.7–10.1** |
+| mean frame | 128 ms | **60 ms** |
+| frames in 100–200 ms | 105/120 | 33–49/120 |
+
+**≈1.6× faster scrolling for 1,024 bytes of internal RAM.**
+
+Two things this exposed that were not obvious:
+
+- **Nothing in Mochi sets `shadow_width`.** The only two call sites set it to *0*
+  (the flat buttons). Every shadow on screen comes from the LVGL default theme's
+  `btn` style at `LV_DPX(3)` — which is why turning UI effects off never changed
+  anything measurable. The toggle does not reach them. This finally separates
+  radius from shadow, which F5's note said had never been isolated.
+- **The cache holds exactly one geometry.** `sh_cache_size` / `sh_cache_r` are
+  scalars, not a table, so it only pays off when consecutive shadow draws share a
+  radius. A list of identical rows is the ideal case; a screen of mixed shapes
+  thrashes it and gains nothing.
+
+> **Tooling trap, cost a full flash cycle to find:** `SDKCONFIG_DEFAULTS` only
+> *seeds* `build_<device>/sdkconfig` when it does not already exist
+> (`purrstrap.py` `cmd_build`). Editing a `.overrides` file therefore has **no
+> effect on an incremental build** — the first attempt silently kept
+> `CONFIG_LV_SHADOW_CACHE_SIZE 0`. Delete the stale build sdkconfig, then verify
+> against the generated `sdkconfig.h` rather than trusting the build. Same shape
+> as "`purrstrap build` exits 0 without compiling."
+
+### F19 — Scanout tearing ⚠️ **NOT FIXABLE ON THIS BOARD — do not spend more on it**
+
+Reported immediately after F18, and correctly: *"that brought back the tearing
+again."* It is a **torn/offset line across a moving image**, not F17's
+band-by-band fill — confirmed with the user, since the two need opposite fixes.
+
+Not a regression. F18 made frames ~1.6× more frequent, so GRAM is written more
+often while the panel is scanning it out, and the seam shows up more. Both compose
+paths were re-checked and are sound: `last_part` is properly reset
+(`lv_refr.c:607/615`) so `lv_disp_flush_is_last()` cannot fire early and bypass
+composing, and LVGL waits on `flushing` before the next refresh's flush, so the
+mirror is never overwritten mid-push.
+
+**The obvious mitigation was measured and rejected.** The composed push sends
+full-width rows spanning the bounding box of every area in a refresh, so it was
+worth knowing how much of that is wasted:
+
+```
+sent=15178px  drawn=9195px  waste=65%  parts/refresh=2.8
+sent=9280px   drawn=5481px  waste=69%  parts/refresh=2.0
+```
+
+65–69% waste sounds actionable until the absolute numbers are read: a composed
+push is ~15K pixels ≈ 30 KB ≈ **3 ms** at 80 MHz, against a ~16.7 ms panel scan.
+Eliminating all the waste takes it to ~2 ms — it narrows the tear window slightly
+and removes nothing. **A stride-aware push variant on `catcall_display` is
+therefore not justified**, which is the useful result: measuring first avoided
+adding permanent contract surface for no gain.
+
+The only real fix is TE, and **F4 already established TE is not wired on the
+T-Deck Plus** — LilyGo breaks out six display pins and TE is not among them
+(`display_rst = -1` too). There is no signal to sync to. This is a hardware
+limit, not an open task; record it for the next board and stop here.
+
 ### F17 — The screen visibly rendered in bands ✅ **FIXED — off-screen compose**
 
 Reported 2026-07-26: *"even when opening apps, i can see the screen render in

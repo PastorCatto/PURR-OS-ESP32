@@ -148,6 +148,7 @@ static lv_color_t *s_compose = NULL;
 static lv_area_t s_dirty;
 static bool      s_dirty_any = false;
 
+
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
     const catcall_display_t *d = purr_kernel_display();
@@ -200,6 +201,7 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *colo
             int32_t dy = s_dirty.y1;
             int32_t dh = s_dirty.y2 - s_dirty.y1 + 1;
             lv_color_t *src = &s_compose[dy * s_disp_w];
+
 
             if (s_async_flush) {
                 d->push_pixels_async(0, dy, s_disp_w, dh, (uint16_t *)src);
