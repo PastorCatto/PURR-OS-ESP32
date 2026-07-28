@@ -40,28 +40,31 @@ bt          = false
 lora        = ""
 
 [modules]
-# miniwin — restored 2026-07-27 for the DP8 bake.
+# cupcake — the experiment from a1b3e8af, now actually buildable.
 #
-# This was switched to Cupcake in a1b3e8af as an experiment (upstream author's
-# request: does the LVGL v8 Android-style UI work on the P4 at all?). That
-# experiment has never built, and could not have:
+# It never built before, and the reason was a myth rather than a limitation:
+# CoreOS/CMakeLists.txt excluded `cupcake` for tab5 "because tab5 resolves LVGL
+# v9 and Cupcake is v8-coded". No such resolution exists. The manifest pins
+# `lvgl/lvgl: ">=8.3.0,<9.0.0"` for every target, managed_components is shared,
+# and the resolved component is 8.4.0. Tab5 has always had LVGL 8.
 #
-#   CoreOS/CMakeLists.txt puts `cupcake` in tab5's EXCLUDE_COMPONENTS, because
-#   tab5 resolves LVGL v9 (idf_component.yml's matches clause) and Cupcake is
-#   v8-coded. So the component is not compiled, while purrstrap still generates
-#   glue registering it — giving
+# So the component was excluded while this line still selected it, and purrstrap
+# generated glue registering a module that was never compiled:
 #
 #     undefined reference to `purr_module_cupcake'
 #
-# The failure was invisible because purrstrap reports a device [OK] if a
-# firmware.bin exists, and a stale one from an earlier build was still present.
-# tab5 has therefore been packaged from a stale binary since a1b3e8af.
+# Invisible for a week, because purrstrap marks a device [OK] whenever a
+# firmware.bin exists without checking the current run produced it — tab5 kept
+# shipping a stale image.
 #
-# Answering the actual question needs Cupcake ported to LVGL v9, or a v8/v9
-# shim — not a one-line device.pcat change. Left as miniwin, which is what the
-# exclusion list is written for, until someone can do that with a Tab5 on a
-# bench.
-ui          = "miniwin"
+# Both sides are corrected now (exclusion list, and the equally-false
+# lv_conf_v9.h selection). This device builds Cupcake against LVGL 8 like every
+# other device.
+#
+# NOT hardware-verified — no Tab5 on the bench. It builds; whether the Android-
+# style UI is usable on a 1280x720 P4 panel is the question a1b3e8af was
+# actually asking, and it still needs someone with the board.
+ui          = "cupcake"
 app_manager = "app_manager"
 lua         = "lua_runtime"
 

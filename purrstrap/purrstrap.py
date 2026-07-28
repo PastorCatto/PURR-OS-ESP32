@@ -960,6 +960,34 @@ def _build_kernel_spine(device, cfg, out_dir):
         env["IDF_TOOLS_PATH"] = _tools_path
     env["PURR_KERNEL_TYPE"] = cfg.get("device.kernel_type", "native")
 
+    # Drivers CoreOS/main must REQUIRE for this device, from device.pcat.
+    #
+    # Passed as an ENVIRONMENT variable, not a CMake variable, and that is
+    # load-bearing: ESP-IDF expands component requirements by executing each
+    # component's CMakeLists.txt in an isolated scope that cannot see the
+    # parent's variables — not even CACHE ones. A cache variable set in
+    # CoreOS/CMakeLists.txt read as undefined inside main, which silently took
+    # its hardcoded fallback and required st7789 on an ssd1306 board. The
+    # environment does survive into that expansion, which is exactly why
+    # PURR_KERNEL_TYPE above is already passed this way.
+    _drv = []
+    for _k in ("drivers.display", "drivers.touch", "drivers.input",
+               "drivers.keyboard", "drivers.radio", "drivers.gps",
+               "drivers.battery"):
+        _v = (cfg.get(_k, "") or "").strip().strip('"')
+        if _v and _v not in _drv:
+            _drv.append(_v)
+    _drv.append("boot_splash")          # every kernel draws the splash
+    # The UI backend too: a specialized kernel's sources are compiled INTO main
+    # (BOOT_SRCS), so whatever they reference has to be linkable from main.
+    # kernel_tdeck_plus_arduino calls miniwin directly, which is why main used to
+    # hardcode `REQUIRES miniwin` for every device — including boards that have
+    # no miniwin in their build at all once selection is on.
+    _ui = (cfg.get("modules.ui", "") or "").strip().strip('"')
+    if _ui and _ui not in _drv:
+        _drv.append(_ui)
+    env["PURR_DRIVER_REQUIRES"] = " ".join(_drv)
+
     # idf.py's own __main__ guard does `if 'MSYSTEM' in os.environ: print_warning(...)`
     # as an if/elif/else chain — when MSYSTEM is set (Git Bash, MSYS2, any
     # MinGW-derived shell always sets it) it prints a warning and returns
@@ -1102,7 +1130,7 @@ def _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin):
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
-def _regenerate_components_manifest():
+def _regenerate_components_manifest(cfg=None, device=None):
     """
     Regenerate cattobaked/components_manifest.cmake from whatever module/app
     directories currently exist on disk, before the IDF build reads it.
@@ -1125,7 +1153,10 @@ def _regenerate_components_manifest():
         sys.path.insert(0, modulestrap_dir)
     import modulestrap
     targets = modulestrap.find_modules()
-    modulestrap.generate_components_manifest(targets)
+    # cfg drives per-device selection — only the components this device
+    # references, plus their transitive REQUIRES, get compiled. Passing None
+    # (no caller does today) falls back to emitting everything.
+    modulestrap.generate_components_manifest(targets, cfg=cfg, device=device)
 
 def cmd_build(args):
     device = args.device
@@ -1173,7 +1204,7 @@ def cmd_build(args):
     # this file to populate EXTRA_COMPONENT_DIRS, so a stale manifest here
     # means a just-added module/app silently never gets built at all (see
     # _regenerate_components_manifest()'s own comment for the bug this fixes).
-    _regenerate_components_manifest()
+    _regenerate_components_manifest(cfg=cfg, device=device)
 
     # ── Kernel spine (IDF build) ───────────────────────────────────────────────
     firmware_bin = _build_kernel_spine(device, cfg, out_dir)

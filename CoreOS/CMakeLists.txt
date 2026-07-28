@@ -34,42 +34,24 @@ endif()
 
 set(PURR_DEVICE $ENV{PURR_DEVICE})
 
-# Tab5 resolves LVGL v9 (see idf_component.yml's matches clause) and hosts
-# its own v9-only UI backend, "nougat" — every other device stays on v8.
-# Component *compilation* isn't gated by which LVGL version a manifest
-# resolves to: this project's own components_manifest.cmake (included
-# above) is included unconditionally, with no COMPONENTS/EXCLUDE_COMPONENTS
-# filtering at all until now, so every discovered component gets built as
-# part of *every device's own build* regardless of whether its device.pcat
-# references it (confirmed empirically elsewhere this session: msn/
-# meshtastic/proximity all compiled for heltec despite not being in its
-# [modules]). Left unfiltered, Tab5's build would still attempt to compile
-# cupcake_hal.c/kittenui_win.c/cardstack_win.c/pounce_win.c/lvgldebug (all
-# v8-coded) against the v9 headers actually present and fail outright —
-# and symmetrically, nougat's v9-only source would fail against v8 on
-# every other device. EXCLUDE_COMPONENTS must be set before project().
-# m5tab5_bsp is symmetric with nougat here, not just the LVGL-backend list:
-# it #includes esp_lcd_mipi_dsi.h (esp_lcd's dsi/ subdirectory), which only
-# exists/works on a target with MIPI-DSI PHY hardware. Left out of this
-# list, it compiled for every other device too (confirmed live via a full
-# fleet bake — "fatal error: esp_lcd_mipi_dsi.h: No such file or directory"
-# building it for waveshare169/esp32s3) since CoreOS/main/CMakeLists.txt's
-# own TAB5_REQUIRES guard only controls whether main *links* against it,
-# not whether components_manifest.cmake's unconditional include still
-# attempts to *compile* it as part of the build graph.
-if(PURR_DEVICE STREQUAL "tab5")
-    # tab5's own device.pcat now selects MiniWin (an experimental st7123-
-    # driver-based port, see device.pcat's own header comment), not Nougat —
-    # Nougat's own code has a real, pre-existing bug independent of this
-    # (nougat_win.c calls lv_list_add_button(), which doesn't exist in either
-    # LVGL version; cupcake_win.c's equivalent correctly uses
-    # lv_list_add_btn()) that this exclusion also happens to route around.
-    # m5tab5_bsp is the previous (also-unverified) tab5 display driver this
-    # device no longer references — excluded same as every other device.
-    set(EXCLUDE_COMPONENTS cupcake kittenui cardstack pounce lvgldebug nougat m5tab5_bsp)
-else()
-    set(EXCLUDE_COMPONENTS nougat m5tab5_bsp)
-endif()
+# EXCLUDE_COMPONENTS is gone, and deliberately.
+#
+# It existed to compensate for modulestrap emitting EVERY discovered component
+# into EVERY device's build: components that could not compile for a given
+# target (m5tab5_bsp needs MIPI-DSI hardware; nougat is v9-only source) had to
+# be denied by hand, per device, in this file.
+#
+# That made three places decide what a device contains — device.pcat via the
+# generated glue, per-component Kconfig gating, and this denylist — with none
+# authoritative. They could and did disagree: tab5's device.pcat selected
+# Cupcake while this list removed the component, so the glue referenced a module
+# that was never compiled ("undefined reference to purr_module_cupcake") and the
+# device shipped stale binaries for a week.
+#
+# modulestrap now generates components_manifest.cmake per device, from
+# device.pcat plus the transitive REQUIRES of what it names. A component that
+# cannot build for a target is simply never added, so there is nothing to
+# exclude, and a contradiction of that shape can no longer be expressed.
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
@@ -94,15 +76,21 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 #       all — "#include expects FILENAME or <FILENAME>" — confirmed live.
 #       Must be pre-quoted.
 #
-# LVGL v8 and v9 also have different lv_conf.h schemas (renamed/restructured
-# options) — one file can't serve both, so the path itself is
-# PURR_DEVICE-conditional too, same split as EXCLUDE_COMPONENTS above.
-if(PURR_DEVICE STREQUAL "tab5")
-    get_filename_component(PURR_LV_CONF_PATH "${CMAKE_CURRENT_LIST_DIR}/../source/config/lv_conf_v9.h" ABSOLUTE)
-    idf_build_set_property(COMPILE_DEFINITIONS "LV_CONF_PATH=\"${PURR_LV_CONF_PATH}\"" APPEND)
-else()
-    get_filename_component(PURR_LV_CONF_PATH "${CMAKE_CURRENT_LIST_DIR}/../source/config/lv_conf.h" ABSOLUTE)
-    idf_build_set_property(COMPILE_DEFINITIONS "LV_CONF_PATH=${PURR_LV_CONF_PATH}" APPEND)
-endif()
+# LVGL v8 and v9 have different lv_conf.h schemas, so this used to be
+# PURR_DEVICE-conditional: tab5 got lv_conf_v9.h with v9-style pre-quoting,
+# everything else got lv_conf.h bare.
+#
+# CORRECTION (2026-07-28): that split was for a v9 resolution that does not
+# exist. CoreOS/main/idf_component.yml pins `lvgl/lvgl: ">=8.3.0,<9.0.0"` for
+# every target with no rules clause, managed_components is shared across
+# devices, and the resolved component is **8.4.0** — verified in
+# dependencies.lock and lvgl.h's own LVGL_VERSION_MAJOR.
+#
+# So tab5 was being handed a v9-schema config, with v9 quoting, against a v8
+# library. Every device now takes the v8 branch, which is what every device
+# actually links. Restore the split only if a device genuinely resolves v9 —
+# and then fix the manifest first, because today nothing can.
+get_filename_component(PURR_LV_CONF_PATH "${CMAKE_CURRENT_LIST_DIR}/../source/config/lv_conf.h" ABSOLUTE)
+idf_build_set_property(COMPILE_DEFINITIONS "LV_CONF_PATH=${PURR_LV_CONF_PATH}" APPEND)
 
 project(purr_os)

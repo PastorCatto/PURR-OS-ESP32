@@ -46,26 +46,57 @@ endif()
 
 if(PURR_KERNEL_TYPE STREQUAL "arduino")
     set(EXTRA_REQUIRES espressif__arduino-esp32)
-    set(DRIVER_REQUIRES st7789 trackball boot_splash)
     message(STATUS "PURR: Arduino kernel — using Wire for I2C peripherals")
 else()
     set(EXTRA_REQUIRES "")
+endif()
+
+# Drivers this device's kernel links against.
+#
+# These used to be hardcoded — `st7789 gt911 trackball bbq20 boot_splash` for
+# every native device, `st7789 trackball boot_splash` for Arduino — on the
+# reasoning that an unreferenced-but-linkable driver is harmless. That held only
+# while modulestrap emitted every component into every device's build.
+#
+# It no longer does: components_manifest.cmake is now generated per device from
+# device.pcat, so a hardcoded name here can refer to a component that was never
+# added to the build, and CMake fails at configure time rather than harmlessly.
+# purrstrap therefore passes PURR_DRIVER_REQUIRES, built from the same
+# device.pcat [drivers] section modulestrap selects components from — one source
+# of truth for both what is compiled and what is linked.
+#
+# Read from the ENVIRONMENT, like PURR_KERNEL_TYPE above, and for a reason worth
+# stating: ESP-IDF expands component requirements by executing each component's
+# CMakeLists.txt in an isolated scope that sees none of the parent's variables,
+# cache included. A CMake variable set in CoreOS/CMakeLists.txt is simply
+# invisible here — it read as undefined, this took the fallback, and the build
+# then required st7789 on a board with an ssd1306. The environment does survive
+# into that expansion.
+#
+# The fallback keeps a hand-run `idf.py` (no purrstrap, so no env var) working
+# exactly as before.
+set(PURR_DRIVER_REQUIRES_ENV $ENV{PURR_DRIVER_REQUIRES})
+if(PURR_DRIVER_REQUIRES_ENV)
+    separate_arguments(DRIVER_REQUIRES NATIVE_COMMAND "${PURR_DRIVER_REQUIRES_ENV}")
+    message(STATUS "PURR: driver REQUIRES from device.pcat: ${DRIVER_REQUIRES}")
+elseif(PURR_KERNEL_TYPE STREQUAL "arduino")
+    set(DRIVER_REQUIRES st7789 trackball boot_splash)
+else()
     set(DRIVER_REQUIRES st7789 gt911 trackball bbq20 boot_splash)
 endif()
 
-# Tab5 (ESP32-P4) baked-in Layer 0 driver — matches T-Deck Plus's own
-# pattern above (specialized kernel #includes the driver header + calls
-# its init directly, bypassing the module loader), but kept its own
-# PURR_DEVICE-keyed branch rather than folded into DRIVER_REQUIRES: unlike
-# st7789/gt911/trackball/bbq20 (harmlessly unreferenced-but-linkable on
-# every other native-kernel device), m5tab5_bsp.c #includes
-# esp_lcd_mipi_dsi.h (MIPI-DSI/DPI panel APIs), which are only meaningful
-# on a target with DSI PHY hardware. Requiring it unconditionally risks
-# failing to compile on every other device.
+# TAB5_REQUIRES removed (2026-07-28), same class as the driver list above.
+#
+# It hardcoded `m5tab5_bsp` for tab5. Nothing compiled for that device
+# references it: the only user is source/kernel/kernel_tab5_m5bsp_legacy/, and
+# SPEC_KERNEL_DIR resolves to kernel_${PURR_DEVICE} — kernel_tab5, which does
+# not exist — so tab5 builds the generic kernel and the legacy directory is
+# never compiled at all. tab5's device.pcat names st7123 as its display.
+#
+# Harmless while every component was in every build; a configure-time failure
+# once components are selected per device. If a Tab5 BSP is wanted again, add it
+# to that device.pcat's [drivers] so one file decides.
 set(TAB5_REQUIRES "")
-if(PURR_DEVICE STREQUAL "tab5")
-    set(TAB5_REQUIRES m5tab5_bsp)
-endif()
 
 # USB MSC (composite CDC+MSC, share the SD card over USB on panic) — pinned/
 # dormant (source/modules/usb_msc/DISABLED.md), module.pcat renamed so
@@ -111,5 +142,4 @@ idf_component_register(
         ${EXTRA_REQUIRES}
         ${USB_MSC_REQUIRES}
         ${TAB5_REQUIRES}
-        miniwin
 )
