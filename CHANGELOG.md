@@ -15,7 +15,83 @@
 
 ---
 
-## v1.0.0-dp8 — 2026-07-24
+## v1.0.0-dp8 — 2026-07-24 … 2026-07-27
+
+> Shipped in two passes. The first (2026-07-24) is the mobile UI generation described
+> below. The second (2026-07-25 → 27) is a performance and stability pass driven entirely
+> by on-device measurement — every figure in it was measured on T-Deck Plus hardware, and
+> most of them replaced an earlier figure that turned out to be wrong.
+
+### Pass 2 — performance and stability (2026-07-25 → 27)
+
+**Rendering**
+- `-O2` instead of `-Og`, worth ~3.3x on frame time — the single biggest win, and in no
+  version of the original plan.
+- Fixed the black rectangular blocks: the SPI transfer-length register is 18 bits, so one
+  transaction caps at 32,768 bytes and a full 153,600-byte frame was silently rejected,
+  leaving stale GRAM. A PSRAM source also forced a failing per-transaction bounce buffer.
+- **Asynchronous flush with real double buffering** — `catcall_display` v1 → v3, adding an
+  optional `push_pixels_async` / `flush_done_cb` pair (chunked, ping-pong staged, with a
+  `stride` so a sub-rectangle of a larger buffer can be sent without flattening it).
+  Drivers that skip it keep the blocking path unchanged.
+- **Off-screen composition** — bands are assembled into a full-screen mirror and the
+  finished frame is sent once, so a redraw no longer paints top-to-bottom over ~150ms.
+  The obvious alternative, a full-screen draw buffer, was measured and rejected: 153,600
+  bytes cannot sit in a 32KB data cache and mean frame time went 23ms → 44ms.
+- **Shadows identified as 40-50% of scroll frame time.** Nothing in the UI sets
+  `shadow_width` — every shadow comes from LVGL's default theme, which is why the existing
+  effects toggle had never made a measurable difference. It reaches them now.
+- **Idle repaint eliminated.** The system UI rewrote the whole status row five times a
+  second regardless of change, and rebuilt the notification and task boxes object-by-object
+  each time. Measured 75-81ms every 200ms at idle; now ~1 slow frame in 55s.
+- Scrolling: **6.2 → 9.7-10.1 fps**, mean frame **128ms → 60ms**.
+
+**Speed Demon** (renamed from "game mode")
+- One app takes the whole machine, reclaiming **12.8-15.7KB of internal DRAM**. Apps opt in
+  with one line — `.speed_demon = 1` — and `app_manager` owns both entry and restore, so an
+  app cannot forget the exit.
+- Went from never completing a round trip to **four consecutive cycles with memory flat**.
+  Six faults fixed: a UI catcall never released on unload; an SPI bus race on entry (the bus
+  lock is per *device*, not per task); a PSRAM stack in the health watchdog; a relaunch that
+  was silently inert; 8KB leaked per unload (`xTaskCreateWithCaps` paired with plain
+  `vTaskDelete`); and `mesh_persist_task` deleted mid-SD-write.
+- Documented in `docs/15_SpeedDemon.md`. Pre-linked `.claw` apps only — Lua tiers cannot use
+  it, because the flag lives in a module header they do not have and Speed Demon unloads
+  `lua_runtime` itself.
+
+**Contracts and UI**
+- **Menu primitive** — `catcall_ui` v8 adds `purr_win_menu_*`, a real grouped-list contract
+  with sections, values and headers, so apps stop hand-rolling button grids. Mochi renders
+  it as an iOS-style grouped table; backends without a native implementation fall back to
+  label + list. Settings' category picker and General page migrated.
+- Cupcake and Mochi now **share one display path** (`modules/common/purr_lv_flush.h`). Every
+  fix above had landed in Mochi only, and Cupcake — a near-copy of the same file — silently
+  had none of them. Bringing it level exposed two of its own bugs: a draw buffer 1.6x the
+  data cache, and a second draw buffer allocated unconditionally that could never help while
+  its flush was synchronous.
+- Half-height notification shade with a grab handle; overpull drops to the lock screen.
+  Duplicate Control Center removed. Flat buttons in row layouts. Springboard grid derived
+  from panel size instead of a hard-coded 4x2.
+
+**Kernel**
+- **Crash strikes reset when the firmware's ELF hash changes.** The counter lives in NVS and
+  halts boot at 5; during this pass it reached 13/5 and bricked boot three times, each
+  needing a manual `esptool erase_region 0x9000 0x6000`. It also caused a full
+  misdiagnosis, where a boot loop after a config change looked like that change's fault.
+- Module tasks now unsubscribe from the task watchdog before deletion — four did not, and it
+  panicked ~4s into every Speed Demon session.
+- Bounded module unloads; NVS settings load before the UI is built.
+
+**Instrumentation** *(worth recording, because it changed conclusions rather than adding logs)*
+- The frame metric was wrong twice: first a censored sample that only logged slow frames,
+  then one counting no-op loop iterations and overstating fps ~20x.
+- Added **BUSY-fps**, measured from the gap between consecutive rendered frames — "how fast
+  is it while dragging", which `RENDER-fps` (frames ÷ whole window, idle included) does not
+  answer. Caveat: identical builds measured 9.7 and 7.7 depending on what was scrolled;
+  compare ranges, not single runs.
+
+### Pass 1 — mobile UI generation (2026-07-24)
+
 
 ### Summary
 Mobile UI generation. Two new LVGL 8 backends — **Mochi** (iOS-style squircle
@@ -87,6 +163,22 @@ documentation pass bringing `docs/` back in line with the tree.
   `lvgl.h` unconditionally, since MiniWin and Pounce builds have no LVGL.
 - 16 `module.pcat` files still use the legacy flat schema; migration to the sectioned
   `[module]` form is deferred to its own change.
+- **Screen tearing during motion is a hardware limit on T-Deck Plus** — LilyGo does not
+  break out the ST7789's TE pin, and scanline readback is impractical on a bus shared with
+  the radio. Pushing fewer pixels was measured and does not help: a 40% reduction changed
+  nothing, because any asynchronous write crossing the scan produces a seam regardless of
+  size. Recorded as a requirement for the next board, not an open task.
+- **MagicMac does not build** — it has no `app.pcat`, so it is never scanned into the
+  firmware. `docs/08_Exclusives.md` implied otherwise and has been corrected.
+- **MagiDOS is the host shell only** — the INT 21h shim, `C:` mapping and bundled DOS app
+  are not in this release.
+- **Temporary instrumentation is still compiled in** (`[perf]` flush counters, `[frames]`,
+  `[mem]` unload/restore accounting). Left in deliberately: it is warn-level logging rather
+  than behaviour, and stripping it immediately before a release without re-verifying on
+  hardware was the riskier option. First task of the next cycle.
+- `homebase`'s task-leak fix is committed but **not hardware-verified** — confirming it
+  needs a Speed Demon round trip, which requires launching an app from the touchscreen.
+- Milkbar icons and the Tab5 grid remain unverified on hardware.
 
 ---
 
