@@ -820,7 +820,27 @@ static int cmp_reg_priority(const void *a, const void *b)
 // hang-watchdog (see purr_crash_guard.h) — giving the UI a couple of
 // uncontested seconds first, before P3 modules/apps start piling on,
 // avoids racing it against everything spinning up at once.
-#define BOOT_SETTLE_MS 2500UL
+// 2500 -> 500 (2026-07-28). The reason above still stands; the amount it needs
+// to buy does not.
+//
+// 2500ms was chosen when the UI was genuinely starved — internal DRAM sat at
+// ~1-2KB within seconds of boot, and a full-screen redraw took ~150ms. The DP8
+// performance pass changed both sides of that: -O2 (~3.3x on frame time),
+// asynchronous flush with double buffering, off-screen compose, and the idle
+// repaint fix (the system UI was rewriting the whole status row five times a
+// second whether or not anything had changed).
+//
+// The two hangs this was papering over were also root-caused since, and neither
+// was contention: the UI catcall was never released on unload, and the display
+// driver's SPI bus was held across an async return. Both fixed.
+//
+// Reported as "the OS hangs for a few seconds on boot" — which it did, visibly,
+// with the progress bar parked wherever P2 ended. Kept rather than removed
+// because the original failure was timing-dependent and only appeared when
+// someone opened an app in the first moment after boot; 500ms still gives the
+// UI a clear head start. If that race ever returns, this is the first place to
+// look, and raising it is a one-line change.
+#define BOOT_SETTLE_MS 500UL
 
 // Defined further down, next to the state it writes. See its own comment for
 // why the kernel loads these rather than the settings app.
