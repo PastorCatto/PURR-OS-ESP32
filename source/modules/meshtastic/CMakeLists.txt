@@ -23,9 +23,9 @@
 if(CONFIG_PURR_FEATURE_MESHTASTIC)
     set(MESH_SRCS
         meshtastic_module.c
+        mesh_ble.c
         mesh_radio.c
         mesh_router.c
-        mesh_ble.c
         ../../lib/lib_nanopb/pb_common.c
         ../../lib/lib_nanopb/pb_encode.c
         ../../lib/lib_nanopb/pb_decode.c
@@ -39,8 +39,8 @@ if(CONFIG_PURR_FEATURE_MESHTASTIC)
         ../../lib/lib_mesh_pb/meshtastic/xmodem.pb.c
     )
 else()
-    # Stubs only.
-    set(MESH_SRCS meshtastic_module.c)
+    # Stub branches only — see above.
+    set(MESH_SRCS meshtastic_module.c mesh_ble.c)
 endif()
 
 idf_component_register(
