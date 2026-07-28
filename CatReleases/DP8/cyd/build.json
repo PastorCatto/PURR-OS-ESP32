@@ -3,7 +3,7 @@
   "chip": "esp32",
   "purros_version": "1.0.0-dp8",
   "kitt_version": "1.0.0",
-  "last_build": "2026-07-28T00:18:25.693711",
+  "last_build": "2026-07-28T10:44:53.983251",
   "pcat": "C:\\Users\\PastorCatto\\Documents\\PURR-OS-ESP32\\source\\devices\\cyd\\device.pcat",
   "flash_bin": "C:\\Users\\PastorCatto\\Documents\\PURR-OS-ESP32\\cattobaked\\cyd\\flash.bin",
   "firmware_bin": "C:\\Users\\PastorCatto\\Documents\\PURR-OS-ESP32\\cattobaked\\cyd\\firmware.bin",
