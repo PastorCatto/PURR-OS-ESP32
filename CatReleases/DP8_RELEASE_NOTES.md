@@ -1,11 +1,15 @@
 # PURR OS — Developer Preview 8
 
-**40 commits · 72 files · +7,441 / −674 lines**
+**43 commits since DP7 · 73 files · +7,741 / −674 lines**
 
-DP8 is a performance and stability release. It began as "Mochi feels laggy" and
-turned into finding out that most of what we believed about the display path was
-measured with a broken instrument. Almost every number below replaced an earlier
-number that was wrong.
+DP8 shipped in two passes. The first brought in the mobile UI generation — the
+Mochi and Tabby backends and the `systemui` split. The second, described here, is
+a performance and stability pass.
+
+It began as "Mochi feels laggy" and turned into discovering that most of what we
+believed about the display path had been measured with a broken instrument.
+Almost every number below replaced an earlier number that was wrong — including
+two decisions that were made, shipped, and later reversed on better data.
 
 Two features shipped: **Speed Demon** (one app takes the whole machine) and the
 **menu primitive** (a real list contract, so apps stop scattering buttons).
