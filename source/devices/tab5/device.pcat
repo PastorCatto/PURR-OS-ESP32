@@ -40,9 +40,28 @@ bt          = false
 lora        = ""
 
 [modules]
-# Cupcake experiment (upstream author's request): does the LVGL v8 Android-
-# style UI work on the P4 at all? Normally miniwin here.
-ui          = "cupcake"
+# miniwin — restored 2026-07-27 for the DP8 bake.
+#
+# This was switched to Cupcake in a1b3e8af as an experiment (upstream author's
+# request: does the LVGL v8 Android-style UI work on the P4 at all?). That
+# experiment has never built, and could not have:
+#
+#   CoreOS/CMakeLists.txt puts `cupcake` in tab5's EXCLUDE_COMPONENTS, because
+#   tab5 resolves LVGL v9 (idf_component.yml's matches clause) and Cupcake is
+#   v8-coded. So the component is not compiled, while purrstrap still generates
+#   glue registering it — giving
+#
+#     undefined reference to `purr_module_cupcake'
+#
+# The failure was invisible because purrstrap reports a device [OK] if a
+# firmware.bin exists, and a stale one from an earlier build was still present.
+# tab5 has therefore been packaged from a stale binary since a1b3e8af.
+#
+# Answering the actual question needs Cupcake ported to LVGL v9, or a v8/v9
+# shim — not a one-line device.pcat change. Left as miniwin, which is what the
+# exclusion list is written for, until someone can do that with a Tab5 on a
+# bench.
+ui          = "miniwin"
 app_manager = "app_manager"
 lua         = "lua_runtime"
 
