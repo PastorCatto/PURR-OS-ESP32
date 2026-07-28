@@ -1015,6 +1015,13 @@ def _build_kernel_spine(device, cfg, out_dir):
         _drv.append(_ui)
     env["PURR_DRIVER_REQUIRES"] = " ".join(_drv)
 
+    # Optional per-device boot settle (see purr_kernel.c's BOOT_SETTLE_MS).
+    # Only set when device.pcat asks for one, so the kernel default stands
+    # everywhere else.
+    _settle = (cfg.get("device.boot_settle_ms", "") or "").strip().strip('"')
+    if _settle.isdigit():
+        env["PURR_BOOT_SETTLE_MS"] = _settle
+
     # idf.py's own __main__ guard does `if 'MSYSTEM' in os.environ: print_warning(...)`
     # as an if/elif/else chain — when MSYSTEM is set (Git Bash, MSYS2, any
     # MinGW-derived shell always sets it) it prints a warning and returns

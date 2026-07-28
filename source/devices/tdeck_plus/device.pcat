@@ -13,6 +13,14 @@ psram_mb    = 8
 
 spiffs_offset  = "0xD90000"
 
+# boot_settle_ms — pause between the P2 (UI) and P3 (radios, deferred apps)
+# module tiers. See purr_kernel.c's BOOT_SETTLE_MS for why it exists.
+#
+# 50 here because this profile has none of what the pause guards against: no
+# Nearby, MSN, mesh, BT or proximity stack to race the UI at P3. The kernel
+# default is 500; a full image should leave this unset and take it.
+boot_settle_ms = 50
+
 [drivers]
 display     = "st7789"
 touch       = "gt911"
@@ -34,12 +42,12 @@ wifi        = true
 # gated on bt_mgr_host_ready()). Internal free RAM still runs tight (~62KB
 # -> ~26KB just from activating) — worth watching, not yet proven safe
 # under sustained mesh traffic + BLE together.
-bt          = true
+bt          = false
 # sx1262_rl — RadioLib-backed driver (source/drivers/radio/sx1262_rl),
 # swapped in for real Meshtastic node discovery instead of the hand-rolled
 # sx1262.c SPI driver (still present, unused by this device — see the
 # "Vendor Meshtastic's real radio/crypto code" plan).
-lora        = "sx1262_rl"
+lora        = ""
 
 # Presentation choices that select between implementations rather than naming
 # a module to register. Deliberately NOT in [modules]: purrstrap turns every
@@ -92,7 +100,7 @@ systemui    = "systemui"
 app_manager = "app_manager"
 # mesh — re-enabled for active Meshtastic diagnosis (was off, gated behind
 # CONFIG_PURR_FEATURE_MESHTASTIC, see CoreOS/main/Kconfig.projbuild).
-mesh        = "meshtastic"
+# mesh        = "meshtastic"
 # meshcore — compiled in and statically registered alongside meshtastic
 # (separate [modules] key, both loaded into the static registry — see
 # purrstrap.py's free-form modules.* handling), but NOT the boot-time
@@ -100,16 +108,22 @@ mesh        = "meshtastic"
 # guard (meshcore_module.cpp) refuses to activate while it's running.
 # Manually toggle via Terminal's `stop meshtastic` / `start meshcore`
 # until roadmap item 2 (the NVS-driven select-and-reboot switch) exists.
-meshcore    = "meshcore"
+# meshcore    = "meshcore"
 lua         = "lua_runtime"
 wifi        = "wifi_mgr"
-bt          = "bt_mgr"
+# bt          = "bt_mgr"
 # proximity/pairing — NOT listed here anymore; purrstrap.py's
 # apply_radio_companion_defaults() adds them automatically to any device
 # with [radio] wifi = true (this one), see cyd/device.pcat's comment for
 # the full heuristic. msn/nearby above predate that mechanism (added
 # during the earlier MSN rewrite) and stay explicit.
 
+msn_relay   = ""
+proximity   = ""
+proximity_rpc= ""
+pairing     = ""
+homebase    = ""
+app_manager_remote= ""
 [ui]
 theme       = "wce"
 
@@ -117,17 +131,19 @@ theme       = "wce"
 settings    = true
 terminal    = true
 fileman     = true
-hwtest      = true
-drivermgr   = true
-msn         = true
-services    = true
-taskmgr     = true
-nearby      = true
+hwtest      = false
+drivermgr   = false
+msn         = false
+services    = false
+taskmgr     = false
+nearby      = false
 # MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
 # systemui, the mesh stack and the radios before it starts, and restores them
 # when it exits. The app calls nothing itself. See docs/15_SpeedDemon.md.
-magidos     = true
+magidos     = false
 
+milkbar     = false
+meshdiag    = false
 [flash]
 display/st7789    = 1
 touch/gt911       = 1

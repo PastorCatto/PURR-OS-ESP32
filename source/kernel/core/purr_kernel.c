@@ -840,7 +840,14 @@ static int cmp_reg_priority(const void *a, const void *b)
 // someone opened an app in the first moment after boot; 500ms still gives the
 // UI a clear head start. If that race ever returns, this is the first place to
 // look, and raising it is a one-line change.
+// Overridable per device via device.pcat's [device] boot_settle_ms — purrstrap
+// passes it through to a -D on the main component. The right value depends on
+// what a build actually contains: a minimal image with no Nearby/MSN/mesh has
+// nothing racing the UI at P3, so it can drop to ~50ms, while a full image
+// wants the head start. A single global constant cannot express that.
+#ifndef BOOT_SETTLE_MS
 #define BOOT_SETTLE_MS 500UL
+#endif
 
 // Defined further down, next to the state it writes. See its own comment for
 // why the kernel loads these rather than the settings app.

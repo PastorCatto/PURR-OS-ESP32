@@ -106,6 +106,12 @@ set(TAB5_REQUIRES "")
 # kernel_tdp_boot.c when this work resumes.
 set(USB_MSC_REQUIRES "")
 
+# Per-device boot settle, from device.pcat [device] boot_settle_ms (see
+# purr_kernel.c's BOOT_SETTLE_MS). Environment rather than a CMake variable for
+# the same reason as PURR_DRIVER_REQUIRES above — component CMakeLists are
+# evaluated in an isolated scope. Absent means the kernel's own default.
+set(PURR_BOOT_SETTLE_ENV $ENV{PURR_BOOT_SETTLE_MS})
+
 idf_component_register(
     SRCS
         ${BOOT_SRCS}
@@ -143,3 +149,8 @@ idf_component_register(
         ${USB_MSC_REQUIRES}
         ${TAB5_REQUIRES}
 )
+
+if(PURR_BOOT_SETTLE_ENV)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE BOOT_SETTLE_MS=${PURR_BOOT_SETTLE_ENV}UL)
+    message(STATUS "PURR: boot settle ${PURR_BOOT_SETTLE_ENV} ms (from device.pcat)")
+endif()
