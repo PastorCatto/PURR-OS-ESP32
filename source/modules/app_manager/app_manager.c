@@ -466,6 +466,12 @@ static int launch_meow(app_entry_t *app, int idx)
 // True hot-loading from SD blobs requires position-independent compilation and
 // an ELF relocator — tracked as future work.
 
+// Trampoline for purr_kernel_run_bounded() — see its call site in native_task
+// for why entering speed demon may not happen on that task's PSRAM stack.
+static void speed_demon_enter_trampoline(void *arg) {
+    purr_speed_demon_enter((const char *)arg);
+}
+
 static void native_task(void *arg) {
     app_task_ctx_t *ctx = (app_task_ctx_t *)arg;
     ESP_LOGI(TAG, "native app task start: %s (core=%d prio=%u)",
@@ -473,12 +479,33 @@ static void native_task(void *arg) {
 
     // Speed demon, if this app declared it (purr_module_header_t::speed_demon).
     //
-    // Entered HERE and not from the app: init() must never do it, because
-    // init() can run on the UI render task and entering unloads the UI backend
-    // — deleting the very task making the call. native_task is a dedicated
-    // task, so it is the correct place, and doing it centrally means an app
-    // cannot forget the matching exit.
-    if (ctx->app->speed_demon) purr_speed_demon_enter(ctx->app->name);
+    // Run on purr_kernel_run_bounded()'s helper task, NOT inline here. This
+    // task's stack is PSRAM (xTaskCreatePinnedToCoreWithCaps with
+    // MALLOC_CAP_SPIRAM, below), and entering unloads a dozen modules whose
+    // deinit() paths write NVS. Writing NVS disables the flash cache, and a
+    // PSRAM stack is unreachable while it is disabled — so doing it inline
+    // faulted on this task's own stack:
+    //
+    //   assert failed: esp_task_stack_is_sane_cache_disabled()
+    //   (cache_utils.c:152), stack at 0x3c21xxxx — PSRAM
+    //
+    // run_bounded's helper is deliberately INTERNAL-stack for exactly this
+    // reason (see its own comment), which makes it the right vehicle rather
+    // than a workaround. Giving native_task an internal stack instead is not an
+    // option: a CLAW app asks for 16384 bytes and the largest free internal
+    // block at launch time is ~15872.
+    //
+    // It still must not be the app's own init(): init() can run on the UI
+    // render task, and entering unloads the UI backend — deleting the very
+    // task making the call. Doing it centrally is also what stops an app from
+    // forgetting the matching exit.
+    //
+    // 30s ceiling: entering nests its own 3s-per-module bounded unloads across
+    // ~12 modules, so the outer bound has to clear the sum comfortably.
+    if (ctx->app->speed_demon) {
+        purr_kernel_run_bounded("speed_demon_enter", speed_demon_enter_trampoline,
+                                (void *)ctx->app->name, 30000);
+    }
 
     int rc = ctx->mod->init();
     ESP_LOGI(TAG, "native app task init() returned: %s rc=%d window=%u",
