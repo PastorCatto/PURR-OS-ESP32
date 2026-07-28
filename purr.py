@@ -57,8 +57,8 @@ TOOLS = {
     },
 }
 
-PURROS_VERSION = "0.12.0"
-KITT_VERSION   = "0.9.0"
+PURROS_VERSION = "1.0.0-DP8"
+KITT_VERSION   = "1.0.0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
