@@ -18,9 +18,11 @@ idf_component_register(
         ../../../kernel/core
         ../../../kernel/catcalls
         ../../../modules/speed_demon
-        # app_manager — for app_manager_notify_exited(), so the launcher stops
-        # believing MagiDOS is still running once its task ends. Without it the
-        # second launch silently does nothing.
-        ../../../modules/app_manager
-    REQUIRES esp_common driver freertos speed_demon app_manager
+    # app_manager — PRIVATE, for app_manager_notify_exited(): the launcher must
+    # stop believing MagiDOS is running once its task ends, or the second launch
+    # silently does nothing. Private for the same command-line-length reason as
+    # app_manager's own speed_demon dependency.
+    PRIV_INCLUDE_DIRS ../../../modules/app_manager
+    REQUIRES esp_common driver freertos speed_demon
+    PRIV_REQUIRES app_manager
 )

@@ -335,7 +335,9 @@ static void mesh_task(void *arg)
         }
 
 #ifdef CONFIG_ESP_TASK_WDT_EN
+#ifdef CONFIG_ESP_TASK_WDT_EN
         esp_task_wdt_reset();
+#endif
 #endif
 
         // Interrupt-driven wake instead of a flat vTaskDelay(10) — the
@@ -653,7 +655,9 @@ void mesh_manager_deinit(void)
     // and rebooted. Harmless if the task was never subscribed - delete just
     // returns ESP_ERR_NOT_FOUND.
     if (s_task) {
+        #ifdef CONFIG_ESP_TASK_WDT_EN
         esp_task_wdt_delete(s_task);
+        #endif
         if (s_task_uses_psram_stack) vTaskDeleteWithCaps(s_task);
         else                         vTaskDelete(s_task);
         s_task = NULL;

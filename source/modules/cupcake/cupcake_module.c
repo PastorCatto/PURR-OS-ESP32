@@ -62,7 +62,9 @@ static void cupcake_task(void *arg)
     // this gets a real backtrace of whatever it's actually stuck in
     // (lv_timer_handler, a widget callback, the shared-SPI-bus display
     // driver itself) instead of just the breadcrumb string.
+#ifdef CONFIG_ESP_TASK_WDT_EN
     esp_task_wdt_add(NULL);
+#endif
 
     uint32_t tick = 0;
     while (1) {
@@ -89,7 +91,9 @@ static void cupcake_task(void *arg)
         purr_kernel_ui_breadcrumb("idle");
         purr_kernel_ui_unlock();
         purr_kernel_ui_heartbeat();
+#ifdef CONFIG_ESP_TASK_WDT_EN
         esp_task_wdt_reset();
+#endif
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -149,7 +153,9 @@ void cupcake_deinit(void)
     cupcake_hal_wait_flush_idle();
 
     if (s_task) {
+        #ifdef CONFIG_ESP_TASK_WDT_EN
         esp_task_wdt_delete(s_task);
+        #endif
         vTaskDelete(s_task);
         s_task = NULL;
     }

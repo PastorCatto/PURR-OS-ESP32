@@ -51,7 +51,9 @@ static void tabby_task(void *arg)
     // boot/module-init sequences, so tasks opt in individually. This is the
     // task every UI hang ultimately surfaces as, and subscribing gets a real
     // backtrace of whatever it is stuck in instead of only a breadcrumb.
+#ifdef CONFIG_ESP_TASK_WDT_EN
     esp_task_wdt_add(NULL);
+#endif
 
     uint32_t tick = 0;
     while (1) {
@@ -75,7 +77,9 @@ static void tabby_task(void *arg)
         purr_kernel_ui_breadcrumb("idle");
         purr_kernel_ui_unlock();
         purr_kernel_ui_heartbeat();
+#ifdef CONFIG_ESP_TASK_WDT_EN
         esp_task_wdt_reset();
+#endif
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
@@ -117,7 +121,9 @@ void tabby_deinit(void)
     // CONFIG_ESP_TASK_WDT_TIMEOUT_S. Only reachable now that speed demon unloads
     // UI backends at runtime. Harmless if never subscribed.
     if (s_task) {
+        #ifdef CONFIG_ESP_TASK_WDT_EN
         esp_task_wdt_delete(s_task);
+        #endif
         vTaskDelete(s_task);
         s_task = NULL;
     }

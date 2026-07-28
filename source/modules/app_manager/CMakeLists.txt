@@ -6,8 +6,17 @@ idf_component_register(
         .
         ../../kernel/core
         ../../kernel/catcalls
-        # speed_demon — app_manager enters and exits it for any app declaring
-        # .speed_demon = 1, so the app never calls it itself.
-        ../speed_demon
-    REQUIRES esp_common driver freertos nvs_flash speed_demon
+    # speed_demon — PRIVATE. app_manager enters and exits it for any app
+    # declaring .speed_demon = 1, but speed_demon.h is included only by
+    # app_manager.c, never by app_manager.h.
+    #
+    # PRIV_ rather than public, and that matters on Windows: a public REQUIRES
+    # propagates the dependency's include paths to EVERY component that depends
+    # on app_manager, and app_manager is depended on widely. Making it public
+    # pushed the compile command line to ~32.4KB, past Windows' 32,768-byte
+    # CreateProcess limit, and the build died with "ninja: fatal: CreateProcess:
+    # The parameter is incorrect" on a target that had built all day.
+    PRIV_INCLUDE_DIRS ../speed_demon
+    REQUIRES esp_common driver freertos nvs_flash
+    PRIV_REQUIRES speed_demon
 )
