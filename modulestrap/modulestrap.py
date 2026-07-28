@@ -490,6 +490,260 @@ def cmd_clean(args):
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+
+# ── Per-device module toggling ───────────────────────────────────────────────
+#
+# device.pcat is the single source of truth for what a device contains (see
+# select_components), so toggling a module means editing that file — not a
+# parallel list somewhere else, which is the mistake that let tab5's UI backend
+# and the component exclusion list disagree for a week.
+#
+# Edits are line-based rather than parse-and-rewrite. A .pcat carries a lot of
+# hard-won commentary — why a device is on one radio driver and not another,
+# what broke last time someone changed it — and a naive round-trip through
+# parse_pcat() would silently delete every word of it.
+
+DEVICES_DIR = os.path.join(SOURCE_DIR, "devices")
+
+# Refused: purrstrap's generated glue registers these for every device whether
+# or not device.pcat mentions them, so "disabling" one only breaks the link with
+# an undefined reference to purr_module_<name>.
+UNTOGGLEABLE = {"app_manager", "driver_manager"}
+
+# Auto-added by purrstrap's apply_radio_componion_defaults() to any device with
+# [radio] wifi = true, via cfg.setdefault(). Commenting the line out therefore
+# does NOT disable them — setdefault sees the key as absent and puts it straight
+# back, so the command appeared to succeed and changed nothing.
+#
+# setdefault does respect a key that IS present, and purrstrap's glue skips
+# empty values (`if raw_key.startswith("modules.") and raw_val`), so an explicit
+# empty assignment is what actually suppresses one.
+RADIO_COMPANIONS = {"proximity", "pairing", "proximity_rpc",
+                    "app_manager_remote", "homebase", "msn_relay"}
+
+
+def _device_pcat(device):
+    p = os.path.join(DEVICES_DIR, device, "device.pcat")
+    if not os.path.isfile(p):
+        die(f"no such device: {device} (expected {os.path.relpath(p, REPO_DIR)})")
+    return p
+
+
+def _read_lines(path):
+    return io.open(path, encoding="utf-8").read().splitlines()
+
+
+def _write_lines(path, lines):
+    io.open(path, "w", encoding="utf-8", newline="").write("\n".join(lines) + "\n")
+
+
+def _section_bounds(lines, name):
+    """(start, end) line indices of [name]'s body, or (None, None)."""
+    start = None
+    for i, line in enumerate(lines):
+        st = line.strip()
+        if st.startswith("[") and st.endswith("]"):
+            if st[1:-1].strip() == name:
+                start = i + 1
+            elif start is not None:
+                return start, i
+    return (start, len(lines)) if start is not None else (None, None)
+
+
+def _resolve_device_cfg(device):
+    """device.pcat as purrstrap will actually see it.
+
+    Goes through purrstrap.resolve_device() rather than parse_pcat() directly,
+    because purrstrap applies apply_radio_companion_defaults() — silently adding
+    proximity/pairing/msn_relay/homebase/app_manager_remote to any device with
+    [radio] wifi = true. Reading the raw file under-reports what really builds
+    (heltec: 13 vs the true 17), and a count that disagrees with the build is
+    worse than no count at all.
+
+    Falls back to the raw parse if purrstrap is not importable, so this command
+    still works in a bare checkout.
+    """
+    path = _device_pcat(device)
+    try:
+        purrstrap_dir = os.path.join(REPO_DIR, "purrstrap")
+        if purrstrap_dir not in sys.path:
+            sys.path.insert(0, purrstrap_dir)
+        import purrstrap
+        cfg, _ = purrstrap.resolve_device(device)
+        return cfg, path
+    except Exception:
+        return parse_pcat(path), path
+
+
+def cmd_modules(args):
+    """Show every module/app this device has on, and what is available but off."""
+    device = args.device
+    cfg, _path = _resolve_device_cfg(device)
+    targets = find_modules()
+    index = _component_index(targets)
+
+    on_modules, on_apps = {}, []
+    for k, v in sorted(cfg.items()):
+        if k.startswith("modules.") and k != "modules.radio_companion" and v:
+            on_modules[k.split(".", 1)[1]] = v
+        elif k.startswith("apps.") and v.lower() in ("true", "1", "yes"):
+            on_apps.append(k.split(".", 1)[1])
+
+    selected, _dirs = select_components(cfg, targets)
+
+    print(f"\n{C_BOLD}{device}{C_RST}  —  {len(selected)} component(s) compiled "
+          f"of {len(index)} discoverable\n")
+
+    print(f"{C_BOLD}[modules] on{C_RST}")
+    for role, mod in on_modules.items():
+        mark = "" if mod in selected else f"  {C_YLW}(not compiled!){C_RST}"
+        print(f"  {role:<16} = {mod}{mark}")
+
+    if on_apps:
+        print(f"\n{C_BOLD}[apps] on{C_RST}")
+        print("  " + "  ".join(sorted(on_apps)))
+
+    off = sorted(set(index) - set(selected))
+    if off:
+        print(f"\n{C_BOLD}available but off{C_RST}")
+        for i in range(0, len(off), 5):
+            print("  " + "  ".join(f"{n:<20}" for n in off[i:i + 5]).rstrip())
+    print()
+
+
+def _set_app(lines, name, on):
+    """Flip an [apps] entry, adding it if absent. Returns (lines, what_happened)."""
+    start, end = _section_bounds(lines, "apps")
+    val = "true" if on else "false"
+    if start is None:
+        lines = lines + ["", "[apps]", f"{name:<12}= {val}"]
+        return lines, "added [apps] section"
+    for i in range(start, end):
+        st = lines[i].strip()
+        if st.startswith("#") or "=" not in st:
+            continue
+        if st.split("=", 1)[0].strip() == name:
+            lines[i] = f"{name:<12}= {val}"
+            return lines, f"set apps.{name} = {val}"
+    lines.insert(end, f"{name:<12}= {val}")
+    return lines, f"added apps.{name} = {val}"
+
+
+def _set_module(lines, name, on):
+    """Enable/disable a [modules] entry. Returns (lines, what_happened)."""
+    start, end = _section_bounds(lines, "modules")
+    if start is None:
+        if not on:
+            return lines, "nothing to do (no [modules] section)"
+        return lines + ["", "[modules]", f'{name:<12}= "{name}"'], "added [modules] section"
+
+    for i in range(start, end):
+        st = lines[i].strip()
+        if "=" not in st:
+            continue
+        commented = st.startswith("#")
+        body = st.lstrip("#").strip()
+        key, _, val = body.partition("=")
+        val = val.split("#", 1)[0]          # inline comment is not the value
+        key, val = key.strip(), val.strip().strip('"')
+        if val != name and key != name:
+            continue
+        if on and commented:
+            lines[i] = body                      # uncomment, keep the role key
+            return lines, f"re-enabled {key} = {val}"
+        if on and not commented:
+            if not val:
+                # An explicitly-emptied companion (see RADIO_COMPANIONS). The key
+                # is present, so the old check called this "already on" and did
+                # nothing — the one state disable() actually produces was the one
+                # enable() could not undo.
+                lines[i] = f'{key:<12}= "{name}"'
+                return lines, f're-enabled {key} = "{name}"'
+            return lines, f"already on ({key} = {val})"
+        if not on and not commented:
+            if name in RADIO_COMPANIONS:
+                # No trailing comment: parse_pcat() does not strip inline
+                # comments, so anything after the value becomes PART of it and
+                # would reach purrstrap's glue as a module name to link.
+                lines[i] = f'{key:<12}= ""'
+                return lines, f'disabled {key} (explicit empty — see RADIO_COMPANIONS)'
+            # Comment out rather than delete: the line records WHICH ROLE this
+            # module filled, which is not recoverable from the module name alone.
+            lines[i] = "# " + lines[i].lstrip()
+            return lines, f"disabled {key} = {val}"
+        return lines, f"already off ({key} = {val})"
+
+    if on:
+        lines.insert(end, f'{name:<12}= "{name}"')
+        return lines, f'added {name} = "{name}"'
+    if name in RADIO_COMPANIONS:
+        # Not written in the file, but purrstrap will add it. An explicit empty
+        # value is the only thing that stops that.
+        lines.insert(end, f'{name:<12}= ""')
+        return lines, f"disabled {name} (was auto-added by radio companions)"
+    return lines, "not present, nothing to disable"
+
+
+def _toggle(args, on):
+    device, name = args.device, args.name
+    if name in UNTOGGLEABLE:
+        die(f"'{name}' is registered for every device by purrstrap's generated "
+            f"glue — turning it off only breaks the link. Refusing.")
+
+    path  = _device_pcat(device)
+    lines = _read_lines(path)
+
+    targets = find_modules()
+    index   = _component_index(targets)
+    before, _ = select_components(_resolve_device_cfg(device)[0], targets)
+    is_app  = os.path.isdir(os.path.join(SOURCE_DIR, "apps", "system", name)) or \
+              os.path.isdir(os.path.join(SOURCE_DIR, "apps", "exclusive", name))
+
+    if on and name not in index:
+        die(f"unknown component '{name}' — run `modulestrap list` to see what exists")
+
+    lines, what = (_set_app(lines, name, on) if is_app
+                   else _set_module(lines, name, on))
+    _write_lines(path, lines)
+    info(f"{device}: {what}")
+
+    # Report the DELTA, not just a total. Turning a module off does not always
+    # shrink the build: another component may REQUIRE it, in which case it still
+    # compiles and only stops being REGISTERED. Saying "17 components" both
+    # before and after, with no explanation, reads like the command did nothing.
+    cfg, _ = _resolve_device_cfg(device)
+    after, _d = select_components(cfg, targets)
+
+    if len(after) == len(before):
+        info(f"{len(after)} component(s) compile for {device} (unchanged)")
+    else:
+        arrow = "->" if len(after) < len(before) else "->"
+        info(f"components for {device}: {len(before)} {arrow} {len(after)}")
+
+    if not on and name in after:
+        holders = [c for c in after
+                   if c != name and name in _component_requires(index.get(c, ""))]
+        if holders:
+            who = ", ".join(sorted(holders)[:3])
+            warn(f"'{name}' still COMPILES — {who} REQUIRES it. It is no longer "
+                 f"registered at boot, which is what disabling controls; removing "
+                 f"the code too means dropping whatever still needs it.")
+        else:
+            warn(f"'{name}' is still selected and nothing REQUIRES it — most "
+                 f"likely purrstrap re-added it. Check [radio] wifi and "
+                 f"modules.radio_companion in this device.pcat.")
+
+    info("run `purrstrap build " + device + "` to apply")
+
+
+def cmd_enable(args):
+    _toggle(args, True)
+
+
+def cmd_disable(args):
+    _toggle(args, False)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="modulestrap",
                                      description="PURR OS kernel module compiler")
@@ -507,8 +761,21 @@ def main():
     p_list.add_argument("--drivers", nargs="+", metavar="DIR",
                         help="extra driver directories to include")
 
+    p_mods = sub.add_parser("modules",
+                            help="Show which modules/apps a device has on, and what is available")
+    p_mods.add_argument("device", help="device name (source/devices/<name>/)")
+
+    p_en = sub.add_parser("enable", help="Turn a module or app on for a device")
+    p_en.add_argument("name", help="module or app name")
+    p_en.add_argument("device", help="device name")
+
+    p_dis = sub.add_parser("disable", help="Turn a module or app off for a device")
+    p_dis.add_argument("name", help="module or app name")
+    p_dis.add_argument("device", help="device name")
+
     args = parser.parse_args()
-    dispatch = {"build": cmd_build, "clean": cmd_clean, "list": cmd_list}
+    dispatch = {"build": cmd_build, "clean": cmd_clean, "list": cmd_list,
+                "modules": cmd_modules, "enable": cmd_enable, "disable": cmd_disable}
     if args.cmd not in dispatch:
         parser.print_help()
         sys.exit(0)
