@@ -38,8 +38,11 @@ All catcalls must be confirmed working on every supported device before 1.0.
 - [ ] GPS — NMEA fix acquired and surfaced through `catcall_gps_t`
 - [x] SD card — mount, read, write confirmed
 - [–] ~~Cardstack — responds to touch/trackball/keyboard correctly, hosts app windows cleanly~~
-  → `tdeck_plus` no longer selects Cardstack. It ships **Mochi** (dp8); Cupcake and Tabby
-  are the other supported choices. Cardstack remains a backend but is not this device's.
+  → `tdeck_plus` no longer selects Cardstack. It ships **Cupcake** with the Android
+  systemui style as of the dp8 performance pass (it shipped Mochi earlier in dp8);
+  Mochi and Tabby are the other supported choices, and both now share one display
+  path (`modules/common/purr_lv_flush.h`). Cardstack remains a backend but is not
+  this device's.
 
 ### T-Deck Plus IDF-kernel migration gate (must pass before `kernel_tdeck_plus_arduino` is archived)
 
@@ -345,7 +348,11 @@ was re-verified against the tree.
 | BBQ20 keyboard in test kernel | **Resolved** — confirmed on hardware | done |
 | Serial console timeout on non-Arduino kernels | Open | 1.0 |
 | `purrstrap clean` cleans nothing (wrong path) | Open — documented, not yet fixed | 1.0 |
-| `catcall_ui_t` has changed every DP cycle (now v7) | Open — the contract must be frozen before 1.0 | 1.0 |
+| `catcall_ui_t` has changed every DP cycle (now **v8** — dp8 added the menu primitive) | Open — the contract must be frozen before 1.0 | 1.0 |
+| `catcall_display_t` moved v1 → **v3** in dp8 (async push, then a `stride` parameter) | Open — same freeze applies; both additions are optional members with NULL fallback, so no driver was forced to change | 1.0 |
+| Screen tearing on `tdeck_plus` | **Won't fix — hardware.** No TE pin is broken out (verified against LilyGo's own `utilities.h`), and pushing 40% fewer pixels was measured to change nothing. Recorded as a requirement for the next board | — |
+| Crash-guard strikes could permanently brick boot | **Resolved** in dp8 — strikes now clear when the firmware's ELF hash changes. Previously five crashes during development halted boot until someone knew to erase NVS at `0x9000` | done |
+| Temporary render/memory instrumentation compiled into releases | Open — `[perf]`, `[frames]`, `[mem]` log lines still ship in dp8 | 1.0 |
 | KittenUI is selected by no device, so is untested | Open — give it a target or retire it | 1.0 |
 | Portable list icons blocked on `CONFIG_PURR_UI_LVGL` | Open — tracked as a separate change | 1.0 |
 | 16 legacy-schema `module.pcat` files | Open — tracked as a separate change | 1.0 |
