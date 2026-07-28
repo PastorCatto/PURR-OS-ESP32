@@ -98,6 +98,15 @@ idf_component_register(
         spiffs
         fatfs
         sdmmc
+        # esp_app_format — for esp_app_get_description() in purr_crash_guard.c,
+        # which keys the strike counter on the running firmware's ELF hash so a
+        # reflash starts clean.
+        #
+        # Explicit, not inherited: tdeck_plus happened to pull this in
+        # transitively and built fine, while tdeck has a leaner component set and
+        # failed with "esp_app_desc.h: No such file or directory" — a difference
+        # only a multi-device bake surfaces.
+        esp_app_format
         ${DRIVER_REQUIRES}
         ${EXTRA_REQUIRES}
         ${USB_MSC_REQUIRES}
