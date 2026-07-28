@@ -30,6 +30,33 @@ import sys
 
 os.system("")
 
+# Force UTF-8 on our own stdout/stderr.
+#
+# These tools print box-drawing characters (the U+2500 divider) and en/em
+# dashes. On Windows, a Python subprocess with no PYTHONIOENCODING gets the
+# ANSI codepage — cp1252 here — and the FIRST divider raises
+#
+#   UnicodeEncodeError: 'charmap' codec can't encode characters ...
+#
+# which kills the tool. purrstrap invokes catstrap as a subprocess, so it died
+# there mid-build and reported "catstrap exited with errors — some apps may be
+# missing": the SPIFFS image was then built without them, and the failure was a
+# traceback about a print statement rather than anything to do with apps.
+#
+# Setting PYTHONIOENCODING in the shell hides this, which is exactly why it went
+# unnoticed — every invocation during development had it set. Fixing it here
+# means the tools work in a plain terminal, from any shell, with no environment
+# setup.
+#
+# errors="replace" rather than "strict": a decorative character is never worth
+# aborting a build over.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass   # not a real stream (redirected/captured) — nothing to do
+
+
 C_RST  = "\033[0m"
 C_BOLD = "\033[1m"
 C_GRY  = "\033[90m"
