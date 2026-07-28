@@ -73,7 +73,7 @@ lora        = ""
 # The lesson worth keeping: a boot loop after a config change is not evidence
 # that the config change caused it. Check crash_guard strikes first, and
 # confirm by reverting.
-systemui_style = "android"
+systemui_style = "ios"
 
 [modules]
 # ui — back to Cupcake. The MiniWin WinCE desktop was selected here for the
@@ -90,7 +90,7 @@ systemui_style = "android"
 # modules/common/purr_lv_flush.h — off-screen compose, async flush + double
 # buffering, and shadow suppression tied to the UI-effects toggle. It was
 # factored out precisely because it had landed in Mochi only.
-ui          = "cupcake"
+ui          = "mochi"
 # systemui — the status bar, drag-down panels, Back/Home/Recents nav bar,
 # Recents carousel and lock screen, split out of Cupcake into their own
 # module (source/modules/systemui/). Cupcake hosts it; this entry is what
