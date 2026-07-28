@@ -1,6 +1,17 @@
 # PURR OS — In-House Exclusives
 
-The in-house exclusives are PURR OS's two flagship `.claw` apps: **MagicMac** and **MagiDOS**. Both are full computer emulators that run inside PURR OS on ESP32-S3 hardware. They live at `source/apps/exclusive/` and are built with `catstrap build magicmac` / `catstrap build magidos`.
+The in-house exclusives are PURR OS's two flagship `.claw` apps: **MagicMac** and **MagiDOS**. Both are full computer emulators that run inside PURR OS on ESP32-S3 hardware, and both live at `source/apps/exclusive/`.
+
+> **Build status, as of DP8 — they are not equals.**
+>
+> | | In the firmware? | Why |
+> |---|---|---|
+> | **MagiDOS** | **Yes** | Has an `app.pcat`, so `modulestrap`'s exclusive scan picks it up and it links in as a pre-linked `.claw`. Runs under [Speed Demon](15_SpeedDemon.md). |
+> | **MagicMac** | **No** | Has no `app.pcat`. `modulestrap` only scans directories containing one, so it is never registered as a component and never enters a build — confirmed absent from `components_manifest.cmake`. |
+>
+> The sections below describe both designs as intended. Treat MagicMac's as a
+> design document rather than a description of shipping behaviour until it gains
+> an `app.pcat` and is verified on hardware.
 
 ---
 

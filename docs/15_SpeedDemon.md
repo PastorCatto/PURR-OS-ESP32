@@ -11,7 +11,7 @@ exits.
 It exists because a T-Deck Plus running the full OS has roughly **31 KB of
 internal DRAM free**, and an emulator or a game needs framebuffers, and headroom
 that simply is not there while a launcher, an LVGL backend, a mesh stack and two
-radios are resident. Speed Demon reclaims about **12.8 KB of internal DRAM** and,
+radios are resident. Speed Demon reclaims **12.8-15.7 KB of internal DRAM** and,
 just as importantly, gives the app uncontended use of the SPI bus and the CPU.
 
 ---
@@ -35,6 +35,28 @@ PURR_MODULE_REGISTER(mygame) = {
 ```
 
 `0` or omitted means a normal app that runs alongside everything else.
+
+### Which apps can use it
+
+**Pre-linked native apps only** — `.claw` apps compiled into the firmware with a
+`PURR_MODULE_REGISTER` block.
+
+**Lua apps (`.meow`, `.paws`, `.kitten`) cannot**, and this is structural rather
+than a missing feature:
+
+- The flag is read from `purr_module_header_t`, and an app scanned off the
+  filesystem has no module header to read it from. There is no manifest field
+  and no Lua binding.
+- More fundamentally, **Speed Demon unloads `lua_runtime`.** It is
+  `PURR_MOD_SYSTEM`, so `is_kept()` does not spare it — you can watch it go by in
+  the unload list above. A Lua app entering Speed Demon would destroy the
+  interpreter that is executing it, mid-statement.
+
+Exempting `lua_runtime` would not fix this either: an interpreter, its VM state
+and the script's own allocations are a large part of what Speed Demon exists to
+reclaim, so an app that needs the machine badly enough to ask for it is the last
+thing that should be running under one. If a Lua app needs this much headroom,
+the answer is to port the hot part to a `.claw`.
 
 `app_manager` reads the flag and owns both halves of the lifecycle:
 
@@ -138,13 +160,13 @@ a ~90% failure rate entering Speed Demon before it was fixed.
 
 ## Known state (DP8)
 
-Verified on hardware: **three consecutive round trips**, entering and exiting
-cleanly each time.
+Verified on hardware: **four consecutive round trips**, entering and exiting
+cleanly each time, with memory flat across all four.
 
 | | value |
 |---|---|
-| internal DRAM reclaimed on entry | ~12.8 KB |
-| drift per round trip | ~470 bytes |
+| internal DRAM reclaimed on entry | 12.8-15.7 KB |
+| drift per round trip | ~440 bytes |
 | beat interval / miss tolerance | 5 s / 2 beats |
 | per-module unload ceiling | 3 s |
 
@@ -164,3 +186,9 @@ backtrace rather than by reading code, and each looked like something else first
   run, which is what gave it away — it was the task doing the unloading.
 - `mesh_persist_task` was deleted mid-SD-write, corrupting newlib's per-task
   reentrancy state. It now stops on a flag and deletes itself at a safe point.
+- Making the flag declarative moved entry onto `native_task`, whose stack for a
+  CLAW app is **PSRAM**. Unloading writes NVS, which disables the flash cache
+  and makes a PSRAM stack unreachable, so it faulted on its own stack every
+  launch. The check that matters when relocating work is not "is this the UI
+  task?" but **"can this task reach flash?"** — the same root cause had already
+  appeared twice that day, in the health watchdog and in meshtastic.

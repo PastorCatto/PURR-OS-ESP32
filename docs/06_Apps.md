@@ -341,6 +341,28 @@ purr_module_header_t purr_module = {
 
 `.claw` apps have the same structure as `.paws` but add full `purr_kernel_*` access: catcall accessors, system info, reboot, and SD availability checks.
 
+### Speed Demon — taking the whole machine
+
+A pre-linked `.claw` can ask for the device to itself: the launcher, system UI,
+mesh stack and radios are unloaded before it starts and restored when it exits,
+freeing 12.8-15.7 KB of internal DRAM and the SPI bus. It is one line in the
+app's module registration:
+
+```c
+PURR_MODULE_REGISTER(mygame) = {
+    ...
+    .speed_demon = 1,
+};
+```
+
+`app_manager` drives both halves; the app calls neither enter nor exit. It does
+have to beat `purr_speed_demon_heartbeat()` every 5 s and call
+`app_manager_notify_exited("mygame")` before its task ends.
+
+**Pre-linked `.claw` only.** Lua tiers cannot use this — the flag is read from
+the module header they do not have, and Speed Demon unloads `lua_runtime`
+itself. See [15_SpeedDemon.md](15_SpeedDemon.md) for the full contract.
+
 ```c
 #include "purr_win.h"
 #include "purr_kernel.h"    // adds purr_kernel_display(), free_ram(), etc.
