@@ -157,6 +157,33 @@ About page reported a version no baked artifact matched.
 
 ---
 
+## Build
+
+**Meshtastic is no longer force-compiled into every device.** Only
+`meshtastic_module.c` stays unconditional, and deliberately: it carries the
+`#else` branch that provides linkable no-op symbols for meshdiag, milkbar, msn,
+meshcore, `sx1262_rl` and both T-Deck boots, so removing it would break those at
+link rather than disable a feature. The bulk — radio, router, BLE companion,
+vendored nanopb and the entire Meshtastic protobuf set — is now gated on
+`CONFIG_PURR_FEATURE_MESHTASTIC`, the same shape the UI backends already use.
+
+**Task-watchdog calls are guarded consistently.** `esp_task_wdt_*` is not
+linkable on a target that hasn't enabled `CONFIG_ESP_TASK_WDT_EN`, which is opted
+into per-device. One unguarded call slipped in during this cycle and broke the
+Heltec build; all `add`/`reset`/`delete` pairs across the four affected modules
+are now symmetric.
+
+**Windows: long compiler command lines now go through response files.**
+`CreateProcess` caps a command line at 32,768 bytes, and the final ELF target is
+compiled with every component's public include directories. The project had
+quietly reached ~32.4 KB — close enough that renaming one module directory from
+`game_mode` to `speed_demon`, **+2 characters per occurrence**, pushed it over.
+It failed with `ninja: fatal: CreateProcess: The parameter is incorrect.`, which
+names neither the limit nor the file. Fixed with
+`CMAKE_NINJA_FORCE_RESPONSE_FILE`.
+
+---
+
 ## Instrumentation
 
 Worth calling out, because it changed conclusions rather than just adding logs.

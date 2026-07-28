@@ -82,6 +82,21 @@
   panicked ~4s into every Speed Demon session.
 - Bounded module unloads; NVS settings load before the UI is built.
 
+**Build**
+- **Meshtastic is no longer force-compiled into every device.** Only
+  `meshtastic_module.c` stays unconditional — it carries the `#else` branch giving
+  linkable no-op symbols to meshdiag, milkbar, msn, meshcore, `sx1262_rl` and both
+  T-Deck boots, so removing it would break those at link rather than disable a feature.
+  The radio, router, BLE companion, vendored nanopb and the whole protobuf set are now
+  gated on `CONFIG_PURR_FEATURE_MESHTASTIC`.
+- Task-watchdog calls guarded consistently across meshtastic, cupcake, mochi and tabby.
+  `esp_task_wdt_*` is not linkable without `CONFIG_ESP_TASK_WDT_EN`; one unguarded call
+  added during this cycle broke the heltec build.
+- **Windows:** `CMAKE_NINJA_FORCE_RESPONSE_FILE`. The final ELF target compiles with
+  every component's public include dirs and had reached ~32.4KB against CreateProcess's
+  32,768-byte cap — renaming `game_mode` to `speed_demon` (+2 chars per occurrence)
+  pushed it over, failing with a message that names neither the limit nor the file.
+
 **Instrumentation** *(worth recording, because it changed conclusions rather than adding logs)*
 - The frame metric was wrong twice: first a censored sample that only logged slow frames,
   then one counting no-op loop iterations and overstating fps ~20x.
