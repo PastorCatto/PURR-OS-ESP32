@@ -642,10 +642,58 @@ static void ck_build_status_icons(uint16_t w)
     lv_obj_add_flag(s_icon_mail_badge, LV_OBJ_FLAG_HIDDEN);
 }
 
+// ── Idle redraw suppression ─────────────────────────────────────────────────
+//
+// purr_systemui_tick() runs every ~200ms and used to rewrite the whole status
+// row unconditionally. LVGL's style setters do not compare old against new —
+// they mark the object dirty and invalidate it regardless — so a device sitting
+// idle with unchanged WiFi, LoRa and battery still repainted the status bar five
+// times a second, and the notification and task boxes were destroyed and rebuilt
+// object-by-object just as often.
+//
+// Measured on hardware before this: lv_timer_handler() took 75-81ms on exactly
+// every 40th iteration — the tick cadence — on a launcher doing nothing. Roughly
+// a 37% duty cycle spent redrawing state that had not changed.
+//
+// Everything below therefore compares first and only touches LVGL on a real
+// change. The cheap scalar cases cache the value; the two list boxes hash their
+// contents, because "did this list change" has no single value to compare.
+static uint32_t hash_str(uint32_t h, const char *s)
+{
+    while (s && *s) { h ^= (uint8_t)(*s++); h *= 16777619u; }
+    return h;
+}
+
 static void ck_refresh_status_icons(void)
 {
-    lv_obj_set_style_text_color(s_icon_wifi, purr_kernel_wifi_connected() ? CK_ICON_ON : CK_ICON_OFF, 0);
-    lv_obj_set_style_text_color(s_icon_lora, purr_kernel_lora_available() ? CK_ICON_ON : CK_ICON_OFF, 0);
+    static bool     s_seen      = false;
+    static bool     s_last_wifi = false, s_last_lora = false;
+    static int      s_last_pct  = -999;
+    static int      s_last_mv   = -999;
+    static bool     s_last_badge = false;
+
+    bool wifi = purr_kernel_wifi_connected();
+    bool lora = purr_kernel_lora_available();
+    int  pct  = purr_kernel_battery_percent();
+    int  mv   = purr_kernel_battery_voltage_mv();
+    bool badge = purr_kernel_notify_count() > 0;
+
+    // Nothing moved — do not touch a single LVGL object.
+    if (s_seen && wifi == s_last_wifi && lora == s_last_lora &&
+        pct == s_last_pct && mv == s_last_mv && badge == s_last_badge) return;
+
+    bool wifi_changed  = !s_seen || wifi  != s_last_wifi;
+    bool lora_changed  = !s_seen || lora  != s_last_lora;
+    bool badge_changed = !s_seen || badge != s_last_badge;
+    bool batt_changed  = !s_seen || pct   != s_last_pct;
+    bool mv_changed    = !s_seen || mv    != s_last_mv;
+
+    s_seen = true;
+    s_last_wifi = wifi; s_last_lora = lora; s_last_pct = pct;
+    s_last_mv = mv;     s_last_badge = badge;
+
+    if (wifi_changed) lv_obj_set_style_text_color(s_icon_wifi, wifi ? CK_ICON_ON : CK_ICON_OFF, 0);
+    if (lora_changed) lv_obj_set_style_text_color(s_icon_lora, lora ? CK_ICON_ON : CK_ICON_OFF, 0);
 
     // Skip touching the badge while the whole status row is auto-hidden
     // (lp_hide_status(), in-app) — s_icon_wifi's own hidden state doubles as
@@ -654,12 +702,11 @@ static void ck_refresh_status_icons(void)
     // status()/lp_hide_status(). Without this guard, a real unread
     // notification would unconditionally re-show just the badge on the very
     // next tick even while everything else stayed correctly hidden.
-    if (!lv_obj_has_flag(s_icon_wifi, LV_OBJ_FLAG_HIDDEN)) {
-        if (purr_kernel_notify_count() > 0) lv_obj_clear_flag(s_icon_mail_badge, LV_OBJ_FLAG_HIDDEN);
-        else                                 lv_obj_add_flag(s_icon_mail_badge, LV_OBJ_FLAG_HIDDEN);
+    if (badge_changed && !lv_obj_has_flag(s_icon_wifi, LV_OBJ_FLAG_HIDDEN)) {
+        if (badge) lv_obj_clear_flag(s_icon_mail_badge, LV_OBJ_FLAG_HIDDEN);
+        else       lv_obj_add_flag(s_icon_mail_badge, LV_OBJ_FLAG_HIDDEN);
     }
 
-    int pct = purr_kernel_battery_percent();
     const char *sym;
     lv_color_t  color = lv_color_white();
     if (pct < 0)        { sym = LV_SYMBOL_BATTERY_FULL;  color = CK_ICON_OFF; }
@@ -668,20 +715,40 @@ static void ck_refresh_status_icons(void)
     else if (pct > 30)  sym = LV_SYMBOL_BATTERY_2;
     else if (pct > 10)  sym = LV_SYMBOL_BATTERY_1;
     else                { sym = LV_SYMBOL_BATTERY_EMPTY; color = lv_color_make(0xE0, 0x40, 0x40); }
-    lv_label_set_text(s_icon_battery, sym);
-    lv_obj_set_style_text_color(s_icon_battery, color, 0);
+    if (batt_changed) {
+        lv_label_set_text(s_icon_battery, sym);
+        lv_obj_set_style_text_color(s_icon_battery, color, 0);
+    }
 
-    int mv = purr_kernel_battery_voltage_mv();
-    char vbuf[16];
-    if (mv < 0) vbuf[0] = '\0';
-    else        snprintf(vbuf, sizeof(vbuf), "%d.%02dV", mv / 1000, (mv % 1000) / 10);
-    lv_label_set_text(s_batt_voltage_lbl, vbuf);
+    if (mv_changed) {
+        char vbuf[16];
+        if (mv < 0) vbuf[0] = '\0';
+        else        snprintf(vbuf, sizeof(vbuf), "%d.%02dV", mv / 1000, (mv % 1000) / 10);
+        lv_label_set_text(s_batt_voltage_lbl, vbuf);
+    }
 }
 
 static void ck_refresh_status_notif_box(void)
 {
-    lv_obj_clean(s_status_notif_box);
+    // Hash the list before touching anything. This function destroys every child
+    // and rebuilds them, which is far more expensive than a repaint, and it ran
+    // five times a second whether or not a notification had arrived.
+    static uint32_t s_last_sig = 0;
+    static bool     s_have_sig = false;
+
     int n = purr_kernel_notify_count();
+    uint32_t sig = 2166136261u ^ (uint32_t)n;
+    for (int i = 0; i < n; i++) {
+        purr_notification_t probe;
+        if (!purr_kernel_notify_at(i, &probe)) break;
+        sig = hash_str(sig, probe.title);
+        sig = hash_str(sig, probe.body);
+    }
+    if (s_have_sig && sig == s_last_sig) return;
+    s_last_sig = sig;
+    s_have_sig = true;
+
+    lv_obj_clean(s_status_notif_box);
     for (int i = 0; i < n; i++) {
         purr_notification_t note;
         if (!purr_kernel_notify_at(i, &note)) break;
@@ -759,8 +826,26 @@ static void ck_taskmgr_open_cb(lv_event_t *e)
 
 static void ck_refresh_status_taskmgr(void)
 {
-    lv_obj_clean(s_status_taskmgr_box);
+    // Same reasoning as the notification box: this builds six LVGL objects per
+    // running app (row, label, two buttons, two button labels) and did so every
+    // tick regardless of whether the running set had changed.
+    static uint32_t s_last_sig = 0;
+    static bool     s_have_sig = false;
+
     int n = app_manager_count();
+    uint32_t sig = 2166136261u;
+    for (int i = 0; i < n; i++) {
+        const app_entry_t *probe = app_manager_get(i);
+        if (!probe || probe->state != APP_STATE_RUNNING) continue;
+        sig = hash_str(sig, probe->name);
+        sig ^= (uint32_t)i * 16777619u;   // position matters: the Kill/Open
+                                          // callbacks capture the index
+    }
+    if (s_have_sig && sig == s_last_sig) return;
+    s_last_sig = sig;
+    s_have_sig = true;
+
+    lv_obj_clean(s_status_taskmgr_box);
     bool any = false;
     for (int i = 0; i < n; i++) {
         const app_entry_t *app = app_manager_get(i);

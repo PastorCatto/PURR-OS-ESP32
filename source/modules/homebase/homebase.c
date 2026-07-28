@@ -50,8 +50,15 @@ static void homebase_task(void *arg) {
             was_present = now_present;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+        // Interruptible sleep, not vTaskDelay: homebase_deinit() notifies to
+        // wake this immediately so an unload does not have to wait out a full
+        // poll interval. Normal operation is unchanged — with no notification
+        // this simply times out after POLL_MS.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(POLL_MS));
     }
+    // Clear BEFORE deleting: homebase_deinit() waits on this to know the task
+    // has actually gone.
+    s_task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -70,12 +77,35 @@ int homebase_init(void) {
 }
 
 void homebase_deinit(void) {
+    // Ask the task to stop, wake it, and WAIT for it to actually go.
+    //
+    // This used to set s_running = false and return immediately, on the
+    // reasoning that the task polls the flag and self-deletes so no handoff was
+    // needed. That is true in isolation and wrong under Speed Demon, which
+    // unloads and restores this module in quick succession:
+    //
+    //   deinit()  sets s_running = false and returns
+    //   ~350ms later, restore calls init(), which sets s_running = true again
+    //   the ORIGINAL task is still asleep in its 2000ms poll
+    //   it wakes, sees true, and loops forever — orphaned, never deleted
+    //
+    // Every round trip therefore stranded one 2560-byte stack plus its TCB.
+    // Measured at exactly 2908 bytes: unloading homebase freed 0 while
+    // restoring it cost 2908, the largest single asymmetry in the cycle.
+    //
+    // The notify makes this cheap rather than slow — the task wakes at once
+    // instead of waiting out a poll interval, so the wait below almost always
+    // returns on the first iteration. Bounded at ~2.5s (over POLL_MS) anyway,
+    // and giving up is safe: worst case is the old behaviour.
     s_running = false;
-    // homebase_task() polls s_running every POLL_MS itself and self-deletes
-    // — no semaphore handoff needed like the UI-app pattern elsewhere in
-    // this codebase, since nothing here owns widgets a caller could
-    // use-after-free; deinit() just stops driving fresh state.
-    s_task = NULL;
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+        for (int i = 0; i < 250 && s_task; i++) vTaskDelay(pdMS_TO_TICKS(10));
+        if (s_task) {
+            ESP_LOGW(TAG, "task did not exit — leaving it running");
+            s_task = NULL;
+        }
+    }
 }
 
 // ── Module header ─────────────────────────────────────────────────────────
