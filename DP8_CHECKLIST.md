@@ -4,36 +4,38 @@
 >
 > **DP8 does not ship until this document is complete and fully satisfied.**
 >
-> The version string is already `v1.0.0-dp8` and the CHANGELOG entry is written,
-> but nothing has been baked — `CatReleases/` still ends at DP7. Mochi is the
-> headline feature of this release, and shipping it in its current state would put
-> the tearing and scroll lag in front of everyone at once.
+> Written when the version string was already `v1.0.0-dp8` with nothing baked, on
+> the grounds that shipping Mochi in its then-current state would put the tearing
+> and scroll lag in front of everyone at once.
+>
+> **That bar is now met and the bake is running** — see the gate status below. One
+> item was struck rather than passed: tearing is a hardware limit on this board,
+> established by measurement, not a fix that was skipped.
 >
 > Steps 0–4 are the gate. Step 5 is explicitly deferred past DP8 (see its entry).
 > Step 6 is an audit whose *findings* are required before release, not its fixes.
 >
-> ### Gate status — 2026-07-26
->
-> **Proposed bar:** worst-case `lv_timer_handler()` under 60 ms, with the
-> 140–159 ms cluster gone.
+> ### Gate status — 2026-07-27 — **MET, baking**
 >
 > | | Result |
 > |---|---|
-> | Idle | ✅ **185 fps, max 13 ms, 585/600 frames under 8 ms** |
-> | Active (shade + multitasker) | ✅ 125–160 fps, mean 1–3 ms |
-> | 140–159 ms cluster | ✅ gone |
-> | Residual | ⚠️ 1–6 frames per 600 still reach 100–200 ms under heavy use |
-> | Corruption | ✅ fixed (black blocks) |
+> | Scrolling (BUSY-fps) | ✅ **6.2 → 9.7-10.1 fps**, mean frame 128 ms → 60 ms |
+> | Idle repaint | ✅ **75-81 ms every 200 ms → ~1 slow frame in 55 s** |
+> | Band-by-band screen fill | ✅ fixed (off-screen compose) |
+> | Corruption (black blocks) | ✅ fixed |
+> | Tearing | ⛔ **hardware limit — see F19.** No TE pin on this board; measured that pushing 40% fewer pixels changes nothing. Not a gate this release can pass. |
+> | Speed Demon round trips | ✅ **4 consecutive, memory flat** (was: never completed one) |
 >
-> Starting point for comparison: 6.7 fps worst case, 38 frames per 600 at
-> 200–400 ms, and visible corruption on any full-screen redraw.
+> Starting point: 6.7 fps worst case, 38 frames per 600 at 200-400 ms, visible
+> corruption on any full-screen redraw, and a game mode that had never once
+> entered and exited cleanly.
 >
-> **The gate is met except for the residual stalls.** Whether those block the
-> bake is a judgement call, not a measurement — they are rare, and they are a
-> tenth of what they were.
->
-> Landed: `fa69ad17` (driver), `1b89d11e` (`-O2`), `fa3f7bb4` (effects/accent,
-> icons, metric, buffer, NVS order), `f1218611` (adaptive grid).
+> **The earlier "185 fps / 585 of 600 frames under 8 ms" gate status was an
+> artifact and has been removed.** It came from the frame instrument described in
+> F12, which counted no-op loop iterations as frames and overstated the rate by
+> roughly 20x. The numbers above come from BUSY-fps, which measures the gap
+> between consecutive *rendered* frames. Keeping the old figures next to the new
+> ones would invite exactly the comparison that misled this project twice.
 
 **Working tracking doc. Scope: Mochi / T-Deck Plus rendering performance.**
 
@@ -1003,18 +1005,31 @@ Not blocking:
 
 ## Release gate — DP8 bake
 
-Once Steps 0–4 are satisfied and Step 6's table is filled in:
+Status as of 2026-07-27.
 
-- [ ] Full erase + flash of `tdeck_plus`, confirm no tearing on a sustained page swipe
-- [ ] Confirm the numbers hold after a warm reboot, not just a fresh flash
-- [ ] Re-check `heltec` still builds and boots — the ST7789 changes don't touch it,
-      but it is the only other target that has been on a bench
-- [ ] Update the dp8 CHANGELOG entry with what actually landed from this document;
-      its current date (2026-07-24) is the commit date and will need to become the
-      real bake date, since every other entry is anchored to `baked_at`
-- [ ] `purrstrap bake` / package into `CatReleases/DP8/`
-- [ ] Tick the corresponding hardware items in `PURR_OS_1.0_CHECKLIST.md` §1 — a
-      real bench session is exactly what that list is short of
+- [x] Full erase + flash of `tdeck_plus`, running the whole session on hardware
+- [x] ~~Confirm no tearing on a sustained page swipe~~ — **struck, not achievable on
+      this board.** F19: TE is not broken out on the T-Deck Plus, and fewer pixels
+      was measured and does not help. Recorded as a hardware requirement for the
+      next board rather than a gate this release can pass.
+- [x] Numbers hold after a warm reboot, not just a fresh flash — every measurement
+      in F17/F18 and the Speed Demon runs came from warm devices across many reflashes
+- [x] Update the dp8 CHANGELOG entry with what actually landed — added as "Pass 2",
+      and the entry's date range now covers both passes
+- [ ] `purrstrap bake --dp` into `CatReleases/DP8/` — **in progress**
+- [ ] Re-check `heltec` still builds and boots. The bake builds it; **booting it has
+      not been checked** — no second board was on the bench this session.
+- [ ] Tick the corresponding hardware items in `PURR_OS_1.0_CHECKLIST.md` §1
+
+**Carried into the next cycle, deliberately:**
+
+- Strip the temporary instrumentation (`[perf]` flush counters, `[frames]`, `[mem]`
+  accounting). Left in for this bake because it is warn-level logging rather than
+  behaviour, and removing it immediately before a release without re-verifying on
+  hardware was the larger risk.
+- `homebase`'s task-leak fix is committed but unverified — confirming it needs a
+  Speed Demon round trip, which requires a touchscreen launch.
+- Milkbar icons, Tab5 grid: still unverified on hardware.
 
 ---
 
