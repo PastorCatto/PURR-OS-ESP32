@@ -353,6 +353,7 @@ was re-verified against the tree.
 | Screen tearing on `tdeck_plus` | **Won't fix — hardware.** No TE pin is broken out (verified against LilyGo's own `utilities.h`), and pushing 40% fewer pixels was measured to change nothing. Recorded as a requirement for the next board | — |
 | Crash-guard strikes could permanently brick boot | **Resolved** in dp8 — strikes now clear when the firmware's ELF hash changes. Previously five crashes during development halted boot until someone knew to erase NVS at `0x9000` | done |
 | Temporary render/memory instrumentation compiled into releases | Open — `[perf]`, `[frames]`, `[mem]` log lines still ship in dp8 | 1.0 |
+| **`purrstrap bake` reports a device `[OK]` if `firmware.bin` merely EXISTS** | Open — **release-integrity bug.** It does not check that the current run produced the artifact, so a failed build silently packages a stale binary. Caught twice in one bake: tab5 had shipped a stale image since `a1b3e8af`, and `tdeck_plus_pounce` was packaged into DP8 carrying its **DP7 (07-20)** firmware after a transient compiler ICE. Same failure shape as `purrstrap build` exiting 0 without compiling. Fix: compare artifact mtime against run start, or fail the device outright on a non-zero `idf.py` exit | 1.0 |
 | KittenUI is selected by no device, so is untested | Open — give it a target or retire it | 1.0 |
 | Portable list icons blocked on `CONFIG_PURR_UI_LVGL` | Open — tracked as a separate change | 1.0 |
 | 16 legacy-schema `module.pcat` files | Open — tracked as a separate change | 1.0 |
