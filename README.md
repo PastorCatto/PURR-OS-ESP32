@@ -170,6 +170,15 @@ python3 modulestrap/modulestrap.py list
 python3 modulestrap/modulestrap.py clean [all]
 ```
 
+It also decides which components a given device compiles, from that device's
+`device.pcat`, and can change that:
+
+```bash
+python3 modulestrap/modulestrap.py modules tdeck_plus          # what is on / off
+python3 modulestrap/modulestrap.py disable meshtastic tdeck_plus
+python3 modulestrap/modulestrap.py enable  nearby     tdeck_plus
+```
+
 ### catstrap — user app builder + SDK
 
 ```bash

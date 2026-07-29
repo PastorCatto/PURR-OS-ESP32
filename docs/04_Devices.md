@@ -14,6 +14,7 @@ psram       = true | false
 psram_mb    = 8
 port        = "/dev/ttyACM0"          # default flash port
 spiffs_offset = "0xD90000"            # SPIFFS partition start (hex)
+boot_settle_ms = 50                   # optional; kernel default 500 if omitted
 
 [drivers]
 display = "ili9341" | "st7789" | "axs15231b" | "ssd1306" | ""
@@ -66,6 +67,35 @@ purrstrap reads this file to:
 2. Generate `purr_device_glue.c` with pin `#defines` and radio capability flags
 3. Generate `CoreOS/sdkconfig_<slug>` (chip, flash size, PSRAM, UI backend, Arduino kernel config) via `purrstrap generate` — see [07_Build_Tools.md](07_Build_Tools.md)
 4. Decide which system apps to bake in
+5. Decide **which components compile at all** — modulestrap takes the transitive
+   closure of what this file references and emits only that into
+   `components_manifest.cmake`
+
+Point 5 is newer than the rest and changes how the file should be read. A
+`device.pcat` is no longer a description of a build that happens anyway; it *is*
+the build. A name removed from `[modules]` is not merely unregistered — its
+component is never added, so a stale reference to it in `CoreOS/main/CMakeLists.txt`
+becomes a configure-time failure rather than silently linking dead code. This is
+why the hardcoded `TAB5_REQUIRES` and driver lists there had to become
+`PURR_DRIVER_REQUIRES`, fed from this same `[drivers]` section.
+
+Use `modulestrap modules <device>` to see the resulting component set, and
+`modulestrap enable`/`disable` to change it — see
+[07_Build_Tools.md](07_Build_Tools.md#toggling-modules-per-device). Editing by
+hand is fine; the tool exists mainly so the consequences are visible before a
+rebuild.
+
+### `boot_settle_ms`
+
+The pause the kernel takes between the P2 (UI) and P3 (radios, deferred apps)
+module tiers — see `BOOT_SETTLE_MS` in `purr_kernel.c` for what it guards
+against. Omit it and the kernel's own default of 500 ms applies; a hand-run
+`idf.py` outside purrstrap gets the default too.
+
+It is per-device because the right value depends on what the image contains. A
+build with no mesh, BLE, proximity or Nearby stack has nothing to race the UI at
+P3, and `tdeck_plus`'s minimal profile sets 50 on exactly that reasoning —
+roughly halving time-to-launcher. A full image should leave it unset.
 
 ---
 

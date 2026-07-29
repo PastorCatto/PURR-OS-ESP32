@@ -105,7 +105,7 @@ source/
     exclusive/         magicmac, magidos
 
 purrstrap/             final flashable firmware image builder
-modulestrap/           .purr module + driver blob compiler
+modulestrap/           .purr module + driver blob compiler, per-device selection
 catstrap/              user app builder + SDK
 
 cattobaked/            all build output (firmware, blobs, merged images)
@@ -135,7 +135,7 @@ archive/               legacy scripts, old docs, old build artifacts
 | `.paws` | Compiled userland app — `purr_win.h` + `sd.*` only |
 | `.claw` | Compiled kernel-access app — full `purr_kernel_*` + `purr_win.h` |
 | `purrstrap` | Builds the final merged flashable image per device |
-| `modulestrap` | Registers `.purr` module + driver blobs as IDF components |
+| `modulestrap` | Registers `.purr` module + driver blobs as IDF components; selects which ones a device compiles, from its `device.pcat` |
 | `catstrap` | Builds user apps and manages the catstrap SDK |
 | `cattobaked/` | All build output from all three tools |
 | `device.pcat` | Per-device manifest: chip, drivers, radio, apps, pins |

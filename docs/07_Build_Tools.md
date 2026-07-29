@@ -215,7 +215,7 @@ esptool.py write_flash 0xD90000 cattobaked/tdeck_plus_arduino/flash.bin
 **File:** `modulestrap/modulestrap.py`
 **Output:** `cattobaked/modules/`, `cattobaked/drivers/`
 
-modulestrap compiles all `.purr` kernel module and driver blobs. It scans `source/modules/`, `source/drivers/`, and `user_drivers/` (community drop zone), generates IDF component `CMakeLists.txt` fragments, and writes `cattobaked/components_manifest.cmake` so CoreOS includes everything in one IDF build.
+modulestrap compiles all `.purr` kernel module and driver blobs. It scans `source/modules/`, `source/drivers/`, and `user_drivers/` (community drop zone), generates IDF component `CMakeLists.txt` fragments, and writes `cattobaked/components_manifest.cmake` so CoreOS includes that device's components in one IDF build.
 
 ### Commands
 
@@ -227,6 +227,10 @@ modulestrap build <name>            one target (e.g. "kittenui", "display/ili934
 modulestrap list                    list all buildable targets
 modulestrap list --drivers PATH     also list from an external driver directory
 modulestrap clean [name|all]        remove .purr blobs from cattobaked/
+
+modulestrap modules <device>        what this device has on, and what is available
+modulestrap enable  <name> <device> turn a module or app on for one device
+modulestrap disable <name> <device> turn it off
 ```
 
 ### What "register" means
@@ -234,9 +238,105 @@ modulestrap clean [name|all]        remove .purr blobs from cattobaked/
 modulestrap does not invoke IDF directly — that is purrstrap's job. Instead it:
 1. Finds all `.c`/`.cpp` source files in the module directory
 2. Generates `CMakeLists.txt` as an IDF component fragment (include dirs point to `source/kernel/`)
-3. Writes `cattobaked/components_manifest.cmake` listing all `EXTRA_COMPONENT_DIRS`
+3. Writes `cattobaked/components_manifest.cmake` listing that device's `EXTRA_COMPONENT_DIRS`
 
-When purrstrap runs `idf.py build` on `CoreOS/`, it includes `components_manifest.cmake` which pulls every registered module in as an IDF component.
+When purrstrap runs `idf.py build` on `CoreOS/`, it includes `components_manifest.cmake` which pulls those components in.
+
+---
+
+### Per-device component selection
+
+`components_manifest.cmake` used to emit **every** discoverable component into
+**every** device's build, identical for all 12 devices, never consulting
+`device.pcat` at all. Selection happened in two *other* places: purrstrap's
+generated glue (which decides what gets registered) and a hand-maintained
+`EXCLUDE_COMPONENTS` denylist in `CoreOS/CMakeLists.txt`. Three sources of truth,
+none authoritative, free to disagree — and every multi-device failure in the DP8
+bake came from exactly that:
+
+| Device | Failure |
+|---|---|
+| `tab5` | `device.pcat` said `ui = "cupcake"` while `EXCLUDE_COMPONENTS` removed the component. The glue referenced a module that was never compiled: `undefined reference to purr_module_cupcake`, then a week of silently stale binaries. |
+| `meshtastic` | Compiled into all 12 devices — nanopb and the whole protobuf set — on boards with no LoRa. |
+| `m5tab5_bsp` | Compiled everywhere until hand-excluded (`esp_lcd_mipi_dsi.h: No such file` on waveshare169). |
+| `heltec` | Built msn / meshtastic / proximity despite listing none of them. |
+
+A contradiction like tab5's is no longer expressible.
+
+`device.pcat` is now the single source of truth. A component compiles if the
+device references it, or if something the device references pulls it in:
+
+```
+frontier = (components named in device.pcat) ∪ CORE_COMPONENTS
+repeat: add every component in each frontier member's REQUIRES that we also own
+```
+
+Three details worth knowing, each of which was a bug first:
+
+- **`REQUIRES` is read from `CMakeLists.txt`, not from `module.pcat`.** The CMake
+  file is what the build actually obeys. A dependency list declared in the
+  manifest could drift from it, which would reintroduce the same
+  two-sources-of-truth failure this change exists to remove.
+
+- **Components are indexed by directory basename**, not by modulestrap's own
+  slug. Drivers carry a `"<type>/<name>"` slug internally (`display/st7789`),
+  but ESP-IDF names a component after its directory and `device.pcat` writes the
+  bare name — so the slug form matches neither, and every driver silently failed
+  to resolve when this was first written.
+
+- **`CORE_COMPONENTS` are always built**, regardless of `device.pcat`:
+  `boot_splash`, `app_manager`, `driver_manager`. purrstrap's generated glue
+  registers these unconditionally, so selection has to match the glue exactly or
+  the link fails with `undefined reference to purr_module_<name>`. Missing
+  `driver_manager` here is what broke the heltec build.
+
+The result is a real reduction, not bookkeeping — `tdeck_plus` on its minimal
+profile compiles **22 of 58** discoverable components, heltec 17 of 58.
+
+The bare `modulestrap build all` CLI has no device, so it still emits everything
+— that path is unchanged.
+
+---
+
+### Toggling modules per device
+
+```bash
+python3 modulestrap/modulestrap.py modules tdeck_plus
+python3 modulestrap/modulestrap.py disable meshtastic tdeck_plus
+python3 modulestrap/modulestrap.py enable  nearby     tdeck_plus
+```
+
+`modules` prints what is on, what is available but off, and — importantly — the
+component count the build will actually produce, so the effect of a toggle is
+visible before committing to a rebuild.
+
+Since `device.pcat` decides what compiles, toggling means editing that file.
+The edits are **line-based rather than parse-and-rewrite**: a `.pcat` carries a
+lot of hard-won commentary (why a device is on one radio driver and not another,
+what broke last time someone changed it), and a round-trip through `parse_pcat()`
+would silently delete every word of it. Disabling comments a line out rather than
+deleting it, because the line records *which role* the module filled — not
+recoverable from the module name alone.
+
+Two categories behave specially:
+
+| Set | Members | Behaviour |
+|---|---|---|
+| `UNTOGGLEABLE` | `app_manager`, `driver_manager` | Refused. The glue registers them for every device; turning one off only breaks the link. |
+| `RADIO_COMPANIONS` | `proximity`, `pairing`, `proximity_rpc`, `app_manager_remote`, `homebase`, `msn_relay` | Disabled by explicit empty assignment (`homebase = ""`), not by commenting out. |
+
+The companion case is worth spelling out, because commenting those lines out
+*looks* like it works and does nothing. purrstrap's
+`apply_radio_companion_defaults()` adds them to any device with
+`[radio] wifi = true` using `cfg.setdefault()`. A commented-out line reads as an
+absent key, so `setdefault` puts it straight back. `setdefault` does respect a
+key that is present, and the glue skips empty values — so `name = ""` is what
+actually suppresses one.
+
+For the same reason, `modules <device>` resolves the config through
+`purrstrap.resolve_device()` rather than parsing the file directly. Reading the
+raw `.pcat` under-reports what really builds (heltec: 13 components rather than
+the true 17), and a count that disagrees with the build is worse than no count.
 
 ### Output structure
 
