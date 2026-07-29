@@ -1,0 +1,35 @@
+# Put PrBoom's .bss in PSRAM.
+#
+# Installing DOOM cost ~98KB of INTERNAL DRAM whether or not it ran
+# (internal_free 127,415 -> 29,035 at the launcher). That is not DOOM's problem
+# to carry alone: internal DRAM is the scarce resource on this board and every
+# other module pays for it. speed_demon.h says exactly this — static .bss is
+# reserved by the linker and is not recovered by unloading modules.
+#
+# It is diffuse rather than one big array (r_main 17.8K, hu_stuff 11.7K,
+# r_plane 10.2K, r_draw 7.0K, d_deh 6.6K, g_game 5.1K ...), so there is nothing
+# to relocate by hand. A whole-archive mapping is the right instrument.
+#
+# Only .bss moves. .data cannot — it needs initialised content copied from
+# flash before PSRAM is up — so m_misc's and m_menu's config tables (~27KB
+# together) stay internal. Recovery is therefore partial by construction.
+#
+# This is safe here specifically because nothing in libdoom.a runs before PSRAM
+# is initialised: DOOM starts from an app task long after boot. The same
+# mapping applied to a driver that touches its statics during early startup
+# would fault.
+#
+# Requires CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY, already enabled for this
+# device (sdkconfig_tdeck_plus.overrides).
+#
+# The performance question is real and unresolved: PrBoom's renderer state is
+# hot, and PSRAM is slower than internal. The framebuffer is the far larger
+# consideration though — i_video.c asks for it internal first and falls back to
+# PSRAM, and at 29KB free that fallback was guaranteed. Trading diffuse cold-ish
+# renderer state for a fast internal framebuffer should be the better bargain,
+# but it is a bargain, not a free win, and wants measuring on hardware.
+
+[mapping:doom]
+archive: libdoom.a
+entries:
+    * (extram_bss)

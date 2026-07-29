@@ -38,6 +38,9 @@ idf_component_register(
     # launcher goes on believing DOOM is running and the second launch silently
     # does nothing. Same reasoning as MagiDOS's.
     PRIV_INCLUDE_DIRS ../../../modules/app_manager
+    # doom.lf — maps PrBoom's .bss into PSRAM. See the file; without it,
+    # installing DOOM costs ~98KB of internal DRAM even when it never runs.
+    LDFRAGMENTS doom.lf
     # fatfs/vfs — the WAD is read from /sdcard via stdio. See doom_wad.c.
     # esp_rom  — three vendored files #include "rom/ets_sys.h". Every use of it
     #            is commented out, so the include is vestigial, but the files
