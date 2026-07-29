@@ -23,7 +23,7 @@ extern "C" {
 // dp7 for a whole dp8 cycle, so the About page reported the wrong version
 // while every baked artifact said otherwise) — bump BOTH, or better, make
 // purrstrap generate this header the way it already generates sdkconfig.
-#define PURR_KERNEL_VERSION  "1.0.0-dp8"
+#define PURR_KERNEL_VERSION  "1.0.0-dp9"
 #define KITT_VERSION         "1.0.0"
 
 // ── Module loader ─────────────────────────────────────────────────────────────
