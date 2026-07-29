@@ -1,0 +1,9 @@
+# apps/exclusive/doom/app.pcat
+
+name        = "doom"
+version     = "0.1.0"
+tier        = "claw"
+author      = "id Software / PrBoom team / Espressif — ported to PURR OS"
+description = "DOOM (PrBoom). Runs under speed demon; reads a WAD from /sdcard/doom/."
+
+idf_requires = "esp_common driver freertos speed_demon boot_splash fatfs vfs"
