@@ -189,6 +189,8 @@ const char* I_SigString(char* buf, size_t sz, int signum)
 //
 // See doom_wad.c for the loader and doom_wad.h for the interface.
 
+#include "esp_timer.h"
+#include "speed_demon.h"
 #include "doom_wad.h"
 
 // Descriptor table. Handles start at 3 to stay clear of stdin/stdout/stderr,
@@ -265,6 +267,28 @@ void I_Close(int fd)
 void *I_Mmap(void *addr, size_t length, int prot, int flags, int ifd, off_t offset)
 {
 	(void)addr; (void)prot; (void)flags;
+
+	// Heartbeat, throttled to once a second.
+	//
+	// This covers the gap between the WAD finishing loading and the engine
+	// reaching its first I_StartTic (which carries the heartbeat from then on).
+	// In between sit W_Init, R_InitData and friends — "Textures Flats Sprites
+	// Tranmap build" is seconds of work with no tic loop running, and speed
+	// demon reboots the device after ten seconds of silence.
+	//
+	// I_Mmap is the right hook precisely because it is not a timer: every lump
+	// PrBoom touches comes through here, so it beats when the engine is
+	// actually making progress and stops when it genuinely wedges. A periodic
+	// timer task would have kept beating through a real hang and defeated the
+	// watchdog entirely.
+	{
+		static int64_t last_beat_us = 0;
+		int64_t now = esp_timer_get_time();
+		if (now - last_beat_us > 1000000) {
+			last_beat_us = now;
+			purr_speed_demon_heartbeat();
+		}
+	}
 
 	const uint8_t *base = doom_wad_data();
 	if (!base) return NULL;

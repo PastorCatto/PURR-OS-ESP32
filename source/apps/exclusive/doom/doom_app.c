@@ -112,6 +112,38 @@ static void fail_screen(const char *line1, const char *line2)
     }
 }
 
+// ── WAD load progress ───────────────────────────────────────────────────────
+
+// Beats the speed demon heartbeat and shows a percentage while the WAD is read.
+//
+// The heartbeat is the load-bearing half. Reading the 3MB WAD off SPI SD takes
+// about ten seconds, and speed demon reboots the device after ten seconds of
+// silence. On the first hardware launch that is precisely what happened: the
+// WAD loaded, PrBoom started, reached "R_InitData: Textures Flats Sprites" —
+// and was killed 170ms later by
+//
+//   crash_guard: strike 2/5 for 'speed_demon': NO HEARTBEAT FOR 10187ms
+//
+// Nothing was wrong with the port; the app simply never told the watchdog it
+// was alive while doing the one slow thing it has to do at startup.
+static void wad_progress(size_t done, size_t total, void *user)
+{
+    (void)user;
+    purr_speed_demon_heartbeat();
+
+    // Throttled to whole percent: purr_splash_status() repaints a full text row
+    // over SPI, and doing that for all ~95 chunks would add measurably to a
+    // load that is already the slowest part of starting the game.
+    static int last_pct = -1;
+    int pct = total ? (int)((done * 100) / total) : 0;
+    if (pct != last_pct) {
+        last_pct = pct;
+        char line[48];
+        snprintf(line, sizeof(line), "Loading WAD... %d%%", pct);
+        purr_splash_status(line);
+    }
+}
+
 // ── Task ────────────────────────────────────────────────────────────────────
 
 static void doom_task(void *arg)
@@ -133,7 +165,7 @@ static void doom_task(void *arg)
     purr_speed_demon_heartbeat();
 
     char wadname[64] = "";
-    doom_wad_err_t werr = doom_wad_load(wadname, sizeof(wadname));
+    doom_wad_err_t werr = doom_wad_load(wadname, sizeof(wadname), wad_progress, NULL);
 
     if (werr != DOOM_WAD_OK) {
         // The recoverable path this app is built around — see the file header.

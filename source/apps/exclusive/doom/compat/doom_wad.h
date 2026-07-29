@@ -26,6 +26,17 @@ typedef enum {
     DOOM_WAD_ERR_BAD_WAD,     // not an IWAD/PWAD, or too small to be either
 } doom_wad_err_t;
 
+// Called repeatedly while the WAD is being read. MUST be supplied, and MUST
+// beat the speed demon heartbeat.
+//
+// This is not optional politeness. Reading a 3MB WAD off SPI SD takes about ten
+// seconds, and speed demon treats ten seconds of silence as a hang and reboots
+// the device — which is exactly what happened the first time DOOM was launched
+// on hardware: the engine reached R_InitData and was then killed 170ms later by
+// its own watchdog. Made a required parameter rather than an optional one so
+// that a future caller cannot reintroduce it by omission.
+typedef void (*doom_wad_progress_fn)(size_t done, size_t total, void *user);
+
 // Scan DOOM_WAD_DIR and load the first .wad found into PSRAM.
 //
 // Prefers an IWAD over a PWAD when both are present: a PWAD is a patch and
@@ -34,7 +45,8 @@ typedef enum {
 // than about the WAD choice.
 //
 // On success `out_name` (if non-NULL) receives the chosen file's basename.
-doom_wad_err_t doom_wad_load(char *out_name, size_t out_name_sz);
+doom_wad_err_t doom_wad_load(char *out_name, size_t out_name_sz,
+                             doom_wad_progress_fn progress, void *user);
 
 void doom_wad_free(void);
 
