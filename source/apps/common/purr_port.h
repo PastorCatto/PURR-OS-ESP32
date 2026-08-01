@@ -43,6 +43,17 @@
 // No frame loop, no event loop, no lifecycle. Ports have their own and they are
 // the reason the app is a .claw. This is a translation layer, not a framework:
 // every function here is something you call, never something that calls you.
+//
+// ── What your component must REQUIRE ────────────────────────────────────────
+//
+// This header pulls in more than it looks like, and a missing entry shows up as
+// a confusing "No such file" in YOUR file rather than in this one:
+//
+//     REQUIRES esp_common freertos esp_timer speed_demon boot_splash
+//
+// esp_timer is the one that catches people out — it is used for the heartbeat
+// throttle and the key-hold timing, neither of which is visible from the call
+// site.
 
 #include <string.h>
 #include <stdio.h>

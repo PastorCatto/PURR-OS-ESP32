@@ -1,0 +1,9 @@
+# apps/exclusive/moy/app.pcat
+
+name        = "moy"
+version     = "0.1.0"
+tier        = "claw"
+author      = "moybyte-org (spec, MIT) — PURR OS host implementation"
+description = "moy core 0.1 portable console. Runs .moy carts from /sdcard/moy/ under speed demon."
+
+idf_requires = "esp_common driver freertos esp_timer speed_demon boot_splash fatfs vfs nvs_flash espressif__cjson"

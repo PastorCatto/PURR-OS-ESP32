@@ -145,6 +145,7 @@ magidos     = false
 milkbar     = false
 meshdiag    = false
 doom        = true
+moy         = true
 [flash]
 display/st7789    = 1
 touch/gt911       = 1

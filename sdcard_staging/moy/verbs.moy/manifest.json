@@ -1,0 +1,10 @@
+{
+  "format": "moy-1",
+  "title": "Verbs",
+  "version": 1,
+  "main": "main.lua",
+  "fps": 60,
+  "input": ["buttons", "keyboard", "touch"],
+  "icon": [1, 1, 1],
+  "extensions": ["layers"]
+}

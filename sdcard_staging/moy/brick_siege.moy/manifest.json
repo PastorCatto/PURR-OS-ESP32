@@ -1,0 +1,8 @@
+{
+  "format": "moy-1",
+  "title": "Brick Siege",
+  "version": 1,
+  "main": "main.lua",
+  "fps": 60,
+  "input": ["buttons"]
+}
