@@ -12,6 +12,7 @@
 //   6. Kernel spine parks in idle loop — everything else runs in module tasks
 
 #include "purr_kernel.h"
+#include "purr_crash_guard.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "esp_vfs_fat.h"
@@ -130,6 +131,23 @@ void app_main(void)
     // (Vext, GPIO36, must be driven low first) with no error surfaced.
     extern void purr_device_init(void);
     purr_device_init();
+
+    // Must run before purr_kernel_load_static_modules() — "before anything
+    // reads a strike count this boot" (purr_crash_guard.c's own comment).
+    // load_one_static() checks purr_crash_guard_is_disabled() per module as
+    // part of that call, so any device using this generic kernel never got
+    // its ELF-hash-keyed strike reset at all: this call previously existed
+    // only in the specialized T-Deck Plus kernels (kernel_tdp_boot.c) and
+    // the unused Tab5 legacy kernel — never here. Confirmed live: a Tab5
+    // running the generic kernel hit a real app_manager_scan_ex() null-deref
+    // (unrelated bug, s_apps used before app_manager_init() allocates it),
+    // crash-guard correctly disabled app_manager after repeated strikes,
+    // and NO subsequent reflash — even a completely different firmware
+    // build — ever cleared that disabled state, because nothing here ever
+    // called the function that's supposed to. Same shape of gap as
+    // purr_kernel_set_boot_ready() below.
+    purr_crash_guard_check_reset_reason();
+
     extern void purr_register_static_modules(void);
     purr_register_static_modules();
     purr_kernel_load_static_modules();
