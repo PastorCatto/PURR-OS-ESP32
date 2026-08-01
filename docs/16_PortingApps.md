@@ -123,7 +123,9 @@ compatible, plain GPL-2.0-only is not. Never commit game assets or ROMs.
 
 ## 4. The seams you have to implement
 
-Most ports need the same five, and they are the whole job:
+Most ports need the same five, and they are the whole job. **§4.2 implements
+all of them for you** — read this table to know what is being translated, then
+use the layer rather than writing it again.
 
 | Seam | PURR OS gives you | Section |
 |---|---|---|
@@ -151,6 +153,68 @@ does — every lump read is a pointer into mapped storage), load the file into
 PSRAM once at startup and make the map function pointer arithmetic. That keeps
 upstream's zero-copy design intact and takes the SD card off the shared SPI bus
 for the whole run.
+
+### 4.2 Use the translation layer — `purr_port.h`
+
+**Do not implement the seams from scratch.** `source/apps/common/purr_port.h`
+already does, and it encodes every trap in §5–§9.
+
+This is the same wrapper technique PURR OS already uses twice. A foreign library
+keeps its own API, and a small HAL fills that library's hooks with callbacks that
+translate to catcalls — `mochi_hal.c` and `cupcake_hal.c` do it for LVGL
+(`lv_disp_drv_t::flush_cb` → `push_pixels`, `lv_indev` read callbacks →
+`poll_event`), and `miniwin` does it for MiniWin. `purr_port.h` is that technique applied
+to applications: **your port keeps its own platform API and implements it in
+terms of these calls.**
+
+Header-only, like `modules/common/purr_lv_flush.h` and for the same reason — no
+lifecycle, nothing to register, so no `.pcat` and no build-system change. Include
+it with a relative path.
+
+```c
+#include "../../common/purr_port.h"
+
+static purr_port_t s_port;
+
+// 8 = paletted (expanded through pal[] on present), 16 = direct RGB565
+if (!purr_port_open(&s_port, 8)) { /* no display, or no memory */ }
+
+purr_port_set_palette_rgb888(&s_port, playpal, 256);
+
+// render into s_port.fb8 (or .fb16), then:
+purr_port_present(&s_port);
+
+purr_port_key_t k;
+while (purr_port_key_next(&s_port, &k)) {
+    // k.down == false is a SYNTHESISED release — see §6
+}
+
+purr_port_heartbeat();          // throttled to 1Hz, safe in a hot loop
+purr_port_close(&s_port);
+```
+
+| Call | Replaces | Handles for you |
+|---|---|---|
+| `purr_port_open` | display lookup + `malloc` | panel size, internal→PSRAM fallback, logs which it got |
+| `purr_port_set_palette_rgb888` | palette conversion | native-endian RGB565, all 256 entries |
+| `purr_port_present` | expand + `push_pixels` | unrolled 8bpp→RGB565 expansion |
+| `purr_port_key_next` | `poll_event` | **synthesised key-up**, repeat swallowing |
+| `purr_port_heartbeat` | `purr_speed_demon_heartbeat` | 1 Hz throttle; no-op when windowed |
+| `purr_port_fail_screen` | — | on-screen error + key-to-exit |
+| `purr_port_find_keyboard` | `purr_kernel_input()` | resolves by capability, not index |
+
+A fix in `purr_port.h` reaches every port. That is the whole point: it is the
+same divergence `purr_lv_flush.h` was created to stop between the two UI
+backends, where a display fix landed in Mochi and silently did not exist in
+Cupcake.
+
+It is a translation layer, **not a framework** — every function is something you
+call, never something that calls you. Your port keeps its own frame loop and its
+own event loop; those are why it is a `.claw` in the first place.
+
+The rest of this document (§5–§9) describes what the layer is doing underneath.
+Read it when you need something the layer does not cover, or when a port is
+behaving oddly and you need to know what to blame.
 
 ---
 
@@ -423,6 +487,7 @@ That log line is what tells you why frame times look wrong later.
 - [ ] `.inl`/`.dat`/`COPYING` copied, not just `.c`/`.h`
 - [ ] Provenance + licence in a `README.md`; no assets committed
 - [ ] Upstream platform layer deleted, not adapted
+- [ ] Seams go through `purr_port.h` (§4.2), not hand-rolled
 - [ ] Screen size from `get_info()`, not hardcoded
 - [ ] No double byte-swap in the pixel path
 - [ ] Keyboard found by capability, not `purr_kernel_input()`
