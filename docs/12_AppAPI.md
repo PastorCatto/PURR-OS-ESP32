@@ -26,6 +26,11 @@ Catcalls are the **hardware** layer (display pixels, touch points, radio packets
 
 ---
 
+> **Porting existing code** — a game, an emulator, an engine — rather than
+> writing a new app? See [16_PortingApps.md](16_PortingApps.md). Ported code
+> usually wants the panel rather than the windowing API below, which changes
+> nearly every decision on this page.
+
 ## Choosing a Tier
 
 | Tier | File ext | Gets `purr_win.h` | Gets kernel API | Use for |

@@ -159,6 +159,8 @@ archive/               legacy scripts, old docs, old build artifacts
 - [12_AppAPI.md](12_AppAPI.md) — purr_win.h complete API reference + backend writing guide
 - [13_Kernels.md](13_Kernels.md) — specialized kernel system: when to use, how to write, existing kernels
 - [14_Driverstrap.md](14_Driverstrap.md) — driverstrap driver template generator: CLI, wizard, generated files
+- [15_SpeedDemon.md](15_SpeedDemon.md) — give one app the whole machine with `.speed_demon = 1`
+- [16_PortingApps.md](16_PortingApps.md) — bringing existing code across: vendoring, the platform seams, the traps
 
 ---
 

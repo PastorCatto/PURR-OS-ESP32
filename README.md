@@ -260,6 +260,7 @@ See [docs/02_Catcalls.md](docs/02_Catcalls.md).
 | [docs/13_Kernels.md](docs/13_Kernels.md) | Specialized kernel system — when to use, how to write, all existing kernels |
 | [docs/14_Driverstrap.md](docs/14_Driverstrap.md) | driverstrap — driver template generator CLI + wizard reference |
 | [docs/15_SpeedDemon.md](docs/15_SpeedDemon.md) | Speed Demon — give one app the whole machine with `.speed_demon = 1` |
+| [docs/16_PortingApps.md](docs/16_PortingApps.md) | **Porting existing apps** — vendoring third-party source, the five platform seams, and the traps that bite |
 
 ---
 
