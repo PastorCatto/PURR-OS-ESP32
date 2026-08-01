@@ -25,7 +25,8 @@ changed later.
 **A ported game or emulator is almost always a `.claw`.** It has its own frame
 loop, its own framebuffer and its own idea of input, so the windowing API is not
 what it wants — it wants the panel. That also makes it a candidate for Speed
-Demon (§7).
+Demon (§7) — **unless it uses the network**, which is an outright exclusion. See
+§7.1 before you design around it.
 
 Note the hard limit: **Lua tiers cannot use Speed Demon**, structurally — see
 [15_SpeedDemon.md](15_SpeedDemon.md). If your port needs the whole machine, it
@@ -130,7 +131,7 @@ Most ports need the same five, and they are the whole job:
 | Input | `catcall_input_t` | §6 |
 | Files | Standard `stdio` on `/sdcard` | §4.1 |
 | Time | `esp_timer_get_time()`, `gettimeofday` | — |
-| Memory | `heap_caps_malloc` | §8 |
+| Memory | `heap_caps_malloc` | §9 |
 
 Delete the upstream platform layer rather than adapting it. On the DOOM port the
 originals for SPI LCD and PSX gamepad were thrown away entirely; keeping them
@@ -282,9 +283,107 @@ This is what restores the OS. Skip it and the app can be launched exactly once
 per boot — `app_manager` still believes it is running, and the second tap
 silently does nothing.
 
+### 7.1 Speed Demon kills the network — do not use it for a connected app
+
+**A networked app must not declare `.speed_demon = 1`.**
+
+Speed Demon's `is_kept()` spares only drivers, apps, `driver_manager` and
+`app_manager`. `wifi_mgr` is `PURR_MOD_SYSTEM`, so it is unloaded like anything
+else — visible in any Speed Demon log:
+
+```
+W speed_demon: [mem] unload  wifi_mgr              -8668 bytes
+```
+
+For an offline game that is free memory. For an SSH session, a tile downloader or
+anything holding a socket, it tears the stack out from under a live connection
+the moment the app starts.
+
+There is no flag to exempt it, and adding one would be the wrong fix: the radios
+are a large part of what Speed Demon reclaims, and an app that needs the machine
+that badly is the last thing that should also be holding a TCP connection.
+
+**So connected ports run as ordinary apps** — alongside the launcher and system
+UI, drawing through `purr_win.h` rather than owning the panel. You keep the
+network and you give up the whole screen. That is the trade, and it is not
+negotiable in the current design.
+
+If a port genuinely needs both — full screen *and* the network — the honest
+options are to split it into an online phase (windowed: fetch, sync, download)
+and an offline phase (Speed Demon: render), or to leave it windowed.
+
 ---
 
-## 8. Memory
+## 8. Two worked archetypes
+
+Both of these come from real requests and both hit constraints §1–§7 do not
+cover on their own.
+
+### 8.1 A terminal / SSH client
+
+Runs **windowed, not Speed Demon** (§7.1). Three further constraints, none of
+them obvious until you are already building:
+
+**80 columns does not fit, and pretending otherwise is the wrong fix.** The panel
+is 320 px wide:
+
+| Font cell | Columns | Verdict |
+|---|---|---|
+| 8×8 | 40 | Comfortable |
+| 6×8 | 53 | The sweet spot |
+| 5×7 | 64 | Dense but legible |
+| 4×6 | 80 | Technically 80 columns; barely readable |
+
+Height is not the problem — 240 px over 24 rows is 10 px per row.
+
+Do **not** claim 80 columns and letterbox or pan. SSH negotiates the window size
+in its pty request, so tell the remote the size you actually have and let it
+reflow. `TERM`, `COLUMNS` and `LINES` all follow from that, and a well-behaved
+remote will wrap correctly instead of you scrolling a fiction.
+
+**The keyboard has no Ctrl, and reports no modifiers at all.** This is the real
+blocker for a terminal — Ctrl-C, Ctrl-D and Ctrl-Z are not optional in an SSH
+session. Two separate problems:
+
+- The BBQ20 has no physical Ctrl key (it has `alt`, `shift`, `sym`).
+- `bbq20.c` sets `.modifiers = 0` unconditionally and emits a single byte, so
+  even shift state is not exposed through `catcall_input_t` today.
+
+So a terminal port needs either a **sticky-modifier scheme in the app** (press
+`sym`, then a letter, to send the control code) or an extension to the bbq20
+driver to report modifiers properly. The driver change is the better fix and
+benefits every app; the app-side scheme is what unblocks you first.
+
+**Crypto is already there.** mbedTLS ships with ESP-IDF, so an SSH client does
+not need it vendored. `libssh2` is the usual embedded choice and has an ESP-IDF
+component; prefer that over vendoring OpenSSL.
+
+Note there is already a `terminal` system app, but it is a local shell, not a
+VT100 emulator — treat it as a sibling, not a starting point. A VT100 port needs
+a real escape-sequence parser and a character grid with scrollback.
+
+### 8.2 A map app
+
+The deciding question is **where the tiles come from**, because it settles the
+Speed Demon question:
+
+- **Offline tiles on the SD card** → may use Speed Demon, gets the whole panel.
+- **Tiles fetched over WiFi** → windowed, per §7.1.
+
+A split design works well here: download windowed, then render offline.
+
+**GPS is a first-class catcall** — `catcall_gps.h`, with `generic_nmea` behind it
+on T-Deck Plus. Resolve it through the kernel registry like any other; do not
+open the UART yourself.
+
+**Tiles belong in PSRAM, decoded.** Budget against §9: a 256×256 RGB565 tile is
+131,072 bytes, so a 3×3 working set is ~1.2 MB — comfortable in PSRAM,
+impossible in internal DRAM. Keep the SD reads batched at pan boundaries rather
+than per-frame, for the same SPI-bus reason as §4.1.
+
+---
+
+## 9. Memory
 
 Two pools, and the scarce one is not the one you expect.
 
@@ -316,7 +415,7 @@ That log line is what tells you why frame times look wrong later.
 
 ---
 
-## 9. Checklist
+## 10. Checklist
 
 - [ ] Tier chosen; `.claw` if it has its own renderer
 - [ ] `app.pcat` + `CMakeLists.txt`; enabled via `modulestrap enable`
@@ -335,7 +434,7 @@ That log line is what tells you why frame times look wrong later.
 
 ---
 
-## 10. Worked example
+## 11. Reference ports
 
 `source/apps/exclusive/doom/` is the reference port and is deliberately
 commented for this purpose. Its `README.md` covers provenance, and the long
