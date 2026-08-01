@@ -148,9 +148,32 @@ void app_main(void)
     // purr_kernel_set_boot_ready() below.
     purr_crash_guard_check_reset_reason();
 
+    // Captured now, before load_static_modules — that call reads the
+    // pending-recovery flag itself (purr_kernel.c's load path) to bound each
+    // P2/P3 module's init this boot, and we need the same value afterwards to
+    // decide whether to end the recovering window.
+    bool recovering = purr_crash_guard_pending_recovery(NULL, 0, NULL, 0);
+
     extern void purr_register_static_modules(void);
     purr_register_static_modules();
     purr_kernel_load_static_modules();
+
+    // End the "recovering" window — every P2/P3 module has now had its one
+    // bounded bring-up attempt for this boot. THIRD generic-kernel gap of the
+    // same shape as the two above (crash-guard reset, boot_ready): the call
+    // that clears this flag existed only in the specialized T-Deck Plus kernel
+    // (kernel_tdp_boot.c), never here. Without it the flag, once written by a
+    // single hang-triggered reboot, is NEVER cleared on a generic-kernel
+    // device — so EVERY subsequent boot is perpetually treated as a recovery
+    // boot and bounds P2/P3 init to 5s. Confirmed live on Tab5: app_manager's
+    // init ran on run_bounded's helper task under that 5s cap on every boot,
+    // "timed out" (it did not actually — the helper simply hadn't finished
+    // within the cap), took a strike each boot, and marched toward the disable
+    // threshold with no crash needed. Must run AFTER load_static_modules (it
+    // needs the flag still set during Phase 1), matching the T-Deck kernel.
+    if (recovering) {
+        purr_crash_guard_clear_pending_recovery();
+    }
 
     // ── Phase 2: SD extras (optional modules not compiled in) ─────────────────
     //
