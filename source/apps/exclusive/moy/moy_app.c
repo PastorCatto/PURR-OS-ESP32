@@ -156,9 +156,16 @@ static void moy_task(void *arg)
 {
     (void)arg;
 
+    size_t psram_at_start = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     ESP_LOGI(TAG, "internal free %u, psram free %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+             (unsigned)psram_at_start);
+
+    // Every static in this app survives the app exiting — it is compiled into
+    // the firmware, so its lifetime is the boot, not the launch. Anything
+    // stateful must therefore be cleared HERE rather than relying on
+    // zero-initialisation, which only happens once.
+    moy_input_reset();
 
     // 8bpp: the console is palette-indexed, so this is exactly the fb8 path.
     // purr_port handles the panel size, the internal-then-PSRAM fallback and
@@ -168,6 +175,15 @@ static void moy_task(void *arg)
         goto done;
     }
     purr_port_set_palette_rgb888(&g_port, moy_palette_rgb888, MOY_PAL_N);
+
+    // Draw state must be live BEFORE anything draws, and the picker draws.
+    //
+    // This used to be done only inside moy_cart_load(), which runs after the
+    // picker — so the picker rendered against a zeroed g_moy: clip_w/clip_h
+    // were 0, so plot() rejected every pixel, and pal_map[1] was 0, so cls(1)
+    // filled with black. The result was a completely black menu that still
+    // responded to input, which is a confusing thing to look at.
+    moy_draw_reset();
 
     purr_splash_show("MOY", 1);
     purr_splash_status("Looking for a cart...");
@@ -211,6 +227,22 @@ static void moy_task(void *arg)
 done:
     moy_cart_free();
     purr_port_close(&g_port);
+
+    // Leak check, on every exit path. A ported app that owns megabytes of PSRAM
+    // and can be relaunched is exactly where a leak hides: it looks fine once,
+    // and kills the device on the fourth or fifth run. Measured at the same
+    // point as psram_at_start, so the two are directly comparable.
+    {
+        size_t psram_at_end = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        if (psram_at_end + 4096 < psram_at_start) {
+            ESP_LOGE(TAG, "[mem] LEAKED %u bytes of PSRAM this run (%u -> %u)",
+                     (unsigned)(psram_at_start - psram_at_end),
+                     (unsigned)psram_at_start, (unsigned)psram_at_end);
+        } else {
+            ESP_LOGI(TAG, "[mem] clean: psram %u -> %u",
+                     (unsigned)psram_at_start, (unsigned)psram_at_end);
+        }
+    }
 
     s_running = false;
     // Restores everything speed demon unloaded. Must run on every path out,

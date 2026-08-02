@@ -311,3 +311,46 @@ bool moy_exit_requested(const char **how)
     if (how) *how = s_exit_via;
     return true;
 }
+
+// Clear every scrap of input state.
+//
+// MUST be called at the start of each launch. All the state in this file is
+// file-static, which on an app compiled into the firmware means it persists for
+// the whole BOOT, not the app — so a second launch inherits whatever the first
+// left behind.
+//
+// That is not theoretical: s_exit_requested latches until read, so after
+// exiting moy once, the next launch saw a stale exit request and quit ~30ms in,
+// before the picker could draw a frame. The log read
+//
+//   moy_menu: exit gesture (hold) from the picker
+//   moy: no cart chosen - leaving
+//
+// on a launch where nothing had been pressed at all.
+void moy_input_reset(void)
+{
+    memset(&s_pad, 0, sizeof(s_pad));
+    memset(s_kb_held, 0, sizeof(s_kb_held));
+    memset(s_ball_until, 0, sizeof(s_ball_until));
+    memset(s_key_held, 0, sizeof(s_key_held));
+    memset(s_key_prev, 0, sizeof(s_key_prev));
+    s_ball_click = false;
+    s_key_last   = 0;
+    s_textmode   = false;
+
+    s_exit_down_us      = 0;
+    s_exit_taps         = 0;
+    s_exit_first_tap_us = 0;
+    s_exit_requested    = false;
+    s_exit_via          = "";
+
+    // Re-resolved on the next poll: the catcall registry is rebuilt by speed
+    // demon's restore, so a pointer cached in a previous run may be stale.
+    s_ball = NULL;
+
+    // Drain anything the launcher's own keypress left in the driver queue —
+    // otherwise the key that STARTED moy arrives as the first game input.
+    const catcall_input_t *kbd = purr_port_find_keyboard();
+    input_event_t ev;
+    if (kbd && kbd->poll_event) while (kbd->poll_event(&ev)) { }
+}

@@ -183,6 +183,7 @@ typedef enum {
     MOY_BTN_COUNT
 } moy_btn_t;
 
+void moy_input_reset(void);         // once per launch, BEFORE the first poll
 void moy_input_poll(void);          // once per tick, before _update
 bool moy_btn(int b, int player);
 bool moy_btnp(int b, int player);
