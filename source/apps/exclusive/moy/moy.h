@@ -118,13 +118,29 @@ typedef enum {
 
 const char *moy_err_str(moy_err_t e);
 
-// Find the first *.moy folder under MOY_CART_DIR and load its manifest and
-// assets into g_moy. Does NOT start Lua.
-moy_err_t moy_cart_load(void);
+#define MOY_MAX_CARTS 32
+
+// Every *.moy folder found under MOY_CART_DIR, by folder name.
+typedef struct {
+    char name[MOY_MAX_CARTS][64];
+    int  n;
+} moy_cart_list_t;
+
+moy_err_t moy_cart_scan(moy_cart_list_t *out);
+
+// Load a cart by folder name (as returned by moy_cart_scan). Does NOT start Lua.
+moy_err_t moy_cart_load(const char *folder);
 void      moy_cart_free(void);
 
 // Read the whole of a file inside the cart folder. Caller frees. NULL on error.
 char *moy_cart_read(const char *filename, size_t *out_len);
+
+// ── moy_menu.c ──────────────────────────────────────────────────────────────
+
+// Choose a cart. Returns a folder name from `carts`, or NULL if the player
+// backed out with the exit gesture. Skipped automatically when only one cart is
+// installed.
+const char *moy_menu_pick(const moy_cart_list_t *carts);
 
 // ── moy_draw.c ──────────────────────────────────────────────────────────────
 //
@@ -176,6 +192,11 @@ bool moy_key_held(int code);
 bool moy_key_pressed(int code);
 void moy_textmode(bool on);
 bool moy_touch(int *x, int *y, bool *tapped, bool *held);
+
+// The host's own exit gesture (spec 7.3 — "the host owns exit"). Hold BACKSPACE
+// for a second, or tap it three times. `how` receives which form fired, which
+// is also how we learn whether the bbq20 repeats held keys.
+bool moy_exit_requested(const char **how);
 
 #ifdef __cplusplus
 }

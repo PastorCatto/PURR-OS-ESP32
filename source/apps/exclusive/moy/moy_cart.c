@@ -218,28 +218,46 @@ static bool ends_with_moy(const char *name)
     return n > 4 && strcasecmp(name + n - 4, ".moy") == 0;
 }
 
-moy_err_t moy_cart_load(void)
+// Every cart on the card, sorted by name so the list is stable between boots —
+// readdir order is filesystem order and would otherwise shuffle the menu.
+moy_err_t moy_cart_scan(moy_cart_list_t *out)
 {
-    memset(&g_moy, 0, sizeof(g_moy));
-    moy_draw_reset();
+    out->n = 0;
 
     DIR *dir = opendir(MOY_CART_DIR);
     if (!dir) return MOY_ERR_NO_DIR;
 
-    char chosen[128] = "";
     struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
+    while ((ent = readdir(dir)) != NULL && out->n < MOY_MAX_CARTS) {
         if (!ends_with_moy(ent->d_name)) continue;
-        // First one wins. A picker belongs in the launcher, not here — this app
-        // plays a cart, it does not browse them.
-        snprintf(chosen, sizeof(chosen), "%s", ent->d_name);
-        ESP_LOGI(TAG, "found cart %s", chosen);
-        break;
+        snprintf(out->name[out->n], sizeof(out->name[0]), "%s", ent->d_name);
+        out->n++;
     }
     closedir(dir);
 
-    if (!chosen[0]) return MOY_ERR_NO_CART;
-    snprintf(g_moy.dir, sizeof(g_moy.dir), "%s/%s", MOY_CART_DIR, chosen);
+    for (int i = 1; i < out->n; i++) {
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "%s", out->name[i]);
+        int j = i - 1;
+        while (j >= 0 && strcasecmp(out->name[j], tmp) > 0) {
+            snprintf(out->name[j + 1], sizeof(out->name[0]), "%s", out->name[j]);
+            j--;
+        }
+        snprintf(out->name[j + 1], sizeof(out->name[0]), "%s", tmp);
+    }
+
+    ESP_LOGI(TAG, "%d cart(s) on the card", out->n);
+    return out->n ? MOY_OK : MOY_ERR_NO_CART;
+}
+
+moy_err_t moy_cart_load(const char *folder)
+{
+    if (!folder || !*folder) return MOY_ERR_NO_CART;
+
+    memset(&g_moy, 0, sizeof(g_moy));
+    moy_draw_reset();
+
+    snprintf(g_moy.dir, sizeof(g_moy.dir), "%s/%s", MOY_CART_DIR, folder);
 
     moy_err_t rc = parse_manifest();
     if (rc != MOY_OK) return rc;

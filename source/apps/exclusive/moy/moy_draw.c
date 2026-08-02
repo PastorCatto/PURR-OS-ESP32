@@ -226,8 +226,19 @@ int moy_mget(int x, int y)
 void moy_mset(int x, int y, int tile)
 {
     if (!g_moy.map || x < 0 || y < 0 || x >= g_moy.map_w || y >= g_moy.map_h) return;
+
+    // tile 0 means EMPTY, matching the file format where a 00 byte is an empty
+    // cell (spec 3.3) — the stored value there is tile_id + 1 precisely so that
+    // zero can mean "nothing".
+    //
+    // This was wrong first time round and it was very visible. mset(x, y, 0) is
+    // how a cart clears a cell — Brick Siege calls it on every brick it
+    // destroys — and writing literal tile 0 meant a real sprite got drawn in
+    // each cleared cell instead of nothing. On hardware that looked like the
+    // map "grabbing a random sprite" as the game went on, and it survived a
+    // restart because the cart's own _init() cannot undo host map state.
     g_moy.map[y * g_moy.map_w + x] =
-        (tile < 0 || tile > MOY_TILE_MAX_MAP) ? 0xFF : (uint8_t)tile;
+        (tile <= 0 || tile > MOY_TILE_MAX_MAP) ? 0xFF : (uint8_t)tile;
 }
 
 void moy_map(int mx, int my, int w, int h, int sx, int sy, int colorkey, int scale)

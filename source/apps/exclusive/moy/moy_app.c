@@ -102,6 +102,16 @@ static void run_cart(void)
         prev = now;
 
         moy_input_poll();
+
+        // The host owns exit (spec 7.3). Checked before _update so the gesture
+        // works even on a cart that is busy or misbehaving, and honoured
+        // regardless of whether the cart implements quit() — most do not.
+        const char *how = NULL;
+        if (moy_exit_requested(&how)) {
+            ESP_LOGI(TAG, "host exit gesture (%s) - leaving '%s'", how, g_moy.title);
+            break;
+        }
+
         moy_lua_call_update(dt);
         if (!moy_lua_ok()) break;
 
@@ -163,10 +173,23 @@ static void moy_task(void *arg)
     purr_splash_status("Looking for a cart...");
     purr_port_heartbeat();
 
-    moy_err_t err = moy_cart_load();
+    // Scan first, then let the player choose. moy_cart_scan() only reads the
+    // directory, so a card with a dozen carts still reaches the picker quickly —
+    // manifests and art are parsed for the ONE cart that gets chosen.
+    static moy_cart_list_t carts;
+    moy_err_t err = moy_cart_scan(&carts);
     if (err != MOY_OK) {
         // Recoverable failure: the launcher is unloaded, so this must draw
         // something and wait rather than returning into a black screen.
+        purr_port_fail_screen("MOY", moy_err_str(err), "Press any key to exit");
+        goto done;
+    }
+
+    const char *chosen = moy_menu_pick(&carts);
+    if (!chosen) { ESP_LOGI(TAG, "no cart chosen - leaving"); goto done; }
+
+    err = moy_cart_load(chosen);
+    if (err != MOY_OK) {
         purr_port_fail_screen("MOY", moy_err_str(err), "Press any key to exit");
         goto done;
     }

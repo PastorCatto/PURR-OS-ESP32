@@ -41,6 +41,7 @@ idf_component_register(
         moy_cart.c
         moy_draw.c
         moy_input.c
+        moy_menu.c
         moy_lua.c
         moy_data.c
         ${LUA_SRCS}
