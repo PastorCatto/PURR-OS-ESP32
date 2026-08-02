@@ -67,8 +67,21 @@ lora        = ""
 ui          = "cupcake"
 app_manager = "app_manager"
 lua         = "lua_runtime"
+# systemui — Cupcake's window model has no per-window title bar or close
+# button by design (see cupcake_win.c): Back/Home/Recents live entirely in
+# this module's nav bar. Without this entry CONFIG_PURR_SYSTEMUI is unset,
+# systemui.c compiles to a no-op stub, and there is no way back to the
+# launcher once an app is open — confirmed live: 640x360 Cupcake on real
+# Tab5 hardware, opening Terminal from the launcher left no path back to
+# Home at all (not a gesture/touch-mapping bug — the nav bar code was never
+# even compiled in). tdeck_plus is the reference for this pairing.
+systemui    = "systemui"
 
 [ui]
+# systemui_style — Cupcake's nav bar (Back/Home/Recents) is the "android"
+# style; "ios" draws no nav bar at all and expects Mochi/Tabby's home
+# indicator instead. Must match the launcher in [modules] above.
+systemui_style = "android"
 theme       = "wce"
 
 [apps]
