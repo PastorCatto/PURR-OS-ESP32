@@ -651,6 +651,24 @@ static int launch_native(app_entry_t *app, int idx)
 
 int app_manager_scan_ex(bool include_sd)
 {
+    // s_apps/s_ctxs are heap-allocated by app_manager_init(), not static
+    // arrays — still NULL if init() never ran (e.g. crash-guard disabled
+    // this module after repeated strikes and skipped its init() outright,
+    // or an allocation genuinely failed there and returned early). Nothing
+    // here checked that before writing through &s_apps[s_app_count], which
+    // for s_app_count==0 is a literal NULL-pointer store. Confirmed live on
+    // Tab5: app_manager_count()'s lazy re-scan (see its own comment) is a
+    // plain exported function call with no such gate, and any UI backend
+    // that calls it — Mochi's springboard build does, unconditionally —
+    // reaches this the instant app_manager is in a disabled/unloaded state,
+    // producing a Guru Meditation "Store access fault" at address 0x0 that
+    // repeats every boot (crash-guard sees it as another app_manager
+    // failure and re-disables it, forever).
+    if (!s_apps || !s_ctxs) {
+        ESP_LOGW(TAG, "scan skipped — app_manager not initialised (s_apps/s_ctxs NULL)");
+        return 0;
+    }
+
     s_app_count = 0;
 
     // Discover pre-linked apps registered in the kernel module table
