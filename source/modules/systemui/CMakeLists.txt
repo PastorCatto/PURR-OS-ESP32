@@ -26,5 +26,6 @@ idf_component_register(
         ../../kernel/core
         ../../kernel/catcalls
         ../meshtastic
-    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager meshtastic
+        ../user_mgr
+    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager meshtastic user_mgr
 )

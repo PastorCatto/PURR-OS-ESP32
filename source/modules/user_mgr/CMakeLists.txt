@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        user_mgr.c
+    INCLUDE_DIRS
+        .
+        ../../kernel/core
+        ../../kernel/catcalls
+    REQUIRES
+        esp_common
+        freertos
+        nvs_flash
+        esp_hw_support
+        mbedtls
+)

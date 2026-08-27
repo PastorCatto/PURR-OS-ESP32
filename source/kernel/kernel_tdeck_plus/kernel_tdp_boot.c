@@ -680,10 +680,29 @@ void app_main(void)
     // sx1262_rl_configure() must run before purr_kernel_load_static_modules()
     // below, since that's what calls the radio module's own module_init() ->
     // sx1262_rl_init(), which reads these pins at SPI-bus-setup time.
+    //
+    // Guarded: this call is unconditional in source, but the SYMBOL only
+    // exists when source/drivers/radio/sx1262_rl/ is actually compiled,
+    // which is device.pcat's [drivers].radio choice, not anything this
+    // specialized kernel controls itself — a device with that cleared
+    // (the "minimal" build profile; see purrstrap.py's apply_build_profile())
+    // would otherwise fail at LINK time with "undefined reference to
+    // sx1262_rl_configure", the exact gap PURR_OS_1.0_CHECKLIST.md's
+    // "[drivers] are not freely toggleable on a device with a specialized
+    // kernel" entry described. PURR_HAS_RADIO_DRIVER is purrstrap-generated
+    // (see CoreOS/main/CMakeLists.txt); the #ifndef fallback below defaults
+    // to 1 so a build that bypasses purrstrap keeps today's behaviour.
+#ifndef PURR_HAS_RADIO_DRIVER
+#define PURR_HAS_RADIO_DRIVER 1
+#endif
+#if PURR_HAS_RADIO_DRIVER
     sx1262_rl_configure(TDP_LORA_MOSI, TDP_LORA_MISO, TDP_LORA_SCLK,
                          TDP_LORA_CS, TDP_LORA_RST, TDP_LORA_BUSY, TDP_LORA_IRQ);
     // Default SPI2_HOST (sx1262_rl_set_spi_host() available if a future fix
     // needs to move this — see mount_sd_vfs()'s comment).
+#else
+    ESP_LOGI(TAG, "drivers.radio unset in device.pcat — skipping sx1262_rl_configure()");
+#endif
 
     ESP_LOGI(TAG, "=== phase 1: static modules ===");
     extern void purr_register_static_modules(void);

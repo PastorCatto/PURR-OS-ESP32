@@ -112,6 +112,11 @@ set(USB_MSC_REQUIRES "")
 # evaluated in an isolated scope. Absent means the kernel's own default.
 set(PURR_BOOT_SETTLE_ENV $ENV{PURR_BOOT_SETTLE_MS})
 
+# Whether [drivers].radio names a driver — see purrstrap.py's own comment on
+# PURR_HAS_RADIO_DRIVER for why a specialized kernel's boot file needs this
+# at compile time rather than just skipping the driver's module registration.
+set(PURR_HAS_RADIO_DRIVER_ENV $ENV{PURR_HAS_RADIO_DRIVER})
+
 idf_component_register(
     SRCS
         ${BOOT_SRCS}
@@ -144,6 +149,17 @@ idf_component_register(
         # failed with "esp_app_desc.h: No such file or directory" — a difference
         # only a multi-device bake surfaces.
         esp_app_format
+        # app_update — esp_ota_ops.h's esp_ota_get_running_partition()/
+        # esp_ota_get_state_partition()/esp_ota_mark_app_valid_cancel_rollback()/
+        # esp_ota_mark_app_invalid_rollback_and_reboot(), used by
+        # purr_crash_guard.c's OTA rollback block (only active under
+        # CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE — see device.pcat [device] ota).
+        # Same "explicit, not inherited" reasoning as esp_app_format just above:
+        # it happens to already be linkable everywhere via a transitive path
+        # from esp_app_desc.h's own esp_app_get_description(), but this makes
+        # that dependency real instead of assumed, on every device regardless
+        # of whether that transitive path stays true as REQUIRES elsewhere change.
+        app_update
         ${DRIVER_REQUIRES}
         ${EXTRA_REQUIRES}
         ${USB_MSC_REQUIRES}
@@ -153,4 +169,12 @@ idf_component_register(
 if(PURR_BOOT_SETTLE_ENV)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOOT_SETTLE_MS=${PURR_BOOT_SETTLE_ENV}UL)
     message(STATUS "PURR: boot settle ${PURR_BOOT_SETTLE_ENV} ms (from device.pcat)")
+endif()
+
+# Only defined when purrstrap actually set it — a bare `idf.py build` (no
+# PURR_HAS_RADIO_DRIVER in the environment at all) leaves kernel_tdp_boot.c's
+# own #ifndef fallback (defaults to 1, today's unconditional behaviour) in
+# charge, same as PURR_BOOT_SETTLE_ENV's "absent means the kernel default" above.
+if(DEFINED ENV{PURR_HAS_RADIO_DRIVER})
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE PURR_HAS_RADIO_DRIVER=${PURR_HAS_RADIO_DRIVER_ENV})
 endif()

@@ -1,11 +1,12 @@
 // services_app.c — PURR OS Services (.claw)
 //
 // Read-only dashboard: live status of core background services (WiFi, BLE,
-// SD, LoRa radio, plus anything registered via purr_kernel_health_register())
-// and current memory pressure. Exists so a hung/crashed background service
-// is visible somewhere even if it never pushed its own notification, and so
-// "is the device under memory pressure right now" is answerable without a
-// serial log.
+// SD, LoRa radio, the wall clock, plus anything registered via
+// purr_kernel_health_register()) and current memory pressure. Exists so a
+// hung/crashed background service is visible somewhere even if it never
+// pushed its own notification, and so "is the device under memory pressure
+// right now" (or "does the device even know what time it is") is answerable
+// without a serial log.
 //
 // meshtastic/meshcore are deliberately filtered out of the health-list rows
 // below — they're "extensions" managed through MSN (msn.c's chooser screen)
@@ -18,6 +19,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "purr_win.h"
 #include "purr_module.h"
 #include "purr_kernel.h"
@@ -55,6 +57,31 @@ static void refresh(void) {
 
     snprintf(s_row_bufs[n], sizeof(s_row_bufs[n]), "LoRa radio: %s",
              purr_kernel_lora_available() ? "available" : "unavailable");
+    s_row_ptrs[n] = s_row_bufs[n]; n++;
+
+    // No device in the supported table has a battery-backed RTC — see
+    // purr_kernel.h's "Wall-clock time" doc comment — so "unsynced" is the
+    // expected state fresh off a cold boot, not a fault. Source is shown
+    // alongside the time itself because which one is currently authoritative
+    // is exactly the kind of thing this app exists to surface.
+    if (purr_kernel_time_is_synced()) {
+        time_t now = purr_kernel_time_now();
+        struct tm tm_utc;
+        gmtime_r(&now, &tm_utc);
+        char ts[20];
+        strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M", &tm_utc);
+        const char *src = "?";
+        switch (purr_kernel_time_source()) {
+            case PURR_TIME_SOURCE_NVS:    src = "saved"; break;
+            case PURR_TIME_SOURCE_GPS:    src = "gps";   break;
+            case PURR_TIME_SOURCE_NTP:    src = "ntp";   break;
+            case PURR_TIME_SOURCE_RTC_HW: src = "rtc";   break;
+            default: break;
+        }
+        snprintf(s_row_bufs[n], sizeof(s_row_bufs[n]), "Clock: %s UTC (%s)", ts, src);
+    } else {
+        snprintf(s_row_bufs[n], sizeof(s_row_bufs[n]), "Clock: unsynced");
+    }
     s_row_ptrs[n] = s_row_bufs[n]; n++;
 
     // Every service registered with purr_kernel_health_register() shows up
@@ -128,7 +155,7 @@ PURR_MODULE_REGISTER(services) = {
     .module_type       = PURR_MOD_APP,
     .load_priority     = PURR_PRIORITY_OPTIONAL,
     .name              = "services",
-    .version           = "1.0.2",
+    .version           = "1.1.0",
     .kernel_min        = "0.11.1",
     .provided_catcalls = 0,
     .required_catcalls = 0,

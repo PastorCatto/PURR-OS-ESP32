@@ -16,7 +16,10 @@ idf_component_register(
     # pushed the compile command line to ~32.4KB, past Windows' 32,768-byte
     # CreateProcess limit, and the build died with "ninja: fatal: CreateProcess:
     # The parameter is incorrect" on a target that had built all day.
-    PRIV_INCLUDE_DIRS ../speed_demon
+    # user_mgr — same PRIVATE treatment as speed_demon just above, for the
+    # same documented reason: user_mgr.h is included only by app_manager.c
+    # (the OOBE-autorun check), never by app_manager.h.
+    PRIV_INCLUDE_DIRS ../speed_demon ../user_mgr
     REQUIRES esp_common driver freertos nvs_flash
-    PRIV_REQUIRES speed_demon
+    PRIV_REQUIRES speed_demon user_mgr
 )

@@ -257,8 +257,11 @@ static void module_registry_unlock(void) {
 }
 
 // ── Version comparison ────────────────────────────────────────────────────────
+// Exported (was file-static) for ota_mgr's manifest-version check — same
+// "MAJOR.MINOR.PATCH" comparison a module's kernel_min/kernel_max already
+// gets checked against below, reused rather than re-implemented.
 
-static int version_cmp(const char *a, const char *b) {
+int purr_kernel_version_cmp(const char *a, const char *b) {
     unsigned ma=0,mi=0,pa=0, mb=0,mib=0,pb=0;
     sscanf(a, "%u.%u.%u", &ma, &mi, &pa);
     sscanf(b, "%u.%u.%u", &mb, &mib, &pb);
@@ -852,6 +855,10 @@ static int cmp_reg_priority(const void *a, const void *b)
 // Defined further down, next to the state it writes. See its own comment for
 // why the kernel loads these rather than the settings app.
 static void kernel_load_persisted_settings(void);
+// Defined next to purr_kernel_time_set() — seeds the coarse NVS fallback
+// (PURR_TIME_SOURCE_NVS) before any module, including wifi_mgr/generic_nmea,
+// gets a chance to sync a fresher one.
+static void kernel_load_persisted_time(void);
 
 int purr_kernel_load_static_modules(void)
 {
@@ -859,6 +866,7 @@ int purr_kernel_load_static_modules(void)
     // here rather than in each kernel_*_boot.c so that every device — generic
     // core and specialised kernels alike — gets it without a per-board edit.
     kernel_load_persisted_settings();
+    kernel_load_persisted_time();
 
     qsort(s_static_reg, s_static_reg_count,
           sizeof(s_static_reg[0]), cmp_reg_priority);
@@ -914,14 +922,14 @@ int purr_kernel_load_module(const char *path)
         return -1;
     }
 
-    if (hdr.kernel_min[0] && version_cmp(KITT_VERSION, hdr.kernel_min) < 0) {
+    if (hdr.kernel_min[0] && purr_kernel_version_cmp(KITT_VERSION, hdr.kernel_min) < 0) {
         ESP_LOGE(TAG, "module %s requires kernel >= %s (running %s)",
                  hdr.name, hdr.kernel_min, KITT_VERSION);
         return -1;
     }
 
     bool compat_mode = false;
-    if (hdr.kernel_max[0] && version_cmp(KITT_VERSION, hdr.kernel_max) > 0) {
+    if (hdr.kernel_max[0] && purr_kernel_version_cmp(KITT_VERSION, hdr.kernel_max) > 0) {
         ESP_LOGW(TAG, "module %s: kernel %s > kernel_max %s [COMPAT]",
                  hdr.name, KITT_VERSION, hdr.kernel_max);
         compat_mode = true;
@@ -934,7 +942,7 @@ int purr_kernel_load_module(const char *path)
     module_slot_t *slot;
     int existing = find_module_slot_by_name(hdr.name);
     if (existing >= 0) {
-        if (version_cmp(hdr.version, s_modules[existing].header.version) <= 0) {
+        if (purr_kernel_version_cmp(hdr.version, s_modules[existing].header.version) <= 0) {
             ESP_LOGI(TAG, "module '%s' v%s already loaded (have v%s) — skipping %s",
                      hdr.name, hdr.version, s_modules[existing].header.version, path);
             return 0;
@@ -1317,6 +1325,96 @@ bool purr_kernel_wifi_connected(void)  { return s_wifi_connected; }
 int  purr_kernel_battery_percent(void) { return s_battery_percent; }
 int  purr_kernel_battery_voltage_mv(void) { return s_battery_voltage_mv; }
 bool purr_kernel_lora_available(void)  { return s_lora_available; }
+
+// ── Wall-clock time ──────────────────────────────────────────────────────────
+// See purr_kernel.h's doc comment for the source-authority model. State here
+// is deliberately just "epoch at last accept + uptime_ms at that moment" —
+// purr_kernel_time_now() extrapolates from it rather than a live libc clock,
+// so there's nothing to keep ticking in the background and nothing that can
+// drift out of sync with purr_kernel_uptime_ms()'s own esp_timer source.
+#define TIME_NVS_NS  "purr_time"
+#define TIME_NVS_KEY "epoch"
+
+// How long a source's reading stays "fresh" enough to block a lower-
+// authority source from overwriting it. 6h: long enough that a routine
+// hourly NTP resync (CONFIG_LWIP_SNTP_UPDATE_DELAY) never lapses into
+// "stale" between updates, short enough that a genuinely gone network lets
+// GPS start carrying the clock well within the same day.
+#define PURR_TIME_FRESH_WINDOW_MS (6ULL * 60 * 60 * 1000)
+
+static time_t              s_wall_time_epoch    = 0;   // UTC seconds; 0 = unsynced
+static purr_time_source_t  s_wall_time_source    = PURR_TIME_SOURCE_NONE;
+static uint64_t            s_wall_time_set_at_ms = 0;   // uptime_ms() at last accept
+
+bool purr_kernel_time_is_synced(void) { return s_wall_time_source != PURR_TIME_SOURCE_NONE; }
+
+time_t purr_kernel_time_now(void) {
+    if (s_wall_time_source == PURR_TIME_SOURCE_NONE) return 0;
+    uint64_t elapsed_ms = purr_kernel_uptime_ms() - s_wall_time_set_at_ms;
+    return s_wall_time_epoch + (time_t)(elapsed_ms / 1000);
+}
+
+purr_time_source_t purr_kernel_time_source(void) { return s_wall_time_source; }
+
+void purr_kernel_time_set(purr_time_source_t source, time_t epoch_utc) {
+    if (source == PURR_TIME_SOURCE_NONE || epoch_utc <= 0) return;
+
+    uint64_t now_ms = purr_kernel_uptime_ms();
+    bool current_fresh = s_wall_time_source != PURR_TIME_SOURCE_NONE &&
+                          (now_ms - s_wall_time_set_at_ms) < PURR_TIME_FRESH_WINDOW_MS;
+    if (source < s_wall_time_source && current_fresh) return;
+
+    s_wall_time_epoch     = epoch_utc;
+    s_wall_time_source    = source;
+    s_wall_time_set_at_ms = now_ms;
+
+    // NVS loading itself back in (purr_kernel_time_load_nvs(), at boot) would
+    // otherwise be a pointless write-back of the value it just read.
+    if (source != PURR_TIME_SOURCE_NVS) {
+        nvs_handle_t h;
+        if (nvs_open(TIME_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_i64(h, TIME_NVS_KEY, (int64_t)epoch_utc);
+            nvs_commit(h);
+            nvs_close(h);
+        }
+    }
+}
+
+// See the forward declaration up in purr_kernel_load_static_modules() for
+// why this runs before any module — including wifi_mgr and generic_nmea —
+// gets a chance to call purr_kernel_time_set() with something fresher.
+static void kernel_load_persisted_time(void) {
+    nvs_handle_t h;
+    if (nvs_open(TIME_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
+        return;   // namespace absent (first boot after an erase, or never synced) — stays unset
+    }
+    int64_t v = 0;
+    esp_err_t err = nvs_get_i64(h, TIME_NVS_KEY, &v);
+    nvs_close(h);
+    if (err == ESP_OK && v > 0) {
+        purr_kernel_time_set(PURR_TIME_SOURCE_NVS, (time_t)v);
+        ESP_LOGI(TAG, "time: seeded from NVS fallback (epoch=%lld)", (long long)v);
+    }
+}
+
+time_t purr_kernel_time_from_utc_calendar(uint16_t year, uint8_t month, uint8_t day,
+                                           uint8_t hour, uint8_t minute, uint8_t second) {
+    // days_from_civil (Howard Hinnant — howardhinnant.github.io/date_algorithms.html),
+    // chosen over struct tm + mktime() specifically to avoid depending on the
+    // libc TZ globals: mktime() treats its input as LOCAL time, and this
+    // kernel never sets a TZ, so relying on it would make every caller's
+    // "UTC in" silently correct only as long as TZ stays unset. Pure integer
+    // math instead — correct for any UTC calendar date, GPS epoch (1980) and
+    // on.
+    int y = (int)year - (month <= 2 ? 1 : 0);
+    int era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);                                   // [0, 399]
+    unsigned doy = (153u * (month + (month > 2 ? -3 : 9)) + 2u) / 5u + day - 1u; // [0, 365]
+    unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;                     // [0, 146096]
+    long days = (long)era * 146097L + (long)doe - 719468L;   // 719468 = 0000-03-01 -> 1970-01-01
+
+    return (time_t)(days * 86400L + (long)hour * 3600L + (long)minute * 60L + (long)second);
+}
 bool purr_kernel_dev_mode_enabled(void) { return s_dev_mode; }
 bool purr_kernel_navbar_always_visible(void) { return s_navbar_always_visible; }
 bool purr_kernel_lock_hide_notifications(void) { return s_lock_hide_notifications; }
@@ -1712,6 +1810,32 @@ void purr_kernel_ui_breadcrumb(const char *step)
 static const char *s_watch_owner      = NULL;
 static uint64_t    s_watch_last_ms    = 0;
 static uint32_t    s_watch_timeout_ms = 0;
+// Whichever task most recently called purr_kernel_watch_beat() — updated on
+// every beat, not captured once at watch_begin(). That matters for speed
+// demon specifically: app_manager's declarative `.speed_demon = 1` path
+// calls purr_speed_demon_enter() (and so watch_begin()) from a short-lived
+// launch task, BEFORE the app's own long-running task even exists (doom_app.c
+// spawns its game task from init(), which watch_begin() ran ahead of) — so
+// there is no single "the game's task" to capture up front. Recording it on
+// every beat instead means it is always whichever task most recently proved
+// it was alive, with zero cooperation needed from the app beyond calling
+// heartbeat the way it already has to.
+static TaskHandle_t s_watch_task       = NULL;
+// How many times the timeout has been extended for a task that is still
+// alive but silent — see the health_watchdog_task check below. Reset on
+// every real beat (a genuine heartbeat is full proof of liveness, not just
+// "still scheduled") and at watch_begin()/watch_end().
+static int          s_watch_extensions = 0;
+// Caps the total silent-but-alive grace at 6 extensions of the base window
+// (60s on speed demon's 10s window) — generous enough for PrBoom's own
+// internal startup (texture/sprite table build — see doom_app.c's
+// wad_progress() comment for the WAD-load half of this same problem, which
+// heartbeat already covers; this covers the part after the WAD is loaded,
+// which nothing calls heartbeat during, because it runs inside PrBoom's own
+// vendored code) without turning into "a wedged task just runs forever
+// unsupervised" — a task that is still silent after 60s is being treated as
+// hung regardless of whether it is technically still scheduled.
+#define SPEED_DEMON_MAX_EXTENSIONS 6
 
 void purr_kernel_watch_begin(const char *owner, uint32_t interval_ms, int missed_beats)
 {
@@ -1724,6 +1848,8 @@ void purr_kernel_watch_begin(const char *owner, uint32_t interval_ms, int missed
     // here would read as one full timeout's worth of silence the instant the
     // watchdog next polls.
     s_watch_last_ms    = purr_kernel_uptime_ms();
+    s_watch_task       = NULL;
+    s_watch_extensions = 0;
 
     ensure_health_watchdog_started();
     ESP_LOGI(TAG, "watch: %s every %ums, react after %d missed (%ums)",
@@ -1733,7 +1859,9 @@ void purr_kernel_watch_begin(const char *owner, uint32_t interval_ms, int missed
 void purr_kernel_watch_beat(void)
 {
     if (!s_watch_owner) return;   // no-op outside a watch — see header
-    s_watch_last_ms = purr_kernel_uptime_ms();
+    s_watch_last_ms    = purr_kernel_uptime_ms();
+    s_watch_task       = xTaskGetCurrentTaskHandle();
+    s_watch_extensions = 0;
 }
 
 void purr_kernel_watch_end(void)
@@ -1743,6 +1871,8 @@ void purr_kernel_watch_end(void)
     s_watch_owner      = NULL;
     s_watch_timeout_ms = 0;
     s_watch_last_ms    = 0;
+    s_watch_task       = NULL;
+    s_watch_extensions = 0;
 
     // Hand the UI check a fresh grace period rather than a stale timestamp.
     //
@@ -1817,19 +1947,64 @@ static void health_watchdog_task(void *arg)
         // identically to a UI hang — including the pending-recovery marker the
         // next boot reads to show "Recovering from Game Mode" instead of the
         // usual splash.
+        //
+        // A missed heartbeat is NOT on its own treated as proof of a hang —
+        // only as proof that whatever last called purr_kernel_watch_beat()
+        // (s_watch_task) needs checking. Doom's WAD load calls heartbeat
+        // throughout (see doom_app.c's wad_progress()), but PrBoom's own
+        // internal startup after that — texture/sprite table construction,
+        // R_InitData, entirely inside vendored code this OS does not
+        // instrument — calls it not at all, and measured well past 10s on
+        // this hardware. Reported live: the watchdog was striking and
+        // rebooting a game that was still genuinely loading, not hung.
+        //
+        // eTaskGetState() on a handle whose task has since self-deleted
+        // returns eDeleted rather than being undefined — FreeRTOS keeps a
+        // deleted task's TCB around until the idle task reclaims it, and
+        // querying a still-held handle in that window is the documented,
+        // safe way to ask "did this task actually finish" without a second
+        // synchronization primitive. That is the real distinction this
+        // makes: still SCHEDULED (however silent) gets more time, up to
+        // SPEED_DEMON_MAX_EXTENSIONS; actually GONE — self-deleted without
+        // going through app_manager_notify_exited()'s own restore path (that
+        // path calls purr_speed_demon_exit(), which ends this watch cleanly
+        // before the task even gets here — see app_manager.c), or genuinely
+        // crashed — gets no grace at all, straight to the existing
+        // strike-and-reboot failsafe below, same as today.
         if (s_watch_owner && s_watch_timeout_ms) {
             uint64_t now = purr_kernel_uptime_ms();
             if (now - s_watch_last_ms > (uint64_t)s_watch_timeout_ms) {
-                char reason[64];
-                snprintf(reason, sizeof(reason), "NO HEARTBEAT FOR %ums",
-                         (unsigned)(now - s_watch_last_ms));
-                const char *owner = s_watch_owner;
-                // Cleared before marking: mark_hang() does not return, and a
-                // stale watch surviving into the recovery path would be a
-                // second, spurious trip.
-                s_watch_owner      = NULL;
-                s_watch_timeout_ms = 0;
-                purr_crash_guard_mark_hang(owner, reason);
+                bool task_alive = s_watch_task != NULL &&
+                                   eTaskGetState(s_watch_task) != eDeleted;
+                if (task_alive && s_watch_extensions < SPEED_DEMON_MAX_EXTENSIONS) {
+                    s_watch_extensions++;
+                    ESP_LOGW(TAG, "watch: %s silent %ums but task still scheduled — "
+                             "extending (%d/%d)", s_watch_owner,
+                             (unsigned)(now - s_watch_last_ms),
+                             s_watch_extensions, SPEED_DEMON_MAX_EXTENSIONS);
+                    s_watch_last_ms = now;
+                } else {
+                    char reason[64];
+                    unsigned silent_ms = (unsigned)(now - s_watch_last_ms);
+                    if (task_alive) {
+                        snprintf(reason, sizeof(reason),
+                                 "NO HEARTBEAT FOR %ums (extensions exhausted)", silent_ms);
+                    } else {
+                        snprintf(reason, sizeof(reason),
+                                 "NO HEARTBEAT FOR %ums (task gone, no clean exit)", silent_ms);
+                    }
+                    const char *owner = s_watch_owner;
+                    // Cleared before marking: mark_hang() does not return, and a
+                    // stale watch surviving into the recovery path would be a
+                    // second, spurious trip.
+                    s_watch_owner      = NULL;
+                    s_watch_timeout_ms = 0;
+                    s_watch_task       = NULL;
+                    s_watch_extensions = 0;
+                    purr_crash_guard_mark_hang(owner, reason);
+                    // Loops forever inside purr_kernel_panic_ex() — nothing
+                    // after this point runs again this boot.
+                }
             }
         }
 

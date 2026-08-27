@@ -59,6 +59,7 @@ PURR_MODULE_REGISTER(wifi_mgr) = {
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -69,6 +70,9 @@ static const char *TAG = "wifi_mgr";
 #define NVS_NS "wifi_sta"
 #define MAX_SCAN_RESULTS 24
 #define MAX_RETRIES 5
+// Same public NTP pool every "protocols/sntp" IDF example defaults to.
+// Not user-configurable yet — see wifi_mgr.h's doc comment.
+#define SNTP_SERVER "pool.ntp.org"
 
 static wifi_mgr_status_t  s_status = WIFI_MGR_IDLE;
 static char               s_ip_str[16] = "";
@@ -79,6 +83,33 @@ static int                s_scan_count = 0;
 
 static esp_event_handler_instance_t s_wifi_ev_inst;
 static esp_event_handler_instance_t s_ip_ev_inst;
+// Whether esp_netif_sntp_init() has run this boot — started once, on the
+// first successful connection, not re-armed per reconnect. lwIP's SNTP
+// client keeps retrying/resyncing on its own schedule for as long as it's
+// initialised (CONFIG_LWIP_SNTP_UPDATE_DELAY, default hourly); a dropped
+// and restored WiFi connection just means its own DNS/UDP attempts start
+// succeeding again, nothing here needs to notice.
+static bool s_sntp_started = false;
+
+// ── SNTP ──────────────────────────────────────────────────────────────────────
+
+static void on_sntp_synced(struct timeval *tv) {
+    if (!tv) return;
+    purr_kernel_time_set(PURR_TIME_SOURCE_NTP, (time_t)tv->tv_sec);
+    ESP_LOGI(TAG, "SNTP synced (epoch=%lld)", (long long)tv->tv_sec);
+}
+
+static void start_sntp_once(void) {
+    if (s_sntp_started) return;
+    s_sntp_started = true;
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(SNTP_SERVER);
+    cfg.sync_cb = on_sntp_synced;
+    esp_err_t ret = esp_netif_sntp_init(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "esp_netif_sntp_init failed: %s", esp_err_to_name(ret));
+        s_sntp_started = false;   // allow a retry on the next got_ip
+    }
+}
 
 // ── NVS persistence ───────────────────────────────────────────────────────────
 
@@ -128,6 +159,7 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data
     s_status  = WIFI_MGR_CONNECTED;
     s_retries = 0;
     purr_kernel_set_wifi_connected(true);
+    start_sntp_once();
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -216,6 +248,10 @@ int wifi_mgr_init(void) {
 void wifi_mgr_deinit(void) {
     esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_wifi_ev_inst);
     esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_ev_inst);
+    if (s_sntp_started) {
+        esp_netif_sntp_deinit();
+        s_sntp_started = false;
+    }
     esp_wifi_stop();
 }
 

@@ -1,0 +1,9 @@
+# apps/system/oobe/app.pcat
+
+name        = "oobe"
+version     = "1.0.0"
+tier        = "claw"
+author      = "PURR OS"
+description = "First-run setup: choose a username/password or keep the zero-config default."
+
+idf_requires = "esp_common driver freertos"

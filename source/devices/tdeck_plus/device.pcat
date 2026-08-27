@@ -11,7 +11,15 @@ port        = "/dev/ttyACM0"
 psram       = true
 psram_mb    = 8
 
-spiffs_offset  = "0xD90000"
+# ota — dual-slot partition table (partitions_16mb_ota.csv) + bootloader
+# rollback. The 16 MB tier has plenty of headroom for it (see that CSV's own
+# header comment) — first device this landed on, see source/modules/ota_mgr/.
+# NOTE: this moves spiffs_offset below from the factory-only layout's
+# 0xD90000 to 0xD80000 — the OTA CSV's own header comment explains why an
+# equal-slot, 0x10000-aligned split can't land on the original offset.
+ota         = true
+
+spiffs_offset  = "0xD80000"
 
 # boot_settle_ms — pause between the P2 (UI) and P3 (radios, deferred apps)
 # module tiers. See purr_kernel.c's BOOT_SETTLE_MS for why it exists.
@@ -111,6 +119,8 @@ app_manager = "app_manager"
 # meshcore    = "meshcore"
 lua         = "lua_runtime"
 wifi        = "wifi_mgr"
+ota         = "ota_mgr"
+users       = "user_mgr"
 # bt          = "bt_mgr"
 # proximity/pairing — NOT listed here anymore; purrstrap.py's
 # apply_radio_companion_defaults() adds them automatically to any device
@@ -129,6 +139,7 @@ theme       = "wce"
 
 [apps]
 settings    = true
+oobe        = true
 terminal    = true
 fileman     = true
 hwtest      = false
@@ -155,6 +166,8 @@ app_manager       = 2
 radio/sx1262_rl   = 2
 driver_manager    = 2
 wifi_mgr          = 2
+ota_mgr           = 2
+user_mgr          = 2
 bt_mgr            = 2
 lua_runtime       = 2
 meshtastic        = 2
@@ -162,6 +175,7 @@ meshcore          = 2
 gps/generic_nmea  = 3
 battery/adc_battery = 3
 apps/settings     = 3
+apps/oobe         = 3
 apps/terminal     = 3
 apps/fileman      = 3
 apps/hwtest       = 3

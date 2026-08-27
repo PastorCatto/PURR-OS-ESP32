@@ -23,6 +23,7 @@
 #include "wifi_mgr.h"
 #include "bt_mgr.h"
 #include "mesh_ble.h"
+#include "ota_mgr.h"
 #include "systemui.h"   // purr_systemui_fx_refresh() — see on_effects_toggle()
 #include "sdkconfig.h"
 
@@ -73,6 +74,17 @@ static purr_wid_t  s_mesh_backend_status_lbl = 0;
 static purr_win_t  s_mesh_switch_confirm_win = 0;
 static purr_mesh_backend_t s_mesh_switch_target;
 static purr_win_t  s_about_win = 0;
+
+// Updates category — see on_open_updates(). ota_mgr_check()/apply() are
+// documented-blocking network calls, same class of problem bt_scan_task()
+// below already solved for Bluetooth scanning: never run them on cupcake_task,
+// always on their own background task, guarded by s_ota_busy the same way
+// s_bt_scanning guards a concurrent scan.
+static purr_win_t  s_updates_win        = 0;
+static purr_wid_t  s_updates_status_lbl = 0;
+static purr_win_t  s_ota_url_dlg_win    = 0;
+static purr_wid_t  s_ota_url_dlg_input  = 0;
+static volatile bool s_ota_busy = false;
 
 static purr_wid_t  s_brightness_lbl = 0;
 static purr_wid_t  s_screen_timeout_lbl = 0;
@@ -1036,6 +1048,204 @@ static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
     purr_win_show(s_connectivity_win);
 }
 
+// ── Updates ───────────────────────────────────────────────────────────────────
+
+static void set_updates_status(const char *msg) {
+    if (s_updates_status_lbl) purr_win_label_set(s_updates_status_lbl, msg);
+}
+
+// Re-reads ota_mgr's current status/progress into the label — same manual
+// "Refresh" pattern taskmgr/services use rather than a polling timer, since
+// nothing in purr_win.h offers one and ota_mgr_check()/apply() already run on
+// their own background task regardless.
+static void refresh_updates_status(void) {
+    char buf[96];
+    switch (ota_mgr_status()) {
+        case OTA_MGR_IDLE:
+            snprintf(buf, sizeof(buf), "Current version: %s", ota_mgr_current_version());
+            break;
+        case OTA_MGR_CHECKING:
+            snprintf(buf, sizeof(buf), "Checking for updates...");
+            break;
+        case OTA_MGR_UP_TO_DATE:
+            snprintf(buf, sizeof(buf), "Up to date (v%s).", ota_mgr_current_version());
+            break;
+        case OTA_MGR_AVAILABLE:
+            snprintf(buf, sizeof(buf), "Update available: v%s (current v%s)",
+                     ota_mgr_available_version(), ota_mgr_current_version());
+            break;
+        case OTA_MGR_DOWNLOADING:
+            snprintf(buf, sizeof(buf), "Downloading v%s... %d%%",
+                     ota_mgr_available_version(), ota_mgr_progress_percent());
+            break;
+        case OTA_MGR_VERIFYING:
+            snprintf(buf, sizeof(buf), "Verifying checksum...");
+            break;
+        case OTA_MGR_READY_TO_REBOOT:
+            snprintf(buf, sizeof(buf), "v%s staged — reboot to apply.", ota_mgr_available_version());
+            break;
+        case OTA_MGR_FAILED:
+            snprintf(buf, sizeof(buf), "Failed: %s", ota_mgr_error());
+            break;
+        default:
+            snprintf(buf, sizeof(buf), "?");
+            break;
+    }
+    set_updates_status(buf);
+}
+
+static void on_updates_refresh(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    refresh_updates_status();
+}
+
+static void ota_check_task(void *arg) {
+    (void)arg;
+    ota_mgr_check();
+    s_ota_busy = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void ota_apply_task(void *arg) {
+    (void)arg;
+    ota_mgr_apply();
+    s_ota_busy = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void ota_apply_sd_task(void *arg) {
+    (void)arg;
+    ota_mgr_apply_from_sd(OTA_MGR_SD_DEFAULT_PATH);
+    s_ota_busy = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+// PSRAM-backed stack and a size on par with bt_scan_task's own reasoning —
+// TLS handshakes (esp_https_ota goes through esp-tls/mbedtls) are the
+// deepest, most stack-hungry part of this call, more so than BLE scanning,
+// so this task gets a larger allocation than bt_scan_task's 4096.
+#define OTA_TASK_STACK 8192
+
+static void on_updates_check(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (!ota_mgr_is_supported()) { set_updates_status("OTA not available on this build."); return; }
+    if (ota_mgr_manifest_url()[0] == '\0') { set_updates_status("Set an update URL first."); return; }
+    if (s_ota_busy) return;
+    s_ota_busy = true;
+    set_updates_status("Checking for updates...");
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(ota_check_task, "ota_check", OTA_TASK_STACK, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { s_ota_busy = false; set_updates_status("Could not start update check."); }
+}
+
+static void on_updates_download(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (ota_mgr_status() != OTA_MGR_AVAILABLE) { set_updates_status("Check for updates first."); return; }
+    if (s_ota_busy) return;
+    s_ota_busy = true;
+    set_updates_status("Starting download...");
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(ota_apply_task, "ota_apply", OTA_TASK_STACK, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { s_ota_busy = false; set_updates_status("Could not start download."); }
+}
+
+// No "check for update available" precondition here, unlike
+// on_updates_download() above — copying a file to OTA_MGR_SD_DEFAULT_PATH IS
+// the user's decision to install it (see ota_mgr_apply_from_sd()'s own doc
+// comment on why there's no version gate on this path).
+static void on_updates_install_sd(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (!purr_kernel_sd_available()) { set_updates_status("No SD card mounted."); return; }
+    if (s_ota_busy) return;
+    s_ota_busy = true;
+    set_updates_status("Reading " OTA_MGR_SD_DEFAULT_PATH "...");
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(ota_apply_sd_task, "ota_apply_sd", OTA_TASK_STACK, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { s_ota_busy = false; set_updates_status("Could not start SD install."); }
+}
+
+static void on_updates_reboot(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (ota_mgr_status() != OTA_MGR_READY_TO_REBOOT) return;
+    set_updates_status("Rebooting...");
+    purr_kernel_reboot();
+}
+
+static void close_ota_url_dialog(void) {
+    if (s_ota_url_dlg_win) purr_win_destroy(s_ota_url_dlg_win);
+    s_ota_url_dlg_win = 0;
+    s_ota_url_dlg_input = 0;
+}
+
+static void on_ota_url_dlg_cancel(purr_wid_t w, purr_event_t e, void *u) { (void)w;(void)e;(void)u; close_ota_url_dialog(); }
+
+static void on_ota_url_dlg_save(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    const char *url = s_ota_url_dlg_input ? purr_win_textarea_get(s_ota_url_dlg_input) : "";
+    if (url && url[0]) ota_mgr_set_manifest_url(url);
+    close_ota_url_dialog();
+    refresh_updates_status();
+}
+
+static void on_updates_set_url(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (s_ota_url_dlg_win) { purr_win_show(s_ota_url_dlg_win); return; }
+
+    s_ota_url_dlg_win = purr_win_create("Update URL");
+    purr_win_label(s_ota_url_dlg_win, "Manifest URL (http/https):");
+    s_ota_url_dlg_input = purr_win_textarea(s_ota_url_dlg_win, 90, 20);
+    if (ota_mgr_manifest_url()[0]) purr_win_textarea_set(s_ota_url_dlg_input, ota_mgr_manifest_url());
+
+    purr_wid_t row = purr_win_row(s_ota_url_dlg_win, 4);
+    purr_win_button(s_ota_url_dlg_win, "Save",   on_ota_url_dlg_save,   NULL);
+    purr_win_button(s_ota_url_dlg_win, "Cancel", on_ota_url_dlg_cancel, NULL);
+    purr_win_layout_end(row);
+
+    purr_win_textarea_focus(s_ota_url_dlg_input);
+    purr_win_show(s_ota_url_dlg_win);
+    purr_win_keyboard_show(s_ota_url_dlg_win, s_ota_url_dlg_input);
+}
+
+static void on_open_updates(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (s_updates_win) { purr_win_show(s_updates_win); refresh_updates_status(); return; }
+
+    s_updates_win = purr_win_create("Updates");
+    add_back_button(s_updates_win);
+
+    if (!ota_mgr_is_supported()) {
+        // No second OTA slot on this device's partition table (device.pcat
+        // [device] ota is unset/false) — ota_mgr still compiles in (same
+        // "always REQUIRES'd, runtime-optional" shape as wifi_mgr/bt_mgr/
+        // meshtastic elsewhere in this file), it just never finds a target
+        // partition. Say so plainly rather than showing controls that would
+        // only ever fail.
+        purr_win_label(s_updates_win, "OTA updates are not available on this build.");
+        purr_win_show(s_updates_win);
+        return;
+    }
+
+    s_updates_status_lbl = purr_win_label(s_updates_win, "...");
+
+    purr_wid_t row1 = purr_win_row(s_updates_win, 4);
+    purr_win_button(s_updates_win, "Check for Updates", on_updates_check, NULL);
+    purr_win_button(s_updates_win, "Set URL",           on_updates_set_url, NULL);
+    purr_win_layout_end(row1);
+
+    purr_wid_t row2 = purr_win_row(s_updates_win, 4);
+    purr_win_button(s_updates_win, "Download & Verify", on_updates_download, NULL);
+    purr_win_button(s_updates_win, "Reboot to Apply",   on_updates_reboot,   NULL);
+    purr_win_layout_end(row2);
+
+    purr_win_label(s_updates_win, "From SD card (" OTA_MGR_SD_DEFAULT_PATH "):");
+    purr_win_button(s_updates_win, "Install from SD", on_updates_install_sd, NULL);
+
+    purr_win_button(s_updates_win, "Refresh", on_updates_refresh, NULL);
+
+    refresh_updates_status();
+    purr_win_show(s_updates_win);
+}
+
 // ── Category picker nav ──────────────────────────────────────────────────
 // Same tile-grid-with-list-fallback shape MSN's own Home screen uses
 // (msn.c's build_home_screen_nav()) — reused here so every multi-screen
@@ -1043,8 +1253,8 @@ static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
 // keeping its older plain-button-row picker. Purely a top-level nav swap:
 // each category's own sub-window (on_open_general() etc.) is untouched.
 
-#define CAT_COUNT 5
-static const char *s_category_labels[CAT_COUNT] = { "General", "Display", "Customization", "Connectivity", "About" };
+#define CAT_COUNT 6
+static const char *s_category_labels[CAT_COUNT] = { "General", "Display", "Customization", "Connectivity", "Updates", "About" };
 
 static void on_cat_menu(purr_wid_t w, purr_event_t e, void *user) {
     (void)user;
@@ -1054,7 +1264,8 @@ static void on_cat_menu(purr_wid_t w, purr_event_t e, void *user) {
         case 1: on_open_display(0, PURR_EVENT_CLICKED, NULL);       break;
         case 2: on_open_customization(0, PURR_EVENT_CLICKED, NULL); break;
         case 3: on_open_connectivity(0, PURR_EVENT_CLICKED, NULL);  break;
-        case 4: on_open_about(0, PURR_EVENT_CLICKED, NULL);         break;
+        case 4: on_open_updates(0, PURR_EVENT_CLICKED, NULL);       break;
+        case 5: on_open_about(0, PURR_EVENT_CLICKED, NULL);         break;
         default: break;
     }
 }
@@ -1103,6 +1314,15 @@ static void settings_deinit(void) {
     if (s_display_win)       { purr_win_destroy(s_display_win);       s_display_win       = 0; s_display_status_lbl       = 0; }
     if (s_customization_win) { purr_win_destroy(s_customization_win); s_customization_win = 0; s_customization_status_lbl = 0; }
     if (s_connectivity_win)  { purr_win_destroy(s_connectivity_win);  s_connectivity_win  = 0; s_mesh_backend_status_lbl = 0; }
+    // No wait-on-semaphore here the way s_bt_scanning above needs one:
+    // ota_check_task()/ota_apply_task() only ever touch ota_mgr's own static
+    // state (via ota_mgr_check()/ota_mgr_apply()), never a widget directly —
+    // reading that state back into s_updates_status_lbl only happens from
+    // the UI-thread refresh button. A download in flight is left running
+    // (ota_mgr is a persistent system module, not owned by this app's
+    // lifetime) rather than aborted just because Settings was closed.
+    close_ota_url_dialog();
+    if (s_updates_win) { purr_win_destroy(s_updates_win); s_updates_win = 0; s_updates_status_lbl = 0; }
     if (s_about_win)         { purr_win_destroy(s_about_win);         s_about_win         = 0; s_about_lbl = 0; }
     if (s_mesh_switch_confirm_win) { purr_win_destroy(s_mesh_switch_confirm_win); s_mesh_switch_confirm_win = 0; }
     purr_win_destroy(s_win);

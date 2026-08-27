@@ -35,6 +35,7 @@
 #include <stdbool.h>
 #include "lvgl.h"
 #include "../../kernel/core/purr_kernel.h"
+#include "../user_mgr/user_mgr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -196,6 +197,39 @@ typedef struct {
     // so a host laying content out against it reclaims the space.
     bool suppress_navbar;
 } purr_systemui_host_t;
+
+// Multi-user boot-time login plumbing — core wiring only, no UI of its own.
+// See user_mgr.h for the account model this calls into.
+//
+// Call once, from each style's purr_systemui_init() (android's and ios's real
+// implementations both do — see systemui_android.c/systemui_ios.c), after
+// user_mgr itself has initialised (it is PURR_PRIORITY_IMPORTANT, same tier
+// as systemui, so load order between the two is not guaranteed — this
+// function tolerates user_mgr not being up yet by simply doing nothing,
+// rather than assuming it always is).
+//
+// Deliberately does NOT show any lock/login UI — that is a real, separate
+// piece of work (a password-entry widget belongs somewhere in the boot
+// flow, matching how ck_build_lock_screen()'s existing lock screen has none
+// today — it is purely gesture-dismissed) intentionally deferred until the
+// planned out-of-box setup flow exists to actually let someone SET a
+// password. Until then this only ever exercises its one reachable branch:
+// bootstrap default user "milkaholic" has no password, so the account
+// intended to be usable with zero configuration logs in with zero
+// friction. The has-a-password branch is real and will do the right thing
+// (not auto-login) the moment something can set one — it deliberately does
+// not try to force a lock screen open with no way to dismiss it correctly,
+// which would be a genuine lockout risk to ship ahead of that widget.
+static inline void purr_systemui_boot_login_check(void) {
+    const char *username = user_mgr_default_username();
+    if (!username || !username[0]) return;   // user_mgr not up yet — see doc comment above
+    if (user_mgr_is_logged_in()) return;      // already handled this boot
+
+    if (!user_mgr_has_password(username)) {
+        user_mgr_set_logged_in(username);
+    }
+    // else: intentionally left logged out — see this function's doc comment.
+}
 
 // Builds every surface. Call once, from the host's UI task, after the host's
 // own screens exist and its HAL is up. `host` must outlive the call (a static

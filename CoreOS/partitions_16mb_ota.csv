@@ -1,0 +1,29 @@
+# PURR OS — 16 MB flash partition table, OTA variant (dual app slot)
+# Opt in via device.pcat [device] ota = true — see purrstrap.py's
+# _generate_sdkconfig() for the flash_mb -> CSV selection.
+#
+# ota_0/ota_1 start at 0x20000 rather than immediately after otadata (0x12000)
+# because ESP-IDF's partition generator requires app-type partitions to begin
+# on a 0x10000-aligned offset — 0x12000 isn't one, 0x20000 is the next that
+# is. Slot SIZE has to be 0x10000-aligned too, not just the offsets — a
+# non-aligned size (0x6B8000, an earlier version of this file) makes the
+# SECOND slot's derived offset (start + size) land off-boundary even though
+# the first slot's own offset was fine; gen_esp32part.py catches this
+# ("Partition ota_1 invalid: Offset ... is not aligned to 0x10000") but only
+# at generate time, not by inspection — this comment exists so the next
+# person doing this arithmetic doesn't repeat it.
+#
+# SPIFFS offset: 0xD80000  size: 0x280000 (2.5 MB) — NOT the same offset as
+# partitions_16mb.csv's factory-only layout (0xD90000/0x270000): an exact
+# equal-size, 0x10000-aligned split of the two OTA slots doesn't land on that
+# offset (0xD90000 - 0x20000 isn't evenly divisible into two aligned halves).
+# SPIFFS ends up very slightly LARGER here, not smaller. Any device moving to
+# this table must update its device.pcat spiffs_offset to "0xD80000".
+#
+# Name,     Type, SubType,  Offset,    Size
+nvs,        data, nvs,      0x9000,    0x6000
+phy_init,   data, phy,      0xF000,    0x1000
+otadata,    data, ota,      0x10000,   0x2000
+ota_0,      app,  ota_0,    0x20000,   0x6B0000
+ota_1,      app,  ota_1,    0x6D0000,  0x6B0000
+spiffs,     data, spiffs,   0xD80000,  0x280000

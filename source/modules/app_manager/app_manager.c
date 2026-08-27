@@ -2,6 +2,7 @@
 
 #include "app_manager.h"
 #include "speed_demon.h"
+#include "user_mgr.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/core/purr_module.h"
 #include "../../kernel/core/purr_crash_guard.h"
@@ -998,6 +999,30 @@ static void autorun_kitten(void)
     }
 }
 
+// Same shape as autorun_kitten() just above: called once from
+// app_manager_init() only, never from app_manager_scan() — a later manual
+// rescan must not re-launch OOBE just because it happened to run again.
+// user_mgr_oobe_completed() is the sole gate (see its own doc comment in
+// user_mgr.h for why this is an explicit completion marker rather than
+// inferred from account state) — the "oobe" app itself is responsible for
+// calling user_mgr_set_oobe_completed() when it finishes or is skipped, the
+// same way every other app owns its own exit path.
+//
+// Silently does nothing if no app named "oobe" is registered — a device
+// that doesn't ship it (or one built before this existed) must not log an
+// error for a condition that isn't actually wrong.
+static void autorun_oobe(void)
+{
+    if (user_mgr_oobe_completed()) return;
+    for (int i = 0; i < s_app_count; i++) {
+        if (strcmp(s_apps[i].name, "oobe") == 0) {
+            ESP_LOGI(TAG, "autorun: first run — launching OOBE setup");
+            app_manager_launch_idx(i);
+            return;
+        }
+    }
+}
+
 // Approximates "which running app is costing the most memory" without real
 // per-task heap accounting (nothing in ESP-IDF tracks allocations by owner
 // out of the box, and wrapping every malloc/free to add that was judged not
@@ -1071,6 +1096,7 @@ int app_manager_init(void)
     bool recovering = purr_crash_guard_pending_recovery(NULL, 0, NULL, 0);
     app_manager_scan_ex(!recovering);
     autorun_kitten();
+    autorun_oobe();
     ESP_LOGI(TAG, "init complete");
     return 0;
 }

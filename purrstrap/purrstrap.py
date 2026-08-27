@@ -27,6 +27,7 @@ import argparse
 import datetime
 import difflib
 import glob
+import hashlib
 import json
 import os
 import re
@@ -203,13 +204,101 @@ def cmd_doctor(args):
 
 # ── Build helpers ─────────────────────────────────────────────────────────────
 
-def resolve_device(device_slug):
+def resolve_device(device_slug, profile=None):
     pcat_path = os.path.join(DEVICES_DIR, device_slug, "device.pcat")
     if not os.path.isfile(pcat_path):
         die(f"no device.pcat found for '{device_slug}' — check source/devices/")
     cfg = parse_pcat(pcat_path)
     apply_radio_companion_defaults(cfg)
+    if profile:
+        apply_build_profile(cfg, profile)
     return cfg, pcat_path
+
+# ── Build profiles ───────────────────────────────────────────────────────────
+#
+# A profile is a cfg OVERLAY applied after apply_radio_companion_defaults(),
+# before anything downstream (glue, sdkconfig, flash image, components
+# manifest) reads cfg — every one of those already takes cfg as a plain
+# parameter, so mutating it here is the ONLY change needed; nothing
+# downstream has to know profiles exist.
+#
+# Why an overlay on the INPUTS (drivers.*/modules.*/apps.*) rather than a
+# filter on the component-selection OUTPUT: select_components()'s transitive
+# REQUIRES closure means some inclusions aren't optional once their asker
+# stays. Traced empirically for tdeck_plus (see PURR_OS_1.0_CHECKLIST.md's
+# "Minimal-build profile" entry, which this makes into a real feature):
+# `settings` REQUIRES bt_mgr/meshtastic/miniwin directly (its WiFi/BT scan
+# windows and mesh-backend switcher are real code, not vestigial), and
+# `cupcake`/`systemui`/`lua_runtime` ALL REQUIRE meshtastic themselves (lock
+# screen node-count line, Lua's kitt.*/radio.* bindings) — so meshtastic and
+# bt_mgr compile in as long as Cupcake/Android and Lua do, REGARDLESS of any
+# profile, because the checklist's own "core OS + Lua + Cupcake/Android +
+# WiFi" composition keeps exactly the three components that require them.
+# Trying to strip them post-hoc would just be an undefined-reference link
+# error; this profile drops what's ACTUALLY optional instead: the radio
+# companion stack (proximity/pairing/proximity_rpc/app_manager_remote/
+# homebase/msn_relay — purely a [radio] wifi=true default, not required by
+# anything kept), the GPS/LoRa/battery drivers, and every bundled app
+# (settings/terminal/fileman all REQUIRE miniwin — a second, entirely
+# separate UI backend from whatever the device actually renders with).
+BUILD_PROFILES = {
+    "minimal": {
+        "description": "core OS + Lua + the active UI backend + WiFi only — "
+                        "no radio-companion stack, no GPS/LoRa/battery "
+                        "drivers, no bundled apps (which is what pulls in a "
+                        "second UI backend via miniwin). For RAM-headroom "
+                        "measurement and lean SD/PSRAM-loader targets, not "
+                        "as a daily-driver replacement for the default build.",
+    },
+}
+
+def apply_build_profile(cfg, profile_name):
+    """Mutates cfg in place. Unknown profile name is a hard error — silently
+    building the default when --profile was typo'd would be exactly the
+    kind of "looked fine, shipped the wrong thing" failure this whole
+    mechanism exists to avoid elsewhere (see purrstrap bake's own staleness
+    gap)."""
+    if profile_name not in BUILD_PROFILES:
+        die(f"unknown build profile '{profile_name}' — known: {', '.join(sorted(BUILD_PROFILES))}")
+
+    if profile_name == "minimal":
+        # Radio-companion stack — one existing, already-tested opt-out flag
+        # (apply_radio_companion_defaults() checks this itself) rather than
+        # unwinding its six individual modules.*/flash.* keys by hand.
+        cfg["modules.radio_companion"] = "false"
+        for key in ("modules.proximity", "modules.pairing", "modules.proximity_rpc",
+                    "modules.app_manager_remote", "modules.homebase", "modules.msn_relay"):
+            cfg.pop(key, None)
+
+        # Drivers not in "core OS + Lua + Cupcake/Android + WiFi".
+        for key in ("drivers.gps", "drivers.radio", "drivers.battery", "radio.lora"):
+            cfg[key] = ""
+
+        # modules.bt/modules.mesh/modules.meshcore, if a device names them
+        # directly (tdeck_plus doesn't — its bt/mesh lines are already off/
+        # commented). meshtastic itself is NOT cleared here: it stays
+        # transitively required by cupcake/systemui/lua_runtime regardless —
+        # see this function's module doc comment.
+        for key in ("modules.bt", "modules.mesh", "modules.meshcore"):
+            cfg.pop(key, None)
+
+        # No bundled apps — see module doc comment for why this is what
+        # actually sheds miniwin (a second UI backend) rather than a
+        # cosmetic trim. Blanket over every apps.* key rather than naming
+        # today's app list, so a future app added to any device is dropped
+        # by this profile too without needing an update here.
+        for key in [k for k in cfg if k.startswith("apps.")]:
+            cfg[key] = "false"
+
+    return cfg
+
+def cmd_profiles(args):
+    div("build profiles")
+    for name, spec in sorted(BUILD_PROFILES.items()):
+        print(f"  {C_BOLD}{name}{C_RST}")
+        print(f"    {spec['description']}")
+    print(f"\n  usage: purrstrap build <device> --profile <name>")
+    div()
 
 # 2nd-stage bootloader flash offset — chip-specific, dictated by the ROM
 # bootloader (not configurable in ESP-IDF itself). Confirmed against IDF's
@@ -373,6 +462,79 @@ def run_live(cmd, cwd=None, env=None):
         proc.terminate(); proc.wait()
         warn("Interrupted."); sys.exit(0)
     return proc.returncode
+
+# ── Partition CSV lookups ────────────────────────────────────────────────────
+
+def _partitions_csv_path(cfg):
+    """The partitions CSV this device's cfg selects — same flash_mb (+ optional
+    device.ota) resolution _generate_sdkconfig() uses, factored out so every
+    caller that needs a real offset from the table (not just the sdkconfig
+    define) resolves the SAME file rather than re-deriving the filename and
+    risking the two drifting apart."""
+    flash_mb = cfg.get("device.flash_mb", "")
+    name = f"partitions_{flash_mb}mb_ota.csv" if _pcat_bool(cfg, "device.ota") else f"partitions_{flash_mb}mb.csv"
+    return os.path.join(REPO_DIR, "CoreOS", name)
+
+def _parse_partitions_csv(partitions_csv):
+    """[(name, type, subtype, offset_int, size_int), ...] from a partitions
+    CSV, comments/blank lines stripped. Empty list if the file can't be read
+    or a row doesn't parse (offset/size fields are hex/decimal, gen_esp32part.py
+    accepts either — int(x, 0) matches that)."""
+    rows = []
+    try:
+        with open(partitions_csv, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                fields = [p.strip() for p in line.split(",")]
+                if len(fields) < 5:
+                    continue
+                try:
+                    rows.append((fields[0], fields[1], fields[2], int(fields[3], 0), int(fields[4], 0)))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return rows
+
+def _ota_slot_size_bytes(partitions_csv):
+    """Size in bytes of the ota_0 partition in an OTA-variant partitions CSV, or
+    None if the file isn't one (no ota_0 entry — a plain single-slot table).
+    Both OTA slots are always sized equal by convention here, so reading ota_0
+    alone is enough to know the budget either slot's firmware.bin must fit."""
+    for name, _type, _sub, _off, size in _parse_partitions_csv(partitions_csv):
+        if name == "ota_0":
+            return size
+    return None
+
+def _partition_offset_by_name(partitions_csv, name):
+    """Offset of the partition literally named `name` (e.g. "otadata"), or
+    None if the table has no such row — a non-OTA table has no otadata
+    partition at all, which callers use to know there's nothing to flash
+    there rather than defaulting to some offset."""
+    for pname, _type, _sub, off, _size in _parse_partitions_csv(partitions_csv):
+        if pname == name:
+            return off
+    return None
+
+def _first_app_partition_offset(partitions_csv):
+    """Flash offset firmware.bin actually belongs at: the first app-type
+    partition's own offset — "factory" on a single-slot table, "ota_0" on an
+    OTA one. NOT a fixed 0x10000: an OTA table's app partition starts later
+    (0x20000 on partitions_16mb_ota.csv, past otadata) to satisfy
+    gen_esp32part.py's 0x10000-alignment rule for app partitions — see that
+    CSV's own header comment. Every write_flash/merge_bin call that places
+    firmware.bin must ask this, not assume, or it silently writes the app
+    image into otadata's region and leaves the real app partition blank —
+    caught only by the device failing to boot, or not caught at all until
+    someone actually flashes it. Falls back to 0x10000 (the historical
+    constant, correct for every non-OTA table) if the CSV can't be read at
+    all, rather than raising and blocking a build over a read error here."""
+    for name, ptype, _sub, off, _size in _parse_partitions_csv(partitions_csv):
+        if ptype == "app":
+            return off
+    return 0x10000
 
 # ── Parse [flash] section from device.pcat ────────────────────────────────────
 #
@@ -814,13 +976,27 @@ def _sdkconfig_lines(device, cfg):
     if flash_mb not in (4, 8, 16):
         die(f"{device}: flash_mb={flash_mb} has no matching partitions_{flash_mb}mb.csv "
             f"(only 4/8/16 MB partition tables exist)")
-    partitions_csv = os.path.join(REPO_DIR, "CoreOS", f"partitions_{flash_mb}mb.csv")
+
+    # [device] ota = true — explicit opt-in (matching this codebase's driver/module
+    # selection pattern generally), not inferred from flash size. Selects the dual
+    # app-slot _ota variant of the partition table instead of the single-slot
+    # default, and turns on bootloader rollback + plain-HTTP OTA (the latter so a
+    # local/offline update server without a TLS cert still works — consistent with
+    # unsigned/self-built firmware already being an accepted flashing path here).
+    # See PURR_OS_1.0_CHECKLIST.md-adjacent OTA plan for the per-tier partition
+    # budget reasoning (16/8 MB have headroom to spare; 4 MB needs a shrunk SPIFFS).
+    ota_enabled = _pcat_bool(cfg, "device.ota")
+    partitions_csv = _partitions_csv_path(cfg)
+    partitions_name = os.path.basename(partitions_csv)
     if not os.path.isfile(partitions_csv):
-        die(f"{device}: expected CoreOS/partitions_{flash_mb}mb.csv does not exist")
+        die(f"{device}: expected CoreOS/{partitions_name} does not exist")
 
     lines.append("")
     lines.append(f"CONFIG_ESPTOOLPY_FLASHSIZE_{flash_mb}MB=y")
-    lines.append(f'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_{flash_mb}mb.csv"')
+    lines.append(f'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="{partitions_name}"')
+    if ota_enabled:
+        lines.append("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y")
+        lines.append("CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y")
 
     if _pcat_bool(cfg, "device.psram"):
         psram_mb_raw = cfg.get("device.psram_mb", "")
@@ -1022,6 +1198,20 @@ def _build_kernel_spine(device, cfg, out_dir):
     if _settle.isdigit():
         env["PURR_BOOT_SETTLE_MS"] = _settle
 
+    # Whether [drivers].radio names an actual radio driver — a specialized
+    # kernel's own boot file (kernel_tdp_boot.c and its pounce twin) calls
+    # that driver's own *_configure() directly, unconditionally, before
+    # purr_kernel_load_static_modules() runs (it has to: that's what sets
+    # the pins the driver's own module_init() reads at SPI-bus-setup time).
+    # That call is an undefined reference at LINK time the moment
+    # [drivers].radio is cleared — first hit by the "minimal" build profile
+    # clearing it, not something any device.pcat had tried before. Passed
+    # through exactly like PURR_BOOT_SETTLE_MS above so kernel_tdp_boot.c
+    # can guard the call with '#if PURR_HAS_RADIO_DRIVER'; a device.pcat
+    # that predates this flag still builds correctly because the guard
+    # below defaults to 1 (today's unconditional behaviour) when unset.
+    env["PURR_HAS_RADIO_DRIVER"] = "1" if (cfg.get("drivers.radio", "") or "").strip() else "0"
+
     # idf.py's own __main__ guard does `if 'MSYSTEM' in os.environ: print_warning(...)`
     # as an if/elif/else chain — when MSYSTEM is set (Git Bash, MSYS2, any
     # MinGW-derived shell always sets it) it prints a warning and returns
@@ -1077,6 +1267,10 @@ def _build_kernel_spine(device, cfg, out_dir):
     firmware_out = os.path.join(out_dir, "firmware.bin")
     bootloader_out = os.path.join(out_dir, "bootloader.bin")
     partitions_out = os.path.join(out_dir, "partition-table.bin")
+    # Only generated by idf.py for a device whose partition table has an
+    # otadata row — the copy loop below already only copies what exists, so
+    # this stays None (nothing to flash) for a non-OTA device automatically.
+    ota_data_out = os.path.join(out_dir, "ota_data_initial.bin")
 
     div("kernel spine")
 
@@ -1103,11 +1297,19 @@ def _build_kernel_spine(device, cfg, out_dir):
 
     # Copy binaries to out_dir
     import shutil as _sh
-    for src_name, dst in (
+    to_copy = [
         (f"purr_os.bin",        firmware_out),
         ("bootloader/bootloader.bin", bootloader_out),
         ("partition_table/partition-table.bin", partitions_out),
-    ):
+    ]
+    # Only idf.py-generated for a device whose partition table has an
+    # otadata row — added to the list (with its own missing-file warning) only
+    # then, so every non-OTA device's build doesn't print a "not found"
+    # warning for a file it was never going to have.
+    if _pcat_bool(cfg, "device.ota"):
+        to_copy.append(("ota_data_initial.bin", ota_data_out))
+
+    for src_name, dst in to_copy:
         src = os.path.join(build_dir, src_name)
         if os.path.isfile(src):
             _sh.copy2(src, dst)
@@ -1115,7 +1317,44 @@ def _build_kernel_spine(device, cfg, out_dir):
         else:
             warn(f"  not found: {src_name}")
 
-    return firmware_out if os.path.isfile(firmware_out) else None
+    if not os.path.isfile(firmware_out):
+        return None
+
+    # OTA size-fit check — a firmware.bin that doesn't fit its ota_0/ota_1 slot
+    # would either fail to flash outright or, worse, corrupt whatever sits after
+    # it, discovered only at flash/update time. Same failure SHAPE as the
+    # `purrstrap bake` staleness gap this codebase already documents (reports
+    # [OK] without confirming the artifact is actually right) — closed here
+    # instead of repeated.
+    if _pcat_bool(cfg, "device.ota"):
+        ota_csv = _partitions_csv_path(cfg)
+        slot_bytes = _ota_slot_size_bytes(ota_csv)
+        actual_bytes = os.path.getsize(firmware_out)
+        if slot_bytes and actual_bytes > slot_bytes:
+            die(f"{device}: firmware.bin is {actual_bytes} bytes but each OTA slot "
+                f"({os.path.basename(ota_csv)}) is only {slot_bytes} bytes — "
+                f"trim components (see `purrstrap build {device} --profile minimal`) "
+                f"or grow the partition table. Refusing to produce an image that "
+                f"cannot fit its own OTA slot.")
+        elif slot_bytes:
+            pct = actual_bytes * 100 // slot_bytes
+            info(f"  OTA slot fit: {actual_bytes} / {slot_bytes} bytes ({pct}%)")
+
+        # firmware.bin.sha256 — companion checksum for ota_mgr_apply_from_sd()
+        # (source/modules/ota_mgr/ota_mgr.h). Copy both files onto an SD card
+        # as /sdcard/ota/firmware.bin + /sdcard/ota/firmware.bin.sha256 (see
+        # OTA_MGR_SD_DEFAULT_PATH) to test an update with no HTTP server —
+        # every OTA-enabled build produces this pair with no extra step.
+        digest = hashlib.sha256()
+        with open(firmware_out, "rb") as fw:
+            for chunk in iter(lambda: fw.read(1 << 20), b""):
+                digest.update(chunk)
+        sha_path = firmware_out + ".sha256"
+        with open(sha_path, "w") as f:
+            f.write(f"{digest.hexdigest()}  {os.path.basename(firmware_out)}\n")
+        info(f"  {C_GRN}OK{C_RST}  {os.path.basename(sha_path)}")
+
+    return firmware_out
 
 def _bootloader_offset(chip):
     # Second-stage bootloader offset differs per chip: 0x1000 on the original
@@ -1126,23 +1365,47 @@ def _bootloader_offset(chip):
         return "0x0"
     return "0x1000"
 
-def _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin):
+def _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin, out_name=None):
     """
     Use esptool merge_bin to combine firmware + SPIFFS into one flashable image.
-    Output: out_dir/PURR_OS_<device>.bin
+    Output: out_dir/PURR_OS_<out_name or device>.bin
+
+    out_name matters when a build profile is active (cmd_build passes
+    "<device>_<profile>") — the merged binary must NOT share a filename with
+    the default build's, or a --profile minimal run and a plain run of the
+    same device silently overwrite each other's artifact. Exactly the
+    "looks fine, ships the wrong binary" shape PURR_OS_1.0_CHECKLIST.md
+    already flags against `purrstrap bake`'s own staleness gap.
     """
     spiffs_offset = cfg.get("device.spiffs_offset", "0x290000")
-    merged_out    = os.path.join(out_dir, f"PURR_OS_{device}.bin")
+    merged_out    = os.path.join(out_dir, f"PURR_OS_{out_name or device}.bin")
     bootloader    = os.path.join(out_dir, "bootloader.bin")
     partitions    = os.path.join(out_dir, "partition-table.bin")
 
     chip = cfg.get("device.chip", "esp32")
     bl_offset = _bootloader_offset(chip)
 
+    # NOT a fixed 0x10000 — an OTA-enabled device's app partition starts at
+    # 0x20000 (past otadata), see _first_app_partition_offset()'s own doc
+    # comment for why a hardcoded offset here silently writes the app image
+    # over otadata instead of into ota_0.
+    partitions_csv = _partitions_csv_path(cfg)
+    app_offset = hex(_first_app_partition_offset(partitions_csv))
+    otadata_offset = _partition_offset_by_name(partitions_csv, "otadata")
+    ota_data_bin = os.path.join(out_dir, "ota_data_initial.bin")
+
     parts = []
     if os.path.isfile(bootloader):   parts += [bl_offset,        bootloader]
     if os.path.isfile(partitions):   parts += ["0x8000",         partitions]
-    parts += ["0x10000", firmware_bin]
+    # otadata must be pre-initialized to "boot ota_0" — a blank/erased
+    # otadata region is not guaranteed to fall back the same way on every
+    # bootloader config, so this is written explicitly rather than left to
+    # chance. idf.py's own generated flash command does the same (confirmed
+    # against its actual output: "0x10000 ota_data_initial.bin 0x20000
+    # purr_os.bin" for this exact partition table).
+    if otadata_offset is not None and os.path.isfile(ota_data_bin):
+        parts += [hex(otadata_offset), ota_data_bin]
+    parts += [app_offset, firmware_bin]
     parts += [spiffs_offset, flash_bin]
 
     # Find esptool: prefer IDF venv python -m esptool, fall back to esptool.py in PATH
@@ -1157,7 +1420,7 @@ def _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin):
     rc = run_live(cmd)
     if rc == 0:
         size_kb = os.path.getsize(merged_out) // 1024
-        info(f"  {C_GRN}PURR_OS_{device}.bin{C_RST}  {size_kb} KB")
+        info(f"  {C_GRN}PURR_OS_{out_name or device}.bin{C_RST}  {size_kb} KB")
     else:
         warn(f"  merge_bin failed (rc={rc})")
     return merged_out if os.path.isfile(merged_out) else None
@@ -1193,16 +1456,37 @@ def _regenerate_components_manifest(cfg=None, device=None):
     modulestrap.generate_components_manifest(targets, cfg=cfg, device=device)
 
 def cmd_build(args):
-    device = args.device
-    cfg, pcat_path = resolve_device(device)
+    device  = args.device
+    profile = getattr(args, "profile", None)
+    cfg, pcat_path = resolve_device(device, profile=profile)
 
     chip    = cfg.get("device.chip", "esp32")
     name    = cfg.get("device.name", device)
     out_dir = os.path.join(OUTPUT_DIR, device)
+    # Only the merged artifact's filename changes under a profile — same
+    # out_dir, same CoreOS build_<device> dir, same as toggling [modules]/
+    # [apps] via `modulestrap enable/disable` and rebuilding, which already
+    # relies on CMake noticing components_manifest.cmake changed. A profile
+    # switch on a device already built the other way needs the same
+    # `purrstrap clean <device>` fresh start that pattern has always needed.
+    out_name = f"{device}_{profile}" if profile else device
 
     div()
-    info(f"building {name} ({chip})")
-    info(f"output → cattobaked/{device}/")
+    info(f"building {name} ({chip})" + (f"  [profile: {profile}]" if profile else ""))
+    info(f"output → cattobaked/{device}/" + (f"  (artifact: PURR_OS_{out_name}.bin)" if profile else ""))
+    if profile:
+        try:
+            modulestrap_dir = os.path.join(REPO_DIR, "modulestrap")
+            if modulestrap_dir not in sys.path:
+                sys.path.insert(0, modulestrap_dir)
+            import modulestrap
+            targets = modulestrap.find_modules()
+            base_cfg, _ = resolve_device(device)   # no profile — the comparison baseline
+            before, _ = modulestrap.select_components(base_cfg, targets)
+            after, _  = modulestrap.select_components(cfg, targets)
+            info(f"profile '{profile}': {len(before)} -> {len(after)} component(s)")
+        except Exception as e:
+            warn(f"could not compute profile component delta: {e}")
     div()
 
     os.makedirs(out_dir, exist_ok=True)
@@ -1223,7 +1507,7 @@ def cmd_build(args):
     _generate_sdkconfig(device, cfg)
 
     # Remove stale merged image so a failed build never leaves a flashable artifact
-    stale = os.path.join(out_dir, f"PURR_OS_{device}.bin")
+    stale = os.path.join(out_dir, f"PURR_OS_{out_name}.bin")
     if os.path.isfile(stale):
         os.remove(stale)
 
@@ -1245,7 +1529,7 @@ def cmd_build(args):
 
     # ── Merge final image ──────────────────────────────────────────────────────
     if firmware_bin and flash_bin:
-        _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin)
+        _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin, out_name=out_name)
     elif not firmware_bin:
         warn("kernel spine not built — IDF unavailable or build failed")
         warn("SPIFFS flash.bin is ready; run IDF manually then merge with esptool merge_bin")
@@ -1254,6 +1538,7 @@ def cmd_build(args):
     meta = {
         **workspace,
         "pcat":         pcat_path,
+        "profile":      profile or "default",
         "flash_bin":    flash_bin or "not built",
         "firmware_bin": firmware_bin or "not built",
         "spiffs_kb":    spiffs_kb,
@@ -1323,6 +1608,23 @@ def cmd_flash(args):
         bl_offset = _bootloader_offset(chip)
         info(f"flashing bootloader+partition-table+firmware+SPIFFS (NVS untouched) ...")
         erase_flag = ["--erase-all"] if getattr(args, "erase", False) else []
+
+        # NOT a fixed 0x10000 for firmware — an OTA-enabled device's app
+        # partition starts at 0x20000 (past otadata); see
+        # _first_app_partition_offset()'s doc comment. otadata itself (when
+        # present) needs its own explicit ota_data_initial.bin write —
+        # idf.py's own generated flash command does the same (confirmed
+        # against real output: "0x10000 ota_data_initial.bin 0x20000
+        # purr_os.bin") — a blank/erased otadata region isn't something to
+        # gamble on the bootloader's fallback handling for.
+        partitions_csv = _partitions_csv_path(cfg_flash)
+        app_offset = hex(_first_app_partition_offset(partitions_csv))
+        otadata_offset = _partition_offset_by_name(partitions_csv, "otadata")
+        ota_data_bin = os.path.join(out_dir, "ota_data_initial.bin")
+        ota_data_part = []
+        if otadata_offset is not None and os.path.isfile(ota_data_bin):
+            ota_data_part = [hex(otadata_offset), ota_data_bin]
+
         cmd = _esptool + [
             "--chip", chip,
             "--port", esptool_port,
@@ -1336,7 +1638,8 @@ def cmd_flash(args):
             "--flash_freq", "80m",
             bl_offset, bootloader_bin,
             "0x8000", partition_bin,
-            "0x10000", firmware_bin,
+        ] + ota_data_part + [
+            app_offset, firmware_bin,
             spiffs_offset, flash_bin,
         ]
         run_live(cmd)
@@ -1561,6 +1864,14 @@ def _bake_dp_release(devices, manifest):
         "```",
         "",
         "## Flashing split images",
+        "",
+        "0x10000 below is correct for most devices, but NOT for one built with",
+        "device.pcat `[device] ota = true` — its app partition starts later",
+        "(0x20000 on the 16 MB OTA table, past the otadata partition) and it",
+        "also needs ota_data_initial.bin written at 0x10000 first. Check that",
+        "device's own `partitions_*_ota.csv` (or just use the merged image",
+        "above, which already gets this right per-device) rather than assuming",
+        "this command as written.",
         "",
         "```bash",
         "esptool.py -p <PORT> write_flash \\",
@@ -2094,11 +2405,18 @@ def main():
 
     p_build = sub.add_parser("build",  help="Build firmware for a device")
     p_build.add_argument("device")
+    p_build.add_argument("--profile", default=None, choices=sorted(BUILD_PROFILES),
+                          help="Build profile — trims [flash]/[modules]/[apps] before "
+                               "compiling. See `purrstrap profiles`.")
 
     p_flash = sub.add_parser("flash",  help="Build + flash to device")
     p_flash.add_argument("device")
     p_flash.add_argument("-p", "--port", default=None)
     p_flash.add_argument("--erase", action="store_true", help="Erase flash before writing")
+    p_flash.add_argument("--profile", default=None, choices=sorted(BUILD_PROFILES),
+                          help="Build profile — see `purrstrap profiles`.")
+
+    sub.add_parser("profiles", help="List available build profiles")
 
     p_monitor = sub.add_parser("monitor", help="Open serial monitor for a device")
     p_monitor.add_argument("device")
@@ -2177,6 +2495,7 @@ def main():
         "status":  cmd_status,
         "doctor":  cmd_doctor,
         "pkg":     cmd_pkg,
+        "profiles": cmd_profiles,
     }
     if args.cmd not in dispatch:
         parser.print_help()

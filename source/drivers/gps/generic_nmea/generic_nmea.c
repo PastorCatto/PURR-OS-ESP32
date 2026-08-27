@@ -1,5 +1,10 @@
 // Generic NMEA GPS driver — UART, parses $GPRMC and $GPGGA
 // Used on: tdeck_plus
+//
+// $GPRMC's date/time fields feed purr_kernel_time_set(PURR_TIME_SOURCE_GPS,
+// ...) directly from this driver (see parse_gprmc()) — a receiver can
+// decode UTC before it has a position lock, so this can sync the clock
+// before gps_fix_t.valid ever goes true. See catcall_gps.h v2.
 
 #include <string.h>
 #include <stdlib.h>
@@ -61,10 +66,50 @@ static bool get_field(const char *sentence, int n, char *buf, size_t buflen) {
     return len > 0;
 }
 
+// Two-digit ASCII pair -> int, e.g. "16" -> 16. No bounds validation beyond
+// what atoi already gives us — get_field()'s length check on the caller side
+// is what actually guards against a short/malformed field.
+static uint16_t two_digits(const char *p) {
+    char b[3] = { p[0], p[1], '\0' };
+    return (uint16_t)atoi(b);
+}
+
 static void parse_gprmc(const char *sentence) {
-    char f[32];
     char status[4] = "";
     get_field(sentence, 2, status, sizeof(status));
+
+    // Time/date (fields 1 and 9) are independent of the position fix — a
+    // receiver can decode UTC from the almanac before it has enough
+    // satellites for a position lock — so these are parsed regardless of
+    // `status`, ahead of the early-return below. A receiver with no fix at
+    // all yet typically leaves these fields blank rather than zeroed, which
+    // is what have_time/have_date are actually gating on.
+    char time_f[16] = "", date_f[8] = "";
+    get_field(sentence, 1, time_f, sizeof(time_f));
+    get_field(sentence, 9, date_f, sizeof(date_f));
+    bool have_time = strlen(time_f) >= 6;
+    bool have_date = strlen(date_f) == 6;
+
+    if (have_time && have_date) {
+        uint8_t  hh = (uint8_t)two_digits(time_f);
+        uint8_t  mm = (uint8_t)two_digits(time_f + 2);
+        uint8_t  ss = (uint8_t)two_digits(time_f + 4);
+        uint8_t  dd = (uint8_t)two_digits(date_f);
+        uint8_t  mo = (uint8_t)two_digits(date_f + 2);
+        uint16_t yy = (uint16_t)(2000 + two_digits(date_f + 4));   // NMEA gives a 2-digit year
+
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        s_fix.hour = hh; s_fix.minute = mm; s_fix.second = ss;
+        s_fix.day  = dd; s_fix.month  = mo; s_fix.year   = yy;
+        s_fix.valid_time = true;
+        xSemaphoreGive(s_mutex);
+
+        // Outside the mutex — NVS I/O in purr_kernel_time_set() has no
+        // business holding up the UART reader task that owns s_fix.
+        purr_kernel_time_set(PURR_TIME_SOURCE_GPS,
+            purr_kernel_time_from_utc_calendar(yy, mo, dd, hh, mm, ss));
+    }
+
     if (status[0] != 'A') {
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         s_fix.valid = false;
@@ -175,7 +220,7 @@ static esp_err_t nmea_deinit(void) {
 
 static const catcall_gps_t s_catcall = {
     .name            = "generic_nmea",
-    .catcall_version = 1,
+    .catcall_version = 2,
     .init            = nmea_init,
     .get_fix         = nmea_get_fix,
     .deinit          = nmea_deinit,

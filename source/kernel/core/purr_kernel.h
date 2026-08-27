@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 #include "purr_module.h"
 #include "../catcalls/catcalls.h"
 #include "../catcalls/catcall_ui.h"
@@ -48,6 +49,12 @@ int  purr_kernel_load_module(const char *path);
 
 // Unload by name.
 void purr_kernel_unload_module(const char *name);
+
+// "MAJOR.MINOR.PATCH" string comparison — <0/0/>0 as a < b / a == b / a > b.
+// Used internally for a module's kernel_min/kernel_max gating; exported so
+// ota_mgr's manifest-version check reuses the same parsing instead of a
+// second implementation.
+int purr_kernel_version_cmp(const char *a, const char *b);
 
 // Get loaded module header by name (NULL if not loaded).
 const purr_module_header_t *purr_kernel_get_module(const char *name);
@@ -209,6 +216,52 @@ int      purr_kernel_battery_percent(void);  // -1 = unknown (no PMIC/fuel gauge
 int      purr_kernel_battery_voltage_mv(void);  // -1 = unknown
 bool     purr_kernel_lora_available(void);
 void     purr_kernel_reboot(void);
+
+// ── Wall-clock time ──────────────────────────────────────────────────────────
+//
+// Distinct from purr_kernel_uptime_ms() (monotonic since boot): this is UTC
+// wall-clock time, and it is UNSET on every cold boot — no device in the
+// supported table carries a battery-backed RTC chip, so there is nothing to
+// read at power-on until a source syncs it. purr_kernel_time_load_nvs() (see
+// purr_kernel.c) seeds a coarse guess from the last accepted sync as source
+// PURR_TIME_SOURCE_NVS before any module runs, so the clock reads "roughly
+// right" instead of 1970 in the meantime.
+//
+// Sources call purr_kernel_time_set() to push a reading: wifi_mgr's SNTP
+// callback and generic_nmea's GPS date/time fields are the two today. A
+// future battery-backed RTC driver is meant to plug in the same way, at
+// PURR_TIME_SOURCE_RTC_HW — that is why this is an authority-ranked enum
+// and not a bool, even though nothing claims the top rank yet.
+typedef enum {
+    PURR_TIME_SOURCE_NONE   = 0,
+    PURR_TIME_SOURCE_NVS    = 1,   // coarse fallback persisted from the last accepted sync
+    PURR_TIME_SOURCE_GPS    = 2,
+    PURR_TIME_SOURCE_NTP    = 3,
+    PURR_TIME_SOURCE_RTC_HW = 4,   // reserved — no current driver claims this
+} purr_time_source_t;
+
+// False until some source has synced time this boot (NVS fallback counts).
+bool                purr_kernel_time_is_synced(void);
+// Seconds since the Unix epoch, UTC. 0 if never synced.
+time_t              purr_kernel_time_now(void);
+// Which source the current reading came from.
+purr_time_source_t  purr_kernel_time_source(void);
+
+// Called by a time source to push a reading. A lower-authority source
+// cannot overwrite a still-fresh higher-authority one (e.g. a GPS fix
+// landing seconds after NTP synced should not downgrade precision) — but
+// does take over once that reading goes stale (see PURR_TIME_FRESH_WINDOW_MS
+// in purr_kernel.c), so e.g. GPS keeps the clock drifting less than doing
+// nothing would if WiFi/NTP has been unreachable for hours. Every accepted
+// call (other than PURR_TIME_SOURCE_NVS loading itself back) persists to
+// NVS as the next boot's coarse fallback.
+void purr_kernel_time_set(purr_time_source_t source, time_t epoch_utc);
+
+// Pure calendar math (UTC, no libc TZ/mktime dependence) for turning a
+// source's calendar fields — GPS's $GPRMC date/time, or a future RTC chip's
+// register set — into the epoch purr_kernel_time_set() wants.
+time_t purr_kernel_time_from_utc_calendar(uint16_t year, uint8_t month, uint8_t day,
+                                           uint8_t hour, uint8_t minute, uint8_t second);
 
 // Runs fn(arg) on a helper task and waits up to timeout_ms for it to
 // finish; returns false on timeout instead of blocking forever. Built for

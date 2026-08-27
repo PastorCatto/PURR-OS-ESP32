@@ -1397,6 +1397,9 @@ void purr_systemui_init(const purr_systemui_host_t *host)
     if (!host) { ESP_LOGE(TAG, "init called with NULL host — system UI disabled"); return; }
     s_host = host;
 
+    // Multi-user plumbing — see systemui.h's own doc comment on this call.
+    purr_systemui_boot_login_check();
+
     uint16_t w = s_host->width();
     uint16_t h = s_host->height();
 
