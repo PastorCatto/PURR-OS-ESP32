@@ -918,11 +918,20 @@ static bool handle_userauth_challenge(const uint8_t mac[6], uint16_t action_id,
     return true;
 }
 
+// Response is 2 bytes: [0]=1/0 ok, [1]=is_admin (meaningless when [0]==0,
+// still written as 0 for a predictable byte). Grown from 1 byte so the
+// client learns whether the account it just logged into is an admin on
+// the server without a separate round trip — milkbar's own dashboard-vs-
+// desktop routing is the reason this exists (see user_mgr_is_admin()'s
+// doc comment). Safe to grow: this changed before any real two-device
+// deployment, both sides of this exchange are always the same firmware
+// build anyway (no wire-compat concern the way a public protocol would
+// have).
 static bool handle_userauth_verify(const uint8_t mac[6], uint16_t action_id,
                                     const uint8_t *req, size_t req_len,
                                     uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out) {
     (void)action_id;
-    if (req_len != sizeof(userauth_verify_req_t) || resp_cap < 1) { *resp_len_out = 0; return false; }
+    if (req_len != sizeof(userauth_verify_req_t) || resp_cap < 2) { *resp_len_out = 0; return false; }
     userauth_verify_req_t r;
     memcpy(&r, req, sizeof(r));
     char username[USERAUTH_USERNAME_MAX];
@@ -948,7 +957,8 @@ static bool handle_userauth_verify(const uint8_t mac[6], uint16_t action_id,
     s_userauth_challenge_username[0] = 0;
 
     resp_out[0] = ok ? 1 : 0;
-    *resp_len_out = 1;
+    resp_out[1] = (ok && user_mgr_is_admin(username)) ? 1 : 0;
+    *resp_len_out = 2;
     return true;
 }
 
@@ -1271,20 +1281,22 @@ bool pairing_verify_user(const uint8_t mac[6], const char *username) {
     ok = proximity_rpc_call(mac, PAIRING_ACTION_USERAUTH_VERIFY,
                              (const uint8_t *)&vreq, sizeof(vreq), resp, sizeof(resp), &resp_len,
                              PAIRING_RPC_TIMEOUT_MS);
-    if (!ok || resp_len != 1 || resp[0] != 1) return false;
+    if (!ok || resp_len != 2 || resp[0] != 1) return false;
+    bool is_admin = resp[1] != 0;
 
     // Success — this device is now authenticated AS username on the
     // server at mac. Do the local user_mgr bookkeeping here rather than
     // pushing it onto every caller: user_mgr_create_remote() is a no-op
-    // if the REMOTE record already exists (see its own doc comment), so
-    // this is safe to call on every successful verify, not just the first.
-    if (!user_mgr_create_remote(username)) {
+    // (besides syncing is_admin) if the REMOTE record already exists (see
+    // its own doc comment), so this is safe to call on every successful
+    // verify, not just the first.
+    if (!user_mgr_create_remote(username, is_admin)) {
         ESP_LOGW(TAG, "userauth: verified '%s' but user_mgr_create_remote() failed "
                       "(name already exists as a LOCAL account?)", username);
         return false;
     }
     user_mgr_set_logged_in(username);
-    ESP_LOGI(TAG, "userauth: logged in as remote user '%s'", username);
+    ESP_LOGI(TAG, "userauth: logged in as remote user '%s' (admin=%d)", username, (int)is_admin);
     return true;
 }
 
@@ -1414,9 +1426,11 @@ void pairing_selftest_userauth(void) {
     uint8_t resp3[4]; size_t resp3_len = 0;
     ok = handle_userauth_verify(fake_mac, PAIRING_ACTION_USERAUTH_VERIFY,
                                  (const uint8_t *)&vreq, sizeof(vreq), resp3, sizeof(resp3), &resp3_len);
-    ESP_LOGI(TAG, "userauth selftest: verify (correct proof) ok=%d status=%u (expect 1)",
-             ok, resp3_len ? resp3[0] : 255);
-    pass = pass && ok && resp3_len == 1 && resp3[0] == 1;
+    // `user` is a plain user_mgr_create() LOCAL account — never admin — so
+    // resp3[1] (is_admin) should come back 0 here.
+    ESP_LOGI(TAG, "userauth selftest: verify (correct proof) ok=%d status=%u is_admin=%u (expect 1, 0)",
+             ok, resp3_len ? resp3[0] : 255, resp3_len > 1 ? resp3[1] : 255);
+    pass = pass && ok && resp3_len == 2 && resp3[0] == 1 && resp3[1] == 0;
 
     // ── Phase C — wrong proof must be rejected (negative case) ───────
     handle_userauth_challenge(fake_mac, PAIRING_ACTION_USERAUTH_CHALLENGE,
@@ -1427,7 +1441,7 @@ void pairing_selftest_userauth(void) {
     uint8_t resp4[4]; size_t resp4_len = 0;
     handle_userauth_verify(fake_mac, PAIRING_ACTION_USERAUTH_VERIFY,
                             (const uint8_t *)&bad_vreq, sizeof(bad_vreq), resp4, sizeof(resp4), &resp4_len);
-    bool wrong_proof_rejected = (resp4_len == 1 && resp4[0] == 0);
+    bool wrong_proof_rejected = (resp4_len == 2 && resp4[0] == 0);
     ESP_LOGI(TAG, "userauth selftest: wrong-proof correctly rejected = %d", wrong_proof_rejected);
     pass = pass && wrong_proof_rejected;
 

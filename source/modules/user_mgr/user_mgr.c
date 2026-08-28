@@ -14,7 +14,14 @@
 #include <ctype.h>
 
 static const char *TAG = "user_mgr";
-#define NVS_NS       "purr_users"
+// Bumped from "purr_users" — user_record_t grew an is_admin field (remote-
+// login work, see user_mgr_is_admin()'s own doc comment). Per this file's
+// own policy just below ("a shape change just means a fresh NVS
+// namespace"): old records are sizeof(user_record_t) bytes and load_all()
+// requires an exact length match, so they'd otherwise fail that check and
+// get silently skipped as "corrupt" rather than cleanly reset. Bumping the
+// namespace makes that a clean, obvious bootstrap-fresh instead.
+#define NVS_NS       "purr_users_v2"
 #define NVS_KEY_COUNT  "count"
 #define NVS_KEY_ACTIVE "active"
 #define NVS_KEY_OOBE   "oobe_done"
@@ -30,6 +37,7 @@ typedef struct __attribute__((packed)) {
     uint8_t has_password;   // 0/1 — LOCAL only; always 0 for REMOTE
     uint8_t salt[16];
     uint8_t hash[32];       // SHA-256(salt || password)
+    uint8_t is_admin;       // 0/1 — see user_mgr_is_admin()'s own doc comment
 } user_record_t;
 
 static user_record_t s_users[USER_MGR_MAX_USERS];
@@ -166,6 +174,21 @@ user_account_type_t user_mgr_account_type(const char *username) {
     return idx >= 0 ? (user_account_type_t)s_users[idx].type : USER_ACCOUNT_LOCAL;
 }
 
+// False for an unknown username — never treats "doesn't exist" as admin.
+bool user_mgr_is_admin(const char *username) {
+    int idx = find_index(username);
+    return idx >= 0 && s_users[idx].is_admin != 0;
+}
+
+bool user_mgr_set_admin(const char *username, bool is_admin) {
+    int idx = find_index(username);
+    if (idx < 0) return false;
+    s_users[idx].is_admin = is_admin ? 1 : 0;
+    save_all();
+    ESP_LOGI(TAG, "'%s' admin = %d", username, (int)s_users[idx].is_admin);
+    return true;
+}
+
 bool user_mgr_create(const char *username, const char *password) {
     if (!user_mgr_valid_username(username)) return false;
     if (user_mgr_exists(username)) return false;
@@ -276,16 +299,25 @@ bool user_mgr_verify_hash(const char *username, const uint8_t hash[32]) {
 // Unlike user_mgr_create(), re-creating an existing name is not an error:
 // logging into the same remote account again (a normal, expected event —
 // see pairing.h's Phase C reconnect flow) just confirms the existing
-// record rather than failing on "already exists". Refuses to touch a
-// name that already exists as a LOCAL account, though — silently
-// converting a real local account into a remote stand-in would be a
-// genuine account-identity mix-up, not a no-op.
-bool user_mgr_create_remote(const char *username) {
+// record (and syncs is_admin to whatever the server most recently
+// reported — a promotion/demotion on the server's own account should take
+// effect on the client's next successful login, not get stuck at
+// whatever it was the first time) rather than failing on "already
+// exists". Refuses to touch a name that already exists as a LOCAL
+// account, though — silently converting a real local account into a
+// remote stand-in would be a genuine account-identity mix-up, not a
+// no-op.
+bool user_mgr_create_remote(const char *username, bool is_admin) {
     if (!user_mgr_valid_username(username)) return false;
 
     int idx = find_index(username);
     if (idx >= 0) {
-        return s_users[idx].type == USER_ACCOUNT_REMOTE;
+        if (s_users[idx].type != USER_ACCOUNT_REMOTE) return false;
+        if (s_users[idx].is_admin != (is_admin ? 1 : 0)) {
+            s_users[idx].is_admin = is_admin ? 1 : 0;
+            save_all();
+        }
+        return true;
     }
 
     if (s_user_count >= USER_MGR_MAX_USERS) {
@@ -299,9 +331,10 @@ bool user_mgr_create_remote(const char *username) {
     snprintf(u->name, sizeof(u->name), "%s", username);
     u->type = USER_ACCOUNT_REMOTE;
     u->has_password = 0;   // salt/hash stay zeroed — REMOTE never has a local credential
+    u->is_admin = is_admin ? 1 : 0;
     s_user_count++;
     save_all();
-    ESP_LOGI(TAG, "created remote user '%s'", username);
+    ESP_LOGI(TAG, "created remote user '%s' (admin=%d)", username, (int)u->is_admin);
     return true;
 }
 
@@ -311,11 +344,17 @@ bool user_mgr_verify(const char *username, const char *password) {
     const user_record_t *u = &s_users[idx];
 
     if (u->type == USER_ACCOUNT_REMOTE) {
-        // No remote-verification transport exists yet — see user_mgr.h's
-        // doc comment on the local/remote split. Nothing creates a REMOTE
-        // account today either, so this is currently unreachable in
-        // practice; it is here so the dispatch shape is already right.
-        ESP_LOGW(TAG, "'%s' is a remote account — remote verification not implemented", username);
+        // REMOTE accounts are real now (user_mgr_create_remote(), created
+        // by pairing_module.c's Phase C on a successful login) — but this
+        // function still isn't how one gets verified. A REMOTE account
+        // never has a password (no salt/hash at all — see user_record_t's
+        // own has_password comment), and its actual proof-of-identity is
+        // pairing.h's own challenge-response, already complete by the time
+        // user_mgr_create_remote()/user_mgr_set_logged_in() get called.
+        // This path stays a deliberate dead end so the dispatch shape is
+        // right for whatever calls user_mgr_verify() generically without
+        // knowing the account's type in advance.
+        ESP_LOGW(TAG, "'%s' is a remote account — verify via pairing_verify_user(), not this", username);
         return false;
     }
 
@@ -399,9 +438,15 @@ int user_mgr_init(void) {
         snprintf(u->name, sizeof(u->name), "%s", USER_MGR_BOOTSTRAP_USER);
         u->type = USER_ACCOUNT_LOCAL;
         u->has_password = 0;
+        // Admin — whoever set up the device (the only account that can
+        // possibly exist at this point) is the natural default admin. See
+        // user_mgr_is_admin()'s own doc comment for what this actually
+        // gates (remote-login dashboard-vs-desktop routing, currently the
+        // only consumer).
+        u->is_admin = 1;
         s_user_count = 1;
         save_all();
-        ESP_LOGI(TAG, "no users configured — bootstrapped default user '%s' (no password)",
+        ESP_LOGI(TAG, "no users configured — bootstrapped default admin user '%s' (no password)",
                  USER_MGR_BOOTSTRAP_USER);
     }
 

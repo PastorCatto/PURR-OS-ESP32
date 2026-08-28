@@ -86,6 +86,19 @@ bool user_mgr_at(int idx, char *name_out, size_t name_out_sz);
 bool user_mgr_exists(const char *username);
 user_account_type_t user_mgr_account_type(const char *username);   // USER_ACCOUNT_LOCAL if not found
 
+// Whoever set up the device (the bootstrap account, user_mgr_init()'s own
+// "no users configured" branch) is admin by default; every other account
+// (LOCAL, created via user_mgr_create(), or REMOTE, created via
+// user_mgr_create_remote()) starts non-admin. False for an unknown
+// username. Currently the only consumer is milkbar's remote-login flow
+// (source/modules/pairing/pairing.h): an admin who logs into this
+// device's account remotely sees a dashboard first, a non-admin goes
+// straight to the app desktop. Not yet exposed in any local-account UI
+// (settings.c has no promote/demote screen) — the primitive exists for
+// that to use later.
+bool user_mgr_is_admin(const char *username);
+bool user_mgr_set_admin(const char *username, bool is_admin);   // false if username doesn't exist
+
 // Creates a LOCAL account. `password` may be NULL or "" for no password
 // (auto-login identity). Fails (false) if the username is invalid, already
 // exists, or USER_MGR_MAX_USERS is already reached.
@@ -128,13 +141,15 @@ void user_mgr_hash_password(const uint8_t salt[16], const char *password, uint8_
 bool user_mgr_verify_hash(const char *username, const uint8_t hash[32]);
 
 // Creates (or, if `username` already names a REMOTE account, just
-// confirms) a USER_ACCOUNT_REMOTE record — no password, no verification of
-// any kind performed here (same "does not itself verify" contract
+// confirms — and syncs is_admin to this call's value, so a promotion/
+// demotion on the server takes effect on the next successful login) a
+// USER_ACCOUNT_REMOTE record — no password, no verification of any kind
+// performed here (same "does not itself verify" contract
 // user_mgr_set_logged_in() already documents; call this only after a real
-// remote-login round-trip has already succeeded). False if `username` is
-// invalid, already exists as a LOCAL account, or USER_MGR_MAX_USERS is
-// reached.
-bool user_mgr_create_remote(const char *username);
+// remote-login round-trip has already succeeded, with whatever is_admin
+// that round-trip reported). False if `username` is invalid, already
+// exists as a LOCAL account, or USER_MGR_MAX_USERS is reached.
+bool user_mgr_create_remote(const char *username, bool is_admin);
 
 // LOCAL: verifies via the salted-hash compare described above; a
 // no-password account verifies true regardless of what `password` is.
