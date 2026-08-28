@@ -144,6 +144,13 @@ idf_component_register(
         # device's own kernel_tdp_boot.c and purr_kernel_app_config_read()/
         # _write() in purr_kernel.h.
         joltwallet__littlefs
+        # esp_partition — esp_partition_find_first()/_mmap()/_write()/
+        # _erase_range(), used by claw_poc_test.c (EXPERIMENTAL, cross-device
+        # .claw loading R&D spike — see that file's own header comment).
+        # Explicit rather than relying on app_update/esp_app_format's
+        # transitive pull-in of it, same "explicit, not inherited" reasoning
+        # as esp_app_format's own comment below.
+        esp_partition
         fatfs
         sdmmc
         # esp_app_format — for esp_app_get_description() in purr_crash_guard.c,

@@ -24,8 +24,9 @@
 # it was running out — purrstrap's own spiffs image build defaults to a
 # fixed 512 KB (build_flash_image()'s spiffs_size_kb) regardless of the
 # partition's declared size, and every build this size has actually produced
-# has landed at exactly that. 1.5 MB is still 3x that measured usage,
-# comfortable headroom for baked-in assets to grow into.
+# has landed at exactly that. Shrunk again (0x180000 -> 0x170000, another
+# 64 KB) to make room for claw_poc below — still ~3x the measured 512 KB
+# usage, comfortable headroom for baked-in assets to grow into.
 #
 # app_cfg offset: 0xF00000  size: 0x100000 (1 MB) — LittleFS-mounted, the one
 # genuinely MUTABLE partition in an otherwise semi-immutable image: one
@@ -34,6 +35,16 @@
 # module settings, a different concern). See purr_kernel_app_config_read()/
 # _write() in purr_kernel.h. 1 MB is generous for text-sized per-app config
 # — sized for headroom, not because anything needs it yet.
+#
+# claw_poc offset: 0xEF0000  size: 0x10000 (64 KB) — EXPERIMENTAL, not part
+# of the semi-immutable design above. Scratch space for the cross-device
+# .claw loading R&D spike: a compiled, relocatable blob gets esp_partition_
+# write()'d here, then esp_partition_mmap()'d with ESP_PARTITION_MMAP_INST
+# (maps flash directly into executable instruction address space — see that
+# function's own doc comment) and jumped into, instead of ever being copied
+# into RAM (PSRAM has no MALLOC_CAP_EXEC region on this chip; IRAM does but
+# is small and already under pressure — both confirmed dead ends before this
+# partition was added). Remove this partition if the spike is abandoned.
 #
 # SubType "spiffs" below is the partition table's own label, not what
 # actually mounts there — esp_vfs_littlefs_register() finds a partition by
@@ -48,5 +59,6 @@ phy_init,   data, phy,      0xF000,    0x1000
 otadata,    data, ota,      0x10000,   0x2000
 ota_0,      app,  ota_0,    0x20000,   0x6B0000
 ota_1,      app,  ota_1,    0x6D0000,  0x6B0000
-spiffs,     data, spiffs,   0xD80000,  0x180000
+spiffs,     data, spiffs,   0xD80000,  0x170000
+claw_poc,   data, 0x40,     0xEF0000,  0x10000
 app_cfg,    data, spiffs,   0xF00000,  0x100000

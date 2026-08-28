@@ -786,6 +786,16 @@ void app_main(void)
     // app_manager_scan_ex()'s comment for why SD gets skipped specifically.
     extern int app_manager_scan_ex(bool include_sd);
     app_manager_scan_ex(!recovering);
+
+    // claw_poc_run() call removed after run #3 PASSED on real hardware
+    // ("entry(10) = 92 (expected 92)" — see claw_poc_test.c's own header
+    // comment for the full story). No reason to keep erasing+rewriting the
+    // claw_poc partition on every boot now that the finding is confirmed;
+    // re-add this call (or move the harness into a real app/module) when
+    // the spike resumes.
+    extern void claw_poc_run(void);
+    (void)claw_poc_run;
+
     purr_kernel_set_boot_ready(true);
 
     // ── Phase 2: SD extras ───────────────────────────────────────────────────
