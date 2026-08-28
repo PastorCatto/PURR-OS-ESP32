@@ -88,10 +88,20 @@
 static const msn_backend_t *s_backend = NULL;
 
 // ── Chooser screen state ─────────────────────────────────────────────────
-static purr_win_t s_chooser_win        = 0;
-static purr_wid_t s_meshtastic_status  = 0;
-static purr_wid_t s_meshcore_status    = 0;
-static purr_wid_t s_force_local_status = 0;
+// Was three rows of button + separate trailing status label, laid out by
+// hand with purr_win_row() — the button-in-a-row path renders as a flat
+// centered pill (tb_btn_create()'s "in_layout" style in cheetah_win.c), not
+// the left-aligned label + right-aligned value row real iOS settings use for
+// exactly this "pick one, show its state" shape. settings.c's own backend
+// switcher already gets that look for free (plain purr_win_button() calls,
+// not row-wrapped, auto-group into a card) — this screen needed the values
+// column a plain button can't carry, so it's the menu primitive instead,
+// same shape as that settings.c screen and diagnostics.c's category picker.
+static purr_win_t s_chooser_win  = 0;
+static purr_wid_t s_chooser_menu = 0;
+static char       s_mt_value[16] = "";
+static char       s_mc_value[16] = "";
+static char       s_fl_value[16] = "";
 static purr_win_t s_switch_confirm_win = 0;
 static purr_wid_t s_switch_confirm_lbl = 0;
 static purr_mesh_backend_t s_pending_switch_target;
@@ -1106,21 +1116,53 @@ static void close_chat_ui(void) {
 
 // ── Chooser screen ───────────────────────────────────────────────────────
 
+// Forward-declared: on_chooser_menu_select() dispatches into these three,
+// all defined further down (each in turn calls back into
+// update_chooser_status() to reflect its result — same mutual shape the
+// row-based version already had, just now needing real declarations since
+// a button click callback used to reach them by direct reference instead of
+// a switch/case dispatch).
+static void update_chooser_status(void);
+static void on_meshtastic_click(purr_wid_t w, purr_event_t e, void *user);
+static void on_meshcore_click(purr_wid_t w, purr_event_t e, void *user);
+static void on_force_local_click(purr_wid_t w, purr_event_t e, void *user);
+
+static void on_chooser_menu_select(purr_wid_t w, purr_event_t e, void *user) {
+    (void)user;
+    if (e != PURR_EVENT_ACTIVATED) return;
+    switch (purr_win_menu_get_selected(w)) {
+        case 0: on_meshtastic_click(0, PURR_EVENT_CLICKED, NULL);  break;
+        case 1: on_meshcore_click(0, PURR_EVENT_CLICKED, NULL);    break;
+        case 2: on_force_local_click(0, PURR_EVENT_CLICKED, NULL); break;
+        default: break;
+    }
+}
+
+// Rebuilds the whole menu (menu_set_sections() is synchronous in Cheetah,
+// unlike list_set_items()'s deferred rebuild — see catcall_ui.h's own doc —
+// so there's no lifetime concern reusing these same static buffers on every
+// call). Called once to populate the screen on open, and again after any
+// action that might change what it shows.
 static void update_chooser_status(void) {
     bool mt_active = purr_kernel_get_module("meshtastic") != NULL;
     bool mc_active = purr_kernel_get_module("meshcore") != NULL;
-    if (s_meshtastic_status) purr_win_label_set(s_meshtastic_status, mt_active ? "* active" : "");
-    if (s_meshcore_status)   purr_win_label_set(s_meshcore_status,   mc_active ? "* active" : "");
-    if (s_force_local_status) {
-        purr_win_label_set(s_force_local_status, msn_mt_relay_get_force_local() ? "* ON" : "");
-    }
+    snprintf(s_mt_value, sizeof(s_mt_value), "%s", mt_active ? "Active" : "");
+    snprintf(s_mc_value, sizeof(s_mc_value), "%s", mc_active ? "Active" : "");
+    snprintf(s_fl_value, sizeof(s_fl_value), "%s", msn_mt_relay_get_force_local() ? "On" : "Off");
+
+    if (!s_chooser_menu) return;
+    static const char *items[3]  = { "Meshtastic", "MeshCore", "Force local radio" };
+    static const char *values[3];
+    values[0] = s_mt_value; values[1] = s_mc_value; values[2] = s_fl_value;
+    static const purr_menu_section_t sec = { .header = NULL, .items = items, .values = values, .count = 3 };
+    purr_win_menu_set_sections(s_chooser_menu, &sec, 1);
+    purr_win_menu_on_select(s_chooser_menu, on_chooser_menu_select, NULL);
 }
 
 static void close_chooser(void) {
     if (s_chooser_win) {
         purr_win_destroy(s_chooser_win);
-        s_chooser_win = 0; s_meshtastic_status = 0; s_meshcore_status = 0;
-        s_force_local_status = 0;
+        s_chooser_win = 0; s_chooser_menu = 0;
     }
 }
 
@@ -1205,24 +1247,14 @@ static void open_chooser(void) {
     s_chooser_win = purr_win_create("MSN");
     purr_win_label(s_chooser_win, "Choose a mesh backend:");
 
-    purr_wid_t mt_row = purr_win_row(s_chooser_win, 4);
-    purr_win_button(s_chooser_win, "Meshtastic", on_meshtastic_click, NULL);
-    s_meshtastic_status = purr_win_label(s_chooser_win, "");
-    purr_win_layout_end(mt_row);
+    // Third row ("Force local radio") is a manual override for MSN's
+    // automatic home-base radio relay (Meshtastic backend only, this pass)
+    // — see msn_backend.h's msn_mt_relay_* comment — living in the same list
+    // as the two backend picks because it's the same shape of choice: one
+    // row, one action, one right-aligned state.
+    s_chooser_menu = purr_win_menu(s_chooser_win);
+    update_chooser_status();   // builds+applies the sections, see its own comment
 
-    purr_wid_t mc_row = purr_win_row(s_chooser_win, 4);
-    purr_win_button(s_chooser_win, "MeshCore", on_meshcore_click, NULL);
-    s_meshcore_status = purr_win_label(s_chooser_win, "");
-    purr_win_layout_end(mc_row);
-
-    // Manual override for MSN's automatic home-base radio relay (Meshtastic
-    // backend only, this pass) — see msn_backend.h's msn_mt_relay_* comment.
-    purr_wid_t fl_row = purr_win_row(s_chooser_win, 4);
-    purr_win_button(s_chooser_win, "Force local radio", on_force_local_click, NULL);
-    s_force_local_status = purr_win_label(s_chooser_win, "");
-    purr_win_layout_end(fl_row);
-
-    update_chooser_status();
     purr_win_show(s_chooser_win);
 }
 
