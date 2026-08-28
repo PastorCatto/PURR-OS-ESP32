@@ -759,26 +759,56 @@ static void tb_ta_cb(purr_wid_t wid, purr_win_cb_t cb, void *user) {
     }
 }
 
-// ── List ────────────────────────────────────────────────────────────────────
+// ── List (flat, iOS 7 "plain style" table) ──────────────────────────────────
+//
+// Used to be lv_list_create()/lv_list_add_btn() — LVGL's own stock list
+// widget, rendered through LVGL's built-in theme rather than this file's
+// iOS-7 palette. Every OTHER primitive here (menu, btn) goes through
+// IOS_CELL_BG/IOS_SEPARATOR/IOS_CELL_TEXT; list quietly didn't, which is
+// exactly what produced screens where one submenu looked iOS-7 and the next
+// (anything backed by list_create — settings/services/msn/milkbar/taskmgr/
+// nearby/drivermgr/fileman) looked like a generic un-themed widget instead.
+//
+// Rebuilt on the same row shape as tb_menu_set_sections' grouped table, minus
+// the rounded card: Apple's own "plain style" table (Mail's inbox, a long
+// Settings sub-list) — the flat variant meant for content whose length isn't
+// known up front, same colours/row height/separator as the grouped one so
+// the two read as one design language instead of two.
+//
+// Selection used to be LV_STATE_CHECKED on an lv_list button, relying on
+// LVGL's theme to paint that state. Rows here have had lv_obj_remove_style_all()
+// applied (same as every other themed row in this file), so that state paints
+// nothing on its own — a small trailing checkmark label (iOS's own selection
+// affordance) is shown/hidden instead. It's always each row's LAST child, so
+// it can be found by position without needing LVGL's user_data field.
 
 typedef struct { purr_win_cb_t cb; void *user; int selected_idx; } list_meta_t;
 static list_meta_t s_list_meta[MAX_WIDS];
 
-static void list_btn_event_cb(lv_event_t *e) {
+static lv_obj_t *list_row_checkmark(lv_obj_t *row) {
+    uint32_t n = lv_obj_get_child_cnt(row);
+    return n ? lv_obj_get_child(row, n - 1) : NULL;
+}
+
+static void list_row_click_cb(lv_event_t *e) {
     cb_ctx_t *ctx = (cb_ctx_t *)lv_event_get_user_data(e);
     if (!ctx) return;
     purr_wid_t list_wid = ctx->wid;
     lv_obj_t *list = get_wid(list_wid);
-    lv_obj_t *btn = lv_event_get_target(e);
-    if (!list || !btn || list_wid < 1 || list_wid > MAX_WIDS) return;
+    lv_obj_t *row  = lv_event_get_target(e);
+    if (!list || !row || list_wid < 1 || list_wid > MAX_WIDS) return;
 
     list_meta_t *meta = &s_list_meta[list_wid - 1];
-    if (meta->selected_idx >= 0) {
-        lv_obj_t *prev_btn = lv_obj_get_child(list, meta->selected_idx);
-        if (prev_btn) lv_obj_clear_state(prev_btn, LV_STATE_CHECKED);
+    int idx = (int)lv_obj_get_index(row);
+
+    if (meta->selected_idx >= 0 && meta->selected_idx != idx) {
+        lv_obj_t *prev = lv_obj_get_child(list, meta->selected_idx);
+        lv_obj_t *pchk = prev ? list_row_checkmark(prev) : NULL;
+        if (pchk) lv_obj_add_flag(pchk, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_add_state(btn, LV_STATE_CHECKED);
-    meta->selected_idx = (int)lv_obj_get_index(btn);
+    meta->selected_idx = idx;
+    lv_obj_t *chk = list_row_checkmark(row);
+    if (chk) lv_obj_clear_flag(chk, LV_OBJ_FLAG_HIDDEN);
 
     if (meta->cb) {
         meta->cb(list_wid, PURR_EVENT_SELECTED, meta->user);
@@ -790,8 +820,13 @@ static purr_wid_t tb_list_create(purr_win_t h, uint16_t w_pct, uint16_t h_pct) {
     lv_obj_t *parent = content_parent(h);
     if (!parent) return 0;
     group_close(h);
-    lv_obj_t *list = lv_list_create(parent);
+    lv_obj_t *list = lv_obj_create(parent);
+    lv_obj_remove_style_all(list);
     lv_obj_set_size(list, LV_PCT(w_pct), LV_PCT(h_pct));
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
     purr_wid_t wid = alloc_wid(list);
     if (wid >= 1 && wid <= MAX_WIDS) {
         s_list_meta[wid - 1].cb = NULL;
@@ -819,15 +854,54 @@ static void tb_list_set_items_async_cb(void *user) {
         lv_obj_clean(list);
         s_list_meta[sctx->wid - 1].selected_idx = -1;
         for (int i = 0; i < sctx->count; i++) {
+            lv_obj_t *row = lv_obj_create(list);
+            lv_obj_remove_style_all(row);
+            lv_obj_set_width(row, LV_PCT(100));
+            lv_obj_set_height(row, IOS_ROW_H);
+            lv_obj_set_style_bg_color(row, IOS_CELL_BG, 0);
+            lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+            // Last row has no trailing hairline, same reasoning as the
+            // grouped table: it reads as a broken cell otherwise.
+            if (i + 1 < sctx->count) {
+                lv_obj_set_style_border_color(row, IOS_SEPARATOR, 0);
+                lv_obj_set_style_border_width(row, 1, 0);
+                lv_obj_set_style_border_side(row, LV_BORDER_SIDE_BOTTOM, 0);
+            }
+            lv_obj_set_style_pad_hor(row, 12, 0);
+            lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
             const char *icon = (sctx->icons && sctx->icons[i]) ? sctx->icons[i] : NULL;
-            lv_obj_t *btn = lv_list_add_btn(list, icon,
-                                             (sctx->items && sctx->items[i]) ? sctx->items[i] : "");
-            group_add(btn);   // rows are keyboard/trackball reachable
+            const char *text = (sctx->items && sctx->items[i]) ? sctx->items[i] : "";
+            lv_coord_t text_x = 0;
+            if (icon) {
+                lv_obj_t *ic = lv_label_create(row);
+                lv_label_set_text(ic, icon);
+                lv_obj_set_style_text_color(ic, IOS_CELL_TEXT, 0);
+                lv_obj_align(ic, LV_ALIGN_LEFT_MID, 0, 0);
+                text_x = 26;   // room for the glyph, matches tile/menu icon gutters
+            }
+            lv_obj_t *lbl = lv_label_create(row);
+            lv_label_set_text(lbl, text);
+            lv_obj_set_style_text_color(lbl, IOS_CELL_TEXT, 0);
+            lv_obj_align(lbl, LV_ALIGN_LEFT_MID, text_x, 0);
+
+            // Selection checkmark: always created, hidden by default, shown by
+            // tb_list_set_selected()/list_row_click_cb(). Must stay this row's
+            // LAST child — see list_row_checkmark() above.
+            lv_obj_t *chk = lv_label_create(row);
+            lv_label_set_text(chk, LV_SYMBOL_OK);
+            lv_obj_set_style_text_color(chk, lv_color_hex(0x007AFF), 0);   // systemBlue
+            lv_obj_align(chk, LV_ALIGN_RIGHT_MID, 0, 0);
+            lv_obj_add_flag(chk, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(chk, LV_OBJ_FLAG_CLICKABLE);
+
+            group_add(row);   // rows are keyboard/trackball reachable
             cb_ctx_t *ctx = heap_caps_malloc(sizeof(cb_ctx_t), MALLOC_CAP_DEFAULT);
             if (ctx) {
                 ctx->cb = NULL; ctx->user = NULL; ctx->wid = sctx->wid;
-                lv_obj_add_event_cb(btn, list_btn_event_cb, LV_EVENT_CLICKED, ctx);
-                lv_obj_add_event_cb(btn, ctx_delete_cb, LV_EVENT_DELETE, ctx);
+                lv_obj_add_event_cb(row, list_row_click_cb, LV_EVENT_CLICKED, ctx);
+                lv_obj_add_event_cb(row, ctx_delete_cb, LV_EVENT_DELETE, ctx);
             }
         }
     }
@@ -858,15 +932,17 @@ static void tb_list_set_selected(purr_wid_t wid, int index) {
     if (!list || wid < 1 || wid > MAX_WIDS) return;
     list_meta_t *meta = &s_list_meta[wid - 1];
     if (meta->selected_idx >= 0) {
-        lv_obj_t *prev_btn = lv_obj_get_child(list, meta->selected_idx);
-        if (prev_btn) lv_obj_clear_state(prev_btn, LV_STATE_CHECKED);
+        lv_obj_t *prev = lv_obj_get_child(list, meta->selected_idx);
+        lv_obj_t *pchk = prev ? list_row_checkmark(prev) : NULL;
+        if (pchk) lv_obj_add_flag(pchk, LV_OBJ_FLAG_HIDDEN);
     }
     meta->selected_idx = index;
     if (index >= 0) {
-        lv_obj_t *btn = lv_obj_get_child(list, index);
-        if (btn) {
-            lv_obj_add_state(btn, LV_STATE_CHECKED);
-            lv_obj_scroll_to_view(btn, LV_ANIM_OFF);
+        lv_obj_t *row = lv_obj_get_child(list, index);
+        if (row) {
+            lv_obj_t *chk = list_row_checkmark(row);
+            if (chk) lv_obj_clear_flag(chk, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_scroll_to_view(row, LV_ANIM_OFF);
         }
     }
 }
