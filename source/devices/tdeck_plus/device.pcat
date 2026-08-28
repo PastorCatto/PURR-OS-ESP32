@@ -146,18 +146,36 @@ ota         = "ota_mgr"
 users       = "user_mgr"
 signing     = "sig_mgr"
 # bt          = "bt_mgr"
-# proximity/pairing — NOT listed here anymore; purrstrap.py's
-# apply_radio_companion_defaults() adds them automatically to any device
-# with [radio] wifi = true (this one), see cyd/device.pcat's comment for
-# the full heuristic. msn/milkbar below predate that mechanism (added
-# during the earlier MSN rewrite) and stay explicit.
-
-msn_relay   = ""
-proximity   = ""
-proximity_rpc= ""
-pairing     = ""
-homebase    = ""
-app_manager_remote= ""
+# proximity/pairing — intended to be picked up automatically by purrstrap.py's
+# apply_radio_companion_defaults() for any device with [radio] wifi = true
+# (this one), see cyd/device.pcat's comment for the full heuristic. msn/
+# milkbar below predate that mechanism (added during the earlier MSN
+# rewrite) and stay explicit.
+#
+# BUT: apply_radio_companion_defaults() adds each of these via
+# cfg.setdefault(key, val) — a no-op when the key is already PRESENT in cfg,
+# even with an empty value. The six explicit `= ""` lines this section used
+# to have did exactly that: present-but-empty, so setdefault() silently left
+# them empty, and _device_referenced()/the glue-file generator both treat an
+# empty modules.* value as "not wanted" (same falsy-empty-string check
+# documented below for claw_loader, and the same class of bug — just an
+# older, previously-undiscovered instance of it). Confirmed live: zero
+# "loaded P#: pairing"-style line anywhere in a full boot log, on a build
+# that nonetheless links pairing_module.c in (pulled in transitively via
+# milkbar's own CMakeLists.txt REQUIRES) — the module was compiled the whole
+# time but never actually registered/initialized. cyd/device.pcat leaves
+# these keys out of its cfg ENTIRELY (not even as empty strings), which is
+# why setdefault() works correctly there.
+#
+# Fixed the same way claw_loader's own instance of this was fixed: name
+# each module after itself (matching signing = "sig_mgr"), a real non-empty
+# value setdefault() would have written anyway had the key been absent.
+msn_relay   = "msn_relay"
+proximity   = "proximity"
+proximity_rpc = "proximity_rpc"
+pairing     = "pairing"
+homebase    = "homebase"
+app_manager_remote = "app_manager_remote"
 # claw_loader — cross-device .claw loading (source/modules/claw_loader/),
 # EXPERIMENTAL for now: exercised by claw_loader_selftest.c
 # (kernel_tdeck_plus, CoreOS/main/CMakeLists.txt's own REQUIRES), not yet
