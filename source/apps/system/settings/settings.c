@@ -91,7 +91,6 @@ static purr_wid_t  s_screen_timeout_lbl = 0;
 
 static uint8_t     s_brightness = 255;
 static uint8_t     s_screen_timeout_min = 1;   // must match purr_kernel.h's own default
-static char        s_theme[16]  = "wce";
 
 static uint8_t     s_dev_mode     = 0;   // 0/1 — see purr_kernel.h's doc comment
 
@@ -163,8 +162,53 @@ static char        s_wallpaper_paths[MAX_WALLPAPERS][WALLPAPER_PATH_LEN];
 static char        s_wallpaper_labels[MAX_WALLPAPERS][40];
 static const char *s_wallpaper_label_ptrs[MAX_WALLPAPERS];
 static int         s_wallpaper_count = 0;
+// The currently-configured selection — previously write-only (saved to NVS,
+// never read back into anything), so the wallpaper list never showed which
+// one was actually active and nothing re-applied it. Loaded by
+// settings_cfg_load(), used to pre-select the matching list row in
+// refresh_wallpaper_list().
+static char        s_wallpaper_selected[WALLPAPER_PATH_LEN] = "default";
+
+// ── App config (LittleFS, /config/settings.cfg) ─────────────────────────────
+// Brightness and wallpaper are genuinely THIS app's own data — unlike dark_
+// mode/ui_effects/accent_color/screen_timeout/dev_mode/navbar_always_visible
+// below, which stay in kernel NVS via purr_kernel_set_*() (kernel_load_
+// persisted_settings() needs them before Settings, or anything else, has
+// ever run — moving them here would make systemui/cheetah depend on an
+// app-specific file instead of the kernel's own boot-time state). Per the
+// "semi-immutable OS" design: app code/assets are build-time and read-only,
+// this file is the one mutable, per-app blob — see purr_app_config_read()/
+// _write()'s doc comments in purr_kernel.h.
+#define SETTINGS_CFG_MAGIC 0x53455401u   // "SET" + struct version 1
+
+typedef struct {
+    uint32_t magic;
+    uint8_t  brightness;
+    char     wallpaper[WALLPAPER_PATH_LEN];
+} settings_app_cfg_t;
+
+static void settings_cfg_load(void) {
+    settings_app_cfg_t cfg;
+    int got = purr_app_config_read("settings", &cfg, sizeof(cfg));
+    if (got == (int)sizeof(cfg) && cfg.magic == SETTINGS_CFG_MAGIC) {
+        s_brightness = cfg.brightness;
+        strncpy(s_wallpaper_selected, cfg.wallpaper, sizeof(s_wallpaper_selected) - 1);
+        s_wallpaper_selected[sizeof(s_wallpaper_selected) - 1] = 0;
+    }
+    // else: no config file yet (or a stale/foreign one) — keep the
+    // compiled-in defaults (255 brightness, "default" wallpaper), same
+    // first-boot behavior every other config-backed value already has.
+}
+
+static void settings_cfg_save(void) {
+    settings_app_cfg_t cfg = { .magic = SETTINGS_CFG_MAGIC, .brightness = s_brightness };
+    strncpy(cfg.wallpaper, s_wallpaper_selected, sizeof(cfg.wallpaper) - 1);
+    purr_app_config_write("settings", &cfg, sizeof(cfg));
+}
 
 // ── NVS helpers ───────────────────────────────────────────────────────────────
+// Everything below is kernel-level state Settings only provides the UI for —
+// see the app-config comment above for why it stays here instead.
 
 static void nvs_save_str(const char *key, const char *val) {
     nvs_handle_t h;
@@ -185,9 +229,6 @@ static void nvs_save_u8(const char *key, uint8_t val) {
 static void nvs_load(void) {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
-    size_t len = sizeof(s_theme);
-    nvs_get_str(h, "theme", s_theme, &len);
-    nvs_get_u8(h, "brightness", &s_brightness);
     nvs_get_u8(h, "screen_timeout", &s_screen_timeout_min);
     nvs_get_u8(h, "dev_mode", &s_dev_mode);
     nvs_get_u8(h, "navbar_always_visible", &s_navbar_always_visible);
@@ -253,27 +294,16 @@ static void add_back_button(purr_win_t win) {
     purr_win_button(win, "< Back", on_subwin_back, (void *)(uintptr_t)win);
 }
 
-// ── Theme buttons ─────────────────────────────────────────────────────────────
-
-static void apply_theme_nvs(const char *id) {
-    nvs_save_str("theme", id);
-    strncpy(s_theme, id, sizeof(s_theme) - 1);
-
-    char msg[48];
-    snprintf(msg, sizeof(msg), "Theme set to '%s' — reboot to apply.", id);
-    set_customization_status(msg);
-}
-
-static void on_theme_wce(purr_wid_t w, purr_event_t e, void *u)  { (void)w;(void)e;(void)u; apply_theme_nvs("wce");  }
-static void on_theme_dark(purr_wid_t w, purr_event_t e, void *u) { (void)w;(void)e;(void)u; apply_theme_nvs("dark"); }
-
 // ── Brightness ────────────────────────────────────────────────────────────────
+// Was NVS-backed (dropped along with the dead WCE/Dark theme picker that used
+// to live in this section — see on_open_customization()'s comment) — now the
+// app-config file, alongside wallpaper below.
 
 static void set_brightness(uint8_t level) {
     s_brightness = level;
     const catcall_display_t *disp = purr_kernel_display();
     if (disp && disp->set_brightness) disp->set_brightness(level);
-    nvs_save_u8("brightness", level);
+    settings_cfg_save();
     char buf[32];
     snprintf(buf, sizeof(buf), "Brightness: %d%%", (level * 100) / 255);
     purr_win_label_set(s_brightness_lbl, buf);
@@ -307,9 +337,14 @@ static void on_timeout_5(purr_wid_t w, purr_event_t e, void *u) { (void)w;(void)
 // ── Wallpaper ─────────────────────────────────────────────────────────────────
 // "Default" (the launcher's built-in gradient) plus every file found under
 // /sdcard/wallpapers/ — same opendir/readdir listing pattern fileman.c already
-// uses. Selecting one just persists the choice to NVS; the launcher reads it
-// back and loads the image itself on next boot (matching the existing
-// theme/brightness "reboot to apply" behavior below).
+// uses. Selecting one persists the choice via the app-config file above.
+//
+// KNOWN GAP, not fixed by this pass: only cupcake_ui.c actually reads this
+// value back and renders it — cheetah_home.c (the active backend on
+// tdeck_plus) still draws its flat/gradient placeholder regardless of what's
+// selected here. That's a real desktop-rendering feature (decode + draw an
+// arbitrary image file), a different piece of work than where the selection
+// is stored, which is all this pass changes.
 
 static void refresh_wallpaper_list(void) {
     s_wallpaper_count = 0;
@@ -342,9 +377,11 @@ static void on_wallpaper_select(purr_wid_t w, purr_event_t e, void *u) {
     int idx = purr_win_list_get_selected(s_wallpaper_list);
     if (idx < 0 || idx >= s_wallpaper_count) return;
 
-    nvs_save_str("wallpaper", s_wallpaper_paths[idx]);
+    strncpy(s_wallpaper_selected, s_wallpaper_paths[idx], sizeof(s_wallpaper_selected) - 1);
+    s_wallpaper_selected[sizeof(s_wallpaper_selected) - 1] = 0;
+    settings_cfg_save();
     char msg[WALLPAPER_PATH_LEN + 64];
-    snprintf(msg, sizeof(msg), "Wallpaper set to '%s' — reboot to apply.", s_wallpaper_paths[idx]);
+    snprintf(msg, sizeof(msg), "Wallpaper set to '%s'.", s_wallpaper_paths[idx]);
     set_customization_status(msg);
 }
 
@@ -946,15 +983,11 @@ static void on_open_customization(purr_wid_t w, purr_event_t e, void *u) {
     s_customization_win = purr_win_create("Customization");
     add_back_button(s_customization_win);
 
-    purr_win_label(s_customization_win, "Theme");
-    purr_wid_t tr = purr_win_row(s_customization_win, 4);
-    purr_win_button(s_customization_win, "WCE Classic", on_theme_wce,  NULL);
-    purr_win_button(s_customization_win, "Dark",        on_theme_dark, NULL);
-    purr_win_layout_end(tr);
-
-    char theme_str[40];
-    snprintf(theme_str, sizeof(theme_str), "Active: %s", s_theme);
-    purr_win_label(s_customization_win, theme_str);
+    // Used to open with its own "WCE Classic"/"Dark" theme picker here —
+    // removed: nothing has read that NVS key since the XP/Cheetah systemui
+    // redesign (it predates dark mode), so it saved a choice that did
+    // nothing and duplicated the real, working "Theme" section (the
+    // dark-mode toggle) further down this same screen.
 
     purr_win_label(s_customization_win, "Wallpaper");
     s_wallpaper_list = purr_win_list(s_customization_win, 90, 30);
@@ -1326,8 +1359,18 @@ static void build_category_nav(void) {
 
 static int settings_init(void) {
     nvs_load();
+    settings_cfg_load();
     purr_kernel_set_dev_mode(s_dev_mode != 0);
     purr_kernel_set_navbar_always_visible(s_navbar_always_visible != 0);
+    // Previously loaded into s_brightness but never actually reapplied to the
+    // panel here — the saved value only took effect once the user pressed a
+    // brightness button again in this same session. Real device boot doesn't
+    // call into Settings at all, so brightness has only ever come from the
+    // display driver's own default until this line.
+    {
+        const catcall_display_t *disp = purr_kernel_display();
+        if (disp && disp->set_brightness) disp->set_brightness(s_brightness);
+    }
 
     // Top-level window is just the category picker — each button opens its
     // own lazily-built, cached sub-window (see on_open_*() above). Keeps
@@ -1378,7 +1421,7 @@ PURR_MODULE_REGISTER(settings) = {
     .module_type       = PURR_MOD_APP,
     .load_priority     = PURR_PRIORITY_OPTIONAL,
     .name              = "settings",
-    .version           = "1.0.1",
+    .version           = "1.1.0",
     .kernel_min        = "0.11.1",
     .provided_catcalls = 0,
     .required_catcalls = 0,

@@ -6,7 +6,7 @@
 # standalone nearby app) — see milkbar_app.c's file header.
 
 name        = "milkbar"
-version     = "1.1.0"
+version     = "1.2.0"
 tier        = "claw"
 author      = "PURR OS"
 description = "Milkbar: discover, pair with, and manage apps on nearby PurrOS devices remotely."

@@ -112,6 +112,47 @@ static int          s_device_count = 0;
 static uint8_t       s_selected_mac[6];
 static volatile bool s_have_selection = false;
 
+// ── App config (LittleFS, /config/milkbar.cfg) ──────────────────────────────
+// Remembers which paired device was last selected, across reboots — not just
+// relaunches (s_selected_mac/s_have_selection already survive those, being
+// plain statics; only a real reboot resets them). Worth persisting
+// specifically because milkbar is meant to become the general server/client
+// connection surface: reopening it and having to reselect the same device
+// every single time is exactly the friction that goal is supposed to remove.
+#define MILKBAR_CFG_MAGIC 0x4D4C4B01u   // "MLK" + struct version 1
+
+typedef struct {
+    uint32_t magic;
+    uint8_t  mac[6];
+    uint8_t  _pad[2];   // explicit, not relied-on compiler padding — this is written raw to a file
+} milkbar_app_cfg_t;
+
+static void milkbar_cfg_save(void) {
+    milkbar_app_cfg_t cfg = { .magic = MILKBAR_CFG_MAGIC };
+    memcpy(cfg.mac, s_selected_mac, 6);
+    purr_app_config_write("milkbar", &cfg, sizeof(cfg));
+}
+
+// Loads the saved mac, but only actually selects it if that device is STILL
+// in the trust list — pairing_forget() may have happened since the config
+// was written, and re-selecting a device this device no longer trusts would
+// have refresh_task() start issuing proximity_rpc_call()s to it regardless.
+static void milkbar_cfg_load(void) {
+    milkbar_app_cfg_t cfg;
+    int got = purr_app_config_read("milkbar", &cfg, sizeof(cfg));
+    if (got != (int)sizeof(cfg) || cfg.magic != MILKBAR_CFG_MAGIC) return;
+
+    int n = pairing_device_count();
+    for (int i = 0; i < n; i++) {
+        paired_device_t pd;
+        if (pairing_device_at(i, &pd) && memcmp(pd.mac, cfg.mac, 6) == 0) {
+            memcpy(s_selected_mac, cfg.mac, 6);
+            s_have_selection = true;
+            return;
+        }
+    }
+}
+
 static char        s_app_row_bufs[MAX_APP_ROWS][64];
 static const char *s_app_row_ptrs[MAX_APP_ROWS];
 #ifdef CONFIG_PURR_UI_LVGL
@@ -280,6 +321,7 @@ static void on_device_list_event(purr_wid_t w, purr_event_t e, void *user) {
     if (!pairing_device_at(idx, &pd)) return;
     memcpy(s_selected_mac, pd.mac, 6);
     s_have_selection = true;
+    milkbar_cfg_save();
     if (s_status_lbl) purr_win_label_set(s_status_lbl, "Loading...");
     // Actual fetch happens on refresh_task()'s own next pass, not here —
     // this callback runs on cupcake_task.
@@ -646,6 +688,7 @@ static int milkbar_app_init(void) {
     s_rx_is_new = false;
     s_last_rx_text[0] = 0;
     refresh_device_list();
+    milkbar_cfg_load();   // may flip s_have_selection back to true — see its own comment
     purr_win_show(s_win);
 
     s_running = true;
@@ -688,7 +731,7 @@ PURR_MODULE_REGISTER(milkbar) = {
     .module_type       = PURR_MOD_APP,
     .load_priority     = PURR_PRIORITY_OPTIONAL,
     .name              = "milkbar",
-    .version           = "1.1.0",
+    .version           = "1.2.0",
     .kernel_min        = "0.11.1",
     .provided_catcalls = 0,
     .required_catcalls = 0,
