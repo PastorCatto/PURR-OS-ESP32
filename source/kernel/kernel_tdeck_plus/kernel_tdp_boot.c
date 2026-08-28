@@ -787,14 +787,15 @@ void app_main(void)
     extern int app_manager_scan_ex(bool include_sd);
     app_manager_scan_ex(!recovering);
 
-    // claw_poc_run()/claw_poc_run2() calls removed — both PASSED on real
-    // hardware (round 1: self-contained relocation/execution; round 2:
-    // loaded code calling back into host firmware through a runtime
-    // function pointer, "entry2(21, poc_host_log) = 42 (expected 42)" — see
-    // claw_poc_test.c's own header comments for the full story). No reason
-    // to keep erasing+rewriting the claw_poc partition on every boot now
-    // that both findings are confirmed; re-add (or move the harness into a
-    // real app/module) when the spike resumes.
+    // claw_poc_run()/claw_poc_run2() calls removed — both PASSED through
+    // the real on-device ELF32 parser (claw_elf.c), not just the earlier
+    // hand-extraction script: "entry(10) = 92" and "entry2(21,
+    // poc_host_log) = 42", parser-derived text/entry-offset/patch-count
+    // values matching the hand-extracted ones exactly — see
+    // claw_poc_test.c's own header comment for the full story. No reason to
+    // keep erasing+rewriting the claw_poc partition on every boot now that
+    // it's confirmed; re-add (or move the harness into a real app/module)
+    // when the spike resumes.
     extern void claw_poc_run(void);
     extern void claw_poc_run2(void);
     (void)claw_poc_run; (void)claw_poc_run2;
