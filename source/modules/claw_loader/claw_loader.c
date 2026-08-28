@@ -4,10 +4,23 @@
 #include "esp_partition.h"
 #include "esp_heap_caps.h"
 #include "purr_module.h"
+#include "purr_kernel.h"
 #include "claw_elf.h"
 #include "claw_loader.h"
 
 static const char *TAG = "claw_loader";
+
+// The import table — see claw_elf.h's own header comment on
+// CLAW_SEC_EXTERN/claw_import_t: this list IS the capability boundary for
+// loaded code. A module can call a named host function only if it's listed
+// here; anything else in the firmware is unreachable by name to it,
+// deliberately. Starts with exactly one entry — enough to prove the
+// mechanism on real hardware — grown as real personal-space modules need
+// more.
+static const claw_import_t s_imports[] = {
+    { "purr_kernel_uptime_ms", (uint32_t)&purr_kernel_uptime_ms },
+};
+#define CLAW_IMPORT_COUNT (sizeof(s_imports) / sizeof(s_imports[0]))
 
 // "claw_slot" — promoted from the R&D spike's "claw_poc" partition once
 // three real-hardware rounds confirmed the approach (see
@@ -23,7 +36,8 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
     memset(out, 0, sizeof(*out));
 
     claw_module_t m;
-    if (!claw_elf_load(obj_bytes, obj_len, "claw_personal_init", &m)) {
+    if (!claw_elf_load(obj_bytes, obj_len, "claw_personal_init",
+                        s_imports, CLAW_IMPORT_COUNT, &m)) {
         ESP_LOGE(TAG, "ELF parse failed (claw_personal_init not found or object malformed)");
         return false;
     }
@@ -94,6 +108,10 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
                 case CLAW_SEC_RODATA: base = (uint32_t)out->rodata_ram; break;
                 case CLAW_SEC_DATA:   base = (uint32_t)out->data_ram;   break;
                 case CLAW_SEC_BSS:    base = (uint32_t)out->bss_ram;    break;
+                // target_off is already the fully-resolved absolute address
+                // (import's addr + relocation addend) — see claw_elf.h's
+                // claw_patch_t comment. No section base to add.
+                case CLAW_SEC_EXTERN: base = 0;                         break;
                 default: ESP_LOGE(TAG, "unknown patch target_kind %d", (int)p->target_kind); heap_caps_free(buf); goto fail;
             }
             uint32_t target_addr = base + p->target_off;

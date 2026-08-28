@@ -31,6 +31,8 @@ static const char *TAG = "claw_elf";
 #define R_XTENSA_32        1
 #define R_XTENSA_SLOT0_OP  20   // self-relocating, see claw_elf.h's header comment — never returned as a patch
 
+#define SHN_UNDEF 0   // symbol is external — resolved via the imports table, see claw_elf.h
+
 typedef struct __attribute__((packed)) {
     uint8_t  e_ident[16];
     uint16_t e_type;
@@ -208,7 +210,19 @@ bool claw_elf_find_offset(const uint8_t *data, size_t len, const char *symbol, u
     return true;
 }
 
-bool claw_elf_load(const uint8_t *data, size_t len, const char *entry_symbol, claw_module_t *out)
+static bool resolve_import(const claw_import_t *imports, int import_count, const char *name, uint32_t *out_addr)
+{
+    for (int i = 0; i < import_count; i++) {
+        if (imports[i].name && strcmp(imports[i].name, name) == 0) {
+            *out_addr = imports[i].addr;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool claw_elf_load(const uint8_t *data, size_t len, const char *entry_symbol,
+                    const claw_import_t *imports, int import_count, claw_module_t *out)
 {
     memset(out, 0, sizeof(*out));
 
@@ -270,19 +284,43 @@ bool claw_elf_load(const uint8_t *data, size_t len, const char *entry_symbol, cl
                          sizeof(sym), &sym)) goto fail;
 
             claw_sec_kind_t kind;
-            if ((int)sym.st_shndx == text_idx)          kind = CLAW_SEC_TEXT;
-            else if (have_rodata && (int)sym.st_shndx == rodata_idx) kind = CLAW_SEC_RODATA;
-            else if (have_data   && (int)sym.st_shndx == data_idx)   kind = CLAW_SEC_DATA;
-            else if (have_bss    && (int)sym.st_shndx == bss_idx)    kind = CLAW_SEC_BSS;
-            else {
+            uint32_t target_off;
+            if (sym.st_shndx == SHN_UNDEF) {
+                // External symbol — the object calls (or takes the address
+                // of) something it never defines. Resolve by NAME against
+                // the caller's import table; nothing else is reachable —
+                // see claw_elf.h's own comment on this being the real
+                // capability boundary for loaded code.
+                const char *sym_name = str_at(data, len, strtab_sh.sh_offset, strtab_sh.sh_size, sym.st_name);
+                uint32_t resolved = 0;
+                if (!sym_name || !resolve_import(imports, import_count, sym_name, &resolved)) {
+                    ESP_LOGE(TAG, "relocation at .text+%u needs external symbol '%s' — not in the import table",
+                                  (unsigned)rel.r_offset, sym_name ? sym_name : "?");
+                    goto fail;
+                }
+                kind = CLAW_SEC_EXTERN;
+                target_off = resolved + (uint32_t)rel.r_addend;   // fully resolved already — loader adds base 0 for this kind
+            } else if ((int)sym.st_shndx == text_idx) {
+                kind = CLAW_SEC_TEXT;
+                target_off = sym.st_value + (uint32_t)rel.r_addend;
+            } else if (have_rodata && (int)sym.st_shndx == rodata_idx) {
+                kind = CLAW_SEC_RODATA;
+                target_off = sym.st_value + (uint32_t)rel.r_addend;
+            } else if (have_data && (int)sym.st_shndx == data_idx) {
+                kind = CLAW_SEC_DATA;
+                target_off = sym.st_value + (uint32_t)rel.r_addend;
+            } else if (have_bss && (int)sym.st_shndx == bss_idx) {
+                kind = CLAW_SEC_BSS;
+                target_off = sym.st_value + (uint32_t)rel.r_addend;
+            } else {
                 ESP_LOGE(TAG, "relocation at .text+%u targets an unsupported section (shndx=%u) — "
-                              "only .text/.rodata/.data/.bss are handled", (unsigned)rel.r_offset, sym.st_shndx);
+                              "only .text/.rodata/.data/.bss/external are handled", (unsigned)rel.r_offset, sym.st_shndx);
                 goto fail;
             }
 
             patches[fill].text_off    = rel.r_offset;
             patches[fill].target_kind = kind;
-            patches[fill].target_off  = sym.st_value + (uint32_t)rel.r_addend;
+            patches[fill].target_off  = target_off;
             fill++;
         }
     }

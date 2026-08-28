@@ -787,18 +787,25 @@ void app_main(void)
     extern int app_manager_scan_ex(bool include_sd);
     app_manager_scan_ex(!recovering);
 
-    // claw_loader_selftest_run() call removed — PASSED on real hardware,
-    // resolving BOTH claw_personal_init and claw_personal_deinit through
-    // the real, promoted claw_loader module (source/modules/claw_loader/):
-    // "claw_personal_init() = 109 (expected 109)", clean deinit, "SELFTEST
-    // PASS" — see claw_loader_selftest.c's own header comment for the full
-    // story and the one gap it explicitly does NOT cover yet (a loaded
-    // module calling a host function by name, e.g. purr_kernel_ui(),
-    // rather than through a parameter it was handed). No reason to keep
-    // erasing+rewriting the claw_slot partition on every boot now that
-    // this is confirmed; re-add when app_manager integration resumes.
+    // claw_loader_selftest_run()/run2() calls removed — both PASSED on real
+    // hardware. run(): resolving BOTH claw_personal_init and
+    // claw_personal_deinit through the real, promoted claw_loader module
+    // (source/modules/claw_loader/): "claw_personal_init() = 109 (expected
+    // 109)", clean deinit, "SELFTEST PASS". run2(): the named-host-function
+    // import table (claw_loader.c's s_imports[] / claw_elf.c's
+    // CLAW_SEC_EXTERN path) — a loaded module called purr_kernel_uptime_ms()
+    // BY NAME (not through a parameter it was handed) and got back a
+    // plausible live value: "claw_personal_init() = 3044 ... SELFTEST PASS
+    // (import table resolved purr_kernel_uptime_ms by name)", 20s boot log
+    // otherwise clean (no error/assert/panic lines). See
+    // claw_loader_selftest.c's own header comment for the full story. No
+    // reason to keep erasing+rewriting the claw_slot partition on every
+    // boot now that both are confirmed; re-add whichever's needed when
+    // app_manager integration resumes.
     extern void claw_loader_selftest_run(void);
     (void)claw_loader_selftest_run;
+    extern void claw_loader_selftest_run2(void);
+    (void)claw_loader_selftest_run2;
 
     purr_kernel_set_boot_ready(true);
 
