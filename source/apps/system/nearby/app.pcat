@@ -1,9 +1,0 @@
-# apps/system/proximity/app.pcat
-
-name        = "nearby"
-version     = "1.0.0"
-tier        = "claw"
-author      = "PURR OS"
-description = "Nearby: read-only list of other PurrOS devices detected via ESP-NOW proximity beacons."
-
-idf_requires = "esp_common driver freertos"

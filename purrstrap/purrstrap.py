@@ -322,7 +322,7 @@ def bootloader_offset(chip):
 # free," rather than needing it hand-wired into each device.pcat one at a
 # time: proximity_module.c/pairing_module.c already handle no-PSRAM and
 # no-LoRa gracefully (see their own header comments), so WiFi is the only
-# real hardware requirement. msn + nearby (the apps that let a user actually
+# real hardware requirement. msn + milkbar (the apps that let a user actually
 # see/act on it) are added on top only when the UI backend implements
 # purr_win (catcall_ui_t) — a raw-framebuffer UI like oled_ui needs its own
 # custom screen instead (see heltec's hand-built Pair screen in
@@ -335,7 +335,7 @@ def bootloader_offset(chip):
 PURR_WIN_UI_BACKENDS = {"miniwin", "cupcake", "kittenui", "cardstack", "pounce", "tabby", "mochi"}
 
 def apply_radio_companion_defaults(cfg):
-    """Mutates cfg in place, adding proximity/pairing (+ msn/nearby where the
+    """Mutates cfg in place, adding proximity/pairing (+ msn/milkbar where the
     UI backend supports it) unless already present or explicitly opted out."""
     flag = cfg.get("modules.radio_companion", "").strip().lower()
     if flag in ("false", "0", "no"):
@@ -355,8 +355,11 @@ def apply_radio_companion_defaults(cfg):
         cfg.setdefault(key, val)
 
     if cfg.get("modules.ui", "") in PURR_WIN_UI_BACKENDS:
-        for key, val in (("apps.msn", "true"), ("apps.nearby", "true"), ("apps.milkbar", "true"),
-                          ("flash.apps/msn", "3"), ("flash.apps/nearby", "3"), ("flash.apps/milkbar", "3")):
+        # nearby was folded into milkbar (its "who's beaconing nearby, pair/
+        # unpair" screen is now milkbar's own Nearby section) — see
+        # source/apps/system/milkbar/milkbar_app.c's file header.
+        for key, val in (("apps.msn", "true"), ("apps.milkbar", "true"),
+                          ("flash.apps/msn", "3"), ("flash.apps/milkbar", "3")):
             cfg.setdefault(key, val)
     return cfg
 

@@ -149,7 +149,7 @@ signing     = "sig_mgr"
 # proximity/pairing — NOT listed here anymore; purrstrap.py's
 # apply_radio_companion_defaults() adds them automatically to any device
 # with [radio] wifi = true (this one), see cyd/device.pcat's comment for
-# the full heuristic. msn/nearby above predate that mechanism (added
+# the full heuristic. msn/milkbar below predate that mechanism (added
 # during the earlier MSN rewrite) and stay explicit.
 
 msn_relay   = ""
@@ -176,7 +176,6 @@ msn         = true
 # meshdiag, taskmgr) — see source/apps/system/diagnostics/diagnostics.c's
 # file header for the mapping.
 diagnostics = true
-nearby      = true
 # MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
 # systemui, the mesh stack and the radios before it starts, and restores them
 # when it exits. The app calls nothing itself. See docs/15_SpeedDemon.md.
@@ -209,7 +208,6 @@ apps/terminal     = 3
 apps/fileman      = 3
 apps/diagnostics  = 3
 apps/msn          = 3
-apps/nearby       = 3
 apps/magidos      = 3
 apps/milkbar      = 3
 

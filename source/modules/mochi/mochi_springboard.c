@@ -205,8 +205,10 @@ const lv_img_dsc_t *mochi_icon_for_app(const char *name)
         // etc.) are now unreferenced here but left in the generated icon set,
         // same as any other unused asset.
         { "diagnostics", &bp_icon_taskmgr_48   },
+        // nearby was merged into milkbar's own Nearby section — see
+        // milkbar_app.c's file header. bp_icon_nearby_48 is now unreferenced
+        // here, same as the four diagnostics-merge icons above.
         { "milkbar",    &bp_icon_milkbar_48    },
-        { "nearby",     &bp_icon_nearby_48     },
         { "msn",        &bp_icon_msn_48        },
         { "meshchat",   &bp_icon_messages_48   },
         { "magicmac",   &bp_icon_magicmac_48   },

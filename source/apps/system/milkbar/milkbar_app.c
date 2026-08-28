@@ -5,10 +5,23 @@
 // over proximity_rpc_call() (REMOTEAPPS_ACTION_LIST, app_manager_remote.h)
 // and shows it in the bottom list; Launch/Stop act on whichever app row is
 // selected there. Same refresh_task + semaphore-guarded-deinit shape as
-// nearby_app.c/msn.c/meshdiag.c in this codebase — the one difference is
-// that proximity_rpc_call() is a real blocking network call (up to its own
+// msn.c/meshdiag.c in this codebase — the one difference is that
+// proximity_rpc_call() is a real blocking network call (up to its own
 // timeout), so it only ever runs on this app's own background task, never
 // on cupcake_task (see proximity_rpc.h's own warning about that).
+//
+// "Nearby" section (was the standalone nearby_app.c): who's beaconing right
+// now (proximity.h's live ESP-NOW table, not the trust list above) plus
+// Pair/Unpair/Set Home actions. Folded in here — not kept as its own app —
+// because discovering a nearby device and connecting to it are the same
+// concern this app already owns; milkbar is meant to become the general
+// server/client connection surface, and "who's around to connect to" is
+// part of that, not a separate destination. Lazily built like Settings'/
+// Diagnostics' category sub-windows (see add_back_button() below), and its
+// refresh piggybacks on this file's own refresh_task() rather than running
+// a second background task — proximity_device_count()/at() is a cheap local
+// beacon-table read, not a blocking network call like the RPC calls below,
+// so it doesn't need the same "own dedicated task" treatment.
 //
 // "Milk Bottle" — originally a separate standalone app, then briefly a
 // "Message" button bolted onto this screen — is neither: it's a synthetic
@@ -64,6 +77,18 @@
 // ── Milk Bottle screen ───────────────────────────────────────────────────
 #define MILKBAR_ACTION_MSG_SEND 0x3000   // same wire value Milk Bottle used — nothing shipped with it yet, pure rename
 #define MSG_MAX_TEXT 64
+
+// Shared by the Nearby sub-window below, same helper settings.c/diagnostics.c
+// use: purr_win_t is a plain uint32_t handle (catcall_ui.h), so it round-trips
+// through the callback's void* user pointer without needing per-window
+// wrapper state.
+static void on_subwin_back(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e;
+    purr_win_hide((purr_win_t)(uintptr_t)u);
+}
+static void add_back_button(purr_win_t win) {
+    purr_win_button(win, "< Back", on_subwin_back, (void *)(uintptr_t)win);
+}
 
 static purr_win_t s_win         = 0;
 static purr_wid_t s_device_list = 0;
@@ -377,10 +402,206 @@ static void open_message_screen(void) {
     purr_win_show(s_msg_win);
 }
 
+// ── Nearby section (was nearby_app.c) ───────────────────────────────────────
+
+#define NEARBY_MAX_ROWS        PROXIMITY_MAX_DEVICES
+#define NEARBY_MAX_PAIRED_ROWS PAIRING_MAX_DEVICES
+
+static purr_win_t s_nearby_win        = 0;
+static purr_wid_t s_nearby_list       = 0;
+static purr_wid_t s_nearby_status_lbl = 0;
+// Trust-list display — a proper list (see pairing.h's multi-device trust
+// list) so "Unpair"/"Set Home" can act on whichever row is selected instead
+// of always a single fixed pairing.
+static purr_wid_t s_nearby_paired_list       = 0;
+static purr_wid_t s_nearby_paired_status_lbl = 0;
+
+// Pairing confirm dialog (initiator side) — open while pairing_get_state()
+// == PAIRING_STATE_PENDING_OUTGOING, mirrors msn.c's own backend-switch
+// confirm-dialog shape (small window, a label, Cancel). refresh_nearby()'s
+// own poll (driven by this file's shared refresh_task() below) also drives
+// closing this automatically once the peer accepts/rejects/times out.
+static purr_win_t s_pair_win     = 0;
+static purr_wid_t s_pair_win_lbl = 0;
+
+static char        s_nearby_row_bufs[NEARBY_MAX_ROWS][64];
+static const char *s_nearby_row_ptrs[NEARBY_MAX_ROWS];
+
+static char        s_nearby_paired_row_bufs[NEARBY_MAX_PAIRED_ROWS][32];
+static const char *s_nearby_paired_row_ptrs[NEARBY_MAX_PAIRED_ROWS];
+
+static void close_pair_dialog(void) {
+    if (s_pair_win) {
+        purr_win_destroy(s_pair_win);
+        s_pair_win = 0; s_pair_win_lbl = 0;
+    }
+}
+
+// Gated on s_nearby_win: skips all of this (formatting rows nobody would
+// see, pushing them to widgets that don't exist yet) until the Nearby
+// section has actually been opened once — same "don't do the work for a
+// section nobody visited" reasoning diagnostics.c's lazy poller start uses,
+// just as a cheap early-return here since this rides the shared task rather
+// than owning one.
+static void refresh_nearby(void) {
+    if (!s_nearby_win) return;
+
+    int n = proximity_device_count();
+    if (n > NEARBY_MAX_ROWS) n = NEARBY_MAX_ROWS;
+
+    for (int i = 0; i < n; i++) {
+        proximity_device_t dev;
+        if (!proximity_device_at(i, &dev)) { n = i; break; }
+        uint32_t age_s = ((uint32_t)purr_kernel_uptime_ms() - dev.last_seen_ms) / 1000UL;
+        // "[radio]" flags PROXIMITY_CAP_RADIO_COMPANION devices — the ones
+        // on_nearby_pair_click() below will actually accept a pairing request.
+        snprintf(s_nearby_row_bufs[i], sizeof(s_nearby_row_bufs[i]), "%s%s  (%d dBm, %lus ago)",
+                 dev.name, (dev.caps & PROXIMITY_CAP_RADIO_COMPANION) ? " [radio]" : "",
+                 (int)dev.rssi, (unsigned long)age_s);
+        s_nearby_row_ptrs[i] = s_nearby_row_bufs[i];
+    }
+    purr_win_list_set_items(s_nearby_list, s_nearby_row_ptrs, n);
+
+    if (!proximity_ready()) {
+        purr_win_label_set(s_nearby_status_lbl, "Proximity: starting...");
+    } else if (!proximity_is_alive()) {
+        purr_win_label_set(s_nearby_status_lbl, "Proximity: not responding");
+    } else {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "Proximity: ready (%d nearby)", n);
+        purr_win_label_set(s_nearby_status_lbl, buf);
+    }
+
+    // Auto-close the confirm dialog once the peer accepts (PAIRED) or the
+    // request ends any other way (rejected/timed out both surface as a
+    // reset back to NONE — see pairing_module.c) — the dialog has nothing
+    // further to wait for in either case.
+    if (s_pair_win && pairing_get_state() != PAIRING_STATE_PENDING_OUTGOING) {
+        close_pair_dialog();
+    }
+
+    int paired_n = pairing_device_count();
+    if (paired_n > NEARBY_MAX_PAIRED_ROWS) paired_n = NEARBY_MAX_PAIRED_ROWS;
+    for (int i = 0; i < paired_n; i++) {
+        paired_device_t pd;
+        if (!pairing_device_at(i, &pd)) { paired_n = i; break; }
+        snprintf(s_nearby_paired_row_bufs[i], sizeof(s_nearby_paired_row_bufs[i]), "%s%s",
+                 pd.name, pairing_is_home_base(pd.mac) ? "  [home]" : "");
+        s_nearby_paired_row_ptrs[i] = s_nearby_paired_row_bufs[i];
+    }
+    purr_win_list_set_items(s_nearby_paired_list, s_nearby_paired_row_ptrs, paired_n);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Paired devices: %d", paired_n);
+    purr_win_label_set(s_nearby_paired_status_lbl, buf);
+}
+
+static void on_nearby_refresh_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    refresh_nearby();
+}
+
+static void on_pair_cancel_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    pairing_cancel();
+    close_pair_dialog();
+}
+
+static void open_pair_dialog(const char *peer_name) {
+    char code[8];
+    pairing_get_pending_code(code, sizeof(code));
+
+    char msg[80];
+    snprintf(msg, sizeof(msg), "Pairing with %s\nCode: %s\nWaiting for confirmation...",
+             peer_name, code);
+
+    s_pair_win = purr_win_create("Pairing");
+    s_pair_win_lbl = purr_win_label(s_pair_win, msg);
+    purr_win_button(s_pair_win, "Cancel", on_pair_cancel_click, NULL);
+    purr_win_show(s_pair_win);
+}
+
+// Acts on whichever row is currently selected in the list — purr_win's list
+// widget only offers click/select, not a press-and-hold gesture, so pairing
+// is a select-then-click-a-button flow.
+static void on_nearby_pair_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    // Only mid-negotiation blocks starting a new one — already having other
+    // paired devices doesn't (pairing_start() enforces the same rule; this
+    // is just an early UI-side bail so this doesn't even try).
+    pairing_state_t st = pairing_get_state();
+    if (st != PAIRING_STATE_NONE && st != PAIRING_STATE_PAIRED) return;
+
+    int idx = purr_win_list_get_selected(s_nearby_list);
+    if (idx < 0) return;
+
+    proximity_device_t dev;
+    if (!proximity_device_at(idx, &dev)) return;
+    if (!(dev.caps & PROXIMITY_CAP_RADIO_COMPANION)) return;   // not a pairable device
+
+    if (pairing_start(dev.mac, dev.name)) {
+        open_pair_dialog(dev.name);
+    }
+}
+
+static void on_nearby_unpair_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    int idx = purr_win_list_get_selected(s_nearby_paired_list);
+    if (idx < 0) return;
+    paired_device_t pd;
+    if (!pairing_device_at(idx, &pd)) return;
+    pairing_forget(pd.mac);
+    refresh_nearby();
+}
+
+// Toggles: selecting the current home base clears it, selecting any other
+// paired row makes it the new one (pairing_set_home_base() only allows one
+// at a time — see pairing.h).
+static void on_nearby_set_home_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    int idx = purr_win_list_get_selected(s_nearby_paired_list);
+    if (idx < 0) return;
+    paired_device_t pd;
+    if (!pairing_device_at(idx, &pd)) return;
+    if (pairing_is_home_base(pd.mac)) {
+        pairing_clear_home_base();
+    } else {
+        pairing_set_home_base(pd.mac);
+    }
+    refresh_nearby();
+}
+
+static void open_nearby(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    if (s_nearby_win) { purr_win_show(s_nearby_win); refresh_nearby(); return; }
+
+    s_nearby_win = purr_win_create("Nearby");
+    add_back_button(s_nearby_win);
+    s_nearby_status_lbl = purr_win_label(s_nearby_win, "Proximity: starting...");
+
+    purr_wid_t row = purr_win_row(s_nearby_win, 4);
+    purr_win_button(s_nearby_win, "Refresh", on_nearby_refresh_click, NULL);
+    purr_win_button(s_nearby_win, "Pair", on_nearby_pair_click, NULL);
+    purr_win_button(s_nearby_win, "Unpair", on_nearby_unpair_click, NULL);
+    purr_win_button(s_nearby_win, "Set Home", on_nearby_set_home_click, NULL);
+    purr_win_layout_end(row);
+
+    s_nearby_list = purr_win_list(s_nearby_win, 100, 40);
+    s_nearby_paired_status_lbl = purr_win_label(s_nearby_win, "Paired devices: 0");
+    s_nearby_paired_list = purr_win_list(s_nearby_win, 100, 20);
+
+    purr_win_show(s_nearby_win);
+    // refresh_nearby() itself is gated on s_nearby_win, which is only just
+    // now non-zero — call directly rather than waiting for refresh_task()'s
+    // next pass, so the section isn't blank for up to REFRESH_MS on open.
+    refresh_nearby();
+}
+
 static void refresh_task(void *arg) {
     (void)arg;
     while (s_running) {
         refresh_device_list();
+        refresh_nearby();                 // no-op fast path until Nearby is opened once
         refresh_app_list_from_remote();   // no-op fast path if nothing selected yet
         if (s_rx_is_new) {
             s_rx_is_new = false;
@@ -415,6 +636,7 @@ static int milkbar_app_init(void) {
     purr_win_button(s_win, "Refresh", on_refresh_click, NULL);
     purr_win_button(s_win, "Launch", on_launch_click, NULL);
     purr_win_button(s_win, "Stop", on_stop_click, NULL);
+    purr_win_button(s_win, "Nearby", open_nearby, NULL);
     purr_win_layout_end(row);
 
     s_status_lbl = purr_win_label(s_win, "Select a paired device");
@@ -446,6 +668,13 @@ static void milkbar_app_deinit(void) {
 
     if (s_msg_win) { purr_win_destroy(s_msg_win); s_msg_win = 0; s_msg_big_lbl = 0; s_msg_input = 0; }
 
+    close_pair_dialog();
+    if (s_nearby_win) {
+        purr_win_destroy(s_nearby_win);
+        s_nearby_win = 0; s_nearby_list = 0; s_nearby_status_lbl = 0;
+        s_nearby_paired_list = 0; s_nearby_paired_status_lbl = 0;
+    }
+
     purr_win_destroy(s_win);
     s_win = 0; s_device_list = 0; s_app_list = 0; s_status_lbl = 0;
     s_have_selection = false;
@@ -459,7 +688,7 @@ PURR_MODULE_REGISTER(milkbar) = {
     .module_type       = PURR_MOD_APP,
     .load_priority     = PURR_PRIORITY_OPTIONAL,
     .name              = "milkbar",
-    .version           = "1.0.0",
+    .version           = "1.1.0",
     .kernel_min        = "0.11.1",
     .provided_catcalls = 0,
     .required_catcalls = 0,
