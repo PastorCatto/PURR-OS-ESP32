@@ -57,6 +57,7 @@
 #include "esp_partition.h"
 #include "esp_heap_caps.h"
 #include "claw_poc_blob.h"
+#include "claw_poc_blob2.h"
 
 static const char *POC_TAG = "claw_poc";
 
@@ -171,4 +172,107 @@ void claw_poc_run(void)
     esp_partition_munmap(exec_handle);
     heap_caps_free(rodata_ram);
     heap_caps_free(bss);
+}
+
+// ── Round 2: can loaded code call BACK into the host firmware? ─────────────
+//
+// The question round 1 didn't touch at all. catcall_ui_t/purr_win.h already
+// dispatch every app->kernel call through a runtime function-pointer struct
+// (_UI_CALL/_UI_VOID -> _ui->win_create(...) etc.), never a direct symbol
+// reference to a kernel-resident function — confirmed via objdump before
+// this was written: the guest's call through a host-supplied function
+// pointer compiles to `callx8 a8` with NO relocation entry at all. It's a
+// pure runtime value, not a compile-time symbol. If this round passes, app
+// code written against the existing purr_win.h/purr_kernel.h headers,
+// completely unmodified, should work loaded this way exactly as well as it
+// works pre-linked — that's the whole point of testing it.
+
+typedef void (*host_log_fn)(const char *msg);
+typedef int (*guest2_entry_fn)(int, host_log_fn);
+
+static void poc_host_log(const char *msg)
+{
+    ESP_LOGI(POC_TAG, "[guest->host callback] %s", msg);
+}
+
+void claw_poc_run2(void)
+{
+    const esp_partition_t *part =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40, "claw_poc");
+    if (!part) {
+        ESP_LOGE(POC_TAG, "claw_poc partition not found — check partitions_16mb_ota.csv");
+        return;
+    }
+
+    size_t text_size = sizeof(guest2_text);
+    if (text_size > part->size) {
+        ESP_LOGE(POC_TAG, "blob (%u B) too big for claw_poc partition (%u B)",
+                 (unsigned)text_size, (unsigned)part->size);
+        return;
+    }
+
+    void *rodata_ram = heap_caps_malloc(sizeof(guest2_rodata), MALLOC_CAP_8BIT);
+    if (!rodata_ram) { ESP_LOGE(POC_TAG, "rodata alloc failed"); return; }
+    memcpy(rodata_ram, guest2_rodata, sizeof(guest2_rodata));
+
+    const void *probe_ptr = NULL;
+    esp_partition_mmap_handle_t probe_handle = 0;
+    esp_err_t err = esp_partition_mmap(part, 0, text_size, ESP_PARTITION_MMAP_INST,
+                                        &probe_ptr, &probe_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(POC_TAG, "probe mmap failed: %s", esp_err_to_name(err));
+        heap_caps_free(rodata_ram);
+        return;
+    }
+    uint32_t probe_base = (uint32_t)probe_ptr;
+    esp_partition_munmap(probe_handle);
+
+    uint8_t *buf = heap_caps_malloc(text_size, MALLOC_CAP_8BIT);
+    if (!buf) { ESP_LOGE(POC_TAG, "patch buffer alloc failed"); heap_caps_free(rodata_ram); return; }
+    memcpy(buf, guest2_text, text_size);
+
+    for (int i = 0; i < GUEST2_PATCH_COUNT; i++) {
+        const guest_patch_t *p = &guest2_patches[i];
+        uint32_t target_addr = (uint32_t)rodata_ram + (uint32_t)p->addend;   // only .rodata this round
+        memcpy(buf + p->text_off, &target_addr, sizeof(target_addr));
+        ESP_LOGI(POC_TAG, "patch[%d]: .text+%u <- 0x%08x (.rodata, RAM)", i,
+                 (unsigned)p->text_off, (unsigned)target_addr);
+    }
+
+    err = esp_partition_erase_range(part, 0, part->erase_size);
+    if (err != ESP_OK) {
+        ESP_LOGE(POC_TAG, "erase failed: %s", esp_err_to_name(err));
+        heap_caps_free(buf); heap_caps_free(rodata_ram);
+        return;
+    }
+    err = esp_partition_write(part, 0, buf, text_size);
+    heap_caps_free(buf);
+    if (err != ESP_OK) {
+        ESP_LOGE(POC_TAG, "write failed: %s", esp_err_to_name(err));
+        heap_caps_free(rodata_ram);
+        return;
+    }
+
+    const void *exec_ptr = NULL;
+    esp_partition_mmap_handle_t exec_handle = 0;
+    err = esp_partition_mmap(part, 0, text_size, ESP_PARTITION_MMAP_INST,
+                              &exec_ptr, &exec_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(POC_TAG, "exec mmap failed: %s", esp_err_to_name(err));
+        heap_caps_free(rodata_ram);
+        return;
+    }
+    ESP_LOGI(POC_TAG, "probe_base=0x%08x exec_base=0x%08x (%s)",
+             (unsigned)probe_base, (unsigned)(uint32_t)exec_ptr,
+             probe_base == (uint32_t)exec_ptr ? "MATCH" : "MISMATCH — patch values are wrong");
+
+    guest2_entry_fn entry2_fn = (guest2_entry_fn)((uint32_t)exec_ptr + GUEST2_ENTRY_OFF);
+    ESP_LOGI(POC_TAG, "calling loaded entry2() at %p, passing host callback %p ...",
+             (void *)entry2_fn, (void *)poc_host_log);
+    int result = entry2_fn(21, poc_host_log);
+    ESP_LOGI(POC_TAG, "entry2(21, poc_host_log) = %d (expected 42)", result);
+    ESP_LOGI(POC_TAG, "%s", result == 42 ? "POC ROUND 2 PASS" : "POC ROUND 2 FAIL");
+
+    esp_partition_munmap(exec_handle);
+    heap_caps_free(rodata_ram);
 }
