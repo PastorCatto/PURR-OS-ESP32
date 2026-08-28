@@ -65,6 +65,58 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
 // init()'d, or one that already reported itself done).
 void claw_loader_unload(claw_loaded_module_t *m);
 
+// ── Personal-space storage ──────────────────────────────────────────────
+// Per-user storage for .claw app objects on SD, at
+// /sdcard/personal/<username>/<appname>.claw — flat, one file per app,
+// enumerated directly (no separate manifest for this first pass, matching
+// app_manager.c's own scan_dir() precedent: readdir() order is whatever
+// the filesystem gives, not alphabetical or insertion-order).
+//
+// username/appname are trusted as already-validated by the caller
+// (app_manager, once piece 3 of the personal-space work lands) —
+// this layer does no username-format checking of its own. user_mgr.h's
+// user_mgr_valid_username() is the real gate; pulling user_mgr in here
+// would be a needless dependency for a module that's otherwise
+// deliberately minimal (see this module's CMakeLists.txt REQUIRES).
+//
+// All four below return false (no-op) if SD isn't available
+// (purr_kernel_sd_available()) — same gate kernel_tdp_boot.c's
+// ensure_sd_dirs() uses before touching /sdcard at all.
+
+// Ensures /sdcard/personal/<username>/ exists, writes obj_bytes to
+// <appname>.claw inside it (overwriting any existing file of that name).
+bool claw_loader_personal_add(const char *username, const char *appname,
+                               const uint8_t *obj_bytes, size_t obj_len);
+
+// Number of .claw files currently stored for `username` (0 if none, no
+// personal directory yet, or SD unavailable).
+int  claw_loader_personal_count(const char *username);
+
+// `idx`'th (0..count-1) app's display name (filename minus .claw), written
+// into name_out. Returns false if idx is out of range or the directory
+// couldn't be enumerated. Same "whatever readdir() order gives" caveat as
+// claw_loader_personal_count() above — a caller wanting a stable order
+// should sort after collecting every entry, not rely on index stability
+// across calls.
+bool claw_loader_personal_at(const char *username, int idx,
+                              char *name_out, size_t name_out_sz);
+
+// Deletes <appname>.claw from username's personal directory. Returns false
+// if it didn't exist or the delete failed.
+bool claw_loader_personal_remove(const char *username, const char *appname);
+
+// Reads <appname>.claw fully into a temporary buffer and calls
+// claw_loader_load() on it — same fixed import table (claw_loader.c's
+// s_imports[]) every other loaded module gets, and the same "only one
+// loaded module at a time" constraint as claw_loader_load() itself, see
+// this header's top comment. The temporary read buffer is freed before
+// this returns;
+// `out`'s own allocations follow claw_loader_load()'s normal ownership
+// rules, freed via claw_loader_unload(). Returns false if the file doesn't
+// exist, couldn't be read, or claw_loader_load() itself failed.
+bool claw_loader_personal_load(const char *username, const char *appname,
+                                claw_loaded_module_t *out);
+
 #ifdef __cplusplus
 }
 #endif

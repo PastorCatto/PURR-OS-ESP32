@@ -1,5 +1,8 @@
 // claw_loader.c — see claw_loader.h for the full picture.
 #include <string.h>
+#include <stdio.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_heap_caps.h"
@@ -163,6 +166,180 @@ void claw_loader_unload(claw_loaded_module_t *m)
     if (m->data_ram)   heap_caps_free(m->data_ram);
     if (m->bss_ram)    heap_caps_free(m->bss_ram);
     memset(m, 0, sizeof(*m));
+}
+
+// ── Personal-space storage ──────────────────────────────────────────────────
+// See claw_loader.h's own header comment on this section for the design.
+
+#define PERSONAL_ROOT "/sdcard/personal"
+
+// Builds /sdcard/personal/<username> into `out` (out_sz-bounded). Shared by
+// every function below so the path format lives in exactly one place.
+static void personal_dir_path(const char *username, char *out, size_t out_sz)
+{
+    snprintf(out, out_sz, "%s/%s", PERSONAL_ROOT, username);
+}
+
+static void personal_file_path(const char *username, const char *appname, char *out, size_t out_sz)
+{
+    snprintf(out, out_sz, "%s/%s/%s.claw", PERSONAL_ROOT, username, appname);
+}
+
+bool claw_loader_personal_add(const char *username, const char *appname,
+                               const uint8_t *obj_bytes, size_t obj_len)
+{
+    if (!purr_kernel_sd_available()) return false;
+
+    // /sdcard/personal itself is NOT in kernel_tdp_boot.c's ensure_sd_dirs()
+    // static list (usernames aren't known at boot) — ensure both levels
+    // here instead, same stat()-then-mkdir() idiom that list already uses.
+    struct stat st;
+    if (stat(PERSONAL_ROOT, &st) != 0) {
+        if (mkdir(PERSONAL_ROOT, 0755) != 0) {
+            ESP_LOGE(TAG, "mkdir %s failed", PERSONAL_ROOT);
+            return false;
+        }
+    }
+
+    char dir_path[300];
+    personal_dir_path(username, dir_path, sizeof(dir_path));
+    if (stat(dir_path, &st) != 0) {
+        if (mkdir(dir_path, 0755) != 0) {
+            ESP_LOGE(TAG, "mkdir %s failed", dir_path);
+            return false;
+        }
+    }
+
+    char file_path[300];
+    personal_file_path(username, appname, file_path, sizeof(file_path));
+    FILE *f = fopen(file_path, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "fopen %s failed", file_path);
+        return false;
+    }
+    size_t written = fwrite(obj_bytes, 1, obj_len, f);
+    fclose(f);
+    if (written != obj_len) {
+        ESP_LOGE(TAG, "short write to %s (%u of %u bytes) — removing partial file",
+                 file_path, (unsigned)written, (unsigned)obj_len);
+        remove(file_path);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "personal: added %s/%s.claw (%u B)", username, appname, (unsigned)obj_len);
+    return true;
+}
+
+int claw_loader_personal_count(const char *username)
+{
+    if (!purr_kernel_sd_available()) return 0;
+
+    char dir_path[300];
+    personal_dir_path(username, dir_path, sizeof(dir_path));
+    DIR *d = opendir(dir_path);
+    if (!d) return 0;
+
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char *ext = strrchr(ent->d_name, '.');
+        if (ext && strcmp(ext, ".claw") == 0) count++;
+    }
+    closedir(d);
+    return count;
+}
+
+bool claw_loader_personal_at(const char *username, int idx, char *name_out, size_t name_out_sz)
+{
+    if (!purr_kernel_sd_available() || idx < 0) return false;
+
+    char dir_path[300];
+    personal_dir_path(username, dir_path, sizeof(dir_path));
+    DIR *d = opendir(dir_path);
+    if (!d) return false;
+
+    // Same linear readdir() walk app_manager.c's scan_dir() uses — this
+    // directory is expected to hold at most a handful of entries (one
+    // user's own personal apps), so there's no need for anything fancier.
+    int seen = 0;
+    bool found = false;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char *ext = strrchr(ent->d_name, '.');
+        if (!ext || strcmp(ext, ".claw") != 0) continue;
+        if (seen == idx) {
+            size_t base_len = (size_t)(ext - ent->d_name);
+            if (base_len >= name_out_sz) base_len = name_out_sz - 1;
+            memcpy(name_out, ent->d_name, base_len);
+            name_out[base_len] = '\0';
+            found = true;
+            break;
+        }
+        seen++;
+    }
+    closedir(d);
+    return found;
+}
+
+bool claw_loader_personal_remove(const char *username, const char *appname)
+{
+    if (!purr_kernel_sd_available()) return false;
+
+    char file_path[300];
+    personal_file_path(username, appname, file_path, sizeof(file_path));
+    if (remove(file_path) != 0) {
+        ESP_LOGW(TAG, "personal: remove %s failed (not found?)", file_path);
+        return false;
+    }
+    ESP_LOGI(TAG, "personal: removed %s/%s.claw", username, appname);
+    return true;
+}
+
+bool claw_loader_personal_load(const char *username, const char *appname, claw_loaded_module_t *out)
+{
+    if (!purr_kernel_sd_available()) return false;
+
+    char file_path[300];
+    personal_file_path(username, appname, file_path, sizeof(file_path));
+    FILE *f = fopen(file_path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "personal: fopen %s failed", file_path);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0) {
+        ESP_LOGE(TAG, "personal: %s is empty or ftell failed", file_path);
+        fclose(f);
+        return false;
+    }
+
+    // Read into a plain heap buffer, not PSRAM-capped — this is a short-
+    // lived staging buffer (freed below, before this function returns),
+    // not something claw_loader_load() keeps a reference into past its own
+    // return (see claw_elf.h's zero-copy note: text/rodata/data point INTO
+    // it only for the duration of that one call).
+    uint8_t *buf = heap_caps_malloc((size_t)fsize, MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGE(TAG, "personal: alloc failed (%ld B) for %s", fsize, file_path);
+        fclose(f);
+        return false;
+    }
+    size_t read_n = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+    if (read_n != (size_t)fsize) {
+        ESP_LOGE(TAG, "personal: short read of %s (%u of %ld bytes)", file_path, (unsigned)read_n, fsize);
+        heap_caps_free(buf);
+        return false;
+    }
+
+    bool ok = claw_loader_load(buf, (size_t)fsize, out);
+    heap_caps_free(buf);
+    if (!ok) {
+        ESP_LOGE(TAG, "personal: claw_loader_load failed for %s/%s", username, appname);
+    }
+    return ok;
 }
 
 // ── Module lifecycle ────────────────────────────────────────────────────────

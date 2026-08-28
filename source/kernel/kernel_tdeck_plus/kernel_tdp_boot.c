@@ -271,6 +271,11 @@ static void ensure_sd_dirs(void)
         "/sdcard/drivers/input", "/sdcard/drivers/radio",
         "/sdcard/drivers/gps", "/sdcard/system", "/sdcard/system/logs",
         "/sdcard/meshchat",       // MeshChat DM/room history text files
+        "/sdcard/personal",       // per-user .claw storage — see claw_loader.h's
+                                   // "Personal-space storage" section; usernames
+                                   // aren't known at boot so only this top level
+                                   // is ensured here, claw_loader_personal_add()
+                                   // creates its own per-username subdir lazily
         NULL
     };
     for (int i = 0; dirs[i]; i++) {
@@ -787,8 +792,8 @@ void app_main(void)
     extern int app_manager_scan_ex(bool include_sd);
     app_manager_scan_ex(!recovering);
 
-    // claw_loader_selftest_run()/run2() calls removed — both PASSED on real
-    // hardware. run(): resolving BOTH claw_personal_init and
+    // claw_loader_selftest_run()/run2()/run3() calls removed — all THREE
+    // PASSED on real hardware. run(): resolving BOTH claw_personal_init and
     // claw_personal_deinit through the real, promoted claw_loader module
     // (source/modules/claw_loader/): "claw_personal_init() = 109 (expected
     // 109)", clean deinit, "SELFTEST PASS". run2(): the named-host-function
@@ -796,16 +801,21 @@ void app_main(void)
     // CLAW_SEC_EXTERN path) — a loaded module called purr_kernel_uptime_ms()
     // BY NAME (not through a parameter it was handed) and got back a
     // plausible live value: "claw_personal_init() = 3044 ... SELFTEST PASS
-    // (import table resolved purr_kernel_uptime_ms by name)", 20s boot log
-    // otherwise clean (no error/assert/panic lines). See
+    // (import table resolved purr_kernel_uptime_ms by name)". run3(): piece
+    // 2, personal-space SD storage (claw_loader_personal_add/count/at/load/
+    // remove) — full add->count->at->load->init/deinit->remove->count
+    // round-trip under a throwaway username, "SELFTEST PASS". Every round's
+    // 20s boot log was otherwise clean (no error/assert/panic lines). See
     // claw_loader_selftest.c's own header comment for the full story. No
-    // reason to keep erasing+rewriting the claw_slot partition on every
-    // boot now that both are confirmed; re-add whichever's needed when
-    // app_manager integration resumes.
+    // reason to keep re-running these on every boot now that all three are
+    // confirmed; re-add whichever's needed when app_manager integration
+    // (piece 3) resumes.
     extern void claw_loader_selftest_run(void);
     (void)claw_loader_selftest_run;
     extern void claw_loader_selftest_run2(void);
     (void)claw_loader_selftest_run2;
+    extern void claw_loader_selftest_run3(void);
+    (void)claw_loader_selftest_run3;
 
     purr_kernel_set_boot_ready(true);
 

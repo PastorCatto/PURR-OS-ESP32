@@ -46,7 +46,14 @@
 // those needs purr_kernel_ui() itself added to the import table, not a
 // further loader change. Not needed for this selftest to prove the
 // mechanism end-to-end.
+//
+// run3() (third test, below) exercises piece 2 — personal-space storage
+// (claw_loader_personal_add/count/at/load/remove) — reusing guest3_o_bytes
+// rather than compiling yet another guest object, since this test isn't
+// about relocation/import behavior at all, just the SD file plumbing
+// around an already-proven loadable object.
 
+#include <string.h>
 #include "esp_log.h"
 #include "claw_loader.h"
 
@@ -374,4 +381,46 @@ void claw_loader_selftest_run2(void)
     ESP_LOGI(TAG, "run2: %s", rc > 0 ? "SELFTEST PASS (import table resolved purr_kernel_uptime_ms by name)" : "SELFTEST FAIL");
 
     claw_loader_unload(&m);
+}
+
+// claw_loader_selftest_run3() — piece 2: personal-space storage. Walks the
+// whole lifecycle (add -> count -> at -> load -> init/deinit -> remove ->
+// count again) under a throwaway username/appname, deleting what it wrote
+// either way so a repeated run (or a real "selftest_user" someday) never
+// finds stale state.
+void claw_loader_selftest_run3(void)
+{
+    static const char *user = "selftest_user";
+    static const char *app  = "selftest_app";
+
+    bool added = claw_loader_personal_add(user, app, guest3_o_bytes, sizeof(guest3_o_bytes));
+    ESP_LOGI(TAG, "run3: personal_add = %d", added);
+    if (!added) { ESP_LOGE(TAG, "run3: SELFTEST FAIL (add)"); return; }
+
+    int count = claw_loader_personal_count(user);
+    ESP_LOGI(TAG, "run3: personal_count = %d (expected 1)", count);
+
+    char name[48] = {0};
+    bool got_at = claw_loader_personal_at(user, 0, name, sizeof(name));
+    ESP_LOGI(TAG, "run3: personal_at(0) = '%s' (expected '%s', got=%d)", name, app, got_at);
+
+    claw_loaded_module_t m;
+    bool loaded = claw_loader_personal_load(user, app, &m);
+    int rc = -1;
+    if (loaded) {
+        rc = m.init();
+        ESP_LOGI(TAG, "run3: loaded claw_personal_init() = %d (expected 109)", rc);
+        m.deinit();
+        claw_loader_unload(&m);
+    } else {
+        ESP_LOGE(TAG, "run3: personal_load failed");
+    }
+
+    bool removed = claw_loader_personal_remove(user, app);
+    int count2 = claw_loader_personal_count(user);
+    ESP_LOGI(TAG, "run3: remove=%d, count after remove=%d (expected 0)", removed, count2);
+
+    bool pass = added && (count == 1) && got_at && (strcmp(name, app) == 0) &&
+                loaded && (rc == 109) && removed && (count2 == 0);
+    ESP_LOGI(TAG, "run3: %s", pass ? "SELFTEST PASS" : "SELFTEST FAIL");
 }
