@@ -1304,6 +1304,9 @@ static uint32_t s_accent_color = 0x1C1C2E;
 // NVS the first time it's opened this session, same lazy-load pattern
 // brightness already uses.
 static uint8_t s_screen_timeout_min = 1;
+// See purr_kernel.h's own doc comment — light (false) by default, matching
+// real iOS 7's own light-first default.
+static bool     s_dark_mode = false;
 
 void purr_kernel_set_sd_available(bool v)    { s_sd_available    = v; }
 void purr_kernel_set_wifi_connected(bool v)  { s_wifi_connected  = v; }
@@ -1319,6 +1322,7 @@ void purr_kernel_set_ui_effects(bool v)      { s_ui_effects = v; }
 // ARGB. Settings parses user-entered hex, so this is a real input path.
 void purr_kernel_set_accent_color(uint32_t rgb) { s_accent_color = rgb & 0x00FFFFFFu; }
 void purr_kernel_set_screen_timeout_min(uint8_t v) { s_screen_timeout_min = v; }
+void purr_kernel_set_dark_mode(bool v)             { s_dark_mode = v; }
 
 bool purr_kernel_sd_available(void)    { return s_sd_available; }
 bool purr_kernel_wifi_connected(void)  { return s_wifi_connected; }
@@ -1420,6 +1424,7 @@ bool purr_kernel_navbar_always_visible(void) { return s_navbar_always_visible; }
 bool purr_kernel_lock_hide_notifications(void) { return s_lock_hide_notifications; }
 bool     purr_kernel_ui_effects_enabled(void) { return s_ui_effects; }
 uint32_t purr_kernel_accent_color(void)       { return s_accent_color; }
+bool     purr_kernel_dark_mode_enabled(void)  { return s_dark_mode; }
 
 // Load the kernel's own persisted settings, BEFORE any module initialises.
 // Forward-declared up at purr_kernel_load_static_modules(), which calls it.
@@ -1453,6 +1458,7 @@ static void kernel_load_persisted_settings(void)
     if (nvs_get_u8(h, "navbar_always_visible", &v) == ESP_OK) s_navbar_always_visible   = (v != 0);
     if (nvs_get_u8(h, "dev_mode",              &v) == ESP_OK) s_dev_mode                = (v != 0);
     if (nvs_get_u8(h, "screen_timeout",        &v) == ESP_OK) s_screen_timeout_min      = v;
+    if (nvs_get_u8(h, "dark_mode",              &v) == ESP_OK) s_dark_mode               = (v != 0);
 
     // Stored as the same "RRGGBB" text the user types into Settings. Trusted
     // only when the read succeeds AND returns the 6 characters we wrote —

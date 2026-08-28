@@ -805,6 +805,10 @@ static const purr_systemui_host_t s_systemui_host = {
     // iOS has no Back/Home/Recents row — Mochi draws a home indicator instead
     // and keeps every other systemui surface. See mochi.h.
     .suppress_navbar         = true,
+    // Lets systemui's own login screen (systemui_login.c) join the same
+    // group mochi_hal.c's keyboard/trackball indevs are bound to, so a
+    // physical keyboard can type a password there too, not just tap.
+    .group                   = mochi_hal_group,
 };
 
 // ── Public API ──────────────────────────────────────────────────────────────

@@ -196,6 +196,22 @@ typedef struct {
     // with no edit. When true, purr_systemui_navbar_height() also reports 0,
     // so a host laying content out against it reclaims the space.
     bool suppress_navbar;
+
+    // The host's shared LVGL group for its keyboard/trackball indevs — the
+    // same group each host's own <name>_hal_group() already returns for its
+    // own widgets (mochi_hal_group(), flow_hal_group(), tabby_hal_group()).
+    // Optional: may be NULL, both for a host with no such concept and for one
+    // that simply hasn't wired it up yet (a static initializer that omits
+    // this field zero-fills it, same as suppress_navbar above).
+    //
+    // Needed here specifically so a systemui-owned text-entry surface (the
+    // login screen in systemui_login.c) can join the SAME group a physical
+    // keyboard indev is already bound to — an indev routes key events to
+    // `lv_group_get_focused(indev's group)`, so a widget outside that group
+    // never receives them no matter how it's focused. Without this hook,
+    // typing a password would only ever reach the on-screen keyboard, never
+    // a hardware one, on every device that has both.
+    lv_group_t *(*group)(void);
 } purr_systemui_host_t;
 
 // Multi-user boot-time login plumbing — core wiring only, no UI of its own.
@@ -230,6 +246,44 @@ static inline void purr_systemui_boot_login_check(void) {
     }
     // else: intentionally left logged out — see this function's doc comment.
 }
+
+// The real login prompt purr_systemui_boot_login_check() above deliberately
+// stops short of (see its own doc comment) — a Windows-XP-welcome-screen-
+// style credential UI (systemui_login.c), shared across every host the same
+// way the status bar and lock screen already are, rather than each backend
+// building its own.
+//
+// Call once, LAST in the host's purr_systemui_init() — after every other
+// surface (panels, status bar, the idle-lock screen) has been built — so
+// this ends up the topmost lv_layer_top() object purely by creation order,
+// the same way the idle-lock screen already relies on being built last.
+// No-ops (does not build anything) if a session already exists — including
+// via purr_systemui_boot_login_check()'s own no-password auto-login, which
+// a host should still call separately and earlier, matching both real
+// implementations (systemui_android.c / systemui_ios.c) today.
+void purr_systemui_show_login(const purr_systemui_host_t *host);
+
+// The idle-lock screen, sharing systemui_login.c's exact UI (tile picker →
+// password → Go) rather than a separate minimal dim-and-tap overlay — real
+// Windows locks to the same welcome screen it boots to. The one visual
+// difference: the row for user_mgr_current_user() gets a small "Logged on"
+// tag, since — unlike the boot-time call — a real session already exists.
+// try_unlock() succeeding still requires the password (locking is a real
+// security boundary, not a dismiss gesture); it also restores brightness
+// and clears purr_systemui_relock_active() on success.
+//
+// A style's lock_check_idle()-equivalent calls this in place of building its
+// own overlay when it decides the idle timeout has fired; this function
+// alone owns the dim-on-show / restore-on-unlock pairing, so the two can't
+// drift out of sync across two files. No-ops if no accounts exist or the
+// login screen was never built (nothing to lock against).
+void purr_systemui_show_relock(const purr_systemui_host_t *host);
+
+// True from purr_systemui_show_relock() until its own successful unlock —
+// the shared equivalent of what each style's purr_systemui_is_locked() used
+// to track locally. A style's purr_systemui_is_locked() should simply
+// return this.
+bool purr_systemui_relock_active(void);
 
 // Builds every surface. Call once, from the host's UI task, after the host's
 // own screens exist and its HAL is up. `host` must outlive the call (a static

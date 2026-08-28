@@ -3,6 +3,7 @@
 #include "app_manager.h"
 #include "speed_demon.h"
 #include "user_mgr.h"
+#include "sig_mgr.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/core/purr_module.h"
 #include "../../kernel/core/purr_crash_guard.h"
@@ -259,26 +260,12 @@ static void meow_task(void *arg) {
     vTaskDeleteWithCaps(NULL);
 }
 
-// Scans a .hiss/.kitten script's own source for a "-- purr-sig: <value>"
-// comment — the same self-declared, honor-system tag catstrap.py's
-// cmd_validate()/build_app() read at build time on the dev machine, but
-// this is the copy that actually matters: it gates whether launch_meow()
-// below lets an unsigned privileged script run. A whole-buffer strstr()
-// rather than a strict line-anchored parser — good enough for an
-// honor-system tag, and simpler than re-deriving line boundaries on-device.
-// Falls back to "unsigned" for no tag, or a value not in this list.
-static const char *scan_purr_sig(const char *code) {
-    static const char *values[] = { "dev-signed", "trusted-signed", "dev-approved" };
-    const char *p = strstr(code, "purr-sig:");
-    if (!p) return "unsigned";
-    p += strlen("purr-sig:");
-    while (*p == ' ' || *p == '\t') p++;
-    for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
-        size_t len = strlen(values[i]);
-        if (strncmp(p, values[i], len) == 0) return values[i];
-    }
-    return "unsigned";
-}
+// The old scan_purr_sig() honor-system tag scanner lived here — replaced
+// by real Ed25519 verification, see the sig_mgr_classify_buffer() call in
+// launch_meow() below and sig_mgr.h for the tier model. catstrap.py's own
+// build-time reads of the same tag are a separate, still-open cleanup
+// (they never gated anything on-device — this was always the copy that
+// mattered).
 
 static int launch_meow(app_entry_t *app, int idx)
 {
@@ -372,35 +359,51 @@ static int launch_meow(app_entry_t *app, int idx)
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     }
 
-    // Developer Mode gate — .hiss and .kitten (both privileged tiers, see
-    // purr_kernel_dev_mode_enabled()'s doc comment). A signed script
-    // (dev-signed/trusted-signed/dev-approved) always runs; only "unsigned"
-    // is blocked, and only when Developer Mode is off. Rejected here, before
-    // any task/semaphore exists, so nothing downstream needs to know this
-    // ever almost ran. .kitten needs this even more than .hiss does —
-    // app_manager_init() autoruns the first .kitten found on the SD card at
-    // *every* boot with no user interaction at all, so without this gate any
-    // unsigned .kitten dropped onto the card would silently get full
-    // kitt.*/radio.*/gps.* privilege on every power-on.
-    if (app->tier == APP_TIER_HISS || app->tier == APP_TIER_KITTEN) {
-        const char *sig = scan_purr_sig(code);
-        if (strcmp(sig, "unsigned") == 0 && !purr_kernel_dev_mode_enabled()) {
-            heap_caps_free(code);
-            // Clear pending state fully (not just the code buffer) — a
-            // dangling s_meow_pending_path with no matching code would make
-            // lua_runtime_init()'s "nothing pending" check (empty code AND
-            // empty path) false, letting a *later*, unrelated init() call
-            // fall through to its fopen()-based fallback and run this exact
-            // script anyway, bypassing the rejection above.
-            s_meow_pending_path[0]   = '\0';
-            s_meow_pending_privileged = false;
-            app->state = APP_STATE_ERROR;
+    // Signature classification — sig_mgr_classify_buffer() hashes `code`
+    // directly rather than re-reading app->path from SD a second time (see
+    // sig_mgr.h's own doc comment on why classify_buffer() exists). Real
+    // Ed25519 verification now, replacing the old scan_purr_sig() honor-
+    // system string tag — see sig_mgr.h for the tier model.
+    //
+    // TAMPERED is hard-blocked unconditionally, for EVERY .meow/.hiss/
+    // .kitten launch, dev mode or not: a .sig + co-located .pub that fails
+    // to verify means the artifact changed after someone signed it, which
+    // is a real integrity violation, not the "never got signed" case the
+    // Developer Mode gate below exists for.
+    //
+    // The Developer Mode gate itself keeps its EXACT prior scope —
+    // .hiss/.kitten only, only blocks SIG_TIER_UNSIGNED — deliberately not
+    // widened to .meow here; that would be a real policy change, not a
+    // hardening of this one check. .kitten needs it even more than .hiss
+    // does: app_manager_init() autoruns the first .kitten found on the SD
+    // card at *every* boot with no user interaction at all, so without
+    // this gate an unsigned .kitten dropped onto the card would silently
+    // get full kitt.*/radio.*/gps.* privilege on every power-on.
+    sig_tier_t sig = sig_mgr_classify_buffer((const uint8_t *)code, nread, app->path);
+    if (sig == SIG_TIER_TAMPERED ||
+        ((app->tier == APP_TIER_HISS || app->tier == APP_TIER_KITTEN) &&
+         sig == SIG_TIER_UNSIGNED && !purr_kernel_dev_mode_enabled())) {
+        heap_caps_free(code);
+        // Clear pending state fully (not just the code buffer) — a
+        // dangling s_meow_pending_path with no matching code would make
+        // lua_runtime_init()'s "nothing pending" check (empty code AND
+        // empty path) false, letting a *later*, unrelated init() call
+        // fall through to its fopen()-based fallback and run this exact
+        // script anyway, bypassing the rejection above.
+        s_meow_pending_path[0]   = '\0';
+        s_meow_pending_privileged = false;
+        app->state = APP_STATE_ERROR;
+        if (sig == SIG_TIER_TAMPERED) {
+            snprintf(app->error, sizeof(app->error), "TAMPERED — signature does not match content");
+            ESP_LOGE(TAG, "launch .%s: '%s' rejected — signature present but INVALID (tampered)",
+                     tier_name(app->tier), app->name);
+        } else {
             snprintf(app->error, sizeof(app->error),
                      "unsigned .%s — enable Developer Mode in Settings", tier_name(app->tier));
             ESP_LOGW(TAG, "launch .%s: '%s' rejected — unsigned, Developer Mode off",
                      tier_name(app->tier), app->name);
-            return -1;
         }
+        return -1;
     }
 
     s_meow_pending_code = code;

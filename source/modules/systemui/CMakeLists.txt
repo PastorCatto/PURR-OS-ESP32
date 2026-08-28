@@ -1,5 +1,8 @@
 # systemui — status bar, drag-down panels, nav bar/home indicator, Recents,
-# lock screen. Two visual styles implementing one contract (see systemui.h).
+# lock screen, login. Two visual styles implementing one contract (see
+# systemui.h) for everything except the login screen (systemui_login.c),
+# which is style-independent and gates on plain CONFIG_PURR_SYSTEMUI — see
+# that file's own header comment for why.
 #
 # Sources are NOT gated here on a CONFIG_ check. Each file carries its own
 # #ifdef — CONFIG_PURR_SYSTEMUI for the module as a whole, plus
@@ -21,6 +24,8 @@ idf_component_register(
         systemui_module.c
         systemui_android.c
         systemui_ios.c
+        systemui_xp.c
+        systemui_login.c
     INCLUDE_DIRS
         .
         ../../kernel/core

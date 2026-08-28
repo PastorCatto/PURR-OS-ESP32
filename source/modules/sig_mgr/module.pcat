@@ -1,0 +1,14 @@
+# modules/sig_mgr/module.pcat
+# Artifact signing/verification — Ed25519 (lib_ed25519), four trust tiers
+# (official/dev-signed/user-signed/unsigned, plus a distinct TAMPERED
+# result). Hardens the old honor-system "purr-sig" comment tag. See
+# sig_mgr.h for the full design.
+
+name            = "sig_mgr"
+version         = "1.0.0"
+module_type     = "PURR_MOD_SYSTEM"
+kernel_min      = "0.11.1"
+kernel_max      = ""
+
+provides        = ["artifact_signing"]
+required_catcalls = []

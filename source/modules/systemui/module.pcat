@@ -23,5 +23,5 @@ kernel_min  = "1.0.0"
 app_manager = ">=0.1.0"
 
 [build]
-sources     = "systemui_module.c systemui.c"
-requires    = "lvgl app_manager"
+sources     = "systemui_module.c systemui_android.c systemui_ios.c systemui_xp.c systemui_login.c"
+requires    = "lvgl app_manager user_mgr"

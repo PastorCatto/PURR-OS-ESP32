@@ -1413,6 +1413,13 @@ void purr_systemui_init(const purr_systemui_host_t *host)
     ck_build_status_panels(w);
     ck_build_status_icons(w);
     ck_build_lock_screen(w, h);
+
+    // Real credential UI, if the boot-login-check above left the session
+    // logged out — must be LAST, so it lands on top of everything else built
+    // in this function by construction order alone. See its own doc comment
+    // in systemui.h.
+    purr_systemui_show_login(host);
+
     ESP_LOGI(TAG, "system UI built (%ux%u) — status bar, %s, recents, lock",
              w, h, s_host->suppress_navbar ? "no nav bar (host-suppressed)" : "nav bar");
 }
@@ -1465,5 +1472,14 @@ void purr_systemui_close_recents(void)                    { }
 // keys off this, so reporting "locked" here would strand input handling.
 bool purr_systemui_is_locked(void)                        { return false; }
 void purr_systemui_wake(void)                             { }
+// purr_systemui_show_login()'s real implementation lives in
+// systemui_login.c, gated on plain CONFIG_PURR_SYSTEMUI (no style split —
+// see that file's own header comment for why). This is its "module fully
+// off" stub, same convention as every other symbol in this block.
+void purr_systemui_show_login(const purr_systemui_host_t *host) { (void)host; }
+// Same story as purr_systemui_show_login() above — real implementation in
+// systemui_login.c, this is its "module fully off" stub.
+void purr_systemui_show_relock(const purr_systemui_host_t *host) { (void)host; }
+bool purr_systemui_relock_active(void)                           { return false; }
 
 #endif // CONFIG_PURR_SYSTEMUI && style

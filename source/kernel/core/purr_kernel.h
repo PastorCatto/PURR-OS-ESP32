@@ -384,6 +384,22 @@ void     purr_kernel_set_ui_effects(bool v);
 uint32_t purr_kernel_accent_color(void);
 void     purr_kernel_set_accent_color(uint32_t rgb);
 
+// ── Dark mode ──────────────────────────────────────────────────────────────
+// OFF (light) by default — the iOS-7 app-widget theme's existing palette
+// (IOS_CELL_BG/IOS_CELL_TEXT etc. in cheetah_win.c) is light-first, same as
+// real iOS 7 was. This is purely a colour-palette swap read at widget
+// CONSTRUCTION time, same "already-built surfaces don't retroactively
+// change" caveat as purr_kernel_ui_effects_enabled() above — a caller that
+// wants an already-built screen to pick up a toggle needs its own rebuild/
+// refresh path, this flag alone does not walk the LVGL tree.
+//
+// Same load-order lesson as kernel_load_persisted_settings()'s own doc
+// comment: loaded by the KERNEL before any module initialises, not lazily
+// by settings.c, so a persisted preference is correct on the very first
+// frame instead of only after something happens to rebuild it.
+bool     purr_kernel_dark_mode_enabled(void);
+void     purr_kernel_set_dark_mode(bool v);
+
 // Screen idle timeout, minutes — off by default until Settings loads the
 // persisted value (same "purr_settings" NVS namespace, synced on
 // settings' own init()), defaulting to 1 minute in the meantime. Only

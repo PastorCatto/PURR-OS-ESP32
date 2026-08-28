@@ -952,6 +952,7 @@ UI_BACKEND_MAP = {
     "cupcake":   "CUPCAKE",
     "tabby":     "TABBY",
     "mochi":     "MOCHI",
+    "cheetah":   "CHEETAH",
     "lvgldebug": "LVGLDEBUG",
     "pounce":    "POUNCE",
     "nougat":    "NOUGAT",
@@ -1061,9 +1062,9 @@ def _sdkconfig_lines(device, cfg):
         # modules.* value into a static module registration, so a style name
         # there would emit a bogus `extern purr_module_ios;`.
         style = cfg.get("ui.systemui_style", "android").strip().lower()
-        if style not in ("android", "ios"):
+        if style not in ("android", "ios", "xp"):
             die(f"{device}: device.pcat [ui] systemui_style = \"{style}\" "
-                f"is not one of: android, ios")
+                f"is not one of: android, ios, xp")
         lines.append(f"CONFIG_PURR_SYSTEMUI_STYLE_{style.upper()}=y")
 
     if cfg.get("modules.mesh", ""):
@@ -2380,6 +2381,107 @@ def cmd_pkg_app_upgrade(args):
             continue
         cmd_pkg_app_install(argparse.Namespace(device=device, name=name, to="flash"))
 
+# ── Signing (source/modules/sig_mgr/) ───────────────────────────────────────
+#
+# Host-side half of sig_mgr's USER trust tier — see sig_mgr.h's own design
+# comment for the full model. Standard Ed25519 (Python's `cryptography`
+# package, RFC 8032) — verified on-device with source/lib/lib_ed25519, a
+# different but wire-compatible implementation; same split this project's
+# official/dev trust-root keys already use (generated here, verified there).
+#
+# The whole point of the USER tier is "sign your own driver, drop the
+# signature and your public key next to it on the SD card, done" — no
+# device-side enrollment step. `sign file` produces exactly that pair with
+# one command.
+
+def cmd_sign_keygen(args):
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        die("the 'cryptography' package is required for signing — pip install cryptography "
+            "in the IDF Python venv")
+
+    os.makedirs(args.out, exist_ok=True)
+    priv_path = os.path.join(args.out, f"{args.name}.priv")
+    pub_path  = os.path.join(args.out, f"{args.name}.pub")
+    if os.path.isfile(priv_path):
+        die(f"{priv_path} already exists — refusing to overwrite a key")
+
+    priv = Ed25519PrivateKey.generate()
+    pub  = priv.public_key()
+    priv_bytes = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    pub_bytes = pub.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    with open(priv_path, "wb") as f: f.write(priv_bytes)
+    with open(pub_path, "wb") as f: f.write(pub_bytes)
+
+    info(f"  {C_GRN}OK{C_RST}  {priv_path}  (keep this private — never copy it onto a device)")
+    info(f"  {C_GRN}OK{C_RST}  {pub_path}   (this is what travels with a signed file)")
+
+def cmd_sign_file(args):
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        die("the 'cryptography' package is required for signing — pip install cryptography "
+            "in the IDF Python venv")
+
+    if not os.path.isfile(args.path):
+        die(f"no such file: {args.path}")
+    if not os.path.isfile(args.privkey):
+        die(f"no such private key: {args.privkey}")
+
+    priv_bytes = open(args.privkey, "rb").read()
+    if len(priv_bytes) != 32:
+        die(f"{args.privkey} is {len(priv_bytes)} bytes, expected 32 (raw Ed25519 private key) — "
+            f"is this a `purrstrap sign keygen` output?")
+    priv = Ed25519PrivateKey.from_private_bytes(priv_bytes)
+
+    digest = hashlib.sha256()
+    with open(args.path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    signature = priv.sign(digest.digest())
+
+    sig_path = args.path + ".sig"
+    with open(sig_path, "wb") as f:
+        f.write(signature)
+    info(f"  {C_GRN}OK{C_RST}  {sig_path}  ({len(signature)} bytes)")
+
+    # Auto-place the matching public key alongside if one isn't already
+    # there — the two-file pair is what sig_mgr_classify() looks for; this
+    # is what makes `sign file` a one-command "ready to copy to SD" step
+    # rather than a second manual copy every time.
+    pub_path = args.path + ".pub"
+    if os.path.isfile(pub_path):
+        info(f"  {C_YLW}--{C_RST}  {pub_path} already exists — left as-is "
+             f"(delete it first if it's meant to match a different key)")
+    else:
+        pub_bytes = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        with open(pub_path, "wb") as f:
+            f.write(pub_bytes)
+        info(f"  {C_GRN}OK{C_RST}  {pub_path}  (32 bytes)")
+
+    info(f"  copy {os.path.basename(args.path)}, {os.path.basename(sig_path)}, and "
+         f"{os.path.basename(pub_path)} together — sig_mgr_classify() needs all three "
+         f"co-located to verify as user-signed")
+
+def cmd_sign(args):
+    dispatch = {"keygen": cmd_sign_keygen, "file": cmd_sign_file}
+    if args.sign_cmd not in dispatch:
+        die("usage: purrstrap sign <keygen|file> ...")
+    return dispatch[args.sign_cmd](args)
+
 def cmd_pkg(args):
     dispatch = {
         "list": cmd_pkg_list, "add": cmd_pkg_add, "remove": cmd_pkg_remove,
@@ -2417,6 +2519,17 @@ def main():
                           help="Build profile — see `purrstrap profiles`.")
 
     sub.add_parser("profiles", help="List available build profiles")
+
+    p_sign = sub.add_parser("sign", help="Ed25519 artifact signing (source/modules/sig_mgr/)")
+    sign_sub = p_sign.add_subparsers(dest="sign_cmd")
+
+    p_sign_keygen = sign_sub.add_parser("keygen", help="Generate a new Ed25519 keypair")
+    p_sign_keygen.add_argument("name", help="Base name — writes <name>.priv and <name>.pub")
+    p_sign_keygen.add_argument("--out", default=".", help="Output directory (default: current dir)")
+
+    p_sign_file = sign_sub.add_parser("file", help="Sign a file — writes <path>.sig (+ <path>.pub if absent)")
+    p_sign_file.add_argument("path", help="File to sign (e.g. a .purr driver blob or app)")
+    p_sign_file.add_argument("privkey", help="Path to a <name>.priv file from `purrstrap sign keygen`")
 
     p_monitor = sub.add_parser("monitor", help="Open serial monitor for a device")
     p_monitor.add_argument("device")
@@ -2496,6 +2609,7 @@ def main():
         "doctor":  cmd_doctor,
         "pkg":     cmd_pkg,
         "profiles": cmd_profiles,
+        "sign":     cmd_sign,
     }
     if args.cmd not in dispatch:
         parser.print_help()

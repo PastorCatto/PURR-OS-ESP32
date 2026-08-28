@@ -24,10 +24,11 @@ spiffs_offset  = "0xD80000"
 # boot_settle_ms — pause between the P2 (UI) and P3 (radios, deferred apps)
 # module tiers. See purr_kernel.c's BOOT_SETTLE_MS for why it exists.
 #
-# 50 here because this profile has none of what the pause guards against: no
-# Nearby, MSN, mesh, BT or proximity stack to race the UI at P3. The kernel
-# default is 500; a full image should leave this unset and take it.
-boot_settle_ms = 50
+# Was 50 on the reasoning that this profile had none of what the pause
+# guards against — no Nearby, MSN, mesh or proximity stack to race the UI at
+# P3. That's no longer true: [apps]/[modules] below now enable all of those
+# for the "full build, all apps" pass. Left UNSET so the kernel takes its
+# own default of 500 instead, per this comment's own original warning.
 
 [drivers]
 display     = "st7789"
@@ -81,7 +82,16 @@ lora        = ""
 # The lesson worth keeping: a boot loop after a config change is not evidence
 # that the config change caused it. Check crash_guard strikes first, and
 # confirm by reverting.
-systemui_style = "android"
+#
+# systemui_style — "xp": a Windows XP-style taskbar (Start button + Start
+# Menu, one taskbar button per running app, clock tray) replaces the
+# phone-style status bar/nav bar pairing "android"/"ios" both use. Cheetah
+# (née Flow)'s BB10-era Active Frames work is paused; cheetah_home.c now
+# draws an XP desktop (favorites icons only — no paging or its own minimize
+# gesture, since the taskbar owns running-app switching/minimizing now).
+# See systemui_xp.c and CoreOS/main/Kconfig.projbuild's
+# PURR_SYSTEMUI_STYLE_XP entry.
+systemui_style = "xp"
 
 [modules]
 # ui — back to Cupcake. The MiniWin WinCE desktop was selected here for the
@@ -98,7 +108,19 @@ systemui_style = "android"
 # modules/common/purr_lv_flush.h — off-screen compose, async flush + double
 # buffering, and shadow suppression tied to the UI-effects toggle. It was
 # factored out precisely because it had landed in Mochi only.
-ui          = "cupcake"
+#
+# ui — "cheetah": a Windows XP-style desktop (favorites icons + a Choose
+# Favorites picker) — see source/modules/cheetah/. Was "flow" (built for a
+# since-paused BlackBerry 10-style Home Screen; renamed once its content
+# became the XP desktop instead), and before that "cupcake". Built on the
+# same purr_lv_flush.h path and on Mochi's window backend/icon set directly.
+# Cupcake stays compiled in and selectable, just no longer this device's
+# default (same precedent as MiniWin below). Cheetah's window backend is
+# also the app-widget theme (iOS-7 grouped-table style, dark mode
+# supported) every app in the system renders through — independent of its
+# own XP desktop, which stays XP deliberately as this project's minimal-UI
+# benchmark.
+ui          = "cheetah"
 # systemui — the status bar, drag-down panels, Back/Home/Recents nav bar,
 # Recents carousel and lock screen, split out of Cupcake into their own
 # module (source/modules/systemui/). Cupcake hosts it; this entry is what
@@ -106,9 +128,10 @@ ui          = "cupcake"
 # and Cupcake still boots as a bare launcher with no chrome.
 systemui    = "systemui"
 app_manager = "app_manager"
-# mesh — re-enabled for active Meshtastic diagnosis (was off, gated behind
-# CONFIG_PURR_FEATURE_MESHTASTIC, see CoreOS/main/Kconfig.projbuild).
-# mesh        = "meshtastic"
+# mesh — re-enabled: msn/milkbar/meshdiag below all want a real mesh backend
+# to be meaningful, not just present as dead UI. Gated behind
+# CONFIG_PURR_FEATURE_MESHTASTIC, see CoreOS/main/Kconfig.projbuild.
+mesh        = "meshtastic"
 # meshcore — compiled in and statically registered alongside meshtastic
 # (separate [modules] key, both loaded into the static registry — see
 # purrstrap.py's free-form modules.* handling), but NOT the boot-time
@@ -121,6 +144,7 @@ lua         = "lua_runtime"
 wifi        = "wifi_mgr"
 ota         = "ota_mgr"
 users       = "user_mgr"
+signing     = "sig_mgr"
 # bt          = "bt_mgr"
 # proximity/pairing — NOT listed here anymore; purrstrap.py's
 # apply_radio_companion_defaults() adds them automatically to any device
@@ -138,23 +162,28 @@ app_manager_remote= ""
 theme       = "wce"
 
 [apps]
+# Full build — every app this device has enabled, not just the trimmed
+# subset earlier passes shipped. bt stays OFF regardless (see [radio]'s own
+# documented crash history: "not yet proven safe under sustained mesh
+# traffic + BLE together") — that's a radio decision, not an apps one, and
+# these apps' UI still compiles/runs without it, just without a BLE backend.
 settings    = true
 oobe        = true
 terminal    = true
 fileman     = true
-hwtest      = false
-drivermgr   = false
-msn         = false
-services    = false
-taskmgr     = false
-nearby      = false
+hwtest      = true
+drivermgr   = true
+msn         = true
+services    = true
+taskmgr     = true
+nearby      = true
 # MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
 # systemui, the mesh stack and the radios before it starts, and restores them
 # when it exits. The app calls nothing itself. See docs/15_SpeedDemon.md.
-magidos     = false
+magidos     = true
 
-milkbar     = false
-meshdiag    = false
+milkbar     = true
+meshdiag    = true
 doom        = true
 moy         = true
 [flash]
@@ -168,6 +197,7 @@ driver_manager    = 2
 wifi_mgr          = 2
 ota_mgr           = 2
 user_mgr          = 2
+sig_mgr           = 2
 bt_mgr            = 2
 lua_runtime       = 2
 meshtastic        = 2
@@ -184,6 +214,9 @@ apps/msn          = 3
 apps/services     = 3
 apps/taskmgr      = 3
 apps/nearby       = 3
+apps/magidos      = 3
+apps/milkbar      = 3
+apps/meshdiag     = 3
 
 [pins]
 display_cs    = 12

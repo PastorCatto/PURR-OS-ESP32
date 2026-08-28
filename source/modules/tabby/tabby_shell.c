@@ -432,6 +432,10 @@ static const purr_systemui_host_t s_systemui_host = {
     .hide_drawer             = tabby_hide_drawer,
     .hide_foreground_windows = tabby_win_hide_foreground,
     .last_activity_ms        = tabby_hal_last_activity_ms,
+    // Lets systemui's own login screen (systemui_login.c) join the same
+    // group tabby_hal.c's keyboard/trackball indevs are bound to, so a
+    // physical keyboard can type a password there too, not just tap.
+    .group                   = tabby_hal_group,
 };
 
 // ── Public API ──────────────────────────────────────────────────────────────

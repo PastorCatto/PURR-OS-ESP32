@@ -6,5 +6,9 @@ idf_component_register(
         .
         ../../kernel/core
         ../../kernel/catcalls
-    REQUIRES esp_common driver freertos nvs_flash
+        ../sig_mgr
+    # sig_mgr — PUBLIC, not PRIV: driver_manager.h itself now includes
+    # sig_mgr.h (drv_entry_t::sig_tier), so any consumer of this header
+    # (the drivermgr app) needs sig_mgr's declarations visible too.
+    REQUIRES esp_common driver freertos nvs_flash sig_mgr
 )

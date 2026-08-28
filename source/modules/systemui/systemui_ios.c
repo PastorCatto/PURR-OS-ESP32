@@ -1194,6 +1194,12 @@ void purr_systemui_init(const purr_systemui_host_t *host)
     build_status(w);
     build_lock(w, h);
 
+    // Real credential UI, if the boot-login-check above left the session
+    // logged out — must be LAST, so it lands on top of everything else built
+    // in this function by construction order alone. See its own doc comment
+    // in systemui.h.
+    purr_systemui_show_login(host);
+
     ESP_LOGI(TAG, "iOS system UI built (%ux%u)", w, h);
 }
 

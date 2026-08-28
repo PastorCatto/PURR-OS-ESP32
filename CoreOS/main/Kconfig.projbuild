@@ -82,6 +82,33 @@ menu "PURR OS"
                 (Notification Center, Control Center, the app switcher, the
                 lock screen) while the nav bar does not.
 
+        config PURR_UI_BACKEND_CHEETAH
+            bool "Cheetah (LVGL 8, Windows XP-style desktop)"
+            select PURR_UI_LVGL
+            help
+                Named after Mac OS X 10.0's own codename — was "Flow" (built
+                for a since-paused BlackBerry 10-style Home Screen), renamed
+                once its content became a Windows XP-style desktop instead.
+
+                A single desktop pane of FAVORITE apps (not the full
+                registry — that's what the Start Menu covers), curated via a
+                long-press "Choose Favorites..." picker. No paging, no
+                minimize gesture of its own — the taskbar
+                (systemui_xp.c) owns running-app switching/minimizing, one
+                button per running app.
+
+                Hosts source/modules/systemui/ for the taskbar (Start Menu,
+                running-app buttons, tray) and the shared login/lock welcome
+                screen, and reuses Mochi's icon/colour tables
+                (mochi_icon_for_app() / mochi_color_for_app()) rather than a
+                third copy of the same name->icon map — see cheetah.h.
+
+                Also the app-widget theme every app in the system renders
+                through (buttons/lists/menus/textareas) — iOS-7 grouped-
+                table style, with dark mode support — independent of this
+                backend's own XP desktop above it, which stays XP
+                deliberately as the project's minimal-UI benchmark.
+
         config PURR_UI_BACKEND_TABBY
             bool "Tabby (LVGL 8, keyboard-first type-to-filter launcher)"
             select PURR_UI_LVGL
@@ -267,10 +294,11 @@ menu "PURR OS"
         depends on PURR_SYSTEMUI
         default PURR_SYSTEMUI_STYLE_ANDROID
         help
-            Which visual language the system chrome uses. Both styles
+            Which visual language the system chrome uses. All three styles
             implement the identical purr_systemui_* contract, so the UI
             backend hosting them needs no changes either way — exactly one
-            of systemui_android.c / systemui_ios.c compiles in.
+            of systemui_android.c / systemui_ios.c / systemui_xp.c compiles
+            in.
 
             Set automatically by purrstrap from device.pcat's
             [ui] systemui_style key.
@@ -293,6 +321,21 @@ menu "PURR OS"
                 and on the lock screen — so the two always match, which is
                 how iOS behaves. Both scroll like the Recents carousel.
                 Clock-left status bar with indicators right.
+
+        config PURR_SYSTEMUI_STYLE_XP
+            bool "Windows XP UI"
+            help
+                A persistent bottom taskbar owns the whole bottom edge
+                itself (no suppress_navbar handling — this style never asks
+                the host to omit anything): a Start button opening a flat
+                single-column Start Menu of every registered app, one
+                taskbar button per RUNNING app that toggles minimize/
+                restore, and a clock-only system tray. Idle lock is a plain
+                dim-and-tap-to-wake, the same scope level the other two
+                styles use for it. Deliberately does not draw per-window
+                title-bar chrome (minimize/maximize/close buttons) — no
+                backend's window contract draws window chrome today; see
+                systemui_xp.c's own header comment.
 
     endchoice
 

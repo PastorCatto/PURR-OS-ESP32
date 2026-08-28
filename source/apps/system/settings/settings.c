@@ -112,6 +112,10 @@ static uint32_t    s_accent_color           = 0x1C1C2E;
 static purr_wid_t  s_effects_lbl            = 0;
 static purr_wid_t  s_accent_lbl             = 0;
 static purr_wid_t  s_accent_input           = 0;
+// Default matches purr_kernel.c's own — light — so a device with nothing
+// stored behaves identically to one that never had this setting.
+static uint8_t     s_dark_mode              = 0;
+static purr_wid_t  s_dark_mode_lbl          = 0;
 
 static purr_wid_t  s_about_lbl = 0;
 
@@ -189,6 +193,7 @@ static void nvs_load(void) {
     nvs_get_u8(h, "navbar_always_visible", &s_navbar_always_visible);
     nvs_get_u8(h, "lock_hide_notifs", &s_lock_hide_notifs);
     nvs_get_u8(h, "ui_effects", &s_ui_effects);
+    nvs_get_u8(h, "dark_mode", &s_dark_mode);
     // Accent is stored as the same "RRGGBB" text the user types. strtoul with
     // base 16 on a buffer that nvs_get_str left untouched would parse whatever
     // garbage was on the stack, so the read is only trusted when it succeeds
@@ -216,6 +221,14 @@ static void nvs_load(void) {
     // pushed across here at boot.
     purr_kernel_set_ui_effects(s_ui_effects != 0);
     purr_kernel_set_accent_color(s_accent_color);
+    // Same reasoning again: the iOS-7 app-widget theme reads this at
+    // construction time, so a stored preference needs pushing across here
+    // at boot too, same redundant-but-harmless duplicate write the flags
+    // above already do (kernel_load_persisted_settings() in purr_kernel.c
+    // is the one that actually matters for load-order correctness; this
+    // one keeps settings.c's own local copy and the kernel flag in sync
+    // regardless of which loaded first).
+    purr_kernel_set_dark_mode(s_dark_mode != 0);
 }
 
 static void set_general_status(const char *msg) {
@@ -651,6 +664,29 @@ static void refresh_effects_labels(void) {
     }
 }
 
+// Light/dark for the iOS-7 app-widget theme (cheetah_win.c) — separate from
+// the Effects toggle above, which is about translucency, not palette. Same
+// "already-built surfaces don't retroactively change" caveat: only windows
+// built after the toggle pick up the new palette. No systemui refresh call
+// here the way on_effects_toggle() has one — that theme lives entirely in
+// the app-window widget layer, not in systemui's own chrome.
+static void refresh_dark_mode_label(void) {
+    if (s_dark_mode_lbl) {
+        purr_win_label_set(s_dark_mode_lbl, s_dark_mode ? "Theme: Dark" : "Theme: Light");
+    }
+}
+
+static void on_dark_mode_toggle(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    s_dark_mode = s_dark_mode ? 0 : 1;
+    purr_kernel_set_dark_mode(s_dark_mode != 0);
+    nvs_save_u8("dark_mode", s_dark_mode);
+    refresh_dark_mode_label();
+    set_customization_status(s_dark_mode
+        ? "Dark theme — new windows only."
+        : "Light theme — new windows only.");
+}
+
 static void on_effects_toggle(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
     s_ui_effects = s_ui_effects ? 0 : 1;
@@ -938,6 +974,10 @@ static void on_open_customization(purr_wid_t w, purr_event_t e, void *u) {
     // Effects + accent. Sits under Lock Screen because turning effects off is
     // most visible there — the lock screen scrim over the wallpaper is the
     // largest translucent surface in the system.
+    purr_win_label(s_customization_win, "Theme");
+    s_dark_mode_lbl = purr_win_label(s_customization_win, "");
+    purr_win_button(s_customization_win, "Toggle Theme", on_dark_mode_toggle, NULL);
+
     purr_win_label(s_customization_win, "Effects");
     s_effects_lbl = purr_win_label(s_customization_win, "");
     purr_win_button(s_customization_win, "Toggle Effects", on_effects_toggle, NULL);
@@ -950,6 +990,7 @@ static void on_open_customization(purr_wid_t w, purr_event_t e, void *u) {
     // Both labels are created empty above and filled here, so the initial text
     // and every later update go through exactly one formatting path.
     refresh_effects_labels();
+    refresh_dark_mode_label();
 
     s_customization_status_lbl = purr_win_label(s_customization_win, "Ready.");
     purr_win_show(s_customization_win);

@@ -17,7 +17,19 @@
 # Listed explicitly rather than globbed: CMake globs are evaluated at configure
 # time, so a newly generated icon would not trigger a reconfigure and would
 # silently fail to link until a clean build.
-if(CONFIG_PURR_UI_BACKEND_MOCHI)
+#
+# OR CONFIG_PURR_UI_BACKEND_CHEETAH: Cheetah (source/modules/cheetah/, née
+# Flow) reuses this same icon set and mochi_icon_for_app()/mochi_color_for_app()
+# directly rather than keeping a third copy — see cheetah.h's header comment.
+# Safe to compile Mochi's sources in as a side effect of Cheetah being
+# selected: module boot-registration is driven entirely by device.pcat's
+# [modules] keys through purrstrap's generated `extern purr_module_<id>;`
+# glue (_generate_glue() in purrstrap.py), not by linker-section auto-
+# discovery, so nothing references purr_module_mochi on a device whose
+# [modules] ui = "cheetah" — and mochi_init() itself is still independently
+# guarded on the (in that case unset) CONFIG_PURR_UI_BACKEND_MOCHI, so it
+# no-ops even if somehow called.
+if(CONFIG_PURR_UI_BACKEND_MOCHI OR CONFIG_PURR_UI_BACKEND_CHEETAH)
     set(MOCHI_ICON_DIR ../../assets/icons/generated/48)
     set(MOCHI_SRCS
         mochi_module.c
