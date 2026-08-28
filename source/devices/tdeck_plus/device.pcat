@@ -158,6 +158,19 @@ proximity_rpc= ""
 pairing     = ""
 homebase    = ""
 app_manager_remote= ""
+# claw_loader — cross-device .claw loading (source/modules/claw_loader/),
+# EXPERIMENTAL for now: exercised by claw_loader_selftest.c
+# (kernel_tdeck_plus, CoreOS/main/CMakeLists.txt's own REQUIRES), not yet
+# used by app_manager or any real app. Value must be non-empty — modulestrap.
+# py's _device_referenced() does `key.startswith("modules.") and v`, so an
+# EMPTY string (the msn_relay/proximity/etc. convention just above) is
+# falsy and silently skipped; those five actually get pulled into the build
+# transitively (something else's CMakeLists.txt REQUIRES them), not via
+# this section at all — confirmed live ("Failed to resolve component
+# 'claw_loader'" persisted even after adding an empty-string entry here).
+# Naming it after itself, like signing = "sig_mgr" above, is what actually
+# reaches modulestrap's component-selection scan.
+claw_loader = "claw_loader"
 [ui]
 theme       = "wce"
 
@@ -192,6 +205,11 @@ cardstack         = 2
 app_manager       = 2
 radio/sx1262_rl   = 2
 driver_manager    = 2
+# claw_loader — cross-device .claw loading (source/modules/claw_loader/),
+# EXPERIMENTAL for now: exercised by claw_loader_selftest.c
+# (kernel_tdeck_plus, CoreOS/main/CMakeLists.txt's own REQUIRES), not yet
+# used by app_manager or any real app.
+claw_loader       = 2
 wifi_mgr          = 2
 ota_mgr           = 2
 user_mgr          = 2

@@ -787,18 +787,18 @@ void app_main(void)
     extern int app_manager_scan_ex(bool include_sd);
     app_manager_scan_ex(!recovering);
 
-    // claw_poc_run()/claw_poc_run2() calls removed — both PASSED through
-    // the real on-device ELF32 parser (claw_elf.c), not just the earlier
-    // hand-extraction script: "entry(10) = 92" and "entry2(21,
-    // poc_host_log) = 42", parser-derived text/entry-offset/patch-count
-    // values matching the hand-extracted ones exactly — see
-    // claw_poc_test.c's own header comment for the full story. No reason to
-    // keep erasing+rewriting the claw_poc partition on every boot now that
-    // it's confirmed; re-add (or move the harness into a real app/module)
-    // when the spike resumes.
-    extern void claw_poc_run(void);
-    extern void claw_poc_run2(void);
-    (void)claw_poc_run; (void)claw_poc_run2;
+    // claw_loader_selftest_run() call removed — PASSED on real hardware,
+    // resolving BOTH claw_personal_init and claw_personal_deinit through
+    // the real, promoted claw_loader module (source/modules/claw_loader/):
+    // "claw_personal_init() = 109 (expected 109)", clean deinit, "SELFTEST
+    // PASS" — see claw_loader_selftest.c's own header comment for the full
+    // story and the one gap it explicitly does NOT cover yet (a loaded
+    // module calling a host function by name, e.g. purr_kernel_ui(),
+    // rather than through a parameter it was handed). No reason to keep
+    // erasing+rewriting the claw_slot partition on every boot now that
+    // this is confirmed; re-add when app_manager integration resumes.
+    extern void claw_loader_selftest_run(void);
+    (void)claw_loader_selftest_run;
 
     purr_kernel_set_boot_ready(true);
 

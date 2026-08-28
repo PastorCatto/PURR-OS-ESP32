@@ -145,12 +145,17 @@ idf_component_register(
         # _write() in purr_kernel.h.
         joltwallet__littlefs
         # esp_partition — esp_partition_find_first()/_mmap()/_write()/
-        # _erase_range(), used by claw_poc_test.c (EXPERIMENTAL, cross-device
-        # .claw loading R&D spike — see that file's own header comment).
-        # Explicit rather than relying on app_update/esp_app_format's
-        # transitive pull-in of it, same "explicit, not inherited" reasoning
-        # as esp_app_format's own comment below.
+        # _erase_range(), used by claw_loader_selftest.c (EXPERIMENTAL,
+        # exercises the cross-device .claw loading module below). Explicit
+        # rather than relying on app_update/esp_app_format's transitive
+        # pull-in of it, same "explicit, not inherited" reasoning as
+        # esp_app_format's own comment below.
         esp_partition
+        # claw_loader — loads a compiled-but-never-linked .claw object at
+        # runtime (source/modules/claw_loader/). claw_loader_selftest.c
+        # (this device's own kernel_tdeck_plus dir, EXPERIMENTAL) exercises
+        # it; not yet used by anything else.
+        claw_loader
         fatfs
         sdmmc
         # esp_app_format — for esp_app_get_description() in purr_crash_guard.c,
