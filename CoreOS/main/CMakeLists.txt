@@ -154,8 +154,19 @@ idf_component_register(
         # claw_loader — loads a compiled-but-never-linked .claw object at
         # runtime (source/modules/claw_loader/). claw_loader_selftest.c
         # (this device's own kernel_tdeck_plus dir, EXPERIMENTAL) exercises
-        # it; not yet used by anything else.
+        # it; app_manager.c's launch_personal() is the real, non-test caller.
         claw_loader
+        # app_manager, user_mgr — TEMPORARY, same reasoning as claw_loader
+        # just above: claw_loader_selftest.c's run4() exercises the personal-
+        # app app_manager integration end-to-end (scan/launch/stop through
+        # the public API, under a throwaway user_mgr account it creates and
+        # removes). Neither is otherwise needed by "main" directly — every
+        # other kernel_tdp_boot.c call into app_manager already goes through
+        # a local `extern` declaration instead of including the header, to
+        # avoid exactly this REQUIRES growth. Remove alongside run4() once
+        # this is no longer needed for verification.
+        app_manager
+        user_mgr
         fatfs
         sdmmc
         # esp_app_format — for esp_app_get_description() in purr_crash_guard.c,

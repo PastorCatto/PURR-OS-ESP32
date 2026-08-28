@@ -2,11 +2,14 @@
 // app_manager.h — PURR OS app manager public API
 //
 // The app manager is a .purr system module that:
-//   - Scans /flash/apps and /sdcard/apps for .meow, .hiss, .paws, .claw files
+//   - Scans /flash/apps and /sdcard/apps for .meow, .hiss, .paws, .claw files,
+//     plus /sdcard/personal/<current user>/*.claw (loaded at runtime — see
+//     APP_TIER_PERSONAL below)
 //   - Maintains a registry of available and running apps
 //   - Provides the Cat Apps launcher UI (app grid over MiniWin)
 //   - Enforces tier boundaries: .paws gets no kernel calls, .claw gets all,
-//     .meow/.hiss run interpreted (see app_tier_t below for the split between them)
+//     .meow/.hiss run interpreted, a personal app gets only claw_loader's
+//     fixed import table (see app_tier_t below for the full split)
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -33,6 +36,18 @@ typedef enum {
                           // purr-sig/Developer-Mode consent gate), but the
                           // first one found on SD autoruns at boot without
                           // being manually launched (see app_manager_init()).
+    APP_TIER_PERSONAL = 5, // Compiled, loaded at RUNTIME (never linked into
+                          // this firmware) via source/modules/claw_loader/ —
+                          // NOT the same trust level as APP_TIER_CLAW despite
+                          // both compiling from source: a personal app can
+                          // only reach the fixed, small set of host functions
+                          // claw_loader.c's import table names (see
+                          // claw_elf.h's "External (host) symbols" section —
+                          // "the real capability boundary for loaded code").
+                          // Stored per-user under /sdcard/personal/<user>/,
+                          // scanned only for whoever is currently logged in
+                          // (see app_manager_scan_ex()) — never shown for
+                          // another account.
 } app_tier_t;
 
 // ── App entry ─────────────────────────────────────────────────────────────────

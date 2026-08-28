@@ -810,12 +810,40 @@ void app_main(void)
     // reason to keep re-running these on every boot now that all three are
     // confirmed; re-add whichever's needed when app_manager integration
     // (piece 3) resumes.
+    // claw_loader_selftest_run()/run2()/run3()/run4() calls removed — ALL
+    // FOUR PASSED on real hardware, completing the full "named imports,
+    // per-user storage, app_manager launch path" arc:
+    //   run():  claw_personal_init/claw_personal_deinit resolved by name
+    //           through claw_loader, "claw_personal_init() = 109 (expected
+    //           109)" — SELFTEST PASS.
+    //   run2(): the named-host-function import table (claw_loader.c's
+    //           s_imports[] / claw_elf.c's CLAW_SEC_EXTERN path) — a loaded
+    //           module called purr_kernel_uptime_ms() BY NAME and got back
+    //           a plausible live value — SELFTEST PASS.
+    //   run3(): personal-space SD storage (claw_loader_personal_add/count/
+    //           at/load/remove) — full round-trip under a throwaway
+    //           username — SELFTEST PASS.
+    //   run4(): the app_manager integration (APP_TIER_PERSONAL, the
+    //           personal-app scan block, launch_personal()) exercised
+    //           through app_manager's REAL public API (scan/count/get/
+    //           launch_by_name/stop) under a throwaway user_mgr account:
+    //           found in the registry at tier=APP_TIER_PERSONAL, launched
+    //           (native app task init() returned rc=0, state went
+    //           RUNNING), stopped cleanly (deinit() + claw_loader_unload(),
+    //           state went STOPPED), throwaway account removed — SELFTEST
+    //           PASS. Every round's boot log was otherwise clean (no error/
+    //           assert/panic lines).
+    // See claw_loader_selftest.c's own header comment for the full story
+    // and each guest object's exact source. No reason to keep re-running
+    // these on every boot now that all four are confirmed.
     extern void claw_loader_selftest_run(void);
     (void)claw_loader_selftest_run;
     extern void claw_loader_selftest_run2(void);
     (void)claw_loader_selftest_run2;
     extern void claw_loader_selftest_run3(void);
     (void)claw_loader_selftest_run3;
+    extern void claw_loader_selftest_run4(void);
+    (void)claw_loader_selftest_run4;
 
     purr_kernel_set_boot_ready(true);
 

@@ -20,7 +20,10 @@ idf_component_register(
     # for the same documented reason: neither header is included by
     # app_manager.h, only by app_manager.c (OOBE autorun; signature
     # classification in launch_meow()).
-    PRIV_INCLUDE_DIRS ../speed_demon ../user_mgr ../sig_mgr
+    # claw_loader — same PRIVATE treatment, same reason: claw_loader.h is
+    # included only by app_manager.c (launch_personal()'s personal-app
+    # load/unload calls), not by app_manager.h.
+    PRIV_INCLUDE_DIRS ../speed_demon ../user_mgr ../sig_mgr ../claw_loader
     REQUIRES esp_common driver freertos nvs_flash
-    PRIV_REQUIRES speed_demon user_mgr sig_mgr
+    PRIV_REQUIRES speed_demon user_mgr sig_mgr claw_loader
 )

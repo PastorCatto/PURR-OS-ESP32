@@ -4,6 +4,7 @@
 #include "speed_demon.h"
 #include "user_mgr.h"
 #include "sig_mgr.h"
+#include "claw_loader.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/core/purr_module.h"
 #include "../../kernel/core/purr_crash_guard.h"
@@ -85,6 +86,7 @@ static const char *tier_name(app_tier_t t)
     case APP_TIER_PAWS:   return "paws";
     case APP_TIER_CLAW:   return "claw";
     case APP_TIER_KITTEN: return "kitten";
+    case APP_TIER_PERSONAL: return "personal";
     default:              return "?";
     }
 }
@@ -663,6 +665,121 @@ static int launch_native(app_entry_t *app, int idx)
     return 0;
 }
 
+// ── Personal (loaded .claw) apps ────────────────────────────────────────────
+// Only one loaded module active at a time — claw_loader.h's own top comment
+// documents this as claw_loader's own constraint (same "one at a time" the
+// Lua VM already has for .meow/.hiss/.kitten), but claw_loader_load() itself
+// has no guard against being called a second time before the first module
+// is unloaded — doing so would silently orphan the first module's flash
+// mapping/RAM allocations while overwriting the same claw_slot partition
+// out from under it. Enforced here instead, at the one call site that can
+// actually launch a personal app.
+static claw_loaded_module_t s_personal_loaded;
+// Synthetic — wraps s_personal_loaded's init/deinit function pointers so
+// native_task()/app_manager_stop() can treat a personal app exactly like a
+// pre-linked one (both dispatch through nothing but ctx->mod->init/deinit).
+// Every other field is irrelevant on this path: nothing downstream of
+// launch_personal() inspects magic/abi_version/version/catcalls/etc. for a
+// module reached this way, only for one found via purr_kernel_get_module().
+static purr_module_header_t s_personal_hdr;
+// s_apps[] index currently holding the loaded module, -1 if none — lets
+// app_manager_stop() know whether ITS app is the one to unload, and lets a
+// second launch attempt (a different personal app, or the same one again
+// while state is still transitioning) be refused cleanly instead of
+// silently corrupting the one already running.
+static int s_personal_running_idx = -1;
+
+static int launch_personal(app_entry_t *app, int idx)
+{
+    if (purr_crash_guard_is_disabled(app->name)) {
+        app->state = APP_STATE_ERROR;
+        snprintf(app->error, sizeof(app->error), "disabled after repeated crashes");
+        ESP_LOGW(TAG, "app '%s' disabled after repeated crashes — not launching", app->name);
+        return -1;
+    }
+
+    if (s_personal_running_idx >= 0 && s_personal_running_idx != idx) {
+        app->state = APP_STATE_ERROR;
+        snprintf(app->error, sizeof(app->error), "another personal app is already running");
+        ESP_LOGW(TAG, "app '%s' not launched — '%s' (personal) is already running",
+                 app->name, s_apps[s_personal_running_idx].name);
+        return -1;
+    }
+
+    // app->path is "personal:/<username>/<appname>" — built in
+    // app_manager_scan_ex()'s personal-app block. Parsed back out here
+    // rather than kept in a second field: app_entry_t has no spare string,
+    // and every other tier already round-trips everything through `path`.
+    const char *prefix = "personal:/";
+    const char *rest = app->path + strlen(prefix);
+    const char *slash = strchr(rest, '/');
+    if (strncmp(app->path, prefix, strlen(prefix)) != 0 || !slash) {
+        app->state = APP_STATE_ERROR;
+        snprintf(app->error, sizeof(app->error), "malformed personal path");
+        ESP_LOGE(TAG, "app '%s' has a malformed personal path: %s", app->name, app->path);
+        return -1;
+    }
+    char username[USER_MGR_USERNAME_MAX + 1];
+    size_t ulen = (size_t)(slash - rest);
+    if (ulen >= sizeof(username)) ulen = sizeof(username) - 1;
+    memcpy(username, rest, ulen);
+    username[ulen] = '\0';
+    const char *appname = slash + 1;
+
+    if (!claw_loader_personal_load(username, appname, &s_personal_loaded)) {
+        app->state = APP_STATE_ERROR;
+        snprintf(app->error, sizeof(app->error), "load failed");
+        ESP_LOGW(TAG, "app '%s' (personal) failed to load", app->name);
+        return -1;
+    }
+
+    memset(&s_personal_hdr, 0, sizeof(s_personal_hdr));
+    s_personal_hdr.module_type = PURR_MOD_APP;
+    strncpy(s_personal_hdr.name, app->name, sizeof(s_personal_hdr.name) - 1);
+    s_personal_hdr.init   = s_personal_loaded.init;
+    s_personal_hdr.deinit = s_personal_loaded.deinit;
+
+    app_task_ctx_t *ctx = &s_ctxs[idx];
+    ctx->app  = app;
+    ctx->mod  = &s_personal_hdr;
+    ctx->done = xSemaphoreCreateBinary();
+    if (!ctx->done) {
+        ESP_LOGE(TAG, "xSemaphoreCreateBinary failed for '%s' — out of memory", app->name);
+        claw_loader_unload(&s_personal_loaded);
+        report_launch_oom(app);
+        return -1;
+    }
+
+    app->mem_free_at_launch = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "launch .personal: %s (%s) — free heap: internal=%u largest_internal_block=%u",
+             app->name, app->path,
+             (unsigned)app->mem_free_at_launch,
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+    // Same PSRAM-backed-stack treatment as every non-static-stack native
+    // app (see launch_native()'s matching comment) — nothing about a
+    // personal app's own init() touches flash/NVS directly (it can't: the
+    // import table is the only host code it can reach at all, and
+    // purr_kernel_uptime_ms() does no such I/O), so it doesn't need the
+    // static-stack exception settings/fileman/milkbar require.
+    ctx->static_stack = false;
+    uint32_t stack = 16384;   // same as CLAW-tier native apps — see launch_native()'s matching comment
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(native_task, app->name, stack, ctx, 4, &ctx->task, 0, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "xTaskCreateWithCaps failed for '%s' (stack=%u)", app->name, (unsigned)stack);
+        report_launch_oom(app);
+        vSemaphoreDelete(ctx->done);
+        ctx->done = NULL;
+        claw_loader_unload(&s_personal_loaded);
+        return -1;
+    }
+
+    s_personal_running_idx = idx;
+    purr_crash_guard_mark_start(app->name);
+    app->state = APP_STATE_RUNNING;
+    return 0;
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 int app_manager_scan_ex(bool include_sd)
@@ -724,6 +841,42 @@ int app_manager_scan_ex(bool include_sd)
         scan_dir(s_scan_paths[i]);
     }
 
+    // Personal apps — per-user loaded (.claw) apps living outside any
+    // flash/SD apps/ directory, at /sdcard/personal/<username>/*.claw (see
+    // claw_loader.h's "Personal-space storage" section). Only scanned for
+    // whoever is CURRENTLY LOGGED IN — no cross-user browsing at this
+    // layer (that's a milkbar/remote-app-manager concern, not app_manager's:
+    // "the ability to add apps from the server ... move that into a
+    // personal space under their user"). Same include_sd gate as the
+    // filesystem scan above — this is SD too, same recovery-boot hazard.
+    if (include_sd && user_mgr_is_logged_in()) {
+        const char *username = user_mgr_current_user();
+        int n_personal = claw_loader_personal_count(username);
+        for (int i = 0; i < n_personal && s_app_count < MAX_APPS; i++) {
+            char appname[48];
+            if (!claw_loader_personal_at(username, i, appname, sizeof(appname))) continue;
+
+            // Same shadowing rule scan_dir() already applies between flash
+            // and SD — a personal app never overrides an existing entry of
+            // the same display name, it's just skipped (ambiguous which one
+            // a tap should mean, and a system/SD app is more likely to be
+            // the one the user expects).
+            if (find_app_slot_by_name(appname) >= 0) {
+                ESP_LOGW(TAG, "personal app '%s' shadowed by an existing entry — skipping", appname);
+                continue;
+            }
+
+            app_entry_t *app = &s_apps[s_app_count++];
+            memset(app, 0, sizeof(*app));
+            strncpy(app->name, appname, sizeof(app->name) - 1);
+            snprintf(app->path, sizeof(app->path), "personal:/%s/%s", username, appname);
+            app->tier  = APP_TIER_PERSONAL;
+            app->state = APP_STATE_IDLE;
+
+            ESP_LOGI(TAG, "found [personal] %s (user=%s)", app->name, username);
+        }
+    }
+
     ESP_LOGI(TAG, "scan complete: %d apps found", s_app_count);
     return s_app_count;
 }
@@ -747,6 +900,7 @@ int app_manager_launch_path(const char *path)
             if (app->state == APP_STATE_RUNNING) return 0;
             if (app->tier == APP_TIER_MEOW || app->tier == APP_TIER_HISS ||
                 app->tier == APP_TIER_KITTEN) return launch_meow(app, i);
+            if (app->tier == APP_TIER_PERSONAL) return launch_personal(app, i);
             return launch_native(app, i);
         }
     }
@@ -768,6 +922,7 @@ int app_manager_launch_by_name(const char *name)
             if (app->state == APP_STATE_RUNNING) return 0;
             if (app->tier == APP_TIER_MEOW || app->tier == APP_TIER_HISS ||
                 app->tier == APP_TIER_KITTEN) return launch_meow(app, i);
+            if (app->tier == APP_TIER_PERSONAL) return launch_personal(app, i);
             return launch_native(app, i);
         }
     }
@@ -826,6 +981,16 @@ void app_manager_stop(int idx)
     if (ctx->mod && ctx->mod->deinit) {
         purr_kernel_ui_breadcrumb("appstop:deinit");
         ctx->mod->deinit();
+    }
+
+    // Personal (loaded .claw) app: deinit() above just ran the module's own
+    // claw_personal_deinit() — now safe to unmap its flash mapping and free
+    // its RAM copies (claw_loader_unload() must not run before deinit() has
+    // had its chance to finish using them). Matches this file's own
+    // s_personal_running_idx comment on launch_personal().
+    if (idx == s_personal_running_idx) {
+        claw_loader_unload(&s_personal_loaded);
+        s_personal_running_idx = -1;
     }
 
     // Fallback window cleanup: a native app's own deinit() (e.g.
