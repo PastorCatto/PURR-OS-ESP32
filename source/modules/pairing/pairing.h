@@ -119,6 +119,74 @@ bool pairing_get_home_base(uint8_t out_mac[6]);      // false if none set
 bool pairing_is_home_base(const uint8_t mac[6]);
 void pairing_clear_home_base(void);
 
+// ── Remote login ─────────────────────────────────────────────────────────
+// Logging in as a specific user_mgr account on a PAIRED device — separate
+// from (and layered on top of) the device-level trust above. Two paths:
+//
+//   Phase B (rare — first time this device asks to act as `username` on a
+//   given paired server): pairing_request_user_access() sends the
+//   password (protected under the pairing.h Phase A shared secret, never
+//   sent in reusable/replayable form — see pairing_module.c's own doc
+//   comment for the exact construction) and returns whether it was
+//   accepted; if so, a human on the SERVER must then approve/deny via
+//   pairing_get_pending_user_request()/pairing_confirm_user_access()/
+//   pairing_reject_user_access() — poll pairing_poll_user_access() from
+//   the CLIENT side until it reports something other than PENDING, then
+//   call pairing_register_user_key() to actually receive a credential.
+//
+//   Phase C (every later login as the same user on the same server):
+//   pairing_verify_user() alone — proves possession of the key Phase B
+//   registered via challenge-response (the key itself is never resent),
+//   and on success does the user_mgr_create_remote()+set_logged_in()
+//   bookkeeping itself. Returns false (with no side effects) if this
+//   device never completed Phase B for that (mac, username) pair — the
+//   caller's fallback is simply to start Phase B.
+//
+// A server-held key that goes unused for a long stretch is discarded
+// (checked lazily, next time it would be used to answer a Phase C
+// challenge) — see pairing_module.c's own USERAUTH_KEY_EXPIRY_S comment.
+//
+// Every function below is a blocking proximity_rpc_call() (one or more) —
+// same "never call from cupcake_task or proximity_task" rule
+// proximity_rpc.h's own top comment documents. Call these from a
+// dedicated background task, same convention every existing
+// proximity_rpc_call() site in this codebase already follows.
+
+typedef enum {
+    PAIRING_USERAUTH_NONE     = 0,   // no matching request on the server (never sent, denied, or expired)
+    PAIRING_USERAUTH_PENDING  = 1,   // password accepted, waiting on the server's own human to approve/deny
+    PAIRING_USERAUTH_APPROVED = 2,   // approved — call pairing_register_user_key() next
+} pairing_user_access_status_t;
+
+// ── Server side (this device owns the user_mgr account being requested) ──
+// Poll pairing_get_pending_user_request() (e.g. from the same background
+// task/timer a UI already uses to refresh other pairing state), then
+// render a confirm screen and call one of the two below.
+bool pairing_get_pending_user_request(char *out_username, size_t username_sz,
+                                       char *out_device_name, size_t device_name_sz);
+void pairing_confirm_user_access(void);   // local human approved
+void pairing_reject_user_access(void);    // local human declined
+
+// ── Client side ────────────────────────────────────────────────────────
+// Phase B, step 1: verify the password and (if correct) put the request in
+// front of the server's human. Returns false immediately for a wrong
+// password OR if another request is already pending anywhere on the
+// server — true means "wait and poll", not "approved".
+bool pairing_request_user_access(const uint8_t mac[6], const char *username, const char *password);
+// Phase B, step 2: poll until this stops returning PENDING.
+pairing_user_access_status_t pairing_poll_user_access(const uint8_t mac[6], const char *username);
+// Phase B, step 3: once APPROVED, actually receive a credential. Persists
+// it locally (this device's own copy, for pairing_verify_user() below) —
+// nothing further needed after this returns true.
+bool pairing_register_user_key(const uint8_t mac[6], const char *username);
+
+// Phase C: the ordinary "log in again" path. False if this device never
+// completed Phase B for (mac, username) — caller should fall back to
+// pairing_request_user_access(). On true, this device is now
+// user_mgr_current_user() == username (user_mgr_set_logged_in() already
+// called).
+bool pairing_verify_user(const uint8_t mac[6], const char *username);
+
 #ifdef __cplusplus
 }
 #endif

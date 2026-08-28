@@ -857,6 +857,19 @@ void app_main(void)
     extern void pairing_selftest_ecdh(void);
     (void)pairing_selftest_ecdh;
 
+    // pairing_selftest_userauth() call removed — PASSED on real hardware:
+    // "salt ok=1 len=16", "request ok=1 status=1 (pending)", "state after
+    // confirm = 2 (APPROVED)", "register ok=1 status=1", "challenge ok=1
+    // len=16", "verify (correct proof) ok=1 status=1", "wrong-proof
+    // correctly rejected = 1", "SELFTEST PASS". Confirms Phase B/C's RPC
+    // handlers (remote-login work) — SALT/REQUEST/confirm/REGISTER then
+    // CHALLENGE/VERIFY, both the success path and the negative (wrong
+    // proof rejected) case — all work correctly, exercised directly
+    // against a fake paired-device secret + a real throwaway user_mgr
+    // account. Boot log otherwise clean (no error/assert/panic lines).
+    extern void pairing_selftest_userauth(void);
+    (void)pairing_selftest_userauth;
+
     purr_kernel_set_boot_ready(true);
 
     // ── Phase 2: SD extras ───────────────────────────────────────────────────
