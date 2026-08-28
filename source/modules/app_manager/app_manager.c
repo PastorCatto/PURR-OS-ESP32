@@ -194,6 +194,14 @@ static StackType_t  s_static_stack_settings[STATIC_STACK_SIZE];
 static StaticTask_t s_static_tcb_settings;
 static StackType_t  s_static_stack_fileman[STATIC_STACK_SIZE];
 static StaticTask_t s_static_tcb_fileman;
+// milkbar joined this list once milkbar_app_init() started calling
+// purr_app_config_read() directly (loading /config/milkbar.cfg's remembered
+// device selection) — confirmed live crash without this: "assert failed:
+// spi_flash_disable_interrupts_caches_and_other_cpu ...
+// (esp_task_stack_is_sane_cache_disabled())", same class this comment
+// already describes for settings/fileman, just newly true for a third app.
+static StackType_t  s_static_stack_milkbar[STATIC_STACK_SIZE];
+static StaticTask_t s_static_tcb_milkbar;
 
 // Every out-of-memory launch failure below funnels through here so the user
 // actually finds out why nothing happened, instead of a silent no-op —
@@ -603,16 +611,20 @@ static int launch_native(app_entry_t *app, int idx)
     // static stack buffer instead (declared above) — fixed at link time, so
     // it can never be starved out by runtime fragmentation.
     ctx->static_stack = (strcmp(app->name, "settings") == 0) ||
-                        (strcmp(app->name, "fileman")  == 0);
+                        (strcmp(app->name, "fileman")  == 0) ||
+                        (strcmp(app->name, "milkbar")  == 0);
     if (ctx->static_stack) {
         StackType_t  *stack_buf;
         StaticTask_t *tcb_buf;
         if (strcmp(app->name, "settings") == 0) {
             stack_buf = s_static_stack_settings;
             tcb_buf   = &s_static_tcb_settings;
-        } else {
+        } else if (strcmp(app->name, "fileman") == 0) {
             stack_buf = s_static_stack_fileman;
             tcb_buf   = &s_static_tcb_fileman;
+        } else {
+            stack_buf = s_static_stack_milkbar;
+            tcb_buf   = &s_static_tcb_milkbar;
         }
         // Priority 4 — see the meow_task creation site's comment above.
         // Pinned to core 0 alongside every other app task — see that same
