@@ -845,6 +845,18 @@ void app_main(void)
     extern void claw_loader_selftest_run4(void);
     (void)claw_loader_selftest_run4;
 
+    // pairing_selftest_ecdh() call removed — PASSED on real hardware:
+    // "selftest: keygen A=1 B=1", "shared secrets match = 1", "pairing
+    // code A=5629 B=5629 match=1", "SELFTEST PASS". Confirms the ECDH math
+    // itself (pairing_module.c's Phase A of the remote-login work) is
+    // self-consistent — both simulated sides land on the identical shared
+    // secret and the identical derived pairing code. A real two-device
+    // handshake still needs a second physical board to verify end-to-end;
+    // this only proves the crypto, not the wire protocol between two real
+    // devices. Boot log otherwise clean (no error/assert/panic lines).
+    extern void pairing_selftest_ecdh(void);
+    (void)pairing_selftest_ecdh;
+
     purr_kernel_set_boot_ready(true);
 
     // ── Phase 2: SD extras ───────────────────────────────────────────────────

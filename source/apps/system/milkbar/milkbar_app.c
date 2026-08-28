@@ -549,13 +549,18 @@ static void on_pair_cancel_click(purr_wid_t w, purr_event_t e, void *user) {
     close_pair_dialog();
 }
 
+// No pairing_get_pending_code() call on this (initiator) side — as of the
+// ECDH handshake upgrade (pairing_module.c), the real code isn't derivable
+// until the responder's public key arrives in PAIRING_MSG_ACCEPT, which is
+// also the exact moment pairing_on_frame() flips state straight to PAIRED.
+// There's no meaningful window left to show it here before this dialog
+// auto-closes on refresh_nearby()'s very next poll. The code the human
+// actually needs to check is on the RESPONDER's confirm screen (real today
+// on oled_ui_module.c's Heltec-companion flow) — that's where the genuine
+// integrity check happens.
 static void open_pair_dialog(const char *peer_name) {
-    char code[8];
-    pairing_get_pending_code(code, sizeof(code));
-
     char msg[80];
-    snprintf(msg, sizeof(msg), "Pairing with %s\nCode: %s\nWaiting for confirmation...",
-             peer_name, code);
+    snprintf(msg, sizeof(msg), "Pairing with %s\nWaiting for confirmation...", peer_name);
 
     s_pair_win = purr_win_create("Pairing");
     s_pair_win_lbl = purr_win_label(s_pair_win, msg);
