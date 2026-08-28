@@ -239,10 +239,39 @@ static void win_del_async_cb(void *obj) {
 // is the real fix — it exempts this object from its parent's layout engine
 // so manual position/align actually takes effect.
 //
-// Also sized up ("way bigger" was the direct ask) — 20px was genuinely too
-// small a touch target on this panel; 40px is close to the usual ~40-44px
-// minimum-touch-target guidance.
-#define WIN_CLOSE_BTN_SZ 40
+// Sized up once already ("way bigger" was the direct ask) — 20px was
+// genuinely too small a touch target; 40px is close to the usual ~40-44px
+// minimum-touch-target guidance. Height shrunk back down a little since —
+// still comfortably in that range, and now matches WIN_TITLE_BAR_H below, so
+// the button reads as sized for the title bar it sits in front of rather
+// than an arbitrary square.
+#define WIN_CLOSE_BTN_W 40
+#define WIN_CLOSE_BTN_H 30
+
+// Per-window XP-style title bar: hidden by default (this backend's own
+// "no top bar, just the button" decision stands — a permanently-visible bar
+// eats real space on a 320x240 panel), revealed by swiping down from the
+// window's top edge and dismissed again with a tap on the bar itself. Same
+// press/release-tracked swipe technique systemui_xp.c's taskbar auto-hide
+// uses (build_reveal_strip()/reveal_strip_cb()) rather than LVGL's own
+// LV_EVENT_GESTURE — mochi_springboard.c's swipe paging already found that
+// route unreliable on this hardware once anything under the press has its
+// own click handling, which content inside a window always does.
+//
+// Windows-chrome colours, not the iOS-7 app-content theme (theme_cell_bg()
+// etc.) — matches the close button's own already-established precedent of
+// being styled as OS chrome, not themed app content.
+#define WIN_TITLE_BAR_H          30
+#define WIN_TITLE_REVEAL_ZONE_H  12
+#define WIN_TITLE_REVEAL_MIN_PX  20   // matches systemui_xp.c's REVEAL_SWIPE_MIN_PX
+
+static lv_obj_t   *s_close_btns[MAX_WINS];
+static lv_obj_t   *s_title_bars[MAX_WINS];
+static lv_obj_t   *s_title_reveal_zones[MAX_WINS];
+// Single shared touch-start tracker, not per-window — input is single-touch,
+// so only one swipe can ever be in progress system-wide at a time. Same
+// choice systemui_xp.c's own s_reveal_touch_y0 already makes.
+static lv_coord_t  s_title_touch_y0;
 
 static void win_close_click_cb(lv_event_t *e) {
     purr_win_t h = (purr_win_t)(intptr_t)lv_event_get_user_data(e);
@@ -257,11 +286,57 @@ static void win_close_click_cb(lv_event_t *e) {
     cheetah_home_go_home();
 }
 
+// Shows the title bar and hides its reveal zone (nothing left to catch a
+// swipe for while the real bar is already up), or the reverse. visible=false
+// is also this function's own "reset to default" call from tb_win_create().
+static void set_title_bar_visible(purr_win_t h, bool visible) {
+    if (h < 1 || h > MAX_WINS) return;
+    lv_obj_t *bar  = s_title_bars[h - 1];
+    lv_obj_t *zone = s_title_reveal_zones[h - 1];
+    if (!bar) return;
+    if (visible) {
+        lv_obj_clear_flag(bar, LV_OBJ_FLAG_HIDDEN);
+        if (zone) lv_obj_add_flag(zone, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+        if (zone) lv_obj_clear_flag(zone, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void title_bar_tap_cb(lv_event_t *e) {
+    purr_win_t h = (purr_win_t)(intptr_t)lv_event_get_user_data(e);
+    set_title_bar_visible(h, false);
+}
+
+static void title_reveal_zone_cb(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    purr_win_t h = (purr_win_t)(intptr_t)lv_event_get_user_data(e);
+    if (h < 1 || h > MAX_WINS) return;
+
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev || lv_indev_get_type(indev) != LV_INDEV_TYPE_POINTER) return;
+    lv_point_t pt;
+    lv_indev_get_point(indev, &pt);
+
+    if (code == LV_EVENT_PRESSED) {
+        s_title_touch_y0 = pt.y;
+    } else if (code == LV_EVENT_RELEASED) {
+        // Downward drag: y INCREASES. The zone sits at the very top edge, so
+        // any real press here already starts near s_title_touch_y0 — same
+        // small-threshold reasoning as systemui_xp.c's own swipe check.
+        if ((lv_coord_t)(pt.y - s_title_touch_y0) >= WIN_TITLE_REVEAL_MIN_PX) {
+            set_title_bar_visible(h, true);
+        }
+    }
+}
+
 static purr_win_t tb_win_create(const char *title) {
     lv_obj_t *scr = lv_scr_act();
-    // header_height 0 — no title bar. Back/Home/Recents are the system UI's
-    // nav bar, system-wide, so a per-window button row would be redundant and
-    // would collide with the status bar's drag hotzone at the top.
+    // header_height 0 — no BUILT-IN title bar. Back/Home/Recents are the
+    // system UI's nav bar, system-wide, so a per-window button row would be
+    // redundant and would collide with the status bar's drag hotzone at the
+    // top. The swipe-reveal title bar built below is this backend's own
+    // addition, not lv_win's.
     lv_obj_t *win = lv_win_create(scr, 0);
 
     purr_win_t handle = alloc_win(win);
@@ -273,7 +348,7 @@ static purr_win_t tb_win_create(const char *title) {
     lv_obj_t *close_btn = lv_obj_create(win);
     lv_obj_remove_style_all(close_btn);
     lv_obj_add_flag(close_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);   // exempt from win's own COLUMN flex — see comment above
-    lv_obj_set_size(close_btn, WIN_CLOSE_BTN_SZ, WIN_CLOSE_BTN_SZ);
+    lv_obj_set_size(close_btn, WIN_CLOSE_BTN_W, WIN_CLOSE_BTN_H);
     lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -2, 2);
     lv_obj_set_style_radius(close_btn, 3, 0);
     lv_obj_set_style_bg_color(close_btn, lv_color_hex(0xE81123), 0);   // Windows-close-button red
@@ -286,6 +361,59 @@ static purr_win_t tb_win_create(const char *title) {
     lv_obj_set_style_text_color(close_lbl, lv_color_white(), 0);
     lv_obj_center(close_lbl);
     lv_obj_clear_flag(close_lbl, LV_OBJ_FLAG_CLICKABLE);
+    if (handle >= 1 && handle <= MAX_WINS) s_close_btns[handle - 1] = close_btn;
+
+    // Title bar: full width, docked at the very top, starts hidden. Text is
+    // left-inset and width-capped to stop short of the close button (which
+    // stays independently visible/clickable at all times — this bar is
+    // purely a "what app is this" affordance, not where Close lives) so a
+    // long title ellipsizes instead of running underneath it.
+    lv_obj_t *title_bar = lv_obj_create(win);
+    lv_obj_remove_style_all(title_bar);
+    lv_obj_add_flag(title_bar, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_size(title_bar, cheetah_hal_width(), WIN_TITLE_BAR_H);
+    lv_obj_set_pos(title_bar, 0, 0);
+    lv_obj_set_style_bg_color(title_bar, lv_color_hex(0x3A6EA5), 0);        // XP Luna title-bar blue
+    lv_obj_set_style_bg_grad_color(title_bar, lv_color_hex(0x6D9EEB), 0);
+    lv_obj_set_style_bg_grad_dir(title_bar, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(title_bar, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(title_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(title_bar, LV_OBJ_FLAG_CLICKABLE);    // tap to dismiss
+    lv_obj_add_flag(title_bar, LV_OBJ_FLAG_HIDDEN);       // hidden until swiped down
+    lv_obj_add_event_cb(title_bar, title_bar_tap_cb, LV_EVENT_CLICKED, (void *)(intptr_t)handle);
+    lv_obj_t *title_lbl = lv_label_create(title_bar);
+    lv_label_set_text(title_lbl, title ? title : "");
+    lv_obj_set_style_text_color(title_lbl, lv_color_white(), 0);
+    lv_label_set_long_mode(title_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(title_lbl, (lv_coord_t)(cheetah_hal_width() - WIN_CLOSE_BTN_W - 16));
+    lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 6, 0);
+    lv_obj_clear_flag(title_lbl, LV_OBJ_FLAG_CLICKABLE);
+    if (handle >= 1 && handle <= MAX_WINS) s_title_bars[handle - 1] = title_bar;
+
+    // Reveal zone: an invisible touch-catcher for the swipe when the bar is
+    // hidden (lv_win's own content, not this object, would otherwise take
+    // the press first and swallow it as a scroll/click). Deliberately
+    // stops short of the close button's own rectangle so the two objects'
+    // hit-areas never overlap — no z-order ambiguity needed to keep both
+    // independently reachable.
+    lv_obj_t *reveal_zone = lv_obj_create(win);
+    lv_obj_remove_style_all(reveal_zone);
+    lv_obj_add_flag(reveal_zone, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_set_size(reveal_zone, (lv_coord_t)(cheetah_hal_width() - WIN_CLOSE_BTN_W - 6), WIN_TITLE_REVEAL_ZONE_H);
+    lv_obj_set_pos(reveal_zone, 0, 0);
+    lv_obj_set_style_bg_opa(reveal_zone, LV_OPA_TRANSP, 0);
+    lv_obj_clear_flag(reveal_zone, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(reveal_zone, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(reveal_zone, title_reveal_zone_cb, LV_EVENT_PRESSED,  (void *)(intptr_t)handle);
+    lv_obj_add_event_cb(reveal_zone, title_reveal_zone_cb, LV_EVENT_RELEASED, (void *)(intptr_t)handle);
+    if (handle >= 1 && handle <= MAX_WINS) s_title_reveal_zones[handle - 1] = reveal_zone;
+
+    // Fixes z-order once, for the window's whole lifetime: close_btn must
+    // stay clickable in front of the title bar whenever both occupy the top
+    // strip simultaneously. Nothing else in this file reorders siblings
+    // within a window afterward, so this doesn't need repeating on every
+    // show/hide toggle above.
+    lv_obj_move_foreground(close_btn);
 
     lv_obj_t *content = lv_win_get_content(win);
     lv_obj_set_style_pad_all(content, 6, 0);
@@ -323,6 +451,12 @@ static void tb_win_destroy(purr_win_t h) {
         group_close(h);
         s_close_hooks[h - 1].cb = NULL;
         s_close_hooks[h - 1].user = NULL;
+        // Objects themselves are freed by win_del_async_cb's lv_obj_del(w)
+        // above (recursive child delete) — just dropping the now-stale
+        // pointers so a later handle reuse can't read through them.
+        s_close_btns[h - 1]        = NULL;
+        s_title_bars[h - 1]        = NULL;
+        s_title_reveal_zones[h - 1] = NULL;
     }
     win_stack_remove(h);
     free_win(h);
