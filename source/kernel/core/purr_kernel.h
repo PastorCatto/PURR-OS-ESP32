@@ -400,6 +400,36 @@ void     purr_kernel_set_accent_color(uint32_t rgb);
 bool     purr_kernel_dark_mode_enabled(void);
 void     purr_kernel_set_dark_mode(bool v);
 
+// ── Per-app config (LittleFS, /config) ────────────────────────────────────
+// One file per app, holding whatever that app's own user data is — the one
+// genuinely mutable partition in an otherwise semi-immutable image (app
+// code and baked-in assets are read-only at runtime; NVS is kernel/module
+// settings, a different concern from an app's own data). Mounted at kernel
+// boot, before any module's init() runs — see mount_app_config_vfs() in
+// each device's own kernel_*_boot.c (currently just kernel_tdp_boot.c;
+// other devices fall back to the ESP_ERR_NOT_FOUND path below until they
+// grow their own app_cfg partition + mount call).
+//
+// Whole-file semantics, not a key/value store: an app owns the layout of
+// its own config file completely (a config format is that app's own
+// concern, not this API's), and every write REPLACES the file wholesale —
+// there is no append or partial-update here. `name` becomes /config/
+// <name>.cfg; keep it a plain app/module name (no path separators — this
+// does not sanitize one), same names app_manager.c's own app_entry_t::name
+// already uses.
+
+// Reads app `name`'s config file into buf, up to buf_cap bytes. Returns the
+// number of bytes actually read; 0 if the file doesn't exist yet (a new
+// app's first read — not an error, callers should apply their own
+// defaults), or -1 on a real I/O error (VFS not mounted, buf_cap too small
+// for what's stored, etc.).
+int  purr_app_config_read(const char *name, void *buf, size_t buf_cap);
+
+// Overwrites app `name`'s config file wholesale with `len` bytes from buf,
+// creating it if it doesn't exist yet. Returns false on any I/O error
+// (including the VFS simply not being mounted on this device).
+bool purr_app_config_write(const char *name, const void *buf, size_t len);
+
 // Screen idle timeout, minutes — off by default until Settings loads the
 // persisted value (same "purr_settings" NVS namespace, synced on
 // settings' own init()), defaulting to 1 minute in the meantime. Only

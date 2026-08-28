@@ -1426,6 +1426,40 @@ bool     purr_kernel_ui_effects_enabled(void) { return s_ui_effects; }
 uint32_t purr_kernel_accent_color(void)       { return s_accent_color; }
 bool     purr_kernel_dark_mode_enabled(void)  { return s_dark_mode; }
 
+// ── Per-app config (LittleFS, /config) ────────────────────────────────────
+// See purr_kernel.h's own doc comment for the model (whole-file, one file
+// per app, mounted before any module runs). Plain stdio against the VFS
+// path — LittleFS is mounted as a normal POSIX filesystem at /config the
+// same way SPIFFS already is at /flash, so this needs nothing LittleFS-
+// specific beyond the mount call itself in each device's kernel_*_boot.c.
+int purr_app_config_read(const char *name, void *buf, size_t buf_cap)
+{
+    if (!name || !name[0] || !buf || buf_cap == 0) return -1;
+    char path[64];
+    int n = snprintf(path, sizeof(path), "/config/%s.cfg", name);
+    if (n < 0 || n >= (int)sizeof(path)) return -1;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;   // no config saved yet — not an error, see doc comment
+    size_t got = fread(buf, 1, buf_cap, f);
+    fclose(f);
+    return (int)got;
+}
+
+bool purr_app_config_write(const char *name, const void *buf, size_t len)
+{
+    if (!name || !name[0] || (!buf && len > 0)) return false;
+    char path[64];
+    int n = snprintf(path, sizeof(path), "/config/%s.cfg", name);
+    if (n < 0 || n >= (int)sizeof(path)) return false;
+
+    FILE *f = fopen(path, "wb");   // "wb" truncates — whole-file replace, see doc comment
+    if (!f) return false;
+    size_t wrote = len > 0 ? fwrite(buf, 1, len, f) : 0;
+    fclose(f);
+    return wrote == len;
+}
+
 // Load the kernel's own persisted settings, BEFORE any module initialises.
 // Forward-declared up at purr_kernel_load_static_modules(), which calls it.
 //

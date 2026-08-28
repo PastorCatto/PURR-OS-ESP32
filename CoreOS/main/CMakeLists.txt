@@ -138,6 +138,12 @@ idf_component_register(
         freertos
         nvs_flash
         spiffs
+        # joltwallet__littlefs — mounts the app_cfg partition (see
+        # partitions_16mb_ota.csv), the one genuinely mutable partition in an
+        # otherwise semi-immutable image. See mount_app_config_vfs() in this
+        # device's own kernel_tdp_boot.c and purr_kernel_app_config_read()/
+        # _write() in purr_kernel.h.
+        joltwallet__littlefs
         fatfs
         sdmmc
         # esp_app_format — for esp_app_get_description() in purr_crash_guard.c,

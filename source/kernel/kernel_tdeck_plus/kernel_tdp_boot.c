@@ -17,6 +17,7 @@
 #include "purr_crash_guard.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
+#include "esp_littlefs.h"
 #include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
@@ -116,6 +117,49 @@ static void mount_flash_vfs(void)
         esp_spiffs_info(NULL, &total, &used);
         ESP_LOGI(TAG, "flash VFS: %u KB / %u KB",
                  (unsigned)(used / 1024), (unsigned)(total / 1024));
+    }
+}
+
+// ── App config VFS (LittleFS) ────────────────────────────────────────────
+// The one genuinely mutable partition in an otherwise semi-immutable image
+// — see partitions_16mb_ota.csv's own app_cfg comment. Mounted here, at the
+// same kernel-boot point as mount_flash_vfs() above and for the same
+// reason: purr_kernel_app_config_read()/_write() (purr_kernel.h) need this
+// ready before ANY module's init() runs, since a module may want to read
+// its own config from its own init(). format_if_mount_failed=true is what
+// makes a genuinely blank partition (first boot, or a full chip erase) a
+// normal, self-healing case rather than a boot-time failure — LittleFS
+// formats it in place the first time no valid filesystem is found there.
+static void mount_app_config_vfs(void)
+{
+    esp_vfs_littlefs_conf_t conf = {
+        .base_path              = "/config",
+        .partition_label        = "app_cfg",
+        .format_if_mount_failed = true,
+    };
+    esp_err_t ret = esp_vfs_littlefs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "app config VFS mount failed (%s)", esp_err_to_name(ret));
+    } else {
+        size_t total = 0, used = 0;
+        esp_littlefs_info("app_cfg", &total, &used);
+        ESP_LOGI(TAG, "app config VFS: %u KB / %u KB",
+                 (unsigned)(used / 1024), (unsigned)(total / 1024));
+
+        // Real round-trip self-test, not just "did the mount call return
+        // ESP_OK" — this is the first boot that ever exercises
+        // purr_app_config_read()/_write() against real hardware, so prove
+        // the actual read/write path works rather than assuming a clean
+        // mount implies it. Uses a throwaway app name so it never collides
+        // with a real one; leaves the file behind (harmless, ~30 bytes) —
+        // deleting it would need unlink(), not worth adding for a
+        // diagnostic that's fine to just overwrite on every boot.
+        const char test_msg[] = "purr_app_config self-test";
+        char readback[64] = {0};
+        bool wrote = purr_app_config_write("__selftest", test_msg, sizeof(test_msg));
+        int  got   = wrote ? purr_app_config_read("__selftest", readback, sizeof(readback)) : -1;
+        bool ok    = wrote && got == (int)sizeof(test_msg) && memcmp(readback, test_msg, sizeof(test_msg)) == 0;
+        ESP_LOGI(TAG, "app config self-test: %s", ok ? "PASS" : "FAIL");
     }
 }
 
@@ -401,6 +445,7 @@ void app_main(void)
     esp_aes_release_hardware();
 
     mount_flash_vfs();
+    mount_app_config_vfs();
 
     // WiFi station mode: bring up esp_netif/esp_event/esp_wifi once here —
     // not started/connected yet, just initialized so wifi_mgr.c (a

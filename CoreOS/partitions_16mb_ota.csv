@@ -13,12 +13,34 @@
 # at generate time, not by inspection — this comment exists so the next
 # person doing this arithmetic doesn't repeat it.
 #
-# SPIFFS offset: 0xD80000  size: 0x280000 (2.5 MB) — NOT the same offset as
+# SPIFFS offset: 0xD80000  size: 0x180000 (1.5 MB) — NOT the same offset as
 # partitions_16mb.csv's factory-only layout (0xD90000/0x270000): an exact
 # equal-size, 0x10000-aligned split of the two OTA slots doesn't land on that
 # offset (0xD90000 - 0x20000 isn't evenly divisible into two aligned halves).
-# SPIFFS ends up very slightly LARGER here, not smaller. Any device moving to
-# this table must update its device.pcat spiffs_offset to "0xD80000".
+# Any device moving to this table must update its device.pcat spiffs_offset
+# to "0xD80000".
+#
+# Shrunk from 0x280000 (2.5 MB) to make room for app_cfg below, not because
+# it was running out — purrstrap's own spiffs image build defaults to a
+# fixed 512 KB (build_flash_image()'s spiffs_size_kb) regardless of the
+# partition's declared size, and every build this size has actually produced
+# has landed at exactly that. 1.5 MB is still 3x that measured usage,
+# comfortable headroom for baked-in assets to grow into.
+#
+# app_cfg offset: 0xF00000  size: 0x100000 (1 MB) — LittleFS-mounted, the one
+# genuinely MUTABLE partition in an otherwise semi-immutable image: one
+# config file per app, holding its own user data. Everything else here is
+# either read-only at runtime (app code, baked-in assets) or NVS (kernel/
+# module settings, a different concern). See purr_kernel_app_config_read()/
+# _write() in purr_kernel.h. 1 MB is generous for text-sized per-app config
+# — sized for headroom, not because anything needs it yet.
+#
+# SubType "spiffs" below is the partition table's own label, not what
+# actually mounts there — esp_vfs_littlefs_register() finds a partition by
+# NAME (partition_label), not by this CSV's subtype keyword, so labelling it
+# "spiffs" alongside the real SPIFFS partition above is just staying inside
+# gen_esp32part.py's well-known subtype list rather than risking an
+# unrecognized-subtype rejection at generate time.
 #
 # Name,     Type, SubType,  Offset,    Size
 nvs,        data, nvs,      0x9000,    0x6000
@@ -26,4 +48,5 @@ phy_init,   data, phy,      0xF000,    0x1000
 otadata,    data, ota,      0x10000,   0x2000
 ota_0,      app,  ota_0,    0x20000,   0x6B0000
 ota_1,      app,  ota_1,    0x6D0000,  0x6B0000
-spiffs,     data, spiffs,   0xD80000,  0x280000
+spiffs,     data, spiffs,   0xD80000,  0x180000
+app_cfg,    data, spiffs,   0xF00000,  0x100000
