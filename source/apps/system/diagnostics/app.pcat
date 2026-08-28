@@ -1,0 +1,13 @@
+# apps/system/diagnostics/app.pcat
+# Merges what used to be five standalone apps (drivermgr, hwtest, services,
+# meshdiag, taskmgr) — all the same shape, a read-mostly screen over live
+# system/hardware state — into one app with five sections. See diagnostics.c's
+# file header for the full mapping.
+
+name        = "diagnostics"
+version     = "1.0.0"
+tier        = "claw"
+author      = "PURR OS"
+description = "Diagnostics: drivers, hardware I/O, core services, mesh radio, and running tasks in one place."
+
+idf_requires = "esp_common driver freertos"

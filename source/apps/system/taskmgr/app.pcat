@@ -1,9 +1,0 @@
-# apps/system/taskmgr/app.pcat
-
-name        = "taskmgr"
-version     = "1.0.0"
-tier        = "claw"
-author      = "PURR OS"
-description = "Task Manager: lists running apps and is the one deliberate place to kill one."
-
-idf_requires = "esp_common driver freertos"

@@ -36,8 +36,7 @@ theme       = "wce"
 
 [apps]
 settings    = true
-drivermgr   = true
-services    = true
+diagnostics = true
 
 [flash]
 display/ili9341  = 1
@@ -48,8 +47,7 @@ driver_manager   = 2
 wifi_mgr         = 2
 lua_runtime      = 2
 apps/settings    = 3
-apps/drivermgr   = 3
-apps/services    = 3
+apps/diagnostics = 3
 
 [pins]
 display_cs    = 15

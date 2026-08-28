@@ -36,7 +36,7 @@ settings    = true
 # about — folded into Settings' own About tab, see cyd/device.pcat's comment
 terminal    = true
 fileman     = true
-taskmgr     = true
+diagnostics = true
 
 [flash]
 display/st7789   = 1
@@ -48,7 +48,7 @@ lua_runtime      = 2
 apps/settings    = 3
 apps/terminal    = 3
 apps/fileman     = 3
-apps/taskmgr     = 3
+apps/diagnostics = 3
 
 [pins]
 display_cs    = 12

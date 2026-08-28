@@ -1,9 +1,0 @@
-# apps/system/services/app.pcat
-
-name        = "services"
-version     = "1.0.0"
-tier        = "claw"
-author      = "PURR OS"
-description = "Services: live status of core background services + memory pressure."
-
-idf_requires = "esp_common driver freertos"

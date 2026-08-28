@@ -34,11 +34,10 @@ theme       = "wce"
 
 [apps]
 # 1.69" is below medium threshold — still no full-size apps (terminal/
-# fileman/taskmgr/calculator), but settings/drivermgr/services are the new
-# stripped-down baseline across every non-T-Deck device.
+# fileman/calculator), but settings/diagnostics are the new stripped-down
+# baseline across every non-T-Deck device.
 settings    = true
-drivermgr   = true
-services    = true
+diagnostics = true
 
 [flash]
 display/st7789   = 1
@@ -49,8 +48,7 @@ driver_manager   = 2
 wifi_mgr         = 2
 lua_runtime      = 2
 apps/settings    = 3
-apps/drivermgr   = 3
-apps/services    = 3
+apps/diagnostics = 3
 
 [pins]
 display_cs    = 10

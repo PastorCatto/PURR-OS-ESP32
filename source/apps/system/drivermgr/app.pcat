@@ -1,9 +1,0 @@
-# apps/system/driver_manager/app.pcat
-
-name        = "drivermgr"
-version     = "1.0.0"
-tier        = "claw"
-author      = "PURR OS"
-description = "Driver Manager: lists scanned drivers and their OK/COMPAT/FAIL/SKIP status."
-
-idf_requires = "esp_common driver freertos"

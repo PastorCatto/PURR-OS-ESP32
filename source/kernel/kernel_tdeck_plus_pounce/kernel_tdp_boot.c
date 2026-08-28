@@ -522,11 +522,16 @@ void app_main(void)
     app_manager_scan();
 
     // T-Deck Plus Pounce is currently a Meshtastic hardware/debugging
-    // build — go straight to the diagnostics screen instead of the
-    // launcher so RSSI/node-count/kernel-log visibility doesn't require
-    // navigating anywhere first.
+    // build — go straight to Diagnostics' Mesh section instead of the
+    // launcher (or Diagnostics' own category picker) so RSSI/node-count/
+    // kernel-log visibility doesn't require navigating anywhere first.
+    // meshdiag was merged into diagnostics.c as a section — see that file's
+    // header for the full mapping and diagnostics_open_mesh()'s own comment
+    // for why this two-call sequence is safe.
     extern int app_manager_launch_by_name(const char *name);
-    app_manager_launch_by_name("meshdiag");
+    app_manager_launch_by_name("diagnostics");
+    extern void diagnostics_open_mesh(void);
+    diagnostics_open_mesh();
 
     purr_kernel_set_boot_ready(true);
 

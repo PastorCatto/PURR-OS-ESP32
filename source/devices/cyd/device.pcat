@@ -54,8 +54,7 @@ theme       = "wce"
 # compose box isn't actually typeable via touch here yet; deliberately left
 # as-is for now rather than blocked on that.
 settings    = true
-drivermgr   = true
-services    = true
+diagnostics = true
 
 [flash]
 # Priority 1 — required, kernel panics without these
@@ -69,8 +68,7 @@ wifi_mgr         = 2
 lua_runtime      = 2
 # Priority 3 — base OS apps
 apps/settings    = 3
-apps/drivermgr   = 3
-apps/services    = 3
+apps/diagnostics = 3
 
 [pins]
 display_cs    = 15

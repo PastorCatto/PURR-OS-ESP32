@@ -1,9 +1,0 @@
-# apps/system/meshdiag/app.pcat
-
-name        = "meshdiag"
-version     = "1.0.0"
-tier        = "claw"
-author      = "PURR OS"
-description = "Meshtastic hardware/debugging diagnostics: kernel log tail, radio + node stats, test-send."
-
-idf_requires = "esp_common driver freertos"

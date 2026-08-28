@@ -199,13 +199,14 @@ const lv_img_dsc_t *mochi_icon_for_app(const char *name)
         { "terminal",   &bp_icon_terminal_48   },
         { "fileman",    &bp_icon_fileman_48    },
         { "calculator", &bp_icon_calculator_48 },
-        { "hwtest",     &bp_icon_hwtest_48     },
-        { "drivermgr",  &bp_icon_drivermgr_48  },
+        // Merged app (drivermgr/hwtest/services/meshdiag/taskmgr) — see
+        // source/apps/system/diagnostics/diagnostics.c. Reuses taskmgr's old
+        // icon rather than a new asset; the other four's icons (bp_icon_hwtest_48
+        // etc.) are now unreferenced here but left in the generated icon set,
+        // same as any other unused asset.
+        { "diagnostics", &bp_icon_taskmgr_48   },
         { "milkbar",    &bp_icon_milkbar_48    },
         { "nearby",     &bp_icon_nearby_48     },
-        { "services",   &bp_icon_services_48   },
-        { "taskmgr",    &bp_icon_taskmgr_48    },
-        { "meshdiag",   &bp_icon_meshdiag_48   },
         { "msn",        &bp_icon_msn_48        },
         { "meshchat",   &bp_icon_messages_48   },
         { "magicmac",   &bp_icon_magicmac_48   },

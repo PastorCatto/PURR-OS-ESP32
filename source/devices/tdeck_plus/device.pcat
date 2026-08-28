@@ -171,11 +171,11 @@ settings    = true
 oobe        = true
 terminal    = true
 fileman     = true
-hwtest      = true
-drivermgr   = true
 msn         = true
-services    = true
-taskmgr     = true
+# Merges what used to be five separate apps (drivermgr, hwtest, services,
+# meshdiag, taskmgr) — see source/apps/system/diagnostics/diagnostics.c's
+# file header for the mapping.
+diagnostics = true
 nearby      = true
 # MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
 # systemui, the mesh stack and the radios before it starts, and restores them
@@ -183,7 +183,6 @@ nearby      = true
 magidos     = true
 
 milkbar     = true
-meshdiag    = true
 doom        = true
 moy         = true
 [flash]
@@ -208,15 +207,11 @@ apps/settings     = 3
 apps/oobe         = 3
 apps/terminal     = 3
 apps/fileman      = 3
-apps/hwtest       = 3
-apps/drivermgr    = 3
+apps/diagnostics  = 3
 apps/msn          = 3
-apps/services     = 3
-apps/taskmgr      = 3
 apps/nearby       = 3
 apps/magidos      = 3
 apps/milkbar      = 3
-apps/meshdiag     = 3
 
 [pins]
 display_cs    = 12
