@@ -67,6 +67,15 @@ static void hash_password(const uint8_t salt[16], const char *password, uint8_t 
     mbedtls_sha256_free(&ctx);
 }
 
+// Public wrapper — same construction, exposed so remote-login code (the
+// paired-device client side, source/modules/pairing/) computes the
+// identical hash a real LOCAL account on this SAME firmware would, instead
+// of a second hand-rolled copy of "SHA-256(salt || password)" drifting
+// out of sync with this one over time.
+void user_mgr_hash_password(const uint8_t salt[16], const char *password, uint8_t out[32]) {
+    hash_password(salt, password, out);
+}
+
 // Same cost regardless of where the first differing byte falls, so a wrong
 // guess and a right one are not distinguishable by timing.
 static bool constant_time_eq(const uint8_t *a, const uint8_t *b, size_t n) {
@@ -227,6 +236,73 @@ bool user_mgr_set_password(const char *username, const char *password) {
 bool user_mgr_has_password(const char *username) {
     int idx = find_index(username);
     return idx >= 0 && s_users[idx].type == USER_ACCOUNT_LOCAL && s_users[idx].has_password;
+}
+
+// False for an unknown username OR a REMOTE account (which has no local
+// salt/hash at all — see user_record_t's own has_password comment). The
+// caller (pairing_module.c's Phase B access-request handler) treats
+// either case the same way: nothing to hand back.
+bool user_mgr_get_salt(const char *username, uint8_t out[16]) {
+    int idx = find_index(username);
+    if (idx < 0 || s_users[idx].type != USER_ACCOUNT_LOCAL || !s_users[idx].has_password) return false;
+    memcpy(out, s_users[idx].salt, 16);
+    return true;
+}
+
+// Constant-time compare against the stored hash — same helper
+// user_mgr_verify() itself uses internally, just taking an already-hashed
+// candidate instead of a plaintext password. This is what lets a remote
+// login (source/modules/pairing/) check a password without user_mgr ever
+// seeing the plaintext: the caller hashes client-side (user_mgr_hash_
+// password(), using the salt from user_mgr_get_salt()) and only the
+// resulting digest crosses back into this module.
+bool user_mgr_verify_hash(const char *username, const uint8_t hash[32]) {
+    int idx = find_index(username);
+    if (idx < 0) return false;
+    const user_record_t *u = &s_users[idx];
+    if (u->type != USER_ACCOUNT_LOCAL || !u->has_password) return false;
+    return constant_time_eq(hash, u->hash, 32);
+}
+
+// Creates (or refreshes) a REMOTE-type record — no password path at all,
+// matching user_account_type_t's own doc comment ("a REMOTE account's
+// record carries no local password hash"). Called client-side once a
+// pairing_module.c login round-trip (Phase B/C of the remote-login work)
+// has already been proven against the actual server — this function
+// itself performs no verification, same division of responsibility
+// user_mgr_set_logged_in() already has ("does NOT itself verify a
+// password — call user_mgr_verify() first").
+//
+// Unlike user_mgr_create(), re-creating an existing name is not an error:
+// logging into the same remote account again (a normal, expected event —
+// see pairing.h's Phase C reconnect flow) just confirms the existing
+// record rather than failing on "already exists". Refuses to touch a
+// name that already exists as a LOCAL account, though — silently
+// converting a real local account into a remote stand-in would be a
+// genuine account-identity mix-up, not a no-op.
+bool user_mgr_create_remote(const char *username) {
+    if (!user_mgr_valid_username(username)) return false;
+
+    int idx = find_index(username);
+    if (idx >= 0) {
+        return s_users[idx].type == USER_ACCOUNT_REMOTE;
+    }
+
+    if (s_user_count >= USER_MGR_MAX_USERS) {
+        ESP_LOGW(TAG, "cannot create remote '%s' — USER_MGR_MAX_USERS (%d) reached",
+                 username, USER_MGR_MAX_USERS);
+        return false;
+    }
+
+    user_record_t *u = &s_users[s_user_count];
+    memset(u, 0, sizeof(*u));
+    snprintf(u->name, sizeof(u->name), "%s", username);
+    u->type = USER_ACCOUNT_REMOTE;
+    u->has_password = 0;   // salt/hash stay zeroed — REMOTE never has a local credential
+    s_user_count++;
+    save_all();
+    ESP_LOGI(TAG, "created remote user '%s'", username);
+    return true;
 }
 
 bool user_mgr_verify(const char *username, const char *password) {

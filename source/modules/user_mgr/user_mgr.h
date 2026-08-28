@@ -103,6 +103,39 @@ bool user_mgr_set_password(const char *username, const char *password);
 
 bool user_mgr_has_password(const char *username);
 
+// ── Remote-login support (source/modules/pairing/) ──────────────────────────
+// These exist so a paired-device login can check a password without this
+// module (or the network) ever handling the plaintext — see pairing.h's
+// own Phase A/B/C doc comment for the full protocol these plug into.
+
+// The account's salt — false for an unknown username, a no-password
+// account, or a REMOTE account (none of which have a real salt to hand
+// back). Salts aren't secret; sending one over the wire is fine, it's what
+// lets a client compute a matching hash locally.
+bool user_mgr_get_salt(const char *username, uint8_t out[16]);
+
+// The exact SHA-256(salt || password) construction user_mgr_verify()
+// already uses internally, exposed so a client (this SAME firmware,
+// running on the OTHER paired device) computes the identical hash rather
+// than a second hand-rolled copy of the construction.
+void user_mgr_hash_password(const uint8_t salt[16], const char *password, uint8_t out[32]);
+
+// Constant-time compare of an already-hashed candidate against the
+// account's stored hash — false for an unknown username, a no-password
+// account, or a REMOTE account. The plaintext-taking user_mgr_verify()
+// above calls the same internal compare; this is that same check for a
+// caller that only ever has the hash, never the plaintext.
+bool user_mgr_verify_hash(const char *username, const uint8_t hash[32]);
+
+// Creates (or, if `username` already names a REMOTE account, just
+// confirms) a USER_ACCOUNT_REMOTE record — no password, no verification of
+// any kind performed here (same "does not itself verify" contract
+// user_mgr_set_logged_in() already documents; call this only after a real
+// remote-login round-trip has already succeeded). False if `username` is
+// invalid, already exists as a LOCAL account, or USER_MGR_MAX_USERS is
+// reached.
+bool user_mgr_create_remote(const char *username);
+
 // LOCAL: verifies via the salted-hash compare described above; a
 // no-password account verifies true regardless of what `password` is.
 // REMOTE: always false — see this header's own doc comment on why.
