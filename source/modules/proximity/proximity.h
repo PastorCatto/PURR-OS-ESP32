@@ -40,6 +40,19 @@ bool proximity_is_alive(void);
 // devices like Heltec V3 that want to advertise this.
 #define PROXIMITY_CAP_RADIO_COMPANION (1u << 0)
 
+// CAP_HAS_DISPLAY: this device has a real display driver registered (not
+// necessarily purr_win-capable — oled_ui counts too) — set at boot
+// wherever purr_kernel_display() (or the equivalent host-specific check)
+// comes back non-NULL. CAP_STRONG_COMPUTE: this device has PSRAM
+// (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) — the same signal
+// this codebase already uses elsewhere (app_manager.c's own task-stack
+// allocator, proximity_module.c's own PSRAM-vs-internal-RAM task-stack
+// choice) as its "meaningfully stronger board" heuristic. Both feed
+// app_manager.c's decide_placement() for a HYBRID-placed app — see its
+// own doc comment for the actual rule.
+#define PROXIMITY_CAP_HAS_DISPLAY     (1u << 1)
+#define PROXIMITY_CAP_STRONG_COMPUTE  (1u << 2)
+
 typedef struct {
     uint8_t  mac[6];
     char     name[20];        // matches the beacon payload's own name field size
@@ -53,9 +66,30 @@ int  proximity_device_count(void);
 // Fills *out for a known device index. Returns false if idx is out of range.
 bool proximity_device_at(int idx, proximity_device_t *out);
 
-// Sets this device's own capability flags, reflected in every beacon sent
-// from here on (next BEACON_INTERVAL_MS tick — no immediate re-send).
+// Same, keyed by mac instead of table index — false if `mac` hasn't sent
+// a beacon within STALE_MS (proximity_module.c), same pruning
+// proximity_device_at()'s own indexed enumeration is already subject to.
+// A caller that needs a currently-connected remote peer's caps (e.g.
+// app_manager_decide_placement()'s own caller) and gets false back
+// should treat the peer as having none — safe/conservative, not an error
+// to surface.
+bool proximity_find_device_by_mac(const uint8_t mac[6], proximity_device_t *out);
+
+// ORs `caps` into this device's own capability flags (accumulates, does
+// NOT replace) — reflected in every beacon sent from here on (next
+// BEACON_INTERVAL_MS tick — no immediate re-send). Accumulates rather
+// than replaces specifically so multiple independent callers (oled_ui_
+// module.c's own PROXIMITY_CAP_RADIO_COMPANION call, proximity_module.c's
+// own HAS_DISPLAY/STRONG_COMPUTE detection at init time) can each set
+// their own bit without needing to know about or coordinate with the
+// others, regardless of init order.
 void proximity_set_own_caps(uint8_t caps);
+
+// This device's own current capability flags — for a caller comparing
+// itself against a discovered peer's proximity_device_t.caps (e.g.
+// app_manager.h's app_manager_decide_placement()). 0 before proximity_
+// init() has run.
+uint8_t proximity_get_own_caps(void);
 
 // Copies this device's own beacon name into out (NUL-terminated, truncated
 // to out_len). Safe any time after proximity_init() has run.
