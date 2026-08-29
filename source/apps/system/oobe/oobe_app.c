@@ -52,6 +52,11 @@ static void on_skip(purr_wid_t w, purr_event_t e, void *u) {
     // Bootstrap default has no password (see user_mgr.h) — this is exactly
     // the "milkaholic, no password" zero-friction path, unchanged.
     user_mgr_set_logged_in(user_mgr_default_username());
+    // OOBE bypasses systemui_login.c's real screen entirely (and its own
+    // try_unlock() -> app_manager_notify_unlocked() call) — without this,
+    // finishing setup would leave the local registry permanently idle/
+    // empty. See app_manager.h's own doc comment on this function.
+    app_manager_notify_unlocked();
     finish();
 }
 
@@ -102,6 +107,9 @@ static void on_continue(purr_wid_t w, purr_event_t e, void *u) {
     }
 
     user_mgr_set_logged_in(username);
+    // Same reasoning as on_skip() above — this path bypasses
+    // systemui_login.c entirely too.
+    app_manager_notify_unlocked();
     ESP_LOGI(TAG, "setup complete — account '%s' (%s)", username,
              password[0] ? "password set" : "no password");
     finish();

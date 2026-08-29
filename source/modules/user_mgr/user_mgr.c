@@ -38,6 +38,20 @@ typedef struct __attribute__((packed)) {
     uint8_t salt[16];
     uint8_t hash[32];       // SHA-256(salt || password)
     uint8_t is_admin;       // 0/1 — see user_mgr_is_admin()'s own doc comment
+    // Which server this account lives on — REMOTE only, all-zero/unused
+    // for LOCAL. Needed so a later boot/relock can actually attempt
+    // reconnecting a remote identity (pairing_verify_user(mac, name))
+    // instead of just remembering the name with nowhere to send it — see
+    // user_mgr_get_remote_mac()/user_mgr_create_remote()'s own comments.
+    uint8_t mac[6];
+    // Opt-in only, REMOTE accounts only (unused/0 for LOCAL) — allows a
+    // "Continue offline" fallback when this identity's server can't be
+    // reached (systemui_login.c's begin_remote_reconnect() failure
+    // path). Off by default: caching enough state to act "logged in"
+    // without the server reachable is a real trust tradeoff, not
+    // something to default on. See user_mgr_set_offline_access()'s own
+    // doc comment.
+    uint8_t offline_access;
 } user_record_t;
 
 static user_record_t s_users[USER_MGR_MAX_USERS];
@@ -143,6 +157,20 @@ static void save_active(const char *username) {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_str(h, NVS_KEY_ACTIVE, username);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// Clears the persisted "active" username — see user_mgr_logout()'s own
+// comment on why this matters specifically for a REMOTE account: an empty
+// string makes user_mgr_default_username()'s user_mgr_exists() check fail
+// (nothing named "" exists), falling through to USER_MGR_BOOTSTRAP_USER
+// instead of nvs_erase_key()'s NOT_FOUND-handling dance for the same
+// effect — simpler, and reuses a check that already exists.
+static void clear_active(void) {
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, NVS_KEY_ACTIVE, "");
     nvs_commit(h);
     nvs_close(h);
 }
@@ -307,16 +335,29 @@ bool user_mgr_verify_hash(const char *username, const uint8_t hash[32]) {
 // account, though — silently converting a real local account into a
 // remote stand-in would be a genuine account-identity mix-up, not a
 // no-op.
-bool user_mgr_create_remote(const char *username, bool is_admin) {
-    if (!user_mgr_valid_username(username)) return false;
+//
+// `mac` is stored (and refreshed on every re-confirm, same as is_admin
+// above) so a later boot/relock can actually attempt reconnecting this
+// identity — see user_mgr_get_remote_mac()'s own comment. A username is
+// assumed to belong to exactly one server at a time; a second server
+// authenticating the same username just overwrites the stored mac with
+// wherever the most recent successful login actually came from.
+bool user_mgr_create_remote(const char *username, bool is_admin, const uint8_t mac[6]) {
+    if (!user_mgr_valid_username(username) || !mac) return false;
 
     int idx = find_index(username);
     if (idx >= 0) {
         if (s_users[idx].type != USER_ACCOUNT_REMOTE) return false;
+        bool dirty = false;
         if (s_users[idx].is_admin != (is_admin ? 1 : 0)) {
             s_users[idx].is_admin = is_admin ? 1 : 0;
-            save_all();
+            dirty = true;
         }
+        if (memcmp(s_users[idx].mac, mac, 6) != 0) {
+            memcpy(s_users[idx].mac, mac, 6);
+            dirty = true;
+        }
+        if (dirty) save_all();
         return true;
     }
 
@@ -332,10 +373,45 @@ bool user_mgr_create_remote(const char *username, bool is_admin) {
     u->type = USER_ACCOUNT_REMOTE;
     u->has_password = 0;   // salt/hash stay zeroed — REMOTE never has a local credential
     u->is_admin = is_admin ? 1 : 0;
+    memcpy(u->mac, mac, 6);
     s_user_count++;
     save_all();
     ESP_LOGI(TAG, "created remote user '%s' (admin=%d)", username, (int)u->is_admin);
     return true;
+}
+
+// False if unknown or not USER_ACCOUNT_REMOTE (a LOCAL account's mac[]
+// field is unused/zeroed — returning it as if meaningful would be a real
+// bug, not just an unhelpful answer).
+bool user_mgr_get_remote_mac(const char *username, uint8_t out_mac[6]) {
+    int idx = find_index(username);
+    if (idx < 0 || s_users[idx].type != USER_ACCOUNT_REMOTE || !out_mac) return false;
+    memcpy(out_mac, s_users[idx].mac, 6);
+    return true;
+}
+
+// False (no-op) for a LOCAL account or an unknown username — offline
+// access is a REMOTE-account concept only, see user_record_t's own
+// comment on why.
+bool user_mgr_set_offline_access(const char *username, bool enabled) {
+    int idx = find_index(username);
+    if (idx < 0 || s_users[idx].type != USER_ACCOUNT_REMOTE) return false;
+    uint8_t v = enabled ? 1 : 0;
+    if (s_users[idx].offline_access != v) {
+        s_users[idx].offline_access = v;
+        save_all();
+    }
+    ESP_LOGI(TAG, "'%s' offline_access = %d", username, (int)v);
+    return true;
+}
+
+// False for an unknown username or a LOCAL account (never offline-
+// capable — it's already fully local, "offline" isn't a meaningful
+// state for it) — same "unknown never reads as enabled" caution user_
+// mgr_is_admin() already documents for its own equivalent flag.
+bool user_mgr_get_offline_access(const char *username) {
+    int idx = find_index(username);
+    return idx >= 0 && s_users[idx].type == USER_ACCOUNT_REMOTE && s_users[idx].offline_access != 0;
 }
 
 bool user_mgr_verify(const char *username, const char *password) {
@@ -398,7 +474,23 @@ bool user_mgr_set_logged_in(const char *username) {
 }
 
 void user_mgr_logout(void) {
-    if (s_current_user[0]) ESP_LOGI(TAG, "session: '%s' logged out", s_current_user);
+    if (s_current_user[0]) {
+        ESP_LOGI(TAG, "session: '%s' logged out", s_current_user);
+        // A REMOTE account's persisted "active" marker (save_active(),
+        // written unconditionally on every login) must NOT survive an
+        // explicit logout — confirmed live as a real, reported bug:
+        // without this, the next login screen's boot/relock seed
+        // (user_mgr_default_username()) kept returning this same remote
+        // username, and systemui_login.c's automatic reconnect
+        // (begin_remote_reconnect()) fired right back at the server the
+        // user just explicitly logged off from. A LOCAL account's logout
+        // does NOT clear it — "remember who was last active across a
+        // local multi-account device" is real, wanted behavior there,
+        // untouched by this.
+        if (user_mgr_account_type(s_current_user) == USER_ACCOUNT_REMOTE) {
+            clear_active();
+        }
+    }
     s_current_user[0] = '\0';
 }
 

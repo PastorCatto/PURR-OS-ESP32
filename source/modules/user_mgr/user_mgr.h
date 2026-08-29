@@ -141,15 +141,41 @@ void user_mgr_hash_password(const uint8_t salt[16], const char *password, uint8_
 bool user_mgr_verify_hash(const char *username, const uint8_t hash[32]);
 
 // Creates (or, if `username` already names a REMOTE account, just
-// confirms — and syncs is_admin to this call's value, so a promotion/
-// demotion on the server takes effect on the next successful login) a
+// confirms — and syncs is_admin AND mac to this call's values, so a
+// promotion/demotion or a re-login from wherever the server actually
+// answered from both take effect on the next successful login) a
 // USER_ACCOUNT_REMOTE record — no password, no verification of any kind
 // performed here (same "does not itself verify" contract
 // user_mgr_set_logged_in() already documents; call this only after a real
 // remote-login round-trip has already succeeded, with whatever is_admin
-// that round-trip reported). False if `username` is invalid, already
-// exists as a LOCAL account, or USER_MGR_MAX_USERS is reached.
-bool user_mgr_create_remote(const char *username, bool is_admin);
+// that round-trip reported). `mac` is the server this account was just
+// authenticated against — stored so a later boot/relock can actually
+// attempt reconnecting this identity, see user_mgr_get_remote_mac().
+// False if `username`/`mac` is invalid, already exists as a LOCAL
+// account, or USER_MGR_MAX_USERS is reached.
+bool user_mgr_create_remote(const char *username, bool is_admin, const uint8_t mac[6]);
+
+// The server a REMOTE account was last authenticated against — false if
+// `username` is unknown or is a LOCAL account (which has no mac at all).
+// For a caller that needs to reconnect a remote identity automatically
+// (a boot/relock seed, or the login screen's "switch user" picker) —
+// pairing_verify_user(mac, username) is the actual reconnect call, see
+// pairing.h's own doc comment on that function.
+bool user_mgr_get_remote_mac(const char *username, uint8_t out_mac[6]);
+
+// Opt-in "Continue offline" capability for a REMOTE account — off by
+// default. When enabled, a failed automatic reconnect (systemui_login.c's
+// begin_remote_reconnect(), server unreachable) offers a limited offline
+// session for this identity instead of only the picker — see that
+// file's own comment for exactly what "limited" means (only already-
+// downloaded LOCAL/HYBRID apps are launchable, app_manager.h's
+// app_placement_t). False (no-op) for a LOCAL account or an unknown
+// username — this is a REMOTE-account concept only.
+bool user_mgr_set_offline_access(const char *username, bool enabled);
+
+// False for an unknown username or a LOCAL account, in addition to the
+// obvious "never explicitly enabled" case.
+bool user_mgr_get_offline_access(const char *username);
 
 // LOCAL: verifies via the salted-hash compare described above; a
 // no-password account verifies true regardless of what `password` is.

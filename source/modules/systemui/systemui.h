@@ -36,6 +36,7 @@
 #include "lvgl.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../user_mgr/user_mgr.h"
+#include "../app_manager/app_manager.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -243,6 +244,16 @@ static inline void purr_systemui_boot_login_check(void) {
 
     if (!user_mgr_has_password(username)) {
         user_mgr_set_logged_in(username);
+        // This is the zero-friction bootstrap path — it bypasses
+        // systemui_login.c's real screen (and its own try_unlock() ->
+        // app_manager_notify_unlocked() call) entirely, so nothing else
+        // ever tells app_manager the local registry is safe to populate.
+        // Without this, a no-password account (the common case — see
+        // this function's own doc comment) would boot straight into a
+        // permanently idle/empty Desktop, no way to reach it short of a
+        // relock/unlock cycle that never happens on its own. See
+        // app_manager.h's own doc comment on app_manager_notify_unlocked().
+        app_manager_notify_unlocked();
     }
     // else: intentionally left logged out — see this function's doc comment.
 }
