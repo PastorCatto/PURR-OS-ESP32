@@ -215,6 +215,17 @@ magidos     = true
 milkbar     = true
 doom        = true
 moy         = true
+# server_manager — reached only through app_manager.h's synthetic remote-mode
+# entry (see app_manager_launch_by_name("server_manager")), never a Start
+# Menu icon. Needs to be explicit here like milkbar/oobe above rather than
+# relying on apply_radio_companion_defaults()'s PURR_WIN_UI_BACKENDS
+# auto-add: modules.ui = "cheetah" (this device) isn't in that set, so that
+# block never fires for tdeck_plus at all — msn/milkbar's own comment above
+# already flags they predate that mechanism and stay explicit for the same
+# reason. Root-caused after `apps.server_manager=true` silently never made
+# it into the component list despite being set the identical setdefault way
+# msn is.
+server_manager = true
 [flash]
 display/st7789    = 1
 touch/gt911       = 1
@@ -246,6 +257,7 @@ apps/diagnostics  = 3
 apps/msn          = 3
 apps/magidos      = 3
 apps/milkbar      = 3
+apps/server_manager = 3
 
 [pins]
 display_cs    = 12
