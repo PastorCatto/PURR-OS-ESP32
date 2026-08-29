@@ -1,30 +1,40 @@
 // milkbar_app.c — PURR OS Milkbar (Remote Apps manager).
 //
-// Three screens, in order:
-//   1. Connection (the window this app opens with): the paired-device
-//      trust list (pairing.h) plus a username/password login form. Login
-//      goes through pairing.h's own remote-login flow (Phase B first
-//      contact — password check, human approval on the server, a key
-//      registered here; Phase C every time after — cheap challenge-
-//      response reusing that key, see run_login_flow() below) — this file
-//      only drives the state machine, all the actual crypto/protocol
-//      lives in pairing_module.c.
-//   2. Dashboard — admin accounts only (user_mgr_is_admin(), learned from
-//      the server as part of a successful login): server name, who's
-//      logged in, a little status, and a "Desktop" button.
-//   3. Desktop — everyone else lands here directly; admins reach it via
-//      Dashboard's button. This is what the whole app used to be before
-//      the connection/dashboard split: the remote app list (queried over
-//      proximity_rpc_call(), REMOTEAPPS_ACTION_LIST, app_manager_remote.h)
-//      with Launch/Stop acting on whichever row is selected. Same
-//      refresh_task + semaphore-guarded-deinit shape as msn.c/meshdiag.c
-//      in this codebase — the one difference is that proximity_rpc_call()
-//      is a real blocking network call (up to its own timeout), so it
-//      only ever runs on this app's own background task, never on
-//      cupcake_task (see proximity_rpc.h's own warning about that). That
-//      background task starts at app open (Connection screen already
-//      needs it — refresh_device_list()) and keeps running across all
-//      three screens; only which window is currently shown changes.
+// Login itself does NOT live here — it's a systemui-level screen now
+// (systemui_login.c's "Log in to a server" button and the near-identical
+// screen it opens), which runs the actual pairing.h Phase A/B/C exchange
+// and, on success, launches this app as the post-login hand-off
+// (app_manager_launch_by_name("milkbar")). By the time this app's own
+// init() runs in that case, user_mgr_current_user() is already the
+// authenticated remote identity — see milkbar_app_init()'s own routing
+// logic for how that's detected. This file used to own a whole login UI
+// of its own (a Connection-screen login form, briefly a Windows-7-style
+// tile/"Not you?" dialog); both were removed once login moved to
+// systemui — no login widgets live in this file at all any more.
+//
+// Two screens, in order:
+//   1. Connection (shown when this app is opened WITHOUT an active remote
+//      session — e.g. tapped from the desktop during a normal local
+//      session): the paired-device trust list (pairing.h) plus Nearby and
+//      Disconnect — browsing/pairing management, nothing more. No way to
+//      log in from here; that's systemui's job now.
+//   2. Dashboard (admin accounts only, user_mgr_is_admin() — learned from
+//      the server during login) — shown directly, skipping Connection
+//      entirely, when milkbar_app_init() detects an active remote session.
+//      Its own "Desktop" button (and, for a non-admin account, this app's
+//      own init() directly) hands off to enter_remote_desktop(): NOT a
+//      window this app draws — it points app_manager.h's remote mode at
+//      the selected server (app_manager_remote_connect(),
+//      app_manager_remote.h) and gets out of the way, hiding this app's own
+//      window(s) and calling purr_systemui_return_home(). The launcher UI
+//      already running on this device (cheetah_home.c's icon grid,
+//      systemui_xp.c's taskbar/Start Menu) drives itself purely off
+//      app_manager_count()/get()/launch_idx() — the instant remote mode is
+//      on, it's showing the server's apps with no code of its own aware
+//      anything changed. This is what the whole app used to be, before the
+//      Connection/Dashboard split and before remote mode existed: its own
+//      bespoke remote app list with Launch/Stop buttons, replaced once
+//      there was a real launcher UI worth handing off to instead.
 //
 // "Nearby" section (was the standalone nearby_app.c): who's beaconing right
 // now (proximity.h's live ESP-NOW table, not the trust list above) plus
@@ -36,34 +46,10 @@
 // Diagnostics' category sub-windows (see add_back_button() below), and its
 // refresh piggybacks on this file's own refresh_task() rather than running
 // a second background task — proximity_device_count()/at() is a cheap local
-// beacon-table read, not a blocking network call like the RPC calls below,
-// so it doesn't need the same "own dedicated task" treatment.
-//
-// "Milk Bottle" — originally a separate standalone app, then briefly a
-// "Message" button bolted onto this screen — is neither: it's a synthetic
-// row always pinned at index 0 of the (otherwise remote-fetched) app list
-// below, right alongside whatever real apps REMOTEAPPS_ACTION_LIST returns
-// for the selected device. Launch/Stop act on it exactly like any other
-// row. That's deliberate — the whole point of Milk Bottle is to exercise
-// this app's own list→launch→stop pipeline end-to-end as a live test, not
-// to be a shortcut that bypasses it. It never shows up as its own
-// installed app or home-screen icon; it only exists inside Milkbar.
-// Reuses this file's own s_selected_mac/s_have_selection and refresh_task()
-// — no second background task, no second device list.
-//
-// Send has two paths, chosen per-target: a full purr_win device (Cupcake/
-// MiniWin/etc.) answers over proximity_rpc's MILKBAR_ACTION_MSG_SEND, same
-// as always — but that only works if the target is running Milkbar itself
-// (a purr_win app), which a headless device like Heltec V3's oled_ui can
-// never be (oled_ui doesn't implement purr_win, doesn't run app_manager
-// apps at all — see app_manager's own scan turning up 0 apps on it). Those
-// devices already advertise PROXIMITY_CAP_RADIO_COMPANION in their beacon
-// (oled_ui_module.c calls proximity_set_own_caps() at boot) and already
-// have their own built-in message UI (oled_ui's SCREEN_SEND/SCREEN_MESSAGES,
-// fed by meshtastic's LoRa broadcast, not proximity_rpc). So when the
-// selected device is flagged radio-companion, Send falls back to
-// mesh_manager_send_text() instead — landing directly in that device's
-// existing SCREEN_MESSAGES ring buffer, no new module or wire format needed.
+// beacon-table read, unlike the remote-mode RPCs app_manager_remote.c now
+// owns entirely on its own background task (see app_manager.h's remote-mode
+// doc comment) — this file no longer makes a single proximity_rpc_call() of
+// its own at all.
 
 #include <string.h>
 #include <stdio.h>
@@ -77,23 +63,13 @@
 #include "purr_module.h"
 #include "pairing.h"
 #include "proximity.h"
-#include "proximity_rpc.h"
+#include "app_manager.h"
 #include "app_manager_remote.h"
-#include "meshtastic.h"
+#include "systemui.h"
 #include "user_mgr.h"
 
-#ifdef CONFIG_PURR_UI_LVGL
-#include "lvgl.h"
-#endif
-
 #define REFRESH_MS        2000
-#define RPC_TIMEOUT_MS    3000
 #define MAX_DEVICE_ROWS   PAIRING_MAX_DEVICES
-#define MAX_APP_ROWS      32   // PROXIMITY_RPC_MAX_MSG / sizeof(remote_app_entry_t) headroom, see app_manager_remote.h
-
-// ── Milk Bottle screen ───────────────────────────────────────────────────
-#define MILKBAR_ACTION_MSG_SEND 0x3000   // same wire value Milk Bottle used — nothing shipped with it yet, pure rename
-#define MSG_MAX_TEXT 64
 
 // Shared by the Nearby sub-window below, same helper settings.c/diagnostics.c
 // use: purr_win_t is a plain uint32_t handle (catcall_ui.h), so it round-trips
@@ -110,18 +86,10 @@ static void add_back_button(purr_win_t win) {
 // ── Connection screen (opened first) ────────────────────────────────────
 static purr_win_t s_win           = 0;
 static purr_wid_t s_device_list   = 0;
-static purr_wid_t s_user_input    = 0;
-static purr_wid_t s_pass_input    = 0;
-static purr_wid_t s_login_status_lbl = 0;
 
 // ── Dashboard screen (admin accounts only) ──────────────────────────────
 static purr_win_t s_dashboard_win  = 0;
 static purr_wid_t s_dashboard_info_lbl = 0;
-
-// ── Desktop screen (the remote app list — what this whole app used to be) ──
-static purr_win_t s_desktop_win = 0;
-static purr_wid_t s_app_list    = 0;
-static purr_wid_t s_status_lbl  = 0;
 
 static TaskHandle_t s_refresh_task = NULL;
 static bool         s_running      = false;
@@ -140,23 +108,6 @@ static int          s_device_count = 0;
 static uint8_t       s_selected_mac[6];
 static volatile bool s_have_selection = false;
 
-// ── Login flow ────────────────────────────────────────────────────────────
-// on_login_click() (cupcake_task) captures username/password and sets the
-// request flag; run_login_flow() (refresh_task()'s own background task)
-// picks it up on its next pass and runs the WHOLE multi-step sequence —
-// pairing_verify_user()/_request_user_access()/_poll_user_access()/
-// _register_user_key(), every one of which is a blocking proximity_rpc_
-// call() — same handoff shape s_selected_mac/s_have_selection already use
-// for the app-list RPCs, same reason (never call these from cupcake_task).
-static volatile bool s_login_requested = false;
-static char          s_login_username[USER_MGR_USERNAME_MAX];
-static char          s_login_password[64];
-// Give a human roughly the same window to notice and act on the approval
-// request that pairing_module.c's own USERAUTH_REQ_TIMEOUT_MS grants
-// server-side — not exposed via pairing.h (it's that file's own internal
-// constant), so this is a matching value kept here, not a shared one.
-#define LOGIN_APPROVAL_TIMEOUT_MS (5UL * 60UL * 1000UL)
-
 // ── App config (LittleFS, /config/milkbar.cfg) ──────────────────────────────
 // Remembers which paired device was last selected, across reboots — not just
 // relaunches (s_selected_mac/s_have_selection already survive those, being
@@ -164,7 +115,14 @@ static char          s_login_password[64];
 // specifically because milkbar is meant to become the general server/client
 // connection surface: reopening it and having to reselect the same device
 // every single time is exactly the friction that goal is supposed to remove.
-#define MILKBAR_CFG_MAGIC 0x4D4C4B01u   // "MLK" + struct version 1
+// Bumped to version 3 — dropped the remembered-username field version 2
+// added (a Windows-7-style login tile that briefly lived in this app; login
+// lives in systemui now, see this file's top comment, so there's no local
+// "identity last logged in with" for this app to remember any more). An
+// old version-1/2 file fails the magic check below and is just treated as
+// absent — same "no saved state yet" cold-start path a first-ever run
+// already takes, not a real migration.
+#define MILKBAR_CFG_MAGIC 0x4D4C4B03u   // "MLK" + struct version 3
 
 typedef struct {
     uint32_t magic;
@@ -181,7 +139,7 @@ static void milkbar_cfg_save(void) {
 // Loads the saved mac, but only actually selects it if that device is STILL
 // in the trust list — pairing_forget() may have happened since the config
 // was written, and re-selecting a device this device no longer trusts would
-// have refresh_task() start issuing proximity_rpc_call()s to it regardless.
+// have remote mode reconnecting to it regardless.
 static void milkbar_cfg_load(void) {
     milkbar_app_cfg_t cfg;
     int got = purr_app_config_read("milkbar", &cfg, sizeof(cfg));
@@ -196,52 +154,6 @@ static void milkbar_cfg_load(void) {
             return;
         }
     }
-}
-
-static char        s_app_row_bufs[MAX_APP_ROWS][64];
-static const char *s_app_row_ptrs[MAX_APP_ROWS];
-#ifdef CONFIG_PURR_UI_LVGL
-// Every row currently gets the same generic icon — remote app entries
-// (remote_app_entry_t, app_manager_remote.h) carry no icon data at all
-// (the LOCAL app_entry_t doesn't either; icons are a UI-layer-only lookup
-// today, see cupcake's own app-drawer icon mapping), so the real per-row
-// differentiator is the name text, not the glyph. Matches how this was
-// explicitly scoped when asked for: "the name of the app... because
-// they're all the same icon right now."
-static const char *s_app_row_icons[MAX_APP_ROWS];
-#endif
-static int          s_app_count = 0;
-static remote_app_entry_t s_last_apps[MAX_APP_ROWS];   // raw entries, for Launch/Stop to read state/name by row index
-
-// ── Milk Bottle screen state ────────────────────────────────────────────
-static purr_win_t s_msg_win     = 0;
-static purr_wid_t s_msg_big_lbl = 0;
-static purr_wid_t s_msg_input   = 0;
-
-// Last received message — written from proximity_rpc's own dispatch
-// context (handle_send_msg(), not cupcake_task), read/rendered by
-// refresh_task(). Plain flag-guarded copy, same "background writes, one
-// UI-owning task reads" shape as homebase.c's s_present.
-static char           s_last_rx_text[MSG_MAX_TEXT + 1];
-static volatile bool  s_rx_is_new = false;
-
-// proximity_rpc's own SEND_MSG responder — see this file's top comment for
-// why "receive" only works while Milkbar itself is open (registered/
-// unregistered in milkbar_app_init()/_deinit(), same as the app list
-// action IDs don't need registering/unregistering since REMOTEAPPS_
-// ACTION_LIST etc. are answered by app_manager_remote.c, an always-on
-// module — this one is answered directly by this app instead, so it's
-// scoped to the app's own lifetime).
-static bool handle_send_msg(const uint8_t mac[6], uint16_t action_id,
-                             const uint8_t *req, size_t req_len,
-                             uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out) {
-    (void)mac; (void)action_id; (void)resp_out; (void)resp_cap;
-    *resp_len_out = 0;
-    if (req_len == 0 || req_len > MSG_MAX_TEXT) return false;
-    memcpy(s_last_rx_text, req, req_len);
-    s_last_rx_text[req_len] = 0;
-    s_rx_is_new = true;
-    return true;
 }
 
 // Live presence via proximity's own beacon table — same check homebase.c
@@ -285,78 +197,6 @@ static void refresh_device_list(void) {
     if (s_device_list) purr_win_list_set_items(s_device_list, s_device_row_ptrs, s_device_count);
 }
 
-// Row 0 is always "Milk Bottle" — a local, in-process test app, not
-// something fetched from the remote device — so it stays available even
-// when the remote query below fails outright (e.g. a headless device that
-// can't answer REMOTEAPPS_ACTION_LIST at all, like Heltec's oled_ui). Real
-// remote entries (if any) start at row 1; s_last_apps[] stays 0-indexed to
-// match them, so Launch/Stop subtract 1 from the list selection.
-static void set_milkbottle_row(int row) {
-    snprintf(s_app_row_bufs[row], sizeof(s_app_row_bufs[row]), "Milk Bottle%s",
-             s_msg_win ? "  (open)" : "");
-    s_app_row_ptrs[row] = s_app_row_bufs[row];
-#ifdef CONFIG_PURR_UI_LVGL
-    s_app_row_icons[row] = LV_SYMBOL_CALL;
-#endif
-}
-
-// Runs on refresh_task() — see this file's top comment for why this can
-// never be called from cupcake_task.
-static void refresh_app_list_from_remote(void) {
-    if (!s_have_selection) {
-        s_app_count = 0;
-        if (s_app_list) purr_win_list_set_items(s_app_list, s_app_row_ptrs, 0);
-        if (s_status_lbl) purr_win_label_set(s_status_lbl, "Select a paired device");
-        return;
-    }
-
-    set_milkbottle_row(0);
-
-    uint8_t resp[PROXIMITY_RPC_MAX_MSG];
-    size_t  resp_len = 0;
-    bool ok = proximity_rpc_call(s_selected_mac, REMOTEAPPS_ACTION_LIST, NULL, 0,
-                                  resp, sizeof(resp), &resp_len, RPC_TIMEOUT_MS);
-    if (!ok) {
-        s_app_count = 1;   // Milk Bottle row still stands even with no remote app list
-        if (s_app_list) {
-#ifdef CONFIG_PURR_UI_LVGL
-            purr_win_list_set_items_icon(s_app_list, s_app_row_ptrs, s_app_row_icons, s_app_count);
-#else
-            purr_win_list_set_items(s_app_list, s_app_row_ptrs, s_app_count);
-#endif
-        }
-        if (s_status_lbl) purr_win_label_set(s_status_lbl, "Remote device not responding");
-        return;
-    }
-
-    int n = (int)(resp_len / sizeof(remote_app_entry_t));
-    if (n > MAX_APP_ROWS - 1) n = MAX_APP_ROWS - 1;
-    memcpy(s_last_apps, resp, (size_t)n * sizeof(remote_app_entry_t));
-    for (int i = 0; i < n; i++) {
-        int row = i + 1;
-        snprintf(s_app_row_bufs[row], sizeof(s_app_row_bufs[row]), "%s%s",
-                 s_last_apps[i].name, s_last_apps[i].state == 1 /* APP_STATE_RUNNING */ ? "  (running)" : "");
-        s_app_row_ptrs[row] = s_app_row_bufs[row];
-#ifdef CONFIG_PURR_UI_LVGL
-        s_app_row_icons[row] = LV_SYMBOL_FILE;
-#endif
-    }
-    s_app_count = n + 1;
-
-    if (s_app_list) {
-#ifdef CONFIG_PURR_UI_LVGL
-        purr_win_list_set_items_icon(s_app_list, s_app_row_ptrs, s_app_row_icons, s_app_count);
-#else
-        purr_win_list_set_items(s_app_list, s_app_row_ptrs, s_app_count);
-#endif
-    }
-    if (s_status_lbl) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "%d remote app%s", n, n == 1 ? "" : "s");
-        purr_win_label_set(s_status_lbl, buf);
-    }
-}
-
 static void on_device_list_event(purr_wid_t w, purr_event_t e, void *user) {
     (void)w; (void)user;
     if (e != PURR_EVENT_ACTIVATED) return;
@@ -367,148 +207,6 @@ static void on_device_list_event(purr_wid_t w, purr_event_t e, void *user) {
     memcpy(s_selected_mac, pd.mac, 6);
     s_have_selection = true;
     milkbar_cfg_save();
-    if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Enter your username and password, then Log In");
-    // The app list itself (Desktop, not built yet at this point) still
-    // fetches lazily on refresh_task()'s own next pass, same as before —
-    // this callback runs on cupcake_task.
-}
-
-// Forward-declared: Milk Bottle's own screen (defined further down, right
-// after the message-send/receive machinery it opens).
-static void open_message_screen(void);
-// Forward-declared: Dashboard/Desktop are defined further down (Desktop
-// right where its widgets — the old always-visible app list — used to
-// live inline in milkbar_app_init(); Dashboard right after it), but
-// run_login_flow() below needs to open one of them the moment a login
-// succeeds.
-static void open_dashboard(void);
-static void open_desktop(void);
-
-// ── Login flow ───────────────────────────────────────────────────────────
-
-static void on_login_success(void) {
-    purr_win_hide(s_win);
-    const char *username = user_mgr_current_user();   // pairing_verify_user() already called user_mgr_set_logged_in()
-    if (user_mgr_is_admin(username)) {
-        open_dashboard();
-    } else {
-        open_desktop();
-    }
-}
-
-// Runs entirely on refresh_task() — never cupcake_task, see this file's
-// top comment and proximity_rpc.h's own warning (every step here is a
-// blocking proximity_rpc_call(), several of them in the slow Phase-B-
-// first-contact path).
-static void run_login_flow(void) {
-    uint8_t mac[6];
-    memcpy(mac, s_selected_mac, 6);
-    char username[USER_MGR_USERNAME_MAX];
-    char password[sizeof(s_login_password)];
-    snprintf(username, sizeof(username), "%s", s_login_username);
-    snprintf(password, sizeof(password), "%s", s_login_password);
-    // Wipe the shared buffer immediately — it's done its job, no reason
-    // for a plaintext password to keep sitting in RAM any longer than
-    // necessary. (username is not similarly sensitive.)
-    memset(s_login_password, 0, sizeof(s_login_password));
-
-    // Fast path — this device already registered a key for (mac,
-    // username) from a prior Phase B, most logins take this single call
-    // and skip everything below entirely.
-    if (pairing_verify_user(mac, username)) {
-        if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Connected");
-        on_login_success();
-        return;
-    }
-
-    if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Checking password...");
-    if (!pairing_request_user_access(mac, username, password)) {
-        if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Wrong username or password");
-        return;
-    }
-
-    if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Waiting for approval on the server...");
-    pairing_user_access_status_t status = PAIRING_USERAUTH_PENDING;
-    for (uint32_t waited_ms = 0; s_running && waited_ms < LOGIN_APPROVAL_TIMEOUT_MS; waited_ms += 2000) {
-        status = pairing_poll_user_access(mac, username);
-        if (status != PAIRING_USERAUTH_PENDING) break;
-        // Short steps, not one long delay — same shutdown-responsiveness
-        // reasoning refresh_task()'s own wait loop below already follows.
-        for (int i = 0; i < 10 && s_running; i++) vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    if (!s_running) return;   // app closed mid-wait — nothing left to update
-    if (status == PAIRING_USERAUTH_NONE) {
-        if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Request denied or expired");
-        return;
-    }
-    if (status != PAIRING_USERAUTH_APPROVED) {
-        if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Timed out waiting for approval");
-        return;
-    }
-
-    if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Approved — connecting...");
-    if (!pairing_register_user_key(mac, username) || !pairing_verify_user(mac, username)) {
-        if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Connection failed — try again");
-        return;
-    }
-    if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Connected");
-    on_login_success();
-}
-
-static void on_login_click(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)e; (void)user;
-    if (!s_have_selection) {
-        if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Select a device first");
-        return;
-    }
-    if (s_login_requested) return;   // already in flight — ignore a double-tap
-
-    const char *u = purr_win_textarea_get(s_user_input);
-    if (!u || !*u) {
-        if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Enter a username");
-        return;
-    }
-    const char *p = purr_win_textarea_get(s_pass_input);
-
-    snprintf(s_login_username, sizeof(s_login_username), "%s", u);
-    snprintf(s_login_password, sizeof(s_login_password), "%s", p ? p : "");
-    if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Connecting...");
-    s_login_requested = true;   // picked up by refresh_task()'s next pass
-}
-
-static void on_launch_click(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)e; (void)user;
-    if (!s_have_selection) return;
-    int idx = purr_win_list_get_selected(s_app_list);
-    if (idx < 0 || idx >= s_app_count) return;
-
-    if (idx == 0) { open_message_screen(); return; }   // row 0 is always Milk Bottle
-
-    int i = idx - 1;
-    uint8_t resp[16]; size_t resp_len = 0;
-    bool ok = proximity_rpc_call(s_selected_mac, REMOTEAPPS_ACTION_LAUNCH,
-                                  (const uint8_t *)s_last_apps[i].name, strlen(s_last_apps[i].name),
-                                  resp, sizeof(resp), &resp_len, RPC_TIMEOUT_MS);
-    if (s_status_lbl) purr_win_label_set(s_status_lbl, ok ? "Launched" : "Launch failed");
-}
-
-static void on_stop_click(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)e; (void)user;
-    if (!s_have_selection) return;
-    int idx = purr_win_list_get_selected(s_app_list);
-    if (idx < 0 || idx >= s_app_count) return;
-
-    if (idx == 0) {   // row 0 is always Milk Bottle — "Stop" just closes its own screen
-        if (s_msg_win) purr_win_hide(s_msg_win);
-        return;
-    }
-
-    int i = idx - 1;
-    uint8_t resp[16]; size_t resp_len = 0;
-    bool ok = proximity_rpc_call(s_selected_mac, REMOTEAPPS_ACTION_STOP,
-                                  (const uint8_t *)s_last_apps[i].name, strlen(s_last_apps[i].name),
-                                  resp, sizeof(resp), &resp_len, RPC_TIMEOUT_MS);
-    if (s_status_lbl) purr_win_label_set(s_status_lbl, ok ? "Stopped" : "Stop failed");
 }
 
 static void on_refresh_click(purr_wid_t w, purr_event_t e, void *user) {
@@ -516,57 +214,37 @@ static void on_refresh_click(purr_wid_t w, purr_event_t e, void *user) {
     refresh_device_list();
 }
 
-// Ends the session and drops back to the Connection screen — from either
-// Dashboard or Desktop, whichever is currently open. Logs out of user_mgr
-// too (this device is no longer meaningfully "logged in" once it's no
-// longer connected to the server that identity came from) but leaves
-// s_selected_mac/s_have_selection alone — the device stays selected in
-// the Connection screen's list, so logging back in is just re-entering
-// credentials, not reselecting a device too.
+// Turns app_manager's remote mode on for the selected device (app_manager.h,
+// app_manager_remote_connect()) unless it's already pointed there. Both
+// open_dashboard() and enter_remote_desktop() call this — Dashboard's own
+// "Remote apps: N" line needs it live too, not just the eventual Desktop
+// hand-off (see refresh_dashboard()) — and checking app_manager_is_remote()
+// first means going Dashboard -> Desktop doesn't tear down and restart the
+// same connection for no reason.
+static void ensure_remote_connected(void) {
+    if (!s_have_selection) return;
+    if (!app_manager_is_remote()) app_manager_remote_connect(s_selected_mac);
+}
+
+// Ends the session and drops back to the Connection screen — from
+// Dashboard, the remote desktop, or Connection's own Disconnect button
+// (a harmless no-op re-show there). Turns remote mode off and logs out of
+// user_mgr — this device is no longer meaningfully "logged in" once it's
+// no longer connected to the server that identity came from — but leaves
+// s_selected_mac/s_have_selection alone: the device stays selected in the
+// Connection screen's list, so logging back in (via the systemui login
+// screen, then relaunching this app) is just re-entering credentials
+// there, not reselecting a device here too.
 static void disconnect_to_connection_screen(void) {
+    app_manager_clear_remote();
     if (s_dashboard_win) purr_win_hide(s_dashboard_win);
-    if (s_desktop_win)   purr_win_hide(s_desktop_win);
     user_mgr_logout();
-    if (s_login_status_lbl) purr_win_label_set(s_login_status_lbl, "Disconnected");
     purr_win_show(s_win);
 }
 
-static void on_desktop_disconnect_click(purr_wid_t w, purr_event_t e, void *user) {
+static void on_connection_disconnect_click(purr_wid_t w, purr_event_t e, void *user) {
     (void)w; (void)e; (void)user;
     disconnect_to_connection_screen();
-}
-
-// Lazy create-then-show — same pattern every other sub-window in this file
-// uses. This is what the whole app used to be before the Connection/
-// Dashboard split: the remote app list, Launch/Stop, the status line —
-// unchanged logic, just its own window now instead of living inline in
-// s_win.
-static void open_desktop(void) {
-    if (s_desktop_win) { purr_win_show(s_desktop_win); return; }
-
-    s_desktop_win = purr_win_create("Desktop");
-    purr_wid_t row = purr_win_row(s_desktop_win, 3);
-    purr_win_button(s_desktop_win, "Launch", on_launch_click, NULL);
-    purr_win_button(s_desktop_win, "Stop", on_stop_click, NULL);
-    purr_win_button(s_desktop_win, "Disconnect", on_desktop_disconnect_click, NULL);
-    purr_win_layout_end(row);
-
-    s_status_lbl = purr_win_label(s_desktop_win, "Loading...");
-    s_app_list = purr_win_list(s_desktop_win, 100, 30);
-
-    purr_win_show(s_desktop_win);
-    // refresh_task()'s own loop already calls refresh_app_list_from_
-    // remote() unconditionally whenever s_have_selection is true (it has
-    // been running since s_win first opened) — no extra call needed here,
-    // its very next pass populates s_app_list now that it exists.
-}
-
-// ── Dashboard (admin accounts only) ─────────────────────────────────────
-
-static void on_dashboard_desktop_click(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)e; (void)user;
-    purr_win_hide(s_dashboard_win);
-    open_desktop();
 }
 
 static void on_dashboard_disconnect_click(purr_wid_t w, purr_event_t e, void *user) {
@@ -574,11 +252,45 @@ static void on_dashboard_disconnect_click(purr_wid_t w, purr_event_t e, void *us
     disconnect_to_connection_screen();
 }
 
-// Called right after login succeeds (once, from run_login_flow()) and
-// again on every refresh_task() pass while s_dashboard_win is open — same
-// "gated on the window existing" shape refresh_nearby() already uses, so
-// the app count line stays live if apps get launched/stopped from Desktop
-// and the user comes back to Dashboard.
+// ── "Desktop" — hand off to the real launcher, remote-mode ─────────────────
+// Not a window this app draws any more (see this file's top comment) —
+// ensure_remote_connected() above points app_manager at the selected
+// server, then this just gets out of the way. cheetah_home.c's icon grid
+// and systemui_xp.c's taskbar/Start Menu both already drive themselves
+// purely off app_manager_count()/get()/launch_idx() — the instant remote
+// mode is on, they show the server's apps with no code of their own aware
+// anything changed.
+static void enter_remote_desktop(void) {
+    if (!s_have_selection) return;
+    ensure_remote_connected();
+    if (s_win)           purr_win_hide(s_win);
+    if (s_dashboard_win) purr_win_hide(s_dashboard_win);
+    // Reveal the desktop/taskbar underneath — same call mochi_springboard.c
+    // already uses after showing ITS OWN home screen (see systemui.h's own
+    // doc comment on purr_systemui_return_home(): "callers decide whether
+    // leaving means hide (Home) or stop (Back)" — hide is exactly what the
+    // two purr_win_hide() calls above just did). This app keeps running
+    // with no window of its own visible for as long as remote mode stays
+    // on this way — the same accepted shape app_manager.c's own header
+    // comment already documents for "an exclusive app that drives the
+    // panel directly has no window to re-show" (see
+    // app_manager_notify_exited()'s doc comment): tapping Milkbar's
+    // taskbar button again in that state just re-shows the (login-free)
+    // Connection screen, which still has its own Disconnect button.
+    purr_systemui_return_home();
+}
+
+static void on_dashboard_desktop_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    enter_remote_desktop();
+}
+
+// ── Dashboard (admin accounts only) ─────────────────────────────────────
+
+// Called once Dashboard is first opened and again on every refresh_task()
+// pass while s_dashboard_win is open — same "gated on the window existing"
+// shape refresh_nearby() already uses, so the info line stays live if the
+// user comes back to Dashboard after visiting the remote desktop.
 static void refresh_dashboard(void) {
     if (!s_dashboard_win || !s_have_selection) return;
 
@@ -595,24 +307,23 @@ static void refresh_dashboard(void) {
         }
     }
 
-    // s_app_count/s_last_apps are already kept current by refresh_task()'s
-    // own unconditional refresh_app_list_from_remote() call — that runs
-    // whether or not Desktop's own window/list widget exists yet, so this
-    // reads real data even if Desktop has never been opened this session.
-    // Subtract 1 for the synthetic Milk Bottle row (see set_milkbottle_row()'s
-    // own comment) — it's not a "real" remote app to report here.
-    int real_app_count = s_app_count > 0 ? s_app_count - 1 : 0;
+    // Live from app_manager's own remote-mode registry — open_dashboard()
+    // already turned it on via ensure_remote_connected(). Reads 0 until its
+    // background task's first successful list() fetch lands, same as any
+    // other app_manager_count() caller.
+    int remote_app_count = app_manager_is_remote() ? app_manager_count() : 0;
 
     char buf[192];
     snprintf(buf, sizeof(buf),
              "Server: %s\nLogged in as: %s\nStatus: %s\nRemote apps: %d",
              server_name, user_mgr_current_user(),
              device_is_connected(s_selected_mac) ? "online" : "not currently in range",
-             real_app_count);
+             remote_app_count);
     purr_win_label_set(s_dashboard_info_lbl, buf);
 }
 
 static void open_dashboard(void) {
+    ensure_remote_connected();
     if (s_dashboard_win) { purr_win_show(s_dashboard_win); refresh_dashboard(); return; }
 
     s_dashboard_win = purr_win_create("Dashboard");
@@ -624,79 +335,6 @@ static void open_dashboard(void) {
 
     purr_win_show(s_dashboard_win);
     refresh_dashboard();
-}
-
-typedef struct {
-    uint8_t mac[6];
-    char    text[MSG_MAX_TEXT + 1];
-} msg_send_ctx_t;
-
-static void send_msg_task(void *arg) {
-    msg_send_ctx_t *ctx = (msg_send_ctx_t *)arg;
-    uint8_t resp[4]; size_t resp_len = 0;
-    // Fire-and-forget from the UI's perspective — result isn't surfaced
-    // (same "optimistic, no confirmation" precedent as MSN's own send
-    // button).
-    proximity_rpc_call(ctx->mac, MILKBAR_ACTION_MSG_SEND,
-                        (const uint8_t *)ctx->text, strlen(ctx->text),
-                        resp, sizeof(resp), &resp_len, RPC_TIMEOUT_MS);
-    free(ctx);
-    vTaskDeleteWithCaps(NULL);
-}
-
-static void on_msg_send_click(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)e; (void)user;
-    if (!s_have_selection) return;
-    const char *text = purr_win_textarea_get(s_msg_input);
-    if (!text || !*text) return;
-
-    // Radio-companion target (Heltec's oled_ui, or anything else that
-    // advertises the same cap) can't run Milkbar/answer proximity_rpc at
-    // all — see this file's top comment. Fall back to a mesh broadcast,
-    // which oled_ui's own SCREEN_MESSAGES already listens for.
-    // mesh_manager_send_text() is documented safe to call directly from a
-    // UI callback (encoding is cheap; the actual radio TX happens later on
-    // meshtastic's own task) — no background task needed for this path.
-    if (device_caps(s_selected_mac) & PROXIMITY_CAP_RADIO_COMPANION) {
-        mesh_manager_send_text(MESH_BROADCAST, 0, text);
-        purr_win_textarea_clear(s_msg_input);
-        return;
-    }
-
-    msg_send_ctx_t *ctx = malloc(sizeof(*ctx));
-    if (!ctx) return;
-    memcpy(ctx->mac, s_selected_mac, 6);
-    size_t n = strlen(text);
-    if (n > MSG_MAX_TEXT) n = MSG_MAX_TEXT;
-    memcpy(ctx->text, text, n);
-    ctx->text[n] = 0;
-
-    // proximity_rpc_call() must never run on cupcake_task — dedicated
-    // background task per send, same rule as this file's app-list RPCs.
-    TaskHandle_t task = NULL;
-    BaseType_t ok = xTaskCreateWithCaps(send_msg_task, "milkbar_msgtx", 4096, ctx, 3, &task, MALLOC_CAP_SPIRAM);
-    if (ok != pdPASS) free(ctx);
-
-    purr_win_textarea_clear(s_msg_input);
-}
-
-static void on_msg_back_click(purr_wid_t w, purr_event_t e, void *user) {
-    (void)w; (void)e; (void)user;
-    purr_win_hide(s_msg_win);
-}
-
-// Lazy create-then-show, Back hides — same pattern MSN's Nodes/Channels/
-// Messages screens use. Operates on this file's own s_selected_mac —
-// whichever device is selected in the main list, no separate picker.
-static void open_message_screen(void) {
-    if (s_msg_win) { purr_win_show(s_msg_win); return; }
-    s_msg_win = purr_win_create("Message");
-    purr_win_button(s_msg_win, "< Back", on_msg_back_click, NULL);
-    s_msg_big_lbl = purr_win_label(s_msg_win, "");
-    purr_win_label_align(s_msg_big_lbl, PURR_ALIGN_CENTER);
-    s_msg_input = purr_win_textarea(s_msg_win, 100, 20);
-    purr_win_button(s_msg_win, "Send", on_msg_send_click, NULL);
-    purr_win_show(s_msg_win);
 }
 
 // ── Nearby section (was nearby_app.c) ───────────────────────────────────────
@@ -734,6 +372,20 @@ static void close_pair_dialog(void) {
     }
 }
 
+// ── Remote setup dialog (pairing.h's "Remote OOBE") ─────────────────────
+// For a paired device with no screen/keyboard of its own to complete its
+// own first-run setup (e.g. Heltec's oled_ui) — pushes an admin account
+// (or "keep the default") to whichever paired row is selected. One
+// request/response, no polling/approval wait (unlike the server-login
+// flow systemui_login.c now owns), so this stays a small self-contained
+// dialog here rather than needing its own background poll loop.
+static purr_win_t s_setup_dlg        = 0;
+static purr_wid_t s_setup_user_input = 0;
+static purr_wid_t s_setup_pass_input = 0;
+static purr_wid_t s_setup_status_lbl = 0;
+static uint8_t        s_setup_target_mac[6];
+static volatile bool  s_setup_in_flight = false;
+
 // Gated on s_nearby_win: skips all of this (formatting rows nobody would
 // see, pushing them to widgets that don't exist yet) until the Nearby
 // section has actually been opened once — same "don't do the work for a
@@ -769,12 +421,29 @@ static void refresh_nearby(void) {
         purr_win_label_set(s_nearby_status_lbl, buf);
     }
 
-    // Auto-close the confirm dialog once the peer accepts (PAIRED) or the
-    // request ends any other way (rejected/timed out both surface as a
-    // reset back to NONE — see pairing_module.c) — the dialog has nothing
-    // further to wait for in either case.
-    if (s_pair_win && pairing_get_state() != PAIRING_STATE_PENDING_OUTGOING) {
-        close_pair_dialog();
+    // Once the peer accepts (PAIRED), close the dialog — the paired list
+    // just below already reflects the new pairing, nothing more to show.
+    // Any OTHER way the request ends (rejected or timed out — both
+    // surface as a reset back to NONE, see pairing_module.c) used to
+    // close this dialog exactly the same way: silently, with the human
+    // never told which happened, or that anything happened at all. Under
+    // real conditions (weak signal, a busy radio, the memory pressure
+    // this session's own boot-log heapwatch already measured on this
+    // board — dma_free/largest_dma down near ~2.7KB, right where ESP-NOW's
+    // own TX/RX buffers have to come from) a dropped REQUEST/ACCEPT frame
+    // reads as "nothing happened when I tapped Pair" with zero way to
+    // tell that apart from "it's still working, wait." Leave the dialog
+    // open with a real reason instead — on_pair_cancel_click() (its
+    // existing Cancel button) still closes it either way, and
+    // pairing_cancel() is already a safe no-op once the state has already
+    // reset off PENDING_OUTGOING.
+    if (s_pair_win) {
+        pairing_state_t st = pairing_get_state();
+        if (st == PAIRING_STATE_PAIRED) {
+            close_pair_dialog();
+        } else if (st != PAIRING_STATE_PENDING_OUTGOING) {
+            purr_win_label_set(s_pair_win_lbl, "Pairing failed \xE2\x80\x94 timed out or rejected.\nCheck the other device is nearby and awake, then try again.");
+        }
     }
 
     int paired_n = pairing_device_count();
@@ -814,6 +483,15 @@ static void on_pair_cancel_click(purr_wid_t w, purr_event_t e, void *user) {
 // on oled_ui_module.c's Heltec-companion flow) — that's where the genuine
 // integrity check happens.
 static void open_pair_dialog(const char *peer_name) {
+    // A previous attempt's dialog can still be showing its own failure
+    // message here now (refresh_nearby()'s own doc comment on why that no
+    // longer auto-closes) — close it first rather than leaking/orphaning
+    // that window handle. on_nearby_pair_click()'s own gate only checks
+    // pairing_get_state(), which has already reset by the time a failed
+    // dialog is still visible, so it alone doesn't stop this from being
+    // reached while one is still up.
+    close_pair_dialog();
+
     char msg[80];
     snprintf(msg, sizeof(msg), "Pairing with %s\nWaiting for confirmation...", peer_name);
 
@@ -873,6 +551,106 @@ static void on_nearby_set_home_click(purr_wid_t w, purr_event_t e, void *user) {
     refresh_nearby();
 }
 
+typedef struct {
+    uint8_t mac[6];
+    char    username[USER_MGR_USERNAME_MAX];
+    char    password[64];
+} setup_push_ctx_t;
+
+// Fire-and-forget, same one-shot-task shape as app_manager.c's own
+// remote_op_task() from this session — never call pairing_remote_oobe_
+// push() (a blocking proximity_rpc_call()) from cupcake_task. Safe to
+// touch s_setup_status_lbl directly from here despite that: purr_win_
+// label_set()'s own backend already defers internally (see
+// disconnect_to_connection_screen() and everywhere else in this file that
+// touches a purr_win_* widget from refresh_task() without lv_async_call()-
+// style marshaling) — this is the SAME portable API, not raw LVGL.
+static void setup_push_task(void *arg) {
+    setup_push_ctx_t *ctx = (setup_push_ctx_t *)arg;
+    bool ok = pairing_remote_oobe_push(ctx->mac, ctx->username, ctx->password);
+    if (s_setup_status_lbl) {
+        purr_win_label_set(s_setup_status_lbl,
+            ok ? "Setup complete!" : "Setup failed - already configured, or unreachable");
+    }
+    memset(ctx->password, 0, sizeof(ctx->password));
+    free(ctx);
+    s_setup_in_flight = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void on_setup_push_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    if (s_setup_in_flight) return;   // already running — ignore a double-tap
+
+    setup_push_ctx_t *ctx = malloc(sizeof(*ctx));
+    if (!ctx) return;
+    memcpy(ctx->mac, s_setup_target_mac, 6);
+    const char *u = s_setup_user_input ? purr_win_textarea_get(s_setup_user_input) : NULL;
+    const char *p = s_setup_pass_input ? purr_win_textarea_get(s_setup_pass_input) : NULL;
+    snprintf(ctx->username, sizeof(ctx->username), "%s", u ? u : "");
+    snprintf(ctx->password, sizeof(ctx->password), "%s", p ? p : "");
+
+    if (s_setup_status_lbl) purr_win_label_set(s_setup_status_lbl, "Pushing setup...");
+    s_setup_in_flight = true;
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(setup_push_task, "milkbar_setup", 4096, ctx, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) {
+        s_setup_in_flight = false;
+        free(ctx);
+        if (s_setup_status_lbl) purr_win_label_set(s_setup_status_lbl, "Could not start - try again");
+    }
+}
+
+// Same push, but with both fields forced blank first — the exact
+// zero-friction "keep the peer's own bootstrap default, no password" path
+// pairing_remote_oobe_push()'s own doc comment describes, one tap instead
+// of leaving the fields empty and remembering not to type anything.
+static void on_setup_keep_default_click(purr_wid_t w, purr_event_t e, void *user) {
+    if (s_setup_user_input) purr_win_textarea_clear(s_setup_user_input);
+    if (s_setup_pass_input) purr_win_textarea_clear(s_setup_pass_input);
+    on_setup_push_click(w, e, user);
+}
+
+static void on_setup_cancel_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    if (s_setup_dlg) purr_win_hide(s_setup_dlg);
+}
+
+// Lazy create-then-show, same pattern every other sub-window in this file
+// uses. Reset fresh every open — s_setup_target_mac is set by the caller
+// (on_nearby_setup_click()) just before this.
+static void open_setup_dialog(void) {
+    if (!s_setup_dlg) {
+        s_setup_dlg = purr_win_create("Push Setup");
+        purr_win_label(s_setup_dlg, "Username (blank = keep default):");
+        s_setup_user_input = purr_win_textarea(s_setup_dlg, 100, 16);
+        purr_win_label(s_setup_dlg, "Password (optional):");
+        s_setup_pass_input = purr_win_textarea(s_setup_dlg, 100, 16);
+        s_setup_status_lbl = purr_win_label(s_setup_dlg, "");
+
+        purr_wid_t row = purr_win_row(s_setup_dlg, 3);
+        purr_win_button(s_setup_dlg, "Push", on_setup_push_click, NULL);
+        purr_win_button(s_setup_dlg, "Keep Default", on_setup_keep_default_click, NULL);
+        purr_win_button(s_setup_dlg, "Cancel", on_setup_cancel_click, NULL);
+        purr_win_layout_end(row);
+    }
+
+    if (s_setup_user_input) purr_win_textarea_clear(s_setup_user_input);
+    if (s_setup_pass_input) purr_win_textarea_clear(s_setup_pass_input);
+    if (s_setup_status_lbl) purr_win_label_set(s_setup_status_lbl, "");
+    purr_win_show(s_setup_dlg);
+}
+
+static void on_nearby_setup_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    int idx = purr_win_list_get_selected(s_nearby_paired_list);
+    if (idx < 0) return;
+    paired_device_t pd;
+    if (!pairing_device_at(idx, &pd)) return;
+    memcpy(s_setup_target_mac, pd.mac, 6);
+    open_setup_dialog();
+}
+
 static void open_nearby(purr_wid_t w, purr_event_t e, void *u) {
     (void)w; (void)e; (void)u;
     if (s_nearby_win) { purr_win_show(s_nearby_win); refresh_nearby(); return; }
@@ -881,11 +659,12 @@ static void open_nearby(purr_wid_t w, purr_event_t e, void *u) {
     add_back_button(s_nearby_win);
     s_nearby_status_lbl = purr_win_label(s_nearby_win, "Proximity: starting...");
 
-    purr_wid_t row = purr_win_row(s_nearby_win, 4);
+    purr_wid_t row = purr_win_row(s_nearby_win, 5);
     purr_win_button(s_nearby_win, "Refresh", on_nearby_refresh_click, NULL);
     purr_win_button(s_nearby_win, "Pair", on_nearby_pair_click, NULL);
     purr_win_button(s_nearby_win, "Unpair", on_nearby_unpair_click, NULL);
     purr_win_button(s_nearby_win, "Set Home", on_nearby_set_home_click, NULL);
+    purr_win_button(s_nearby_win, "Setup", on_nearby_setup_click, NULL);
     purr_win_layout_end(row);
 
     s_nearby_list = purr_win_list(s_nearby_win, 100, 40);
@@ -902,30 +681,13 @@ static void open_nearby(purr_wid_t w, purr_event_t e, void *u) {
 static void refresh_task(void *arg) {
     (void)arg;
     while (s_running) {
-        // Login takes priority over this pass's ordinary refreshes — it's
-        // a multi-step blocking sequence (see run_login_flow()'s own
-        // comment) that can genuinely take minutes waiting on a human's
-        // approval; the other refreshes below just wait for its next pass
-        // the same way they already wait REFRESH_MS between passes.
-        if (s_login_requested) {
-            s_login_requested = false;
-            run_login_flow();
-        }
         refresh_device_list();
-        refresh_nearby();                 // no-op fast path until Nearby is opened once
-        refresh_app_list_from_remote();   // no-op fast path if nothing selected yet
-        refresh_dashboard();              // no-op fast path until Dashboard is opened
-        if (s_rx_is_new) {
-            s_rx_is_new = false;
-            if (s_msg_big_lbl) purr_win_label_set_big(s_msg_big_lbl, s_last_rx_text);
-        }
+        refresh_nearby();      // no-op fast path until Nearby is opened once
+        refresh_dashboard();   // no-op fast path until Dashboard is opened
         // Short steps, not one REFRESH_MS vTaskDelay — same reasoning as
         // nearby_app.c's own refresh_task(): milkbar_app_deinit() blocks on
         // this task actually exiting, so how quickly it notices
         // s_running == false directly bounds how long a close/Kill stalls.
-        // A live proximity_rpc_call() in flight when s_running flips to
-        // false still has to finish or time out first either way — up to
-        // RPC_TIMEOUT_MS, not bounded by this loop's own step size.
         for (int waited_ms = 0; waited_ms < REFRESH_MS && s_running; waited_ms += 200) {
             vTaskDelay(pdMS_TO_TICKS(200));
         }
@@ -937,62 +699,85 @@ static void refresh_task(void *arg) {
 static int milkbar_app_init(void) {
     if (!s_refresh_done) s_refresh_done = xSemaphoreCreateBinary();
 
-    proximity_rpc_register(MILKBAR_ACTION_MSG_SEND, handle_send_msg);
-
-    // Connection screen — the first thing this app shows. Dashboard/
-    // Desktop (open_dashboard()/open_desktop()) are built lazily, only
-    // once a login actually succeeds.
+    // Connection screen — always built (disconnect_to_connection_screen()
+    // needs somewhere valid to land back on regardless of how this app was
+    // opened), but only actually SHOWN below when there's no already-active
+    // remote session to route past instead. No login fields here any more
+    // (see this file's top comment) — just paired-device browsing/pairing
+    // management, plus its own Disconnect for ending an active session.
     s_win = purr_win_create("Connect");
     purr_win_label(s_win, "Paired devices:");
     s_device_list = purr_win_list(s_win, 100, 30);
     purr_win_list_on_select(s_device_list, on_device_list_event, NULL);
 
-    purr_wid_t row = purr_win_row(s_win, 2);
+    purr_wid_t row = purr_win_row(s_win, 3);
     purr_win_button(s_win, "Refresh", on_refresh_click, NULL);
     purr_win_button(s_win, "Nearby", open_nearby, NULL);
+    purr_win_button(s_win, "Disconnect", on_connection_disconnect_click, NULL);
     purr_win_layout_end(row);
 
-    purr_win_label(s_win, "Username:");
-    s_user_input = purr_win_textarea(s_win, 100, 16);
-    purr_win_label(s_win, "Password:");
-    // Plain textarea, not masked — catcall_ui.h's portable purr_win_
-    // textarea() has no password-mode flag (only systemui_login.c's own
-    // raw-LVGL local-login field does, lv_textarea_set_password_mode()).
-    // Adding that to the portable widget API is a real but separable
-    // follow-up; this pass matches what the API actually offers today.
-    s_pass_input = purr_win_textarea(s_win, 100, 16);
-    purr_win_button(s_win, "Log In", on_login_click, NULL);
-    s_login_status_lbl = purr_win_label(s_win, "Select a paired device");
-
     s_have_selection = false;
-    s_login_requested = false;
-    s_rx_is_new = false;
-    s_last_rx_text[0] = 0;
     refresh_device_list();
     milkbar_cfg_load();   // may flip s_have_selection back to true — see its own comment
-    purr_win_show(s_win);
+
+    // Post-login hand-off: the systemui "Log in to a server" screen
+    // (systemui_login.c) already ran the real pairing.h Phase A/B/C
+    // exchange and called user_mgr_set_logged_in() before launching this
+    // app (app_manager_launch_by_name("milkbar")) — by the time this runs,
+    // user_mgr_current_user() IS that authenticated remote identity. Route
+    // straight past Connection in that case: admin accounts land on
+    // Dashboard, everyone else goes straight to the remote desktop — same
+    // split this file always documented, just no longer decided by a login
+    // this app itself ran.
+    //
+    // KNOWN LIMITATION: this only fires on a FRESH launch of this app — if
+    // Milkbar was already open (browsing Connection/Nearby) when a separate
+    // systemui login completed, app_manager_launch_by_name()'s own
+    // "already running, just re-show" early return (app_manager.c) means
+    // init() never runs again and this check never fires. Same limitation
+    // every native app in this codebase already has (tapping a running
+    // app's icon never re-runs its init()), not new here — just newly
+    // reachable via this path. The user is left on whatever screen Milkbar
+    // already had open; reopening it a second time doesn't help either,
+    // for the same reason.
+    const char *cur = user_mgr_current_user();
+    if (user_mgr_is_logged_in() && user_mgr_account_type(cur) == USER_ACCOUNT_REMOTE) {
+        if (!s_have_selection && pairing_get_home_base(s_selected_mac)) {
+            s_have_selection = true;
+        }
+        if (user_mgr_is_admin(cur)) open_dashboard();
+        else                        enter_remote_desktop();
+    } else {
+        purr_win_show(s_win);
+    }
 
     s_running = true;
-    // Background task does the (potentially slow, blocking) proximity_rpc_
-    // call() work — see this file's top comment. PSRAM-backed stack: no
-    // NVS/flash access anywhere in this task's own body, same rationale as
-    // nearby_app.c's identical refresh_task() pattern.
+    // Background task refreshes Connection/Nearby/Dashboard's own local
+    // reads — none of them block on a network round trip any more (the
+    // remote-mode list/launch/stop RPCs now live entirely in app_manager.c/
+    // app_manager_remote.c's own background tasks, see ensure_remote_
+    // connected()) — but this still rides its own task rather than
+    // cupcake_task, same as nearby_app.c's/meshdiag.c's identical pattern.
     xTaskCreateWithCaps(refresh_task, "milkbar_ref", 4096, NULL, 3, &s_refresh_task, MALLOC_CAP_SPIRAM);
     return 0;
 }
 
 static void milkbar_app_deinit(void) {
     s_running = false;
-    if (s_refresh_done) xSemaphoreTake(s_refresh_done, pdMS_TO_TICKS(RPC_TIMEOUT_MS + 500));
+    if (s_refresh_done) xSemaphoreTake(s_refresh_done, pdMS_TO_TICKS(2000));
     s_refresh_task = NULL;
 
-    // Stop answering MSG_SEND once the app isn't open to show it anymore —
-    // see this file's top comment on receive-only-while-open scope.
-    proximity_rpc_register(MILKBAR_ACTION_MSG_SEND, NULL);
-
-    if (s_msg_win) { purr_win_destroy(s_msg_win); s_msg_win = 0; s_msg_big_lbl = 0; s_msg_input = 0; }
+    // This app is the one that turned remote mode on (ensure_remote_
+    // connected()) — turn it back off if it's still running when this app
+    // is stopped, same hygiene reasoning systemui_xp.c's menu_logoff_cb()
+    // already applies on a local log-off.
+    app_manager_clear_remote();
 
     close_pair_dialog();
+    if (s_setup_dlg) {
+        purr_win_destroy(s_setup_dlg);
+        s_setup_dlg = 0; s_setup_user_input = 0; s_setup_pass_input = 0; s_setup_status_lbl = 0;
+    }
     if (s_nearby_win) {
         purr_win_destroy(s_nearby_win);
         s_nearby_win = 0; s_nearby_list = 0; s_nearby_status_lbl = 0;
@@ -1000,13 +785,10 @@ static void milkbar_app_deinit(void) {
     }
 
     if (s_dashboard_win) { purr_win_destroy(s_dashboard_win); s_dashboard_win = 0; s_dashboard_info_lbl = 0; }
-    if (s_desktop_win)   { purr_win_destroy(s_desktop_win);   s_desktop_win = 0;   s_app_list = 0; s_status_lbl = 0; }
 
     purr_win_destroy(s_win);
-    s_win = 0; s_device_list = 0; s_user_input = 0; s_pass_input = 0; s_login_status_lbl = 0;
+    s_win = 0; s_device_list = 0;
     s_have_selection = false;
-    s_login_requested = false;
-    memset(s_login_password, 0, sizeof(s_login_password));
 }
 
 // ── Module header ─────────────────────────────────────────────────────────
@@ -1017,7 +799,7 @@ PURR_MODULE_REGISTER(milkbar) = {
     .module_type       = PURR_MOD_APP,
     .load_priority     = PURR_PRIORITY_OPTIONAL,
     .name              = "milkbar",
-    .version           = "1.2.0",
+    .version           = "1.3.0",
     .kernel_min        = "0.11.1",
     .provided_catcalls = 0,
     .required_catcalls = 0,
