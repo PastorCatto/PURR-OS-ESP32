@@ -22,6 +22,14 @@ else()
     set(CHEETAH_SRCS "")
 endif()
 
+# app_manager_remote/proximity — cheetah_home.c's launch() now offers to
+# download+install a LOCAL/HYBRID-placed remote app on first tap (see
+# app_manager_decide_placement(), app_manager.h). Both are conditionally-
+# empty on esp32p4/tab5 (no radio there at all) — same "safe to REQUIRE
+# unconditionally either way" shape systemui/CMakeLists.txt already
+# documents for pairing/app_manager_remote; the C code itself guards the
+# actual calls behind CONFIG_IDF_TARGET_ESP32P4 (see cheetah_home.c's own
+# #if), matching systemui_login.c's identical precedent.
 idf_component_register(
     SRCS ${CHEETAH_SRCS}
     INCLUDE_DIRS
@@ -29,5 +37,9 @@ idf_component_register(
         ../../kernel/core
         ../../kernel/catcalls
         ../systemui
-    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager systemui mochi
+        ../app_manager_remote
+        ../proximity
+        ../user_mgr
+        ../claw_loader
+    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager systemui mochi app_manager_remote proximity user_mgr claw_loader
 )

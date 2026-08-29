@@ -241,12 +241,13 @@ static void win_del_async_cb(void *obj) {
 //
 // Sized up once already ("way bigger" was the direct ask) — 20px was
 // genuinely too small a touch target; 40px is close to the usual ~40-44px
-// minimum-touch-target guidance. Height shrunk back down a little since —
-// still comfortably in that range, and now matches WIN_TITLE_BAR_H below, so
-// the button reads as sized for the title bar it sits in front of rather
-// than an arbitrary square.
+// minimum-touch-target guidance. Height shrunk back down a little since,
+// then a further 10px on direct request — no longer matching
+// WIN_TITLE_BAR_H below exactly, so its own vertical offset (see
+// lv_obj_align() at its creation site) is centered within the title bar
+// rather than reused unchanged from when the two matched.
 #define WIN_CLOSE_BTN_W 40
-#define WIN_CLOSE_BTN_H 30
+#define WIN_CLOSE_BTN_H 20
 
 // Per-window XP-style title bar: hidden by default (this backend's own
 // "no top bar, just the button" decision stands — a permanently-visible bar
@@ -286,19 +287,27 @@ static void win_close_click_cb(lv_event_t *e) {
     cheetah_home_go_home();
 }
 
-// Shows the title bar and hides its reveal zone (nothing left to catch a
-// swipe for while the real bar is already up), or the reverse. visible=false
-// is also this function's own "reset to default" call from tb_win_create().
+// Shows the title bar AND its close button together, hiding the reveal
+// zone (nothing left to catch a swipe for while the real bar is already
+// up) — or the reverse. The close button used to be independently
+// always-visible, tied to nothing; that read as an orphaned floating X
+// with no bar under it whenever the bar was hidden (its own default
+// state), and meant "swipe down to reveal the title bar" didn't actually
+// hide anything close-related the way a real XP title bar's own X button
+// would. Tied together here instead: both show, or both hide, as one unit.
 static void set_title_bar_visible(purr_win_t h, bool visible) {
     if (h < 1 || h > MAX_WINS) return;
-    lv_obj_t *bar  = s_title_bars[h - 1];
-    lv_obj_t *zone = s_title_reveal_zones[h - 1];
+    lv_obj_t *bar   = s_title_bars[h - 1];
+    lv_obj_t *btn   = s_close_btns[h - 1];
+    lv_obj_t *zone  = s_title_reveal_zones[h - 1];
     if (!bar) return;
     if (visible) {
         lv_obj_clear_flag(bar, LV_OBJ_FLAG_HIDDEN);
+        if (btn)  lv_obj_clear_flag(btn, LV_OBJ_FLAG_HIDDEN);
         if (zone) lv_obj_add_flag(zone, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+        if (btn)  lv_obj_add_flag(btn, LV_OBJ_FLAG_HIDDEN);
         if (zone) lv_obj_clear_flag(zone, LV_OBJ_FLAG_HIDDEN);
     }
 }
@@ -349,12 +358,16 @@ static purr_win_t tb_win_create(const char *title) {
     lv_obj_remove_style_all(close_btn);
     lv_obj_add_flag(close_btn, LV_OBJ_FLAG_IGNORE_LAYOUT);   // exempt from win's own COLUMN flex — see comment above
     lv_obj_set_size(close_btn, WIN_CLOSE_BTN_W, WIN_CLOSE_BTN_H);
-    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -2, 2);
+    // y-offset centers the button within WIN_TITLE_BAR_H (30px), not just
+    // a small fixed inset from the top the way it was when the two
+    // heights matched exactly: (WIN_TITLE_BAR_H - WIN_CLOSE_BTN_H) / 2.
+    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -2, (WIN_TITLE_BAR_H - WIN_CLOSE_BTN_H) / 2);
     lv_obj_set_style_radius(close_btn, 3, 0);
     lv_obj_set_style_bg_color(close_btn, lv_color_hex(0xE81123), 0);   // Windows-close-button red
     lv_obj_set_style_bg_opa(close_btn, LV_OPA_COVER, 0);
     lv_obj_clear_flag(close_btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(close_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(close_btn, LV_OBJ_FLAG_HIDDEN);   // starts hidden, same default as title_bar below — see set_title_bar_visible()
     lv_obj_add_event_cb(close_btn, win_close_click_cb, LV_EVENT_CLICKED, (void *)(intptr_t)handle);
     lv_obj_t *close_lbl = lv_label_create(close_btn);
     lv_label_set_text(close_lbl, LV_SYMBOL_CLOSE);
@@ -363,11 +376,13 @@ static purr_win_t tb_win_create(const char *title) {
     lv_obj_clear_flag(close_lbl, LV_OBJ_FLAG_CLICKABLE);
     if (handle >= 1 && handle <= MAX_WINS) s_close_btns[handle - 1] = close_btn;
 
-    // Title bar: full width, docked at the very top, starts hidden. Text is
-    // left-inset and width-capped to stop short of the close button (which
-    // stays independently visible/clickable at all times — this bar is
-    // purely a "what app is this" affordance, not where Close lives) so a
-    // long title ellipsizes instead of running underneath it.
+    // Title bar: full width, docked at the very top, starts hidden — the
+    // close button (also hidden by default, see its own creation above)
+    // shows and hides together with this bar, same as a real XP window's
+    // own X button lives inside its title bar rather than floating
+    // independently of it. Text is left-inset and width-capped to stop
+    // short of the close button's rectangle so a long title ellipsizes
+    // instead of running underneath it.
     lv_obj_t *title_bar = lv_obj_create(win);
     lv_obj_remove_style_all(title_bar);
     lv_obj_add_flag(title_bar, LV_OBJ_FLAG_IGNORE_LAYOUT);

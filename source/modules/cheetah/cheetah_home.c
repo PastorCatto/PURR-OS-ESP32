@@ -45,12 +45,32 @@
 #include "../mochi/mochi.h"
 #include "../systemui/systemui.h"
 #include "../app_manager/app_manager.h"
+#include "../user_mgr/user_mgr.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/catcalls/purr_win.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include <string.h>
 #include <stdio.h>
+
+// launch()'s install-prompt path (a LOCAL/HYBRID-placed remote app,
+// app_manager_decide_placement()) needs app_manager_remote_download()
+// and proximity's capability query — both conditionally-empty on
+// esp32p4/tab5 (no radio there at all), same guard shape systemui_
+// login.c's own "Log in to a server" screen already establishes for the
+// identical reason. user_mgr.h has no such gate (universal, no radio
+// dependency) and is included unconditionally above.
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+#define CHEETAH_HAS_APP_DOWNLOAD 0
+#else
+#define CHEETAH_HAS_APP_DOWNLOAD 1
+#include "../app_manager_remote/app_manager_remote.h"
+#include "../proximity/proximity.h"
+#include "../claw_loader/claw_loader.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/idf_additions.h"
+#endif
 
 static const char *TAG = "cheetah_home";
 
@@ -164,11 +184,180 @@ static void fav_default_all(void)
 
 // ── Launch ───────────────────────────────────────────────────────────────
 
+#if CHEETAH_HAS_APP_DOWNLOAD
+// ── Remote app install prompt ───────────────────────────────────────────
+// Every remote-listed app not yet downloaded gets asked, every tap, until
+// it IS downloaded — "Install locally" vs "Run on server" — see
+// launch()'s own comment for why this changed from an app.pcat-declared
+// LOCAL/HYBRID gate (app_placement_t defaults every app to REMOTE with
+// no author-facing way yet to mark one otherwise, so that gate meant
+// NOTHING ever actually asked in practice — a real, reported bug, not
+// the intended "ask only for specially-marked apps" design). Same
+// "purr_win_* calls are safe from a background task, the portable
+// backend already defers internally" precedent this codebase already
+// establishes (see milkbar's own retired background task / cheetah_
+// win.c's own comment), but this dialog is built/torn down entirely on
+// the LVGL/render task (launch() below already runs there, as an
+// icon-click callback) — only the actual network download runs on its
+// own background task, and that task never touches the dialog's window
+// handle at all, sidestepping the question entirely rather than relying
+// on it.
+static purr_win_t s_install_win = 0;
+static char        s_install_name[48];
+static uint8_t      s_install_mac[6];
+static int          s_install_registry_idx = -1;   // for "Run on server" — app_manager_launch_idx() needs the compacted remote index, not just the name
+
+static bool personal_app_exists(const char *username, const char *name) {
+    int n = claw_loader_personal_count(username);
+    for (int i = 0; i < n; i++) {
+        char existing[48];
+        if (claw_loader_personal_at(username, i, existing, sizeof(existing)) &&
+            strcmp(existing, name) == 0) return true;
+    }
+    return false;
+}
+
+// Never call directly — only the body of the task on_install_yes() spawns.
+// Touches nothing LVGL-side; reports outcome via purr_kernel_notify()
+// (thread-safe, no UI dependency) and app_manager_scan()/_launch_by_name()
+// (app_manager.c's own local-registry calls, independent of s_remote_mode
+// — same bypass the synthetic "Server Manager" entry's own launch already
+// uses, see app_manager.c's remote_launch_idx()).
+static void install_download_task(void *arg)
+{
+    (void)arg;
+    const char *username = user_mgr_current_user();
+    bool ok = app_manager_remote_download(s_install_mac, s_install_name, username);
+    if (ok) {
+        ESP_LOGI(TAG, "installed '%s' — launching locally", s_install_name);
+        purr_kernel_notify("App installed", s_install_name, "cheetah");
+        app_manager_scan();   // pick up the freshly-downloaded personal app
+        app_manager_launch_by_name(s_install_name);
+    } else {
+        ESP_LOGW(TAG, "install failed for '%s'", s_install_name);
+        purr_kernel_notify("Install failed", s_install_name, "cheetah");
+    }
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void close_install_dialog(void)
+{
+    if (s_install_win) { purr_win_destroy(s_install_win); s_install_win = 0; }
+}
+
+static void on_install_yes(purr_wid_t w, purr_event_t e, void *user)
+{
+    (void)w; (void)e; (void)user;
+    close_install_dialog();
+    xTaskCreateWithCaps(install_download_task, "cheetah_dl", 4096, NULL, 3, NULL, MALLOC_CAP_SPIRAM);
+}
+
+static void on_install_no(purr_wid_t w, purr_event_t e, void *user)
+{
+    (void)w; (void)e; (void)user;
+    close_install_dialog();
+}
+
+// "Run on server" — exactly what a plain remote tap already does
+// (app_manager_launch_idx(), the same call launch() falls through to for
+// any local or already-decided-remote app below). Choosing this doesn't
+// download anything or change anything persistent — the SAME choice is
+// offered again next time this app is tapped, since it's still not
+// installed. A real, accepted simplification for this pass — see
+// launch()'s own comment.
+static void on_install_run_remote(purr_wid_t w, purr_event_t e, void *user)
+{
+    (void)w; (void)e; (void)user;
+    close_install_dialog();
+    if (s_install_registry_idx >= 0) app_manager_launch_idx(s_install_registry_idx);
+}
+
+// offer_remote=false is the one narrow case left where the choice isn't
+// really a choice: app->placement == APP_PLACE_LOCAL (author-declared —
+// the hand-maintained table in app_manager.c, still real, just no longer
+// the ONLY way to reach this dialog at all) says this app can never run
+// on the server, so there's nothing to offer alongside Install.
+//
+// When it IS a real choice, the recommended side is labeled using the
+// same capability compare app_manager_decide_placement() already does
+// for a HYBRID-declared app — a real recommendation, not a coin flip,
+// just no longer the thing that silently DECIDES for the user the way
+// an earlier version of this dialog did (see launch()'s own comment on
+// why that read as "never asks").
+static void open_install_dialog(int registry_idx, const char *name, const uint8_t mac[6], bool offer_remote)
+{
+    close_install_dialog();   // never orphan a previous prompt — same leak-prevention precedent milkbar's own open_pair_dialog() already established
+    snprintf(s_install_name, sizeof(s_install_name), "%s", name);
+    memcpy(s_install_mac, mac, 6);
+    s_install_registry_idx = registry_idx;
+
+    bool recommend_local = false;
+    if (offer_remote) {
+        proximity_device_t peer = {0};
+        bool have_peer = proximity_find_device_by_mac(mac, &peer);
+        bool peer_strong  = have_peer && (peer.caps & PROXIMITY_CAP_STRONG_COMPUTE);
+        bool peer_display = have_peer && (peer.caps & PROXIMITY_CAP_HAS_DISPLAY);
+        bool my_strong    = (proximity_get_own_caps() & PROXIMITY_CAP_STRONG_COMPUTE) != 0;
+        recommend_local = app_manager_decide_placement(APP_PLACE_HYBRID, my_strong, peer_strong, peer_display) == APP_PLACE_LOCAL;
+    }
+
+    // 64-byte fixed text + up to 47 bytes of name (s_install_name's own
+    // size minus the null) + null = up to 112 — genuinely needs more
+    // than a round 96, not a GCC-can't-prove-it case (see this file's
+    // own claw_loader_personal_root()-class precedent elsewhere in this
+    // codebase for what THAT looks like instead).
+    char msg[128];
+    if (offer_remote) {
+        snprintf(msg, sizeof(msg), "'%s' isn't installed. Install it locally, or run it on the server?", name);
+    } else {
+        snprintf(msg, sizeof(msg), "Install '%s' from this server?", name);
+    }
+
+    s_install_win = purr_win_create("New App");
+    purr_win_label(s_install_win, msg);
+    purr_wid_t row = purr_win_row(s_install_win, offer_remote ? 3 : 2);
+    purr_win_button(s_install_win, recommend_local ? "Install (recommended)" : "Install", on_install_yes, NULL);
+    if (offer_remote) {
+        purr_win_button(s_install_win, recommend_local ? "Run on server" : "Run on server (recommended)",
+                         on_install_run_remote, NULL);
+    }
+    purr_win_button(s_install_win, "Cancel", on_install_no, NULL);
+    purr_win_layout_end(row);
+    purr_win_show(s_install_win);
+}
+#endif // CHEETAH_HAS_APP_DOWNLOAD
+
 static void launch(int registry_idx)
 {
     const app_entry_t *app = app_manager_get(registry_idx);
     if (!app) return;
     ESP_LOGI(TAG, "launching '%s' (idx=%d)", app->name, registry_idx);
+
+#if CHEETAH_HAS_APP_DOWNLOAD
+    // Any remote-listed app: already installed locally (an earlier tap's
+    // choice) launches the local copy directly, no re-asking. Otherwise
+    // — regardless of app->placement, see open_install_dialog()'s own
+    // comment on why this no longer gates on that — every tap offers the
+    // real choice: Install, or Run on server. This is the direct fix for
+    // the reported bug: gating the dialog on an app.pcat-declared LOCAL/
+    // HYBRID placement meant it never actually showed for anything,
+    // since nothing had a way to make that declaration yet.
+    uint8_t remote_mac[6];
+    if (app_manager_is_remote() && app_manager_remote_mac(remote_mac)) {
+        const char *username = user_mgr_current_user();
+        if (personal_app_exists(username, app->name)) {
+            // Same bypass reasoning install_download_task() itself uses
+            // — app_manager_launch_by_name() is the local-registry call,
+            // independent of s_remote_mode.
+            app_manager_launch_by_name(app->name);
+        } else {
+            open_install_dialog(registry_idx, app->name, remote_mac, app->placement != APP_PLACE_LOCAL);
+        }
+        purr_systemui_enter_app(registry_idx);
+        return;
+    }
+#endif
+
     if (app->state == APP_STATE_RUNNING && app->window) {
         purr_win_show(app->window);
     } else {
@@ -260,9 +449,16 @@ static void render_desktop(void)
 
     int n = app_manager_count();
     int placed = 0;
+    // Remote mode (app_manager_is_remote(), see app_manager.h) shows EVERY
+    // app the connected server reports, bypassing the favorites curation
+    // below entirely — a persisted-by-NAME local favorites list has no
+    // meaningful relationship to a transient remote app list, and Milkbar's
+    // whole point in sending someone here is "show me what I can run on
+    // that server," not a subset of it.
+    bool remote = app_manager_is_remote();
     for (int i = 0; i < n && placed < MAX_ICONS; i++) {
         const app_entry_t *app = app_manager_get(i);
-        if (!app || !fav_has(app->name)) continue;   // desktop = favorites only, see header comment
+        if (!app || (!remote && !fav_has(app->name))) continue;   // desktop = favorites only, see header comment (local mode)
         int col = placed / s_rows_per_col;
         int row = placed % s_rows_per_col;
         lv_coord_t x = (lv_coord_t)(MARGIN + col * CELL_W);
