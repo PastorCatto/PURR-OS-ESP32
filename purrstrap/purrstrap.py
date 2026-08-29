@@ -250,6 +250,30 @@ BUILD_PROFILES = {
                         "measurement and lean SD/PSRAM-loader targets, not "
                         "as a daily-driver replacement for the default build.",
     },
+    # The opposite trim from "minimal": KEEPS the full radio-companion/
+    # server stack (proximity/pairing/proximity_rpc/app_manager_remote/
+    # homebase/server_mgr/wifi_mgr — untouched, not cleared) since that's
+    # the whole thing being tested, and only sheds the OTHER bundled apps
+    # (settings/terminal/fileman/calculator/doom/magidos/moy/about/...) —
+    # heavier ones especially (doom/magidos/moy each carry their own game/
+    # shell logic) — that aren't needed for a milkbar-Server-Manager-
+    # pairing test and were measured contributing to this session's own
+    # "memory watchdog: 93% internal SRAM used" / DMA-pool-fragmentation
+    # (dma_free down to ~2.7KB, largest_dma ~2.7KB) live on tdeck_plus —
+    # exactly the kind of pressure that can starve ESP-NOW's own buffer
+    # needs and make device-to-device pairing flaky. Drivers/modules are
+    # deliberately left alone (no GPS/LoRa/battery stripping like
+    # "minimal" does) — this profile only trims [apps], nothing else.
+    "server_test": {
+        "description": "core OS + Lua + the active UI backend + the FULL "
+                        "radio-companion/server stack, kept — only "
+                        "milkbar/oobe/server_manager/settings among the "
+                        "bundled apps (settings is a base-config necessity, "
+                        "not overhead), everything else (terminal/fileman/"
+                        "calculator/doom/magidos/moy/about/...) dropped. "
+                        "For relieving internal-SRAM/DMA-pool pressure "
+                        "while testing device pairing and Server Manager.",
+    },
 }
 
 def apply_build_profile(cfg, profile_name):
@@ -288,6 +312,17 @@ def apply_build_profile(cfg, profile_name):
         # today's app list, so a future app added to any device is dropped
         # by this profile too without needing an update here.
         for key in [k for k in cfg if k.startswith("apps.")]:
+            cfg[key] = "false"
+
+    if profile_name == "server_test":
+        # Radio-companion/server stack is deliberately left untouched — see
+        # this profile's own description above for why (it's the thing
+        # being tested, not overhead to shed).
+        # settings — a base-config necessity (WiFi/BT/display/etc config),
+        # not an optional extra like terminal/fileman/diagnostics/magidos/
+        # doom/moy — kept alongside milkbar/oobe/server_manager per request.
+        keep_apps = {"apps.milkbar", "apps.oobe", "apps.server_manager", "apps.settings"}
+        for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
             cfg[key] = "false"
 
     return cfg
@@ -332,17 +367,51 @@ def bootloader_offset(chip):
 # direction — force it on for a WiFi device this doesn't detect correctly,
 # or off for one that technically has WiFi but shouldn't carry this (e.g. a
 # stripped-down diagnostic/test kernel).
+#
+# [modules] server = true is a SEPARATE, additive opt-in for the exact same
+# module set (see the loop just below — there is no functional difference
+# in what gets built between this and radio_companion=true). The distinct
+# name exists because the two express different things: radio_companion is
+# a HARDWARE heuristic ("this device has WiFi, so give it the stack almost
+# for free"), server is an INTENT flag ("this device is deliberately a
+# login/pairing server, full stop"). A device that already has
+# radio.wifi=true (e.g. heltec) gets this stack from the heuristic already
+# and setting server=true on it changes nothing observable — it's there so
+# device.pcat reads as a deliberate choice rather than a side effect, and
+# so the flag keeps working even if a future device needs the server stack
+# without qualifying for the WiFi heuristic. It does NOT imply the device
+# actually has working WiFi hardware — every module this adds
+# (proximity/pairing/proximity_rpc) genuinely needs the radio to function
+# at all, so setting this on a WiFi-less device is a configuration error
+# the resulting build will simply fail on, same as forcing
+# radio_companion=true on one already does today. Deliberately overrides
+# an explicit radio_companion=false too (checked first, below) — the two
+# contradict each other, and server=true is the more specific statement of
+# intent.
+#
+# Client-side consumption of this stack (milkbar, the systemui "Log in to
+# a server" screen, cheetah's remote-mode desktop) stays gated on having a
+# purr_win-capable UI (PURR_WIN_UI_BACKENDS, just below) or being
+# explicitly wired into a device.pcat (systemui/cheetah aren't part of
+# this function at all — see tdeck_plus's/tab5's own device.pcat) — a
+# server-flagged device with a raw-framebuffer UI like oled_ui answers
+# remote requests just fine without ever being able to originate one
+# itself, the same restriction heltec's own hand-built Pair screen already
+# accepts today.
 PURR_WIN_UI_BACKENDS = {"miniwin", "cupcake", "kittenui", "cardstack", "pounce", "tabby", "mochi"}
 
 def apply_radio_companion_defaults(cfg):
     """Mutates cfg in place, adding proximity/pairing (+ msn/milkbar where the
-    UI backend supports it) unless already present or explicitly opted out."""
+    UI backend supports it) unless already present or explicitly opted out.
+    See this function's own module-level comment above for [modules] server's
+    role alongside radio_companion."""
+    server = cfg.get("modules.server", "").strip().lower() in ("true", "1", "yes")
     flag = cfg.get("modules.radio_companion", "").strip().lower()
-    if flag in ("false", "0", "no"):
+    if flag in ("false", "0", "no") and not server:
         return cfg
     forced_on = flag in ("true", "1", "yes")
     wifi = cfg.get("radio.wifi", "").strip().lower() in ("true", "1", "yes")
-    if not (forced_on or wifi):
+    if not (forced_on or wifi or server):
         return cfg
 
     for key, val in (("modules.proximity", "proximity"), ("modules.pairing", "pairing"),
@@ -350,16 +419,31 @@ def apply_radio_companion_defaults(cfg):
                       ("modules.app_manager_remote", "app_manager_remote"),
                       ("modules.homebase", "homebase"),
                       ("modules.msn_relay", "msn_relay"),
+                      # server_mgr — Server Manager's wire protocol (remote
+                      # WiFi config, app transfer/approval), a new pass this
+                      # session. Same family, same gate — rides server=true/
+                      # radio.wifi alongside everything else here, no new
+                      # purrstrap flag of its own. See source/modules/
+                      # server_mgr/server_mgr.h for the full design.
+                      ("modules.server_mgr", "server_mgr"),
                       ("flash.proximity", "2"), ("flash.pairing", "2"), ("flash.proximity_rpc", "2"),
-                      ("flash.app_manager_remote", "2"), ("flash.homebase", "2"), ("flash.msn_relay", "2")):
+                      ("flash.app_manager_remote", "2"), ("flash.homebase", "2"), ("flash.msn_relay", "2"),
+                      ("flash.server_mgr", "2")):
         cfg.setdefault(key, val)
 
     if cfg.get("modules.ui", "") in PURR_WIN_UI_BACKENDS:
         # nearby was folded into milkbar (its "who's beaconing nearby, pair/
         # unpair" screen is now milkbar's own Nearby section) — see
         # source/apps/system/milkbar/milkbar_app.c's file header.
-        for key, val in (("apps.msn", "true"), ("apps.milkbar", "true"),
-                          ("flash.apps/msn", "3"), ("flash.apps/milkbar", "3")):
+        #
+        # server_manager — reached only through app_manager.h's synthetic
+        # remote-mode entry (never from a home-screen icon or Start Menu
+        # listing — app_manager_launch_by_name("server_manager") is the
+        # only real launch path), but still needs to be a real, compiled
+        # app_manager entry for that by-name launch to find, same as
+        # milkbar/msn here.
+        for key, val in (("apps.msn", "true"), ("apps.milkbar", "true"), ("apps.server_manager", "true"),
+                          ("flash.apps/msn", "3"), ("flash.apps/milkbar", "3"), ("flash.apps/server_manager", "3")):
             cfg.setdefault(key, val)
     return cfg
 
@@ -849,12 +933,14 @@ def _generate_glue(device, cfg, out_dir):
         val = cfg.get(key, "")
         if val:
             module_ids.append(to_sym(val))
-    # [modules] section — ui, app_manager, etc. "radio_companion" is a
-    # control flag (see apply_radio_companion_defaults()), not a module
-    # name — excluded here or to_sym("true"/"false") would produce a bogus
-    # "extern purr_module_true;" reference.
+    # [modules] section — ui, app_manager, etc. "radio_companion" and
+    # "server" are both control flags (see apply_radio_companion_defaults()'s
+    # own comment on the two), not module names — excluded here or
+    # to_sym("true"/"false") would produce a bogus "extern
+    # purr_module_true;" reference.
+    CONTROL_FLAG_MODULE_KEYS = ("modules.radio_companion", "modules.server")
     for raw_key, raw_val in sorted(cfg.items()):
-        if raw_key.startswith("modules.") and raw_val and raw_key != "modules.radio_companion":
+        if raw_key.startswith("modules.") and raw_val and raw_key not in CONTROL_FLAG_MODULE_KEYS:
             module_ids.append(to_sym(raw_val))
     # driver_manager is always included if present
     if to_sym("driver_manager") not in module_ids:
