@@ -17,6 +17,9 @@
 #include "../../modules/meshtastic/meshtastic.h"
 #include "../../modules/pairing/pairing.h"
 #include "../../modules/proximity/proximity.h"
+#include "../../modules/user_mgr/user_mgr.h"
+#include "../../modules/app_manager/app_manager.h"
+#include "../../modules/server_mgr/server_mgr.h"
 
 static const char *TAG = "oled_ui";
 
@@ -213,9 +216,9 @@ static void mesh_rx_for_oled(uint32_t from_node, uint32_t to_node, int channel_i
 // forward through these, long press jumps straight back to SCREEN_LOG.
 // Order/count here must match s_screen_names[] below.
 
-typedef enum { SCREEN_LOG = 0, SCREEN_INFO, SCREEN_ABOUT, SCREEN_SEND, SCREEN_NODES, SCREEN_MESSAGES, SCREEN_PAIR, SCREEN_SHUTDOWN, SCREEN_COUNT } screen_t;
+typedef enum { SCREEN_LOG = 0, SCREEN_INFO, SCREEN_ABOUT, SCREEN_SEND, SCREEN_NODES, SCREEN_MESSAGES, SCREEN_PAIR, SCREEN_LOGIN_REQ, SCREEN_APP_APPROVAL, SCREEN_SHUTDOWN, SCREEN_COUNT } screen_t;
 
-static const char *s_screen_names[SCREEN_COUNT] = { "Log", "Info", "About", "Send", "Nodes", "Msgs", "Pair", "Power" };
+static const char *s_screen_names[SCREEN_COUNT] = { "Log", "Info", "About", "Send", "Nodes", "Msgs", "Pair", "Login", "App", "Power" };
 
 static screen_t s_screen = SCREEN_LOG;
 
@@ -236,17 +239,35 @@ static void draw_title_bar(const char *name) {
 static void render_log(void) {
     draw_title_bar(s_screen_names[SCREEN_LOG]);
 
-    // Row 1: a pending incoming pairing request takes over this row — it's
-    // the one thing on this screen that needs the user's attention before
-    // it times out (PAIRING_TIMEOUT_MS in pairing_module.c), unlike LoRa/
-    // GPS status which is fine to glance at whenever. Otherwise: LoRa/mesh
-    // status is real now (meshtastic module wired in); GPS stays a
-    // placeholder — this board has no onboard GPS and none is attached,
-    // nothing to actually report yet.
+    // Row 1: four priority tiers, highest first (realistically at most one
+    // is ever true at once — OOBE-not-done and trust-not-established both
+    // precede any login request, and a login request only exists once
+    // trust already does):
+    //   1. this device's own OOBE not done yet — needs a client to push
+    //      setup (pairing.h's "Remote OOBE") before anything else here
+    //      matters.
+    //   2. a pending incoming pairing (trust) request — one of the two
+    //      things that times out (PAIRING_TIMEOUT_MS in pairing_module.c)
+    //      if ignored.
+    //   3. a pending userauth (login) request — the other thing that
+    //      times out (USERAUTH_REQ_TIMEOUT_MS), same reasoning as #2, just
+    //      for SCREEN_LOGIN_REQ instead of SCREEN_PAIR.
+    //   4. a pending app-upload approval (server_mgr.h) — doesn't time out
+    //      the way #2/#3 do, but still surfaced here for discoverability;
+    //      nothing else nudges you to go check SCREEN_APP_APPROVAL.
+    //   5. otherwise: LoRa/mesh status is real now (meshtastic module
+    //      wired in); GPS stays a placeholder — this board has no onboard
+    //      GPS and none is attached, nothing to actually report yet.
     // Oversized on purpose — see draw_title_bar()'s buf comment for why.
     char status[48];
-    if (pairing_get_state() == PAIRING_STATE_PENDING_INCOMING) {
+    if (!user_mgr_oobe_completed()) {
+        draw_str(0, FONT_H, "Setup needed! pair", COL_WHITE, COL_BLACK);
+    } else if (pairing_get_state() == PAIRING_STATE_PENDING_INCOMING) {
         draw_str(0, FONT_H, "Pair request! ->Pair", COL_WHITE, COL_BLACK);
+    } else if (pairing_get_pending_user_request(NULL, 0, NULL, 0)) {
+        draw_str(0, FONT_H, "Login request! ->Login", COL_WHITE, COL_BLACK);
+    } else if (server_mgr_get_pending_app(NULL, 0, NULL, 0)) {
+        draw_str(0, FONT_H, "App pending! ->App", COL_WHITE, COL_BLACK);
     } else {
         const char *lora = !mesh_manager_ready()   ? "starting"
                           : !mesh_manager_is_alive() ? "stale"
@@ -299,6 +320,14 @@ static void render_info(void) {
 
     snprintf(line, sizeof(line), "Heap: %u KB", (unsigned)(esp_get_free_heap_size() / 1024));
     draw_str(0, FONT_H * 4, line, COL_WHITE, COL_BLACK);
+
+    // This device's own identity — see oled_ui_init()'s auto-login
+    // comment: there's no password prompt a one-button OLED could ever
+    // satisfy, so this is always just whichever account is current
+    // (the bootstrap default, or whatever a remote OOBE push named it).
+    const char *user = user_mgr_current_user();
+    snprintf(line, sizeof(line), "User: %s", (user && user[0]) ? user : "(none)");
+    draw_str(0, FONT_H * 5, line, COL_WHITE, COL_BLACK);
 }
 
 static void render_about(void) {
@@ -490,6 +519,66 @@ static void render_pair(void) {
     draw_str(0, FONT_H * 7, "tap=reject", COL_WHITE, COL_BLACK);
 }
 
+// --- Login request (pairing.h's Phase B human-approval gate) -----------------
+// A DIFFERENT, later-stage concept from Pair above: Pair establishes
+// device-level trust; this approves a SPECIFIC user_mgr account login on
+// an ALREADY-trusted device (pairing.h's own "Remote login" section). Same
+// single-step hold=confirm/tap=reject shape as render_pair() — a request
+// only exists because an already-trusted device explicitly asked, same
+// reasoning that file's own comment gives for skipping a separate unlock
+// step here too.
+static void render_login_req(void) {
+    draw_title_bar(s_screen_names[SCREEN_LOGIN_REQ]);
+
+    char username[USER_MGR_USERNAME_MAX], device_name[20];
+    if (!pairing_get_pending_user_request(username, sizeof(username), device_name, sizeof(device_name))) {
+        draw_str(0, FONT_H * 2, "No login requests", COL_WHITE, COL_BLACK);
+        return;
+    }
+
+    // Bigger than render_pair()'s own line[24] on purpose — username can be
+    // up to USER_MGR_USERNAME_MAX-1 (31) chars, well past what "Code: %s"'s
+    // 8-char code ever needed. draw_str() clips at OLED_W on its own either
+    // way (see draw_title_bar()'s buf comment for that same reasoning).
+    char line[40];
+    draw_str(0, FONT_H * 2, "Login request:", COL_WHITE, COL_BLACK);
+    snprintf(line, sizeof(line), "user: %s", username);
+    draw_str(0, FONT_H * 3, line, COL_WHITE, COL_BLACK);
+    snprintf(line, sizeof(line), "from: %s", device_name);
+    draw_str(0, FONT_H * 4, line, COL_WHITE, COL_BLACK);
+    draw_str(0, FONT_H * 6, "hold=confirm", COL_WHITE, COL_BLACK);
+    draw_str(0, FONT_H * 7, "tap=reject", COL_WHITE, COL_BLACK);
+}
+
+// --- App approval (server_mgr.h's pushed-app pending-approval gate) --------
+// A DIFFERENT, later concern from Login above: Login approves a specific
+// user_mgr account logging in; this approves an APP a trusted client
+// pushed onto this device (source/modules/server_mgr/), staged and
+// awaiting a human's say before it becomes a real, scanned app anyone can
+// launch remotely. Same single-step hold=approve/tap=reject shape as
+// render_pair()/render_login_req() above, same reason — a pending upload
+// only exists because an already-trusted device explicitly pushed one.
+static void render_app_approval(void) {
+    draw_title_bar(s_screen_names[SCREEN_APP_APPROVAL]);
+
+    char name[48], device_name[20];
+    if (!server_mgr_get_pending_app(name, sizeof(name), device_name, sizeof(device_name))) {
+        draw_str(0, FONT_H * 2, "No apps pending", COL_WHITE, COL_BLACK);
+        return;
+    }
+
+    // Bigger than render_pair()'s own line[24] — see render_login_req()'s
+    // matching comment for why (app names run up to 47 chars here).
+    char line[56];
+    draw_str(0, FONT_H * 2, "App pending:", COL_WHITE, COL_BLACK);
+    snprintf(line, sizeof(line), "name: %s", name);
+    draw_str(0, FONT_H * 3, line, COL_WHITE, COL_BLACK);
+    snprintf(line, sizeof(line), "from: %s", device_name);
+    draw_str(0, FONT_H * 4, line, COL_WHITE, COL_BLACK);
+    draw_str(0, FONT_H * 6, "hold=approve", COL_WHITE, COL_BLACK);
+    draw_str(0, FONT_H * 7, "tap=reject", COL_WHITE, COL_BLACK);
+}
+
 // --- Render -----------------------------------------------------------------
 
 static void render(void) {
@@ -503,10 +592,12 @@ static void render(void) {
         case SCREEN_INFO:  render_info();  break;
         case SCREEN_ABOUT: render_about(); break;
         case SCREEN_SEND:  render_send();  break;
-        case SCREEN_NODES:    render_nodes();    break;
-        case SCREEN_MESSAGES: render_messages(); break;
-        case SCREEN_PAIR:     render_pair();     break;
-        case SCREEN_SHUTDOWN: render_shutdown(); break;
+        case SCREEN_NODES:     render_nodes();     break;
+        case SCREEN_MESSAGES:  render_messages();  break;
+        case SCREEN_PAIR:      render_pair();      break;
+        case SCREEN_LOGIN_REQ:     render_login_req();     break;
+        case SCREEN_APP_APPROVAL:  render_app_approval();  break;
+        case SCREEN_SHUTDOWN:      render_shutdown();      break;
         default: break;
     }
 
@@ -578,6 +669,18 @@ static bool handle_button_event(const input_event_t *ev) {
             else                          pairing_reject();
         } else if (s_screen == SCREEN_PAIR && pairing_is_paired() && held_ms >= LONG_PRESS_MS) {
             pairing_unpair();
+        } else if (s_screen == SCREEN_LOGIN_REQ && pairing_get_pending_user_request(NULL, 0, NULL, 0)) {
+            // Same single-step (no separate unlock) shape as the Pair-
+            // pending branch above, same reason — see render_login_req()'s
+            // own comment. Both outcomes consume the event outright: a
+            // short tap here must NOT also fall through to "next screen".
+            if (held_ms >= LONG_PRESS_MS) pairing_confirm_user_access();
+            else                          pairing_reject_user_access();
+        } else if (s_screen == SCREEN_APP_APPROVAL && server_mgr_get_pending_app(NULL, 0, NULL, 0)) {
+            // Same single-step shape as the two branches just above, same
+            // reason — see render_app_approval()'s own comment.
+            if (held_ms >= LONG_PRESS_MS) server_mgr_approve_app();
+            else                          server_mgr_reject_app();
         } else if (s_screen == SCREEN_SEND && !s_send_unlocked && held_ms >= LONG_PRESS_MS) {
             s_send_unlocked = true;                                 // long press on locked Send: unlock, don't leave
         } else if (s_screen == SCREEN_NODES && !s_nodes_unlocked && held_ms >= LONG_PRESS_MS) {
@@ -666,6 +769,24 @@ static esp_err_t oled_ui_init(void) {
     s_nodes_unlocked = false;
     s_node_last_auto_us = 0;
     s_shutdown_unlocked = false;
+
+    // Auto-login — a one-button 128x64 OLED can never satisfy a password
+    // prompt, so this device just always IS whichever account is current,
+    // the same "no password = auto-login" behavior user_mgr's own
+    // bootstrap account (USER_MGR_BOOTSTRAP_USER, no password) already
+    // documents. user_mgr_default_username() picks that account fresh out
+    // of the box, or whichever identity a remote OOBE push (pairing.h's
+    // "Remote OOBE") named instead — either way, user_mgr_current_user()
+    // reads something sane from the very first boot, shown on
+    // render_info()'s own "User:" line.
+    user_mgr_set_logged_in(user_mgr_default_username());
+    // This device has no systemui_login.c screen at all (no LVGL here),
+    // so nothing else ever calls app_manager_notify_unlocked() — see
+    // app_manager.h's own doc comment. Currently moot in practice
+    // (Heltec's own device.pcat configures zero local apps, so the local
+    // registry is empty either way) but correct regardless, and matters
+    // the moment any oled_ui-class device ever does carry local apps.
+    app_manager_notify_unlocked();
 
     // "PURR OS ready - DPn" instead of the generic "oled_ui ready" — this
     // is the first thing on screen after boot, worth it saying what the

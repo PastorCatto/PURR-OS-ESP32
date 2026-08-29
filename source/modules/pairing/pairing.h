@@ -187,6 +187,54 @@ bool pairing_register_user_key(const uint8_t mac[6], const char *username);
 // called).
 bool pairing_verify_user(const uint8_t mac[6], const char *username);
 
+// ── Remote OOBE (first-run setup, pushed from a client) ─────────────────
+// For a paired device with no screen/keyboard of its own to run the local
+// oobe app (source/apps/system/oobe/oobe_app.c) — e.g. Heltec's oled_ui —
+// first-run setup is instead PUSHED here from an already-trusted client,
+// once device pairing (above) has already succeeded. Gated on
+// pairing_is_trusted() (this device must already trust the peer — same
+// rule every higher-level feature built on the trust list applies to its
+// own inbound frames, per this header's own top comment) AND
+// !user_mgr_oobe_completed() on the RESPONDER side — once a device's own
+// OOBE is complete, a push here always fails, PERMANENTLY: this is a
+// first-setup mechanism, not a "remotely reconfigure the admin account
+// later" one. Redoing setup later is a local, deliberate action only,
+// same as the local oobe app itself only auto-launches once (a manual
+// re-launch, e.g. from Terminal, still works locally — there is no remote
+// equivalent).
+//
+// Both are blocking proximity_rpc_call()s — same "never call from
+// cupcake_task or proximity_task" rule as every other function in this
+// header.
+
+// False on ANY failure — unreachable peer, not paired, or genuinely
+// already configured — "don't offer it" is the safe default for a caller
+// like milkbar's Nearby section deciding whether to show a Setup option.
+bool pairing_remote_oobe_needed(const uint8_t mac[6]);
+
+// username=="" (or NULL) means "keep the peer's own bootstrap default
+// account, no password" — the exact same zero-friction path oobe_app.c's
+// own on_skip() takes locally, just pushed remotely. password may be NULL/
+// "" for no password either way. Both strings are AES-256-GCM-encrypted
+// under the Phase A pairing secret before going over the air — a fresh
+// admin password deserves the same protection pairing_request_user_
+// access()'s own password hash already gets, not less.
+bool pairing_remote_oobe_push(const uint8_t mac[6], const char *username, const char *password);
+
+// ── Shared secret (for other trusted-peer wire protocols) ────────────────
+// The same Phase A ECDH shared secret this file's own USERAUTH/OOBE
+// messages are encrypted under, for a module built ON TOP of this trust
+// list that needs to protect its OWN payloads the same way (e.g.
+// server_mgr.h's WiFi-credential push) rather than either sending them in
+// the clear or standing up a second handshake. Derive a purpose-specific
+// subkey from it per message (SHA256(secret || nonce || a distinct label
+// string) — see pairing_module.c's own derive_msg_key() for the exact
+// construction to mirror, with a DIFFERENT label than this file's own
+// "purr_pairing_access", for domain separation between the two
+// protocols sharing one secret) — never use the raw secret directly as
+// an AES key. False if mac isn't a trusted peer.
+bool pairing_get_shared_secret(const uint8_t mac[6], uint8_t out_secret[32]);
+
 #ifdef __cplusplus
 }
 #endif

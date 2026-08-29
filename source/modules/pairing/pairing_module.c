@@ -277,9 +277,12 @@ static bool remove_paired(const uint8_t mac[6]) {
     return true;
 }
 
-// Internal accessor for the Phase B/C RPC handlers (not exposed via
-// pairing.h — the secret never needs to leave this file, see this file's
-// own s_paired_secrets[] comment). -1 device not found.
+// Internal accessor for the Phase B/C RPC handlers. Also the backing
+// implementation for pairing_get_shared_secret() (public, further down) —
+// server_mgr.h needs the same Phase A secret to encrypt ITS OWN payloads
+// (WiFi credentials) the same way this file's own USERAUTH/OOBE messages
+// already are, rather than either sending them in the clear or inventing
+// a second handshake. False if mac isn't a trusted peer.
 static bool get_paired_secret(const uint8_t mac[6], uint8_t out[32]) {
     int idx = find_paired_idx(mac);
     if (idx < 0) return false;
@@ -480,6 +483,16 @@ static bool constant_time_eq32(const uint8_t a[32], const uint8_t b[32]) {
 #define PAIRING_ACTION_USERAUTH_CHALLENGE 0x2004   // req: username -> resp: 16B challenge (0-length = not registered)
 #define PAIRING_ACTION_USERAUTH_VERIFY    0x2005   // req: userauth_verify_req_t -> resp: 1B status (0=fail, 1=ok)
 
+// Remote OOBE (first-run setup pushed from an already-trusted client) —
+// see pairing.h's own "Remote OOBE" doc comment for the full design. Next
+// free block: 0x3000 (milkbar's old MILKBAR_ACTION_MSG_SEND) was retired
+// this session along with the feature that used it, so this starts fresh
+// at 0x4000 rather than reclaiming a freed value — a stale client still
+// running old firmware would otherwise get a real (if wrong) response
+// instead of a clean "unknown action" from proximity_rpc's own dispatch.
+#define PAIRING_ACTION_OOBE_QUERY 0x4000   // req: none -> resp: 1B (1=needs setup, 0=already configured)
+#define PAIRING_ACTION_OOBE_PUSH  0x4001   // req: oobe_push_req_t -> resp: 1B status (0=fail, 1=ok)
+
 #define PAIRING_RPC_TIMEOUT_MS 3000UL   // same as milkbar's own RPC_TIMEOUT_MS convention
 
 typedef struct __attribute__((packed)) {
@@ -500,6 +513,23 @@ typedef struct __attribute__((packed)) {
     char    username[USERAUTH_USERNAME_MAX];
     uint8_t proof[32];        // HMAC-SHA256(registered_key, challenge)
 } userauth_verify_req_t;
+
+// Remote OOBE push — the inner payload is encrypted the same way
+// userauth_request_req_t's password hash is (this carries a real
+// plaintext password, deserves the same protection, not less): AES-256-
+// GCM under the Phase A pairing secret, a fresh nonce per call.
+// username=="" means "keep the peer's own bootstrap default account,
+// no password" — oobe_app.c's own on_skip() path, just pushed remotely.
+typedef struct __attribute__((packed)) {
+    char username[USERAUTH_USERNAME_MAX];
+    char password[64];
+} oobe_payload_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t nonce[12];
+    uint8_t ciphertext[sizeof(oobe_payload_t)];
+    uint8_t tag[16];
+} oobe_push_req_t;
 
 // Copies req into a NUL-terminated username buffer, bounded by both the
 // wire field's own size and req_len (a shorter-than-USERNAME_MAX request
@@ -819,7 +849,14 @@ static bool handle_userauth_request(const uint8_t mac[6], uint16_t action_id,
     s_userauth_req_state = USERAUTH_REQ_PENDING;
     s_userauth_req_started_ms = (uint32_t)purr_kernel_uptime_ms();
 
-    char notify_body[64];
+    // device_name is up to sizeof(paired_device_t::name)-1 (19) chars,
+    // username up to USERAUTH_USERNAME_MAX-1 (31) — the fixed portion of
+    // the format string is 25 more, so worst case needs 19+31+25+1(NUL) =
+    // 76 bytes. 96 leaves real headroom rather than sizing to the exact
+    // byte — confirmed live as a real (not false-positive) -Werror=format-
+    // truncation on a target/optimization level where GCC could actually
+    // prove the old 64-byte buffer too small for the worst case.
+    char notify_body[96];
     snprintf(notify_body, sizeof(notify_body), "%s wants to access user '%s'", device_name, username);
     purr_kernel_notify("Remote login request", notify_body, "pairing");
 
@@ -959,6 +996,104 @@ static bool handle_userauth_verify(const uint8_t mac[6], uint16_t action_id,
     resp_out[0] = ok ? 1 : 0;
     resp_out[1] = (ok && user_mgr_is_admin(username)) ? 1 : 0;
     *resp_len_out = 2;
+    return true;
+}
+
+// ── Remote OOBE (server side) ────────────────────────────────────────────
+// See pairing.h's own "Remote OOBE" doc comment. Both handlers require
+// pairing_is_trusted(mac) — this device must already trust the peer, same
+// rule every higher-level feature built on the trust list applies to its
+// own inbound frames (this header's own top comment). Unlike the USERAUTH
+// handlers above (which check trust implicitly via get_paired_secret()
+// succeeding, since only a paired peer has a secret to decrypt with),
+// QUERY carries no encrypted payload at all, so it needs an explicit
+// pairing_is_trusted() check of its own to avoid leaking "still needs
+// setup" to a stranger.
+
+static bool handle_oobe_query(const uint8_t mac[6], uint16_t action_id,
+                               const uint8_t *req, size_t req_len,
+                               uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out) {
+    (void)action_id; (void)req; (void)req_len;
+    if (resp_cap < 1) { *resp_len_out = 0; return false; }
+    resp_out[0] = (pairing_is_trusted(mac) && !user_mgr_oobe_completed()) ? 1 : 0;
+    *resp_len_out = 1;
+    return true;
+}
+
+static bool handle_oobe_push(const uint8_t mac[6], uint16_t action_id,
+                              const uint8_t *req, size_t req_len,
+                              uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out) {
+    (void)action_id;
+    if (req_len != sizeof(oobe_push_req_t) || resp_cap < 1) { *resp_len_out = 0; return false; }
+    resp_out[0] = 0;
+    *resp_len_out = 1;
+
+    // A trusted-but-already-configured peer, or an untrusted one, both get
+    // the same flat "fail" — this is a first-setup mechanism, permanently
+    // gated off once done (see this file's own header comment on why),
+    // not something worth distinguishing "wrong" reasons for over the air.
+    if (!pairing_is_trusted(mac) || user_mgr_oobe_completed()) return true;
+
+    uint8_t secret[32];
+    if (!get_paired_secret(mac, secret)) return true;
+
+    oobe_push_req_t r;
+    memcpy(&r, req, sizeof(r));
+    uint8_t msg_key[32];
+    derive_msg_key(secret, r.nonce, msg_key);
+
+    oobe_payload_t payload;
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, msg_key, 256);
+    int rc = mbedtls_gcm_auth_decrypt(&gcm, sizeof(payload), r.nonce, sizeof(r.nonce), NULL, 0,
+                                       r.tag, sizeof(r.tag), r.ciphertext, (uint8_t *)&payload);
+    mbedtls_gcm_free(&gcm);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "remote oobe push: GCM auth failed (rc=%d)", rc);
+        return true;
+    }
+    char username[USERAUTH_USERNAME_MAX];
+    copy_req_username((const uint8_t *)payload.username, sizeof(payload.username), username);
+    char password[sizeof(payload.password) + 1];
+    memcpy(password, payload.password, sizeof(payload.password));
+    password[sizeof(payload.password)] = 0;
+
+    // Mirrors oobe_app.c's on_continue()/on_skip() exactly — see that
+    // file for the local-UI version of this same logic.
+    if (username[0] == '\0') {
+        ESP_LOGI(TAG, "remote oobe: keeping default account '%s'", user_mgr_default_username());
+        user_mgr_set_logged_in(user_mgr_default_username());
+    } else {
+        if (!user_mgr_valid_username(username)) {
+            ESP_LOGW(TAG, "remote oobe: invalid username '%s'", username);
+            return true;
+        }
+        const char *current_default = user_mgr_default_username();
+        bool renaming = strcmp(username, current_default) != 0;
+        if (renaming) {
+            if (user_mgr_exists(username)) {
+                ESP_LOGW(TAG, "remote oobe: '%s' already exists", username);
+                return true;
+            }
+            if (!user_mgr_create(username, password)) {
+                ESP_LOGW(TAG, "remote oobe: create('%s') failed", username);
+                return true;
+            }
+            if (strcmp(current_default, USER_MGR_BOOTSTRAP_USER) == 0) {
+                user_mgr_remove(USER_MGR_BOOTSTRAP_USER);
+            }
+        } else if (!user_mgr_set_password(username, password)) {
+            ESP_LOGW(TAG, "remote oobe: set_password('%s') failed", username);
+            return true;
+        }
+        user_mgr_set_logged_in(username);
+    }
+
+    user_mgr_set_oobe_completed();
+    ESP_LOGI(TAG, "remote oobe: setup complete via pushed config, account '%s'",
+             username[0] ? username : user_mgr_default_username());
+    resp_out[0] = 1;
     return true;
 }
 
@@ -1290,7 +1425,7 @@ bool pairing_verify_user(const uint8_t mac[6], const char *username) {
     // (besides syncing is_admin) if the REMOTE record already exists (see
     // its own doc comment), so this is safe to call on every successful
     // verify, not just the first.
-    if (!user_mgr_create_remote(username, is_admin)) {
+    if (!user_mgr_create_remote(username, is_admin, mac)) {
         ESP_LOGW(TAG, "userauth: verified '%s' but user_mgr_create_remote() failed "
                       "(name already exists as a LOCAL account?)", username);
         return false;
@@ -1298,6 +1433,56 @@ bool pairing_verify_user(const uint8_t mac[6], const char *username) {
     user_mgr_set_logged_in(username);
     ESP_LOGI(TAG, "userauth: logged in as remote user '%s' (admin=%d)", username, (int)is_admin);
     return true;
+}
+
+bool pairing_get_shared_secret(const uint8_t mac[6], uint8_t out_secret[32]) {
+    if (!mac || !out_secret) return false;
+    return get_paired_secret(mac, out_secret);
+}
+
+// ── Remote OOBE (client side) ────────────────────────────────────────────
+// See pairing.h's own "Remote OOBE" doc comment.
+
+bool pairing_remote_oobe_needed(const uint8_t mac[6]) {
+    if (!mac) return false;
+    uint8_t resp[4]; size_t resp_len = 0;
+    bool ok = proximity_rpc_call(mac, PAIRING_ACTION_OOBE_QUERY, NULL, 0,
+                                  resp, sizeof(resp), &resp_len, PAIRING_RPC_TIMEOUT_MS);
+    // Any failure — unreachable, wrong action, malformed response — reads
+    // as "not needed" (see pairing.h's own doc comment: "false on any RPC
+    // failure too — 'don't offer it' is the safe default"), not "needed".
+    if (!ok || resp_len != 1) return false;
+    return resp[0] == 1;
+}
+
+bool pairing_remote_oobe_push(const uint8_t mac[6], const char *username, const char *password) {
+    if (!mac) return false;
+
+    uint8_t secret[32];
+    if (!get_paired_secret(mac, secret)) return false;
+
+    oobe_payload_t payload = {0};
+    if (username) strncpy(payload.username, username, sizeof(payload.username) - 1);
+    if (password) strncpy(payload.password, password, sizeof(payload.password) - 1);
+
+    oobe_push_req_t req = {0};
+    esp_fill_random(req.nonce, sizeof(req.nonce));
+    uint8_t msg_key[32];
+    derive_msg_key(secret, req.nonce, msg_key);
+
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, msg_key, 256);
+    mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, sizeof(payload), req.nonce, sizeof(req.nonce), NULL, 0,
+                               (const uint8_t *)&payload, req.ciphertext, sizeof(req.tag), req.tag);
+    mbedtls_gcm_free(&gcm);
+    memset(&payload, 0, sizeof(payload));   // done with the plaintext copy — no reason to keep it around
+
+    uint8_t resp[4]; size_t resp_len = 0;
+    bool ok = proximity_rpc_call(mac, PAIRING_ACTION_OOBE_PUSH,
+                                  (const uint8_t *)&req, sizeof(req), resp, sizeof(resp), &resp_len,
+                                  PAIRING_RPC_TIMEOUT_MS);
+    return ok && resp_len == 1 && resp[0] == 1;
 }
 
 // ── TEMPORARY selftest ───────────────────────────────────────────────────
@@ -1454,6 +1639,114 @@ void pairing_selftest_userauth(void) {
     ESP_LOGI(TAG, "userauth selftest: %s", pass ? "SELFTEST PASS" : "SELFTEST FAIL");
 }
 
+// Exercises handle_oobe_query()/handle_oobe_push() directly, same
+// fake-paired-peer shape as pairing_selftest_userauth() just above.
+//
+// The positive "correctly-encrypted push actually creates the account"
+// case can only run on a device that hasn't completed its OWN OOBE yet —
+// user_mgr_oobe_completed() is a real, one-way flag (see user_mgr.h's own
+// doc comment: no reset-for-testing escape hatch by design), so a board
+// that's already past its own setup skips that one assertion rather than
+// faking a result — every gating/negative-path check below still runs and
+// still means something regardless of this board's own OOBE state.
+void pairing_selftest_remote_oobe(void) {
+    static const uint8_t fake_mac[6]      = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFE};
+    static const uint8_t untrusted_mac[6] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+    uint8_t fake_secret[32];
+    esp_fill_random(fake_secret, sizeof(fake_secret));
+
+    bool pass = true;
+    bool oobe_already_done = user_mgr_oobe_completed();
+    ESP_LOGI(TAG, "remote oobe selftest: this device's own oobe_completed=%d (test adapts either way)", oobe_already_done);
+
+    // ── QUERY, untrusted mac — must read "not needed" regardless of state ──
+    uint8_t qresp[4]; size_t qresp_len = 0;
+    bool ok = handle_oobe_query(fake_mac, PAIRING_ACTION_OOBE_QUERY, NULL, 0, qresp, sizeof(qresp), &qresp_len);
+    bool untrusted_query_denied = ok && qresp_len == 1 && qresp[0] == 0;
+    ESP_LOGI(TAG, "remote oobe selftest: query (untrusted) = %u (expect 0)", qresp_len ? qresp[0] : 255);
+    pass = pass && untrusted_query_denied;
+
+    add_or_update_paired(fake_mac, "SelftestPeer", fake_secret);
+
+    // ── QUERY, trusted — mirrors this device's REAL oobe state ──────────
+    ok = handle_oobe_query(fake_mac, PAIRING_ACTION_OOBE_QUERY, NULL, 0, qresp, sizeof(qresp), &qresp_len);
+    uint8_t expect_needed = oobe_already_done ? 0 : 1;
+    bool trusted_query_matches = ok && qresp_len == 1 && qresp[0] == expect_needed;
+    ESP_LOGI(TAG, "remote oobe selftest: query (trusted) = %u (expect %u)", qresp_len ? qresp[0] : 255, expect_needed);
+    pass = pass && trusted_query_matches;
+
+    // ── PUSH, untrusted mac — must fail before ever touching decryption ──
+    oobe_payload_t junk_payload = {0};
+    strncpy(junk_payload.username, "oobe_selftest_user", sizeof(junk_payload.username) - 1);
+    oobe_push_req_t breq = {0};
+    esp_fill_random(breq.nonce, sizeof(breq.nonce));
+    uint8_t junk_key[32];
+    esp_fill_random(junk_key, sizeof(junk_key));   // untrusted_mac has no real secret to encrypt under — any key proves the point
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, junk_key, 256);
+    mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, sizeof(junk_payload), breq.nonce, sizeof(breq.nonce), NULL, 0,
+                               (const uint8_t *)&junk_payload, breq.ciphertext, sizeof(breq.tag), breq.tag);
+    mbedtls_gcm_free(&gcm);
+    uint8_t presp[4]; size_t presp_len = 0;
+    ok = handle_oobe_push(untrusted_mac, PAIRING_ACTION_OOBE_PUSH,
+                           (const uint8_t *)&breq, sizeof(breq), presp, sizeof(presp), &presp_len);
+    bool untrusted_push_denied = ok && presp_len == 1 && presp[0] == 0;
+    ESP_LOGI(TAG, "remote oobe selftest: push (untrusted) = %u (expect 0)", presp_len ? presp[0] : 255);
+    pass = pass && untrusted_push_denied;
+
+    // ── PUSH, trusted mac, wrong key (tampered) — must fail either way:
+    // either the oobe-already-done gate catches it first, or — on a
+    // genuinely fresh device — the GCM auth-tag check does. Reuses the
+    // untrusted request's bytes verbatim: wrong key for fake_mac's REAL
+    // secret regardless.
+    ok = handle_oobe_push(fake_mac, PAIRING_ACTION_OOBE_PUSH,
+                           (const uint8_t *)&breq, sizeof(breq), presp, sizeof(presp), &presp_len);
+    bool tampered_push_denied = ok && presp_len == 1 && presp[0] == 0;
+    ESP_LOGI(TAG, "remote oobe selftest: push (trusted, tampered) = %u (expect 0)", presp_len ? presp[0] : 255);
+    pass = pass && tampered_push_denied;
+
+    // ── PUSH, trusted mac, correctly-encrypted — only meaningful pre-OOBE ──
+    if (!oobe_already_done) {
+        static const char *test_user = "oobe_selftest_user";
+        oobe_payload_t good_payload = {0};
+        strncpy(good_payload.username, test_user, sizeof(good_payload.username) - 1);
+        strncpy(good_payload.password, "selftestpass", sizeof(good_payload.password) - 1);
+
+        oobe_push_req_t greq = {0};
+        esp_fill_random(greq.nonce, sizeof(greq.nonce));
+        uint8_t msg_key[32];
+        derive_msg_key(fake_secret, greq.nonce, msg_key);
+        mbedtls_gcm_init(&gcm);
+        mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, msg_key, 256);
+        mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, sizeof(good_payload), greq.nonce, sizeof(greq.nonce), NULL, 0,
+                                   (const uint8_t *)&good_payload, greq.ciphertext, sizeof(greq.tag), greq.tag);
+        mbedtls_gcm_free(&gcm);
+
+        ok = handle_oobe_push(fake_mac, PAIRING_ACTION_OOBE_PUSH,
+                               (const uint8_t *)&greq, sizeof(greq), presp, sizeof(presp), &presp_len);
+        bool good_push_accepted = ok && presp_len == 1 && presp[0] == 1;
+        bool user_created       = user_mgr_exists(test_user);
+        bool oobe_now_done      = user_mgr_oobe_completed();
+        ESP_LOGI(TAG, "remote oobe selftest: push (trusted, correct) = %u user_created=%d oobe_completed=%d (expect 1, 1, 1)",
+                 presp_len ? presp[0] : 255, user_created, oobe_now_done);
+        pass = pass && good_push_accepted && user_created && oobe_now_done;
+
+        // Cleanup the account — cannot un-set oobe_completed (see this
+        // function's own doc comment), but that's fine: a fresh device
+        // only ever runs this selftest once anyway, the same "temporary,
+        // called from a boot hook, then reverted" discipline every
+        // selftest in this file already follows.
+        user_mgr_remove(test_user);
+    } else {
+        ESP_LOGW(TAG, "remote oobe selftest: SKIPPING positive push case — this device's own "
+                      "OOBE is already complete (one-way flag) — gating checks above still ran");
+    }
+
+    remove_paired(fake_mac);
+    ESP_LOGI(TAG, "remote oobe selftest: %s", pass ? "SELFTEST PASS" : "SELFTEST FAIL");
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────
 
 int pairing_init(void) {
@@ -1477,6 +1770,12 @@ int pairing_init(void) {
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_REGISTER,  handle_userauth_register);
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_CHALLENGE, handle_userauth_challenge);
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_VERIFY,    handle_userauth_verify);
+
+    // Remote OOBE — same "always-on, module init" reasoning as USERAUTH_*
+    // just above: a fresh device needing setup has no app open at all yet,
+    // so this can't be scoped to one.
+    proximity_rpc_register(PAIRING_ACTION_OOBE_QUERY, handle_oobe_query);
+    proximity_rpc_register(PAIRING_ACTION_OOBE_PUSH,  handle_oobe_push);
 
     // Small/no PSRAM hazard here either way, but internal RAM keeps this
     // consistent with "only pairing_task() touches NVS" — plain
@@ -1521,6 +1820,8 @@ void pairing_deinit(void) {
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_REGISTER,  NULL);
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_CHALLENGE, NULL);
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_VERIFY,    NULL);
+    proximity_rpc_register(PAIRING_ACTION_OOBE_QUERY, NULL);
+    proximity_rpc_register(PAIRING_ACTION_OOBE_PUSH,  NULL);
     s_state = PAIRING_STATE_NONE;
     s_userauth_req_state = USERAUTH_REQ_NONE;
 }
