@@ -197,6 +197,12 @@ static void menu_logoff_cb(lv_event_t *e)
     (void)e;
     set_menu_open(false);
     ESP_LOGI(TAG, "log off");
+    // A remote session (Milkbar's "Desktop" button, app_manager.h's remote
+    // mode) has no business surviving past its own account logging out —
+    // without this, the taskbar/Start Menu kept showing the OLD server's
+    // apps underneath the NEXT login's session until something else
+    // happened to clear it. Harmless no-op when remote mode isn't on.
+    app_manager_clear_remote();
     user_mgr_logout();
     purr_systemui_return_home();
     if (s_host) purr_systemui_show_login(s_host);

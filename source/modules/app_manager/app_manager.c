@@ -91,6 +91,37 @@ static const char *tier_name(app_tier_t t)
     }
 }
 
+// ── Placement declarations ───────────────────────────────────────────────
+// app.pcat's `placement = "local" | "hybrid"` key (default "remote",
+// unset) is where this is AUTHORED — but a compiled/pre-linked app has
+// no runtime-readable path back to its own app.pcat: purr_module_header_t
+// (purr_module.h) just spent its last spare pad byte on speed_demon, and
+// growing it is a real ABI change across every already-compiled artifact
+// including claw_loader's own runtime-loaded .claw format, so it wasn't
+// grown for this. Hand-maintained here instead, by display name, until a
+// real catstrap codegen step exists to generate this table FROM app.pcat
+// automatically — a real, deliberate simplification for this pass, not
+// an oversight: every app not listed here keeps the APP_PLACE_REMOTE
+// default (see app_placement_t's own doc comment) with zero risk of
+// drifting from what's actually compiled in.
+static const struct { const char *name; app_placement_t placement; } s_placement_table[] = {
+    // { "some_app", APP_PLACE_HYBRID },
+};
+
+static app_placement_t declared_placement_for(const char *name)
+{
+    // Table starts empty (see its own comment) — GCC constant-folds an
+    // inline sizeof(arr)/sizeof(arr[0]) loop bound of 0 and flags the
+    // resulting `i < 0`-shaped comparison (-Wtype-limits); a named
+    // `count` local sidesteps that without changing anything once the
+    // table actually has entries.
+    size_t count = sizeof(s_placement_table) / sizeof(s_placement_table[0]);
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(s_placement_table[i].name, name) == 0) return s_placement_table[i].placement;
+    }
+    return APP_PLACE_REMOTE;
+}
+
 // Strip extension and path prefix to get a display name
 static void make_display_name(const char *filename, char *out, size_t out_sz)
 {
@@ -153,8 +184,9 @@ static void scan_dir(const char *dir)
 
         snprintf(app->path, sizeof(app->path), "%s/%.200s", dir, ent->d_name);
         strncpy(app->name, name, sizeof(app->name) - 1);
-        app->tier  = tier_from_ext(ent->d_name);
-        app->state = APP_STATE_IDLE;
+        app->tier      = tier_from_ext(ent->d_name);
+        app->state     = APP_STATE_IDLE;
+        app->placement = declared_placement_for(app->name);
 
         if (existing >= 0) {
             ESP_LOGI(TAG, "found [%s] %s (shadows earlier entry)", tier_name(app->tier), app->name);
@@ -182,6 +214,55 @@ typedef struct {
 // (pointers/handles/one bool), but no reason to leave even ~1KB behind on
 // internal SRAM when it's just as safe in PSRAM.
 static app_task_ctx_t *s_ctxs;
+
+// ── Remote mode ─────────────────────────────────────────────────────────────
+// See app_manager.h's own doc comment on app_manager_set_remote() for the
+// design (provider-injection, no proximity_rpc/pairing dependency here).
+// This is a SECOND, separate registry (s_remote_apps, own count) — the local
+// one (s_apps/s_app_count) is never touched while remote mode is on, so
+// app_manager_clear_remote() needs no re-scan to bring it back.
+#define MAX_REMOTE_APPS      32
+#define REMOTE_REFRESH_MS    3000
+
+static bool          s_remote_mode  = false;
+static uint8_t        s_remote_mac[6];
+static app_manager_remote_provider_t s_remote_provider;
+static app_entry_t   *s_remote_apps;        // PSRAM-backed, allocated lazily on first use
+static int             s_remote_app_count = 0;
+static TaskHandle_t    s_remote_task = NULL;
+static volatile bool   s_remote_task_running = false;
+static SemaphoreHandle_t s_remote_task_done = NULL;
+
+// Defined near the bottom of this file, alongside the rest of the remote-
+// mode implementation — forward-declared here because app_manager_launch_
+// idx()/app_manager_stop() (both defined well above that section) need it.
+static bool remote_launch_stop_task(int idx, bool launch);
+
+// ── Local unlock gate ─────────────────────────────────────────────────────
+// See app_manager.h's own doc comment on app_manager_notify_unlocked() for
+// the design. Only app_manager_count()/get()'s LOCAL branch (local_count()/
+// local_get() below) read this — launch_idx()/launch_path()/launch_by_name()
+// deliberately do NOT gate on it, since autorun_oobe()/autorun_kitten() (both
+// called from app_manager_init(), before any unlock) and the synthetic
+// "Server Manager" entry's app_manager_launch_by_name("server_manager") call
+// (from inside REMOTE mode, a wholly separate axis from local unlock) both
+// need to keep working regardless of this flag's state.
+static bool s_local_unlocked = false;
+
+// Forward-declared here (real definitions much further down, alongside
+// local_count()/get()) because local_launch_idx()/local_stop_idx() below
+// need translate_local_idx() too — every UI-facing LOCAL index (from
+// app_manager_launch_idx()/stop(), always ultimately driven by whatever
+// app_manager_count()/get() reported) must be translated the SAME way
+// local_get() translates one, or "the Nth icon shown" and "the Nth real
+// s_apps[] entry" silently drift apart the moment any entry is hidden
+// from the former without also being skipped by the latter. Confirmed
+// live as a real, reported bug: local_launch_idx() indexed s_apps[idx]
+// directly while local_count()/get() had already started skipping
+// "server_manager" — tapping what LOOKED like Settings launched whatever
+// real entry happened to sit at that same raw offset instead.
+static bool is_hidden_local_app(const char *name);
+static int  translate_local_idx(int idx);
 
 // ── Static stack pool for apps that touch NVS/flash directly ────────────────
 // See launch_native()'s comment for the full story: settings/fileman must run
@@ -818,6 +899,7 @@ int app_manager_scan_ex(bool include_sd)
         app->state = APP_STATE_IDLE;
         // Declared by the app itself — see purr_module_header_t::speed_demon.
         app->speed_demon = (hdr->speed_demon != 0);
+        app->placement   = declared_placement_for(app->name);
 
         ESP_LOGI(TAG, "found [claw/pre-linked] %s", app->name);
         s_app_count++;
@@ -886,10 +968,54 @@ int app_manager_scan(void)
     return app_manager_scan_ex(true);
 }
 
+// ── Server Manager synthetic entry ──────────────────────────────────────
+// See app_manager.h's own doc comment on app_manager_remote_mac(). Only
+// while remote mode is on AND the current session is an admin on that
+// server — user_mgr_is_admin(user_mgr_current_user()) already reflects
+// the REMOTE identity's own admin flag once pairing_verify_user() has run
+// (user_mgr_create_remote() syncs it on every login, see pairing_module.c),
+// so this needs no new state of its own, just the two existing checks.
+static bool server_manager_entry_active(void)
+{
+    return s_remote_mode && user_mgr_is_admin(user_mgr_current_user());
+}
+
+static int local_launch_idx(int idx)
+{
+    int real = translate_local_idx(idx);
+    if (real < 0) return -1;
+    return app_manager_launch_path(s_apps[real].path);
+}
+
+static int remote_launch_idx(int idx)
+{
+    if (server_manager_entry_active() && idx == s_remote_app_count) {
+        // The LOCAL launch path, not remote_launch_stop_task() below —
+        // "Server Manager" is a client-side app (source/apps/system/
+        // server_manager/), not something the server runs. Declared in
+        // app_manager.h, included at the top of this file, so this is
+        // visible here regardless of where its definition happens to
+        // sit further down.
+        return app_manager_launch_by_name("server_manager");
+    }
+    if (idx < 0 || idx >= s_remote_app_count) return -1;
+    // cheetah_home.c's icon_click_cb()/systemui_xp.c's task_btn_click_
+    // cb() call this directly from the LVGL render task — a live
+    // proximity_rpc_call() (the provider's actual implementation) must
+    // never block there, same rule as every other proximity_rpc_call()
+    // site in this codebase. remote_launch_stop_task() below fires it
+    // on its own short-lived task instead and this returns immediately,
+    // optimistically — same "return 0 the instant the work is handed
+    // off, real state observed later" shape launch_native() already has
+    // for a LOCAL launch (it doesn't wait for init() to finish either).
+    // The next periodic list() refresh (remote_refresh_task()) is what
+    // actually shows the app as running once the launch really lands.
+    return remote_launch_stop_task(idx, /*launch=*/true) ? 0 : -1;
+}
+
 int app_manager_launch_idx(int idx)
 {
-    if (idx < 0 || idx >= s_app_count) return -1;
-    return app_manager_launch_path(s_apps[idx].path);
+    return s_remote_mode ? remote_launch_idx(idx) : local_launch_idx(idx);
 }
 
 int app_manager_launch_path(const char *path)
@@ -929,13 +1055,32 @@ int app_manager_launch_by_name(const char *name)
     return -1;
 }
 
-void app_manager_stop(int idx)
+static void remote_stop_idx(int idx)
 {
-    if (idx < 0 || idx >= s_app_count) return;
-    app_entry_t *app = &s_apps[idx];
+    if (idx < 0 || idx >= s_remote_app_count) return;
+    // Same fire-and-forget shape as the launch branch in
+    // app_manager_launch_idx() just above, same reason — never block
+    // the LVGL render task on a live network round trip.
+    remote_launch_stop_task(idx, /*launch=*/false);
+}
+
+// Takes a REAL (raw) s_apps[] index, never a UI-facing compacted one —
+// see local_stop_idx() below for the wrapper that translates one of
+// those, and app_manager_on_win_close() (further down) for why a second,
+// raw-index entry point is needed at all: it already has the real index
+// via pointer arithmetic on the app_entry_t itself, and re-running that
+// through translate_local_idx() as if it were a compacted index would be
+// exactly the same class of bug this whole translation scheme exists to
+// fix, just from a different call site. Confirmed live as a real,
+// reported regression: the window close button stopped actually closing
+// apps the moment local_stop_idx() started expecting a compacted index.
+static void local_stop_real(int real)
+{
+    if (real < 0 || real >= s_app_count) return;
+    app_entry_t *app = &s_apps[real];
     if (app->state != APP_STATE_RUNNING) return;
 
-    app_task_ctx_t *ctx = &s_ctxs[idx];
+    app_task_ctx_t *ctx = &s_ctxs[real];
 
     // Wait for the task to finish (or force-kill it) BEFORE calling
     // deinit() — deinit() (e.g. lua_runtime_deinit()'s lua_close()) must
@@ -988,7 +1133,7 @@ void app_manager_stop(int idx)
     // its RAM copies (claw_loader_unload() must not run before deinit() has
     // had its chance to finish using them). Matches this file's own
     // s_personal_running_idx comment on launch_personal().
-    if (idx == s_personal_running_idx) {
+    if (real == s_personal_running_idx) {
         claw_loader_unload(&s_personal_loaded);
         s_personal_running_idx = -1;
     }
@@ -1016,6 +1161,187 @@ void app_manager_stop(int idx)
     purr_kernel_ui_breadcrumb("appstop:done");
 }
 
+// The UI-facing entry point — idx is a COMPACTED index, exactly what
+// app_manager_count()/get() report (translate_local_idx() undoes the
+// same skip local_count()/get() apply). This is what app_manager_stop()
+// itself dispatches to; app_manager_on_win_close() below deliberately
+// bypasses both this AND that dispatcher, calling local_stop_real()
+// directly instead — its own idx is already a real one.
+static void local_stop_idx(int idx)
+{
+    local_stop_real(translate_local_idx(idx));
+}
+
+void app_manager_stop(int idx)
+{
+    if (s_remote_mode) remote_stop_idx(idx);
+    else                local_stop_idx(idx);
+}
+
+// ── Remote mode ─────────────────────────────────────────────────────────────
+// See app_manager.h's own doc comment for the design. local_count()/get()/
+// launch_idx()/stop_idx() and their remote_*() counterparts (the public
+// app_manager_count()/get()/launch_idx()/stop() above each just dispatch to
+// one or the other on s_remote_mode) are what used to be four inline
+// if (s_remote_mode) {...} else {...} branches duplicated across four
+// function bodies — split into named helpers instead, so local and remote
+// handling read as two genuinely separate paths rather than one hybrid one.
+
+// One-shot task for a fire-and-forget remote launch/stop — see
+// app_manager_launch_idx()/app_manager_stop()'s own comments for why this
+// can't run synchronously on whichever task called them. Copies the app
+// name onto its own heap block (not a pointer into s_remote_apps[], which
+// remote_refresh_task() can overwrite the instant its next list() call
+// lands) so the name is still valid however long the provider's call takes.
+typedef struct {
+    uint8_t mac[6];
+    char    name[48];   // matches app_entry_t::name / remote_app_entry_t::name
+    bool    launch;      // true = provider->launch(), false = provider->stop()
+} remote_op_ctx_t;
+
+static void remote_op_task(void *arg)
+{
+    remote_op_ctx_t *ctx = (remote_op_ctx_t *)arg;
+    // KNOWN, ACCEPTED RACE: app_manager_clear_remote() waits for
+    // remote_refresh_task() to exit before a later app_manager_set_remote()
+    // reassigns s_remote_provider, but does NOT wait for an in-flight
+    // remote_op_task() like this one — a launch/stop tapped immediately
+    // before Disconnect could still be reading s_remote_provider here the
+    // instant a fresh set_remote() (a different device, say) overwrites it.
+    // Same class of narrow fire-and-forget race the old milkbar send_msg_
+    // task already carried (unawaited proximity_rpc_call() from a one-shot
+    // task) — not solved there either, and not worth a join here for what
+    // is, worst case, a launch/stop landing on the wrong (still trusted)
+    // paired device once in a great while.
+    if (ctx->launch) s_remote_provider.launch(ctx->mac, ctx->name);
+    else if (s_remote_provider.stop) s_remote_provider.stop(ctx->mac, ctx->name);
+    heap_caps_free(ctx);
+    vTaskDeleteWithCaps(NULL);
+}
+
+static bool remote_launch_stop_task(int idx, bool launch)
+{
+    if (launch && !s_remote_provider.launch) return false;
+    if (!launch && !s_remote_provider.stop)  return false;
+
+    remote_op_ctx_t *ctx = heap_caps_malloc(sizeof(*ctx), MALLOC_CAP_SPIRAM);
+    if (!ctx) return false;
+    memcpy(ctx->mac, s_remote_mac, 6);
+    strncpy(ctx->name, s_remote_apps[idx].name, sizeof(ctx->name) - 1);
+    ctx->name[sizeof(ctx->name) - 1] = '\0';
+    ctx->launch = launch;
+
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(remote_op_task, "app_mgr_rop", 4096, ctx, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { heap_caps_free(ctx); return false; }
+    return true;
+}
+
+static void remote_refresh_task(void *arg)
+{
+    (void)arg;
+    while (s_remote_task_running) {
+        int n = s_remote_provider.list(s_remote_mac, s_remote_apps, MAX_REMOTE_APPS);
+        // -1 = this pass's fetch failed (offline/timed out) — leave
+        // s_remote_app_count and s_remote_apps[] exactly as they were from
+        // the last successful pass, rather than flashing the registry to
+        // empty for every transient miss. Remote mode itself stays on
+        // regardless; only app_manager_clear_remote() turns it off.
+        if (n >= 0) s_remote_app_count = n;
+        for (int waited_ms = 0; waited_ms < REMOTE_REFRESH_MS && s_remote_task_running; waited_ms += 200) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+    }
+    if (s_remote_task_done) xSemaphoreGive(s_remote_task_done);
+    vTaskDeleteWithCaps(NULL);
+}
+
+// Real local-to-remote "close before opening" hand-off — walks the local
+// registry and stops every RUNNING app except "milkbar" (the one
+// sanctioned exception: it's what stays reachable, windowless, to get
+// back to Dashboard's Disconnect / the Connection screen — see
+// milkbar_app.c's own file header comment on that design). Called
+// unconditionally at the top of app_manager_set_remote(), every time — a
+// straight remote-server-to-remote-server switch (A -> B, s_remote_mode
+// already true on entry) finds nothing local running and is a harmless
+// no-op loop either way. Calls local_stop_idx() directly rather than the
+// public app_manager_stop() dispatcher: that dispatcher reads the CURRENT
+// s_remote_mode, which during an A -> B switch is still true at this
+// point — the local path is what's actually wanted here regardless.
+static void close_local_apps_for_remote_handoff(void)
+{
+    for (int i = 0; i < s_app_count; i++) {
+        if (s_apps[i].state != APP_STATE_RUNNING) continue;
+        if (strcmp(s_apps[i].name, "milkbar") == 0) continue;
+        ESP_LOGI(TAG, "remote hand-off: stopping local app '%s'", s_apps[i].name);
+        // local_stop_real(), not local_stop_idx() — `i` here is a real
+        // s_apps[] index from iterating s_apps[]/s_app_count directly,
+        // same reasoning app_manager_on_win_close()/app_manager_deinit()/
+        // app_manager_kill_worst_offender() all document.
+        local_stop_real(i);
+    }
+}
+
+bool app_manager_set_remote(const uint8_t mac[6], const app_manager_remote_provider_t *provider)
+{
+    if (!mac || !provider || !provider->list) return false;
+
+    close_local_apps_for_remote_handoff();
+
+    // Clears any previous remote session first — covers both "already
+    // pointed at a different device" and "called twice in a row" the same
+    // way, and guarantees remote_op_task() (above) never runs concurrently
+    // with the provider struct it captured being replaced out from under it.
+    app_manager_clear_remote();
+
+    if (!s_remote_apps) {
+        s_remote_apps = heap_caps_malloc(sizeof(app_entry_t) * MAX_REMOTE_APPS, MALLOC_CAP_SPIRAM);
+        if (!s_remote_apps) {
+            ESP_LOGE(TAG, "remote mode: PSRAM alloc failed (%u bytes)",
+                     (unsigned)(sizeof(app_entry_t) * MAX_REMOTE_APPS));
+            return false;
+        }
+    }
+    memset(s_remote_apps, 0, sizeof(app_entry_t) * MAX_REMOTE_APPS);
+    memcpy(s_remote_mac, mac, 6);
+    s_remote_provider  = *provider;
+    s_remote_app_count = 0;
+
+    if (!s_remote_task_done) s_remote_task_done = xSemaphoreCreateBinary();
+    s_remote_task_running = true;
+    s_remote_mode = true;   // set before the task starts — remote_op_task() reads s_remote_provider, not a local
+
+    BaseType_t ok = xTaskCreateWithCaps(remote_refresh_task, "app_mgr_remote", 4096, NULL, 3, &s_remote_task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "remote mode: refresh task create failed");
+        s_remote_task_running = false;
+        s_remote_mode = false;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "remote mode ON — pointed at %02x:%02x:%02x:%02x:%02x:%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return true;
+}
+
+void app_manager_clear_remote(void)
+{
+    if (!s_remote_mode) return;
+    s_remote_task_running = false;
+    // REMOTE_REFRESH_MS's own step loop notices s_remote_task_running
+    // within 200ms; the +3500 headroom covers one in-flight list() call
+    // riding proximity_rpc_call()'s own timeout before this task can exit —
+    // same margin RPC_TIMEOUT_MS-based waits elsewhere in this codebase
+    // (milkbar_app_deinit(), historically) already budget for that call.
+    if (s_remote_task_done) xSemaphoreTake(s_remote_task_done, pdMS_TO_TICKS(REMOTE_REFRESH_MS + 3500));
+    s_remote_task = NULL;
+    s_remote_mode = false;
+    s_remote_app_count = 0;
+    ESP_LOGI(TAG, "remote mode OFF — back to the local registry");
+}
+
+bool app_manager_is_remote(void) { return s_remote_mode; }
+
 const char *app_manager_get_pending_meow_path(void) { return s_meow_pending_path; }
 
 const char *app_manager_get_pending_meow_code(size_t *out_len) {
@@ -1025,36 +1351,180 @@ const char *app_manager_get_pending_meow_code(size_t *out_len) {
 
 bool app_manager_get_pending_meow_privileged(void) { return s_meow_pending_privileged; }
 
-int app_manager_count(void)
+// +1 for the synthetic "Server Manager" entry — see
+// server_manager_entry_active()'s own doc comment.
+static int remote_count(void)
 {
-    // Boot-order backstop: init()'s scan runs while the pre-linked app modules
-    // are still unregistered (app_manager loads P2, PURR_MOD_APP entries load
-    // after it), so it always finds zero of them. KittenUI's desktop happens
-    // to re-scan when it opens; MiniWin's WinCE start menu only calls this —
+    return s_remote_app_count + (server_manager_entry_active() ? 1 : 0);
+}
+
+// True for a local app that must never appear in the NORMAL (non-remote)
+// registry — currently just "server_manager": reachable ONLY via the
+// synthetic remote-mode entry (remote_launch_idx() above calls
+// app_manager_launch_by_name("server_manager") directly, bypassing this
+// filter entirely — it doesn't go through local_count()/get() at all).
+// Confirmed live this was NOT actually enforced before this fix:
+// app_manager_scan() finds it exactly like any other real .claw app (it
+// has to, for that launch_by_name() call to find it), and with nothing
+// filtering the normal listing it showed up as an ordinary Start Menu
+// icon — reachable and launchable with no remote session active at all.
+// Once launched that way it has no remote target
+// (app_manager_remote_mac() returns false), and — a real, reported bug —
+// its own "On this server" list silently fell back to showing THIS
+// device's local registry instead of a server's, since app_manager_
+// count()/get() have no way to know why a caller assumes remote mode is
+// on.
+static bool is_hidden_local_app(const char *name)
+{
+    return strcmp(name, "server_manager") == 0;
+}
+
+// Translates a UI-facing (compacted, hidden-entries-skipped) LOCAL index
+// into the real s_apps[] index it corresponds to, or -1 if out of range.
+// local_get()/local_launch_idx()/local_stop_idx() all take an index from
+// a caller that only ever saw app_manager_count()/get()'s FILTERED view —
+// every one of them must agree on this exact mapping, or "the Nth icon
+// shown" and "the Nth real s_apps[] entry" silently drift apart the
+// moment any entry is hidden from one but not the other. See this file's
+// forward declaration of this function (near s_local_unlocked) for the
+// real, reported bug this fixes.
+static int translate_local_idx(int idx)
+{
+    if (idx < 0) return -1;
+    int seen = 0;
+    for (int i = 0; i < s_app_count; i++) {
+        if (is_hidden_local_app(s_apps[i].name)) continue;
+        if (seen == idx) return i;
+        seen++;
+    }
+    return -1;
+}
+
+// s_local_unlocked gate: report empty until app_manager_notify_unlocked()
+// has run — see app_manager.h's own doc comment. Checked BEFORE the boot-
+// order backstop below, so a caller querying before unlock never triggers
+// that scan either; the deferred scan happens once, inside
+// app_manager_notify_unlocked() itself.
+static int local_count(void)
+{
+    if (!s_local_unlocked) return 0;
+
+    // Boot-order backstop: init()'s scan (when it still ran unconditionally
+    // at init() — now only for the pre-OOBE-completion case, see
+    // app_manager_init()) ran while the pre-linked app modules were still
+    // unregistered (app_manager loads P2, PURR_MOD_APP entries load after
+    // it), so it always found zero of them. KittenUI's desktop happens to
+    // re-scan when it opens; MiniWin's WinCE start menu only calls this —
     // leaving its Programs list permanently empty (confirmed live on tab5).
     // Re-scan on first query instead: by the time any UI asks, the module
     // table is complete. One-shot on empty only — entries hold live launch
     // state, so a routine re-scan would clobber a RUNNING app's slot, but an
     // empty list has nothing to lose.
     if (s_app_count == 0) app_manager_scan();
-    return s_app_count;
+
+    int n = 0;
+    for (int i = 0; i < s_app_count; i++) {
+        if (!is_hidden_local_app(s_apps[i].name)) n++;
+    }
+    return n;
 }
+
+int app_manager_count(void)
+{
+    return s_remote_mode ? remote_count() : local_count();
+}
+
+void app_manager_notify_unlocked(void)
+{
+    if (s_local_unlocked) return;   // idempotent — a relock->unlock cycle must not double-fire
+    s_local_unlocked = true;
+    ESP_LOGI(TAG, "local unlock: registry now visible");
+}
+
+void app_manager_notify_locked(void)
+{
+    if (!s_local_unlocked) return;
+    s_local_unlocked = false;
+    ESP_LOGI(TAG, "local lock: registry hidden");
+}
+
+static const app_entry_t *remote_get(int idx)
+{
+    if (server_manager_entry_active() && idx == s_remote_app_count) {
+        // Synthesized fresh each call, not cached — cheap (one static
+        // struct, memset + a name copy), and avoids ever needing to
+        // invalidate a stale cached copy. tier/state are cosmetic here
+        // (cheetah_home.c/systemui_xp.c only ever read ->name/->tier/
+        // ->state/->window for rendering — see app_manager_remote.c's
+        // own provider_list() comment on that same shortlist); IDLE/
+        // CLAW read fine as "just a normal app icon," same as anything
+        // else in the grid.
+        static app_entry_t s_server_manager_entry;
+        memset(&s_server_manager_entry, 0, sizeof(s_server_manager_entry));
+        snprintf(s_server_manager_entry.name, sizeof(s_server_manager_entry.name), "Server Manager");
+        s_server_manager_entry.tier  = APP_TIER_CLAW;
+        s_server_manager_entry.state = APP_STATE_IDLE;
+        return &s_server_manager_entry;
+    }
+    if (idx < 0 || idx >= s_remote_app_count) return NULL;
+    return &s_remote_apps[idx];
+}
+
+static const app_entry_t *local_get(int idx)
+{
+    if (!s_local_unlocked) return NULL;
+    int real = translate_local_idx(idx);
+    return real >= 0 ? &s_apps[real] : NULL;
+}
+
 const app_entry_t *app_manager_get(int idx)
 {
-    if (idx < 0 || idx >= s_app_count) return NULL;
-    return &s_apps[idx];
+    return s_remote_mode ? remote_get(idx) : local_get(idx);
+}
+
+bool app_manager_remote_mac(uint8_t out_mac[6])
+{
+    if (!s_remote_mode || !out_mac) return false;
+    memcpy(out_mac, s_remote_mac, 6);
+    return true;
+}
+
+app_placement_t app_manager_decide_placement(app_placement_t declared,
+                                              bool my_strong_compute,
+                                              bool peer_strong_compute,
+                                              bool peer_has_display)
+{
+    if (declared != APP_PLACE_HYBRID) return declared;   // REMOTE/LOCAL: no comparison needed
+
+    if (my_strong_compute != peer_strong_compute) {
+        // Exactly one side has it — run there.
+        return my_strong_compute ? APP_PLACE_LOCAL : APP_PLACE_REMOTE;
+    }
+    // Tied on compute (both or neither strong) — prefer REMOTE only if
+    // the peer can actually show it; otherwise there's nothing gained by
+    // sending it over there.
+    return peer_has_display ? APP_PLACE_REMOTE : APP_PLACE_LOCAL;
 }
 
 // ── Launcher button callback ──────────────────────────────────────────────────
 
+// user is a pointer INTO s_apps[]'s own path[] field — s_apps is
+// allocated once in app_manager_init() and never freed/moved for the
+// device's whole runtime (see its own allocation comment), so this stays
+// valid for as long as the launcher window can possibly still be open.
+// Launches by PATH rather than by index on purpose: this legacy "Cat
+// Apps" browser always iterates s_apps[]/s_app_count directly (unlike
+// cheetah_home.c/systemui_xp.c, it doesn't go through app_manager_count()/
+// get() at all, so it isn't affected by remote mode) — a path match is
+// unambiguous regardless of any index-compaction app_manager_launch_idx()
+// applies for the FILTERED view (see translate_local_idx()'s own
+// comment), so there's nothing here that needs to track that mapping.
 static void launcher_btn_cb(purr_wid_t wid, purr_event_t event, void *user)
 {
     if (event != PURR_EVENT_CLICKED) return;
-    int idx = (int)(intptr_t)user;
-    if (idx >= 0 && idx < s_app_count) {
-        ESP_LOGI(TAG, "launcher: launching %s", s_apps[idx].name);
-        app_manager_launch_idx(idx);
-    }
+    const char *path = (const char *)user;
+    ESP_LOGI(TAG, "launcher: launching %s", path);
+    app_manager_launch_path(path);
 }
 
 void app_manager_open_launcher(void)
@@ -1064,6 +1534,7 @@ void app_manager_open_launcher(void)
     if (!purr_kernel_ui()) {
         ESP_LOGW(TAG, "no UI registered — launcher running in serial-only mode");
         for (int i = 0; i < s_app_count; i++) {
+            if (is_hidden_local_app(s_apps[i].name)) continue;
             ESP_LOGI(TAG, "  [%d] %s (%s)", i, s_apps[i].name, tier_name(s_apps[i].tier));
         }
         return;
@@ -1075,12 +1546,18 @@ void app_manager_open_launcher(void)
         return;
     }
 
-    if (s_app_count == 0) {
+    // is_hidden_local_app() — same "never a normal Start Menu/launcher
+    // entry" rule cheetah_home.c/systemui_xp.c's own listing already
+    // follows via app_manager_count()/get(); this legacy browser needed
+    // its own copy of that check since it reads s_apps[] directly.
+    bool any = false;
+    for (int i = 0; i < s_app_count; i++) {
+        if (is_hidden_local_app(s_apps[i].name)) continue;
+        purr_win_button(win, s_apps[i].name, launcher_btn_cb, (void *)s_apps[i].path);
+        any = true;
+    }
+    if (!any) {
         purr_win_label(win, "No apps installed.\nCopy .meow/.hiss/.paws files to /sdcard/apps");
-    } else {
-        for (int i = 0; i < s_app_count; i++) {
-            purr_win_button(win, s_apps[i].name, launcher_btn_cb, (void *)(intptr_t)i);
-        }
     }
 
     purr_win_show(win);
@@ -1096,7 +1573,19 @@ static void app_manager_on_win_close(purr_wid_t win, purr_event_t event, void *u
     (void)win; (void)event;
     app_entry_t *app = (app_entry_t *)user;
     int idx = (int)(app - s_apps);
-    app_manager_stop(idx);
+    // local_stop_real() directly — NOT the public app_manager_stop()
+    // dispatcher. idx here is a REAL s_apps[] index (pointer arithmetic
+    // against the app_entry_t app_manager_on_window_created() already
+    // resolved via find_app_by_current_task()), and a window this hook
+    // fires for is always a LOCALLY launched app's own window regardless
+    // of whether remote mode happens to be on elsewhere right now — both
+    // routing through app_manager_stop() (which would send it through
+    // remote_stop_idx() instead, wrongly, if s_remote_mode were true) and
+    // through local_stop_idx() (which would re-translate an already-real
+    // index as if it were a compacted one) are wrong here. This was a
+    // real, reported regression: the close button stopped closing apps
+    // the moment local_stop_idx() started expecting a compacted index.
+    local_stop_real(idx);
 }
 
 // Finds the app_entry_t whose launch task is the one calling right now —
@@ -1173,7 +1662,13 @@ static void autorun_kitten(void)
     for (int i = 0; i < s_app_count; i++) {
         if (s_apps[i].tier == APP_TIER_KITTEN) {
             ESP_LOGI(TAG, "autorun: launching .kitten app '%s'", s_apps[i].name);
-            app_manager_launch_idx(i);
+            // app_manager_launch_path(), not app_manager_launch_idx(i) —
+            // `i` here is a REAL s_apps[] index, but launch_idx() is the
+            // UI-facing dispatcher and its local branch now expects a
+            // COMPACTED one (translate_local_idx()). A path match sides
+            // steps the whole question, same fix already applied to
+            // app_manager_open_launcher()/app_manager_on_win_close().
+            app_manager_launch_path(s_apps[i].path);
             return;
         }
     }
@@ -1197,7 +1692,11 @@ static void autorun_oobe(void)
     for (int i = 0; i < s_app_count; i++) {
         if (strcmp(s_apps[i].name, "oobe") == 0) {
             ESP_LOGI(TAG, "autorun: first run — launching OOBE setup");
-            app_manager_launch_idx(i);
+            // app_manager_launch_by_name(), not app_manager_launch_idx(i)
+            // — same reasoning as autorun_kitten() just above (`i` is a
+            // real index, launch_idx() now wants a compacted one); a name
+            // match is even more direct here since one's already in hand.
+            app_manager_launch_by_name("oobe");
             return;
         }
     }
@@ -1240,7 +1739,11 @@ static bool app_manager_kill_worst_offender(void)
     ESP_LOGW(TAG, "memory watchdog: stopping '%s' (~%d bytes consumed since launch, worst of %d running)",
              s_apps[worst_idx].name, (int)worst_drop, s_app_count);
     purr_kernel_notify("App stopped", s_apps[worst_idx].name, "memory watchdog");
-    app_manager_stop(worst_idx);
+    // local_stop_real(), not app_manager_stop() — worst_idx is a REAL
+    // s_apps[] index (found by scanning s_apps[]/s_app_count directly,
+    // entirely local state — a remote app was never a candidate here at
+    // all), same reasoning app_manager_on_win_close() already documents.
+    local_stop_real(worst_idx);
     return true;
 }
 
@@ -1283,9 +1786,14 @@ int app_manager_init(void)
 
 void app_manager_deinit(void)
 {
+    // local_stop_real(), not app_manager_stop() — same reasoning as
+    // app_manager_kill_worst_offender()/app_manager_on_win_close(): `i`
+    // here is a real s_apps[] index from iterating s_apps[]/s_app_count
+    // directly, entirely local, regardless of whatever s_remote_mode
+    // happens to be at teardown time.
     for (int i = 0; i < s_app_count; i++) {
         if (s_apps[i].state == APP_STATE_RUNNING) {
-            app_manager_stop(i);
+            local_stop_real(i);
         }
     }
     s_app_count = 0;
