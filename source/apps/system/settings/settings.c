@@ -25,6 +25,7 @@
 #include "mesh_ble.h"
 #include "ota_mgr.h"
 #include "systemui.h"   // purr_systemui_fx_refresh() — see on_effects_toggle()
+#include "user_mgr.h"   // the new "Users" tab — see on_open_users()
 #include "sdkconfig.h"
 
 // LV_SYMBOL_* glyphs for the category tile grid below — meaningless (and
@@ -65,6 +66,19 @@ static purr_wid_t  s_general_menu = 0;
 // would be permanently unreachable/undismissable once opened.
 static purr_win_t  s_general_win        = 0;
 static purr_wid_t  s_general_status_lbl = 0;
+
+#define MAX_USERS_ROWS USER_MGR_MAX_USERS
+static purr_win_t  s_users_win        = 0;   // separate "Users" window, built on demand
+static purr_wid_t  s_users_list       = 0;
+static purr_wid_t  s_users_status_lbl = 0;
+static char        s_users_labels[MAX_USERS_ROWS][USER_MGR_USERNAME_MAX + 24];   // "name (network) [admin]"
+static const char *s_users_label_ptrs[MAX_USERS_ROWS];
+static char        s_users_names[MAX_USERS_ROWS][USER_MGR_USERNAME_MAX];         // parallel to the list above — bare username, for the Remove action
+static int         s_users_count = 0;
+
+static purr_win_t  s_add_user_win  = 0;
+static purr_wid_t  s_add_user_name = 0;
+static purr_wid_t  s_add_user_pass = 0;
 static purr_win_t  s_display_win        = 0;
 static purr_wid_t  s_display_status_lbl = 0;
 static purr_win_t  s_customization_win        = 0;
@@ -1320,6 +1334,143 @@ static void on_open_updates(purr_wid_t w, purr_event_t e, void *u) {
     purr_win_show(s_updates_win);
 }
 
+// ── Users ─────────────────────────────────────────────────────────────────
+// Add/remove accounts (user_mgr.h) — same purr_win_list()-driven shape
+// settings.c's own WiFi networks list already uses (parallel label/name
+// arrays, since the list widget only ever holds display strings, not the
+// bare data a row's action needs).
+
+static void users_refresh(void) {
+    if (!s_users_list) return;
+    s_users_count = user_mgr_count();
+    if (s_users_count > MAX_USERS_ROWS) s_users_count = MAX_USERS_ROWS;
+    for (int i = 0; i < s_users_count; i++) {
+        if (!user_mgr_at(i, s_users_names[i], sizeof(s_users_names[i]))) {
+            s_users_names[i][0] = '\0';
+        }
+        bool remote = user_mgr_account_type(s_users_names[i]) == USER_ACCOUNT_REMOTE;
+        bool admin  = user_mgr_is_admin(s_users_names[i]);
+        snprintf(s_users_labels[i], sizeof(s_users_labels[i]), "%s%s%s",
+                 s_users_names[i], remote ? " (network)" : " (local)", admin ? " [admin]" : "");
+        s_users_label_ptrs[i] = s_users_labels[i];
+    }
+    purr_win_list_set_items(s_users_list, s_users_label_ptrs, s_users_count);
+}
+
+static void on_add_user_confirm(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    const char *name = purr_win_textarea_get(s_add_user_name);
+    const char *pass = purr_win_textarea_get(s_add_user_pass);
+    if (!name) name = "";
+    if (!pass) pass = "";
+
+    if (!user_mgr_valid_username(name)) {
+        purr_win_label_set(s_users_status_lbl, "Username: lowercase letters/numbers/_, must start with a letter.");
+        return;
+    }
+    if (user_mgr_exists(name)) {
+        purr_win_label_set(s_users_status_lbl, "That username is already taken.");
+        return;
+    }
+    if (!user_mgr_create(name, pass)) {
+        purr_win_label_set(s_users_status_lbl, "Could not create that account.");
+        return;
+    }
+
+    if (s_add_user_win) { purr_win_destroy(s_add_user_win); s_add_user_win = 0; s_add_user_name = 0; s_add_user_pass = 0; }
+    purr_win_label_set(s_users_status_lbl, "Account created.");
+    users_refresh();
+}
+
+static void on_open_add_user(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    if (s_add_user_win) { purr_win_show(s_add_user_win); return; }
+
+    // Same shape OOBE's own on_continue() screen already establishes for
+    // "create a local account" — see oobe_app.c.
+    s_add_user_win = purr_win_create("Add User");
+    purr_win_label(s_add_user_win, "Username:");
+    s_add_user_name = purr_win_textarea(s_add_user_win, 90, 20);
+    purr_win_label(s_add_user_win, "Password (optional):");
+    s_add_user_pass = purr_win_textarea(s_add_user_win, 90, 20);
+    purr_win_button(s_add_user_win, "Create", on_add_user_confirm, NULL);
+    purr_win_show(s_add_user_win);
+}
+
+static void on_remove_user(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    int sel = purr_win_list_get_selected(s_users_list);
+    if (sel < 0 || sel >= s_users_count) {
+        purr_win_label_set(s_users_status_lbl, "Select a user first.");
+        return;
+    }
+    const char *name = s_users_names[sel];
+
+    // Refuse removing the last LOCAL account — user_mgr_remove() itself
+    // is a plain table delete with no such guard; enforced here instead,
+    // matching OOBE's own "the device always needs at least one
+    // identity" reasoning (user_mgr.h's own bootstrap-account comment).
+    if (user_mgr_account_type(name) == USER_ACCOUNT_LOCAL) {
+        int local_count = 0;
+        for (int i = 0; i < s_users_count; i++) {
+            if (user_mgr_account_type(s_users_names[i]) == USER_ACCOUNT_LOCAL) local_count++;
+        }
+        if (local_count <= 1) {
+            purr_win_label_set(s_users_status_lbl, "Can't remove the last local account.");
+            return;
+        }
+    }
+
+    if (user_mgr_remove(name)) {
+        purr_win_label_set(s_users_status_lbl, "Removed.");
+        users_refresh();
+    } else {
+        purr_win_label_set(s_users_status_lbl, "Remove failed.");
+    }
+}
+
+// Toggles offline_access (user_mgr.h) for whichever row is selected —
+// a no-op (user_mgr_set_offline_access() itself returns false, nothing
+// crashes) if that row is a LOCAL account, since the concept doesn't
+// apply there at all; the status line says so either way.
+static void on_toggle_offline_access(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    int sel = purr_win_list_get_selected(s_users_list);
+    if (sel < 0 || sel >= s_users_count) {
+        purr_win_label_set(s_users_status_lbl, "Select a user first.");
+        return;
+    }
+    const char *name = s_users_names[sel];
+    if (user_mgr_account_type(name) != USER_ACCOUNT_REMOTE) {
+        purr_win_label_set(s_users_status_lbl, "Offline access only applies to a network account.");
+        return;
+    }
+    bool now_on = !user_mgr_get_offline_access(name);
+    user_mgr_set_offline_access(name, now_on);
+    purr_win_label_set(s_users_status_lbl, now_on ? "Offline access ON for that account." : "Offline access OFF for that account.");
+}
+
+static void on_open_users(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    if (s_users_win) { purr_win_show(s_users_win); users_refresh(); return; }
+
+    s_users_win = purr_win_create("Users");
+    add_back_button(s_users_win);
+
+    purr_win_label(s_users_win, "Accounts");
+    s_users_list = purr_win_list(s_users_win, 90, 50);
+
+    purr_wid_t row = purr_win_row(s_users_win, 3);
+    purr_win_button(s_users_win, "Add",             on_open_add_user,          NULL);
+    purr_win_button(s_users_win, "Remove",          on_remove_user,            NULL);
+    purr_win_button(s_users_win, "Offline access",  on_toggle_offline_access,  NULL);
+    purr_win_layout_end(row);
+
+    s_users_status_lbl = purr_win_label(s_users_win, "Ready.");
+    users_refresh();
+    purr_win_show(s_users_win);
+}
+
 // ── Category picker nav ──────────────────────────────────────────────────
 // Same tile-grid-with-list-fallback shape MSN's own Home screen uses
 // (msn.c's build_home_screen_nav()) — reused here so every multi-screen
@@ -1327,8 +1478,8 @@ static void on_open_updates(purr_wid_t w, purr_event_t e, void *u) {
 // keeping its older plain-button-row picker. Purely a top-level nav swap:
 // each category's own sub-window (on_open_general() etc.) is untouched.
 
-#define CAT_COUNT 6
-static const char *s_category_labels[CAT_COUNT] = { "General", "Display", "Customization", "Connectivity", "Updates", "About" };
+#define CAT_COUNT 7
+static const char *s_category_labels[CAT_COUNT] = { "General", "Display", "Customization", "Connectivity", "Updates", "Users", "About" };
 
 static void on_cat_menu(purr_wid_t w, purr_event_t e, void *user) {
     (void)user;
@@ -1339,7 +1490,8 @@ static void on_cat_menu(purr_wid_t w, purr_event_t e, void *user) {
         case 2: on_open_customization(0, PURR_EVENT_CLICKED, NULL); break;
         case 3: on_open_connectivity(0, PURR_EVENT_CLICKED, NULL);  break;
         case 4: on_open_updates(0, PURR_EVENT_CLICKED, NULL);       break;
-        case 5: on_open_about(0, PURR_EVENT_CLICKED, NULL);         break;
+        case 5: on_open_users(0, PURR_EVENT_CLICKED, NULL);         break;
+        case 6: on_open_about(0, PURR_EVENT_CLICKED, NULL);         break;
         default: break;
     }
 }
@@ -1407,6 +1559,8 @@ static void settings_deinit(void) {
     // lifetime) rather than aborted just because Settings was closed.
     close_ota_url_dialog();
     if (s_updates_win) { purr_win_destroy(s_updates_win); s_updates_win = 0; s_updates_status_lbl = 0; }
+    if (s_add_user_win) { purr_win_destroy(s_add_user_win); s_add_user_win = 0; s_add_user_name = 0; s_add_user_pass = 0; }
+    if (s_users_win)   { purr_win_destroy(s_users_win);   s_users_win   = 0; s_users_status_lbl = 0; s_users_list = 0; }
     if (s_about_win)         { purr_win_destroy(s_about_win);         s_about_win         = 0; s_about_lbl = 0; }
     if (s_mesh_switch_confirm_win) { purr_win_destroy(s_mesh_switch_confirm_win); s_mesh_switch_confirm_win = 0; }
     purr_win_destroy(s_win);
