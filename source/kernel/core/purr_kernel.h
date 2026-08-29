@@ -211,6 +211,12 @@ size_t purr_kernel_klog_tail(char *out, size_t out_size);
 uint32_t purr_kernel_free_ram(void);
 uint64_t purr_kernel_uptime_ms(void);
 bool     purr_kernel_sd_available(void);
+// True once boot.c's mount_flash_vfs() has successfully mounted /flash
+// (SPIFFS) — mirrors purr_kernel_sd_available() exactly, same reason:
+// claw_loader.c's personal-space storage (source/modules/claw_loader/)
+// falls back to /flash/personal on a device with no SD card (e.g.
+// Heltec V3), and needs a way to know that root exists before touching it.
+bool     purr_kernel_flash_available(void);
 bool     purr_kernel_wifi_connected(void);
 int      purr_kernel_battery_percent(void);  // -1 = unknown (no PMIC/fuel gauge)
 int      purr_kernel_battery_voltage_mv(void);  // -1 = unknown
@@ -314,6 +320,7 @@ int purr_kernel_mesh_backend_switch(purr_mesh_backend_t backend);
 
 // Called by SD / WiFi / PMIC / LoRa drivers when their state changes
 void     purr_kernel_set_sd_available(bool v);
+void     purr_kernel_set_flash_available(bool v);   // boot.c's mount_flash_vfs() only
 void     purr_kernel_set_wifi_connected(bool v);
 void     purr_kernel_set_battery_percent(int v);
 void     purr_kernel_set_battery_voltage_mv(int mv);

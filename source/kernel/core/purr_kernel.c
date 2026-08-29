@@ -1278,6 +1278,7 @@ uint64_t purr_kernel_uptime_ms(void) {
 }
 
 static bool s_sd_available    = false;
+static bool s_flash_available = false;
 static bool s_wifi_connected  = false;
 static int  s_battery_percent = -1;   // -1 = unknown (no PMIC/fuel gauge found)
 static int  s_battery_voltage_mv = -1;   // -1 = unknown
@@ -1309,6 +1310,7 @@ static uint8_t s_screen_timeout_min = 1;
 static bool     s_dark_mode = false;
 
 void purr_kernel_set_sd_available(bool v)    { s_sd_available    = v; }
+void purr_kernel_set_flash_available(bool v) { s_flash_available = v; }
 void purr_kernel_set_wifi_connected(bool v)  { s_wifi_connected  = v; }
 void purr_kernel_set_battery_percent(int v)  { s_battery_percent = v; }
 void purr_kernel_set_battery_voltage_mv(int mv) { s_battery_voltage_mv = mv; }
@@ -1325,6 +1327,7 @@ void purr_kernel_set_screen_timeout_min(uint8_t v) { s_screen_timeout_min = v; }
 void purr_kernel_set_dark_mode(bool v)             { s_dark_mode = v; }
 
 bool purr_kernel_sd_available(void)    { return s_sd_available; }
+bool purr_kernel_flash_available(void) { return s_flash_available; }
 bool purr_kernel_wifi_connected(void)  { return s_wifi_connected; }
 int  purr_kernel_battery_percent(void) { return s_battery_percent; }
 int  purr_kernel_battery_voltage_mv(void) { return s_battery_voltage_mv; }

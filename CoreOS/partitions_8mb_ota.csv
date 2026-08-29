@@ -1,0 +1,34 @@
+# PURR OS — 8 MB flash partition table, OTA variant (dual app slot)
+# Opt in via device.pcat [device] ota = true — see purrstrap.py's
+# _generate_sdkconfig() for the flash_mb -> CSV selection. Mirrors
+# partitions_16mb_ota.csv's own shape — see that file's comment for the
+# alignment rules this follows (app-type partitions need BOTH offset and
+# size 0x10000-aligned; ota_0 starts at 0x20000, not immediately after
+# otadata at 0x12000, because 0x12000 isn't a 0x10000-aligned offset and
+# 0x20000 is the next one that is).
+#
+# Devices: heltec. Real firmware measured at ~1.04MB
+# (CoreOS/build_heltec/purr_os.bin) against the OLD single-slot,
+# factory-only table (partitions_8mb.csv) this replaces — 1.5MB per OTA
+# slot below is ~44% headroom over that, not a guess.
+#
+# SPIFFS offset: 0x320000 size: 0x100000 (1 MB) — any device moving to
+# this table must update its device.pcat spiffs_offset to "0x320000" (see
+# the 16MB OTA table's own comment on why the OTA layout's SPIFFS offset
+# can never just match the non-OTA layout's).
+#
+# Totals 0x420000 (4.03 MB) of the 8 MB flash — the remaining ~3.9MB is
+# genuinely unallocated, not wasted: nothing here needs it yet (Heltec
+# doesn't get claw_slot/app_cfg, unlike the 16MB OTA table — see the
+# "Server Manager" plan doc's own "Files served, not run locally" section
+# for why Heltec never needs to locally launch a pushed app in this pass).
+# Extending this table later, the same way the 16MB one grew claw_slot/
+# app_cfg after the fact, is a small, low-risk addition into that space.
+#
+# Name,     Type, SubType,  Offset,    Size
+nvs,        data, nvs,      0x9000,    0x6000
+phy_init,   data, phy,      0xF000,    0x1000
+otadata,    data, ota,      0x10000,   0x2000
+ota_0,      app,  ota_0,    0x20000,   0x180000
+ota_1,      app,  ota_1,    0x1A0000,  0x180000
+spiffs,     data, spiffs,   0x320000,  0x100000

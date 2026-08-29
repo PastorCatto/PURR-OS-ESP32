@@ -66,11 +66,17 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
 void claw_loader_unload(claw_loaded_module_t *m);
 
 // ── Personal-space storage ──────────────────────────────────────────────
-// Per-user storage for .claw app objects on SD, at
-// /sdcard/personal/<username>/<appname>.claw — flat, one file per app,
-// enumerated directly (no separate manifest for this first pass, matching
+// Per-user storage for .claw app objects, at
+// <root>/<username>/<appname>.claw — flat, one file per app, enumerated
+// directly (no separate manifest for this first pass, matching
 // app_manager.c's own scan_dir() precedent: readdir() order is whatever
-// the filesystem gives, not alphabetical or insertion-order).
+// the filesystem gives, not alphabetical or insertion-order). <root> is
+// /sdcard/personal when SD is available (preferred — more capacity), else
+// /flash/personal on a device with no SD card at all (e.g. Heltec V3;
+// see purr_kernel_flash_available()'s own doc comment) — genuinely small
+// there (whatever's left of that device's SPIFFS partition after
+// everything else that lands on /flash), fine for small pushed apps, not
+// a general-purpose store.
 //
 // username/appname are trusted as already-validated by the caller
 // (app_manager, once piece 3 of the personal-space work lands) —
@@ -79,11 +85,20 @@ void claw_loader_unload(claw_loaded_module_t *m);
 // would be a needless dependency for a module that's otherwise
 // deliberately minimal (see this module's CMakeLists.txt REQUIRES).
 //
-// All four below return false (no-op) if SD isn't available
-// (purr_kernel_sd_available()) — same gate kernel_tdp_boot.c's
-// ensure_sd_dirs() uses before touching /sdcard at all.
+// All four below return false (no-op) if NEITHER SD nor flash is
+// available (purr_kernel_sd_available()/purr_kernel_flash_available()) —
+// same gate kernel_tdp_boot.c's ensure_sd_dirs() uses before touching
+// /sdcard at all, just widened to accept either root.
 
-// Ensures /sdcard/personal/<username>/ exists, writes obj_bytes to
+// The SD-preferred/flash-fallback root itself ("/sdcard/personal" or
+// "/flash/personal"), or NULL if neither is available — for a caller that
+// needs to stage files under this SAME root before they're a real,
+// scannable personal app (e.g. server_mgr.h's pending-approval uploads,
+// staged at <root>/pending/ until a human approves them), without
+// duplicating this file's own SD-preferred/flash-fallback logic.
+const char *claw_loader_personal_root(void);
+
+// Ensures <root>/<username>/ exists, writes obj_bytes to
 // <appname>.claw inside it (overwriting any existing file of that name).
 bool claw_loader_personal_add(const char *username, const char *appname,
                                const uint8_t *obj_bytes, size_t obj_len);

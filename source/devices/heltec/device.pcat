@@ -8,8 +8,18 @@ chip        = "esp32s3"
 kernel_type = "native"
 flash_mb    = 8
 psram       = false
-spiffs_kb      = 256
-spiffs_offset  = "0x690000"
+# ota=true selects CoreOS/partitions_8mb_ota.csv over the old factory-only
+# partitions_8mb.csv (purrstrap.py's _partitions_csv_path(), same existing
+# convention tdeck_plus already uses) — dual OTA app slots plus a real,
+# correctly-sized SPIFFS partition for Server Manager's pushed-app storage
+# (this device has no SD card — see claw_loader.c's flash-fallback
+# personal-space root). spiffs_kb/spiffs_offset below MUST match that
+# table exactly (build_flash_image() reads spiffs_kb directly — an
+# unmatched value here silently generates a wrong-sized SPIFFS image, see
+# purrstrap.py's own build_flash_image()/cmd_build() plumbing).
+ota            = true
+spiffs_kb      = 1024
+spiffs_offset  = "0x320000"
 
 [drivers]
 display     = "ssd1306"
@@ -34,26 +44,67 @@ lora        = "sx1262_rl"
 ui          = "oled_ui"
 app_manager = "app_manager"
 mesh        = "meshtastic"
-# proximity/pairing — NOT listed here anymore; purrstrap.py's
-# apply_radio_companion_defaults() adds them automatically to any device
-# with [radio] wifi = true (this one). ui = "oled_ui" isn't a purr_win
-# backend, so msn/nearby are correctly NOT auto-added — this device gets
-# its own hand-built Pair screen in oled_ui_module.c instead. No wifi_mgr
-# on this device (no WiFi network connectivity needed) — proximity_
-# module.c brings up the WiFi driver itself in STA mode (never connected
-# to an AP) since nothing else on this device does, see its own
+# server = true — this device is a deliberate login/pairing SERVER: any
+# paired client's "Log in to a server" screen (systemui_login.c) can target
+# this board and go through the real pairing.h Phase A/B/C exchange against
+# it (password check, human approval — surfaced on THIS device's own OLED
+# via oled_ui_module.c's confirm screen — key registration). Pulls in
+# proximity/pairing/proximity_rpc/app_manager_remote/homebase via
+# purrstrap.py's apply_radio_companion_defaults(), same module set
+# [radio] wifi = true below already qualified this device for on its own —
+# see that function's own comment for why this is still worth setting
+# explicitly rather than relying on the WiFi side effect. ui = "oled_ui"
+# isn't a purr_win backend, so msn/milkbar (the CLIENT side of this same
+# stack) are correctly NOT auto-added — this device can be logged INTO,
+# but has no screen to log OUT to another server FROM; that stays
+# restricted to purr_win/bigger-screen devices like tdeck_plus. This board
+# gets its own hand-built Pair screen in oled_ui_module.c instead. No
+# wifi_mgr on this device (no WiFi network connectivity needed) —
+# proximity_module.c brings up the WiFi driver itself in STA mode (never
+# connected to an AP) since nothing else on this device does, see its own
 # ensure_wifi_ready() comment.
+server      = true
+# user_mgr — REQUIRED for the server stack above to actually work, not
+# optional groundwork: found live on real hardware while verifying this
+# very feature. apply_radio_companion_defaults()/pairing's own CMakeLists
+# make user_mgr LINKABLE transitively (pairing REQUIRES it), but linking
+# is not the same as running — the kernel's static-module loader only
+# calls a module's init() for names purrstrap.py's glue generator actually
+# emitted from a [modules]/[drivers]/[apps] VALUE (see _generate_glue()'s
+# own comment on "radio_companion"/"server" being control flags, not
+# module names, for the same mechanism in reverse). Without an explicit
+# entry here, user_mgr_init() never ran at all: s_users[] stayed empty,
+# the bootstrap account was never created, and oled_ui's new auto-login
+# (user_mgr_set_logged_in(user_mgr_default_username())) silently failed
+# every boot — no crash, no log line, just a permanently-empty "User:
+# (none)" on the Info screen. tdeck_plus already has this exact same
+# entry (its own device.pcat: `users = "user_mgr"`, a different key name
+# for the identical fix) — every OTHER radio_companion/server device in
+# this tree is missing it too and carries the same latent bug; fixing
+# that fleet-wide is a separate, deliberately out-of-scope follow-up from
+# this one device's own pass.
+user_mgr    = "user_mgr"
 
 [ui]
 style       = "full"
 
 [apps]
-# 128x64 OLED — no touch, no GUI apps.
-settings    = false
+# 128x64 OLED, no touch, no purr_win UI backend on this device (ui =
+# "oled_ui" above, a raw-framebuffer text UI, not LVGL) — none of these
+# will do anything useful if actually LAUNCHED here (they all call
+# purr_win_create(), with nothing to create a window against). Enabled
+# anyway so app_manager's registry lists them for REMOTEAPPS_ACTION_LIST
+# (server_mgr/app_manager_remote — a connected client's own remote-mode
+# desktop sees them), and to actually exercise that listing pipeline with
+# real data for the first time. Whether a client can successfully LAUNCH
+# one against a headless server like this is the real, still-open
+# question the Server Manager plan's own "Files served, not run locally"
+# section already flagged — not attempted or solved here.
+settings    = true
 about       = false
-terminal    = false
-fileman     = false
-calculator  = false
+terminal    = true
+fileman     = true
+calculator  = true
 
 [flash]
 display/ssd1306      = 1
@@ -62,7 +113,12 @@ radio/sx1262_rl       = 2
 oled_ui               = 2
 app_manager           = 2
 meshtastic             = 2
+user_mgr               = 2
 battery/adc_battery    = 3
+apps/settings          = 3
+apps/terminal          = 3
+apps/fileman           = 3
+apps/calculator        = 3
 
 [pins]
 # Vext — separate power rail feeding the OLED (and possibly other onboard

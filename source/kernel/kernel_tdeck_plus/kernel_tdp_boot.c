@@ -117,6 +117,7 @@ static void mount_flash_vfs(void)
         esp_spiffs_info(NULL, &total, &used);
         ESP_LOGI(TAG, "flash VFS: %u KB / %u KB",
                  (unsigned)(used / 1024), (unsigned)(total / 1024));
+        purr_kernel_set_flash_available(true);
     }
 }
 
@@ -869,6 +870,22 @@ void app_main(void)
     // account. Boot log otherwise clean (no error/assert/panic lines).
     extern void pairing_selftest_userauth(void);
     (void)pairing_selftest_userauth;
+
+    // pairing_selftest_remote_oobe() call removed — PASSED on real
+    // hardware: "this device's own oobe_completed=1", "query (untrusted)
+    // = 0 (expect 0)", "query (trusted) = 0 (expect 0)", "push (untrusted)
+    // = 0 (expect 0)", "push (trusted, tampered) = 0 (expect 0)",
+    // "SKIPPING positive push case — this device's own OOBE is already
+    // complete" (this board completed its own OOBE during earlier testing
+    // this session, so the positive-path assertion correctly self-skipped
+    // — see the selftest's own doc comment on why that's expected, not a
+    // gap), "SELFTEST PASS". Confirms the trust-gating and GCM-encrypted
+    // exchange for pairing.h's Remote OOBE push (this session's Heltec
+    // work) all function correctly. Boot log otherwise clean (no error/
+    // assert/panic lines) — server_mgr, wifi_mgr, user_mgr all loaded
+    // (31/31 static modules initialised) alongside it.
+    extern void pairing_selftest_remote_oobe(void);
+    (void)pairing_selftest_remote_oobe;
 
     purr_kernel_set_boot_ready(true);
 

@@ -171,38 +171,56 @@ void claw_loader_unload(claw_loaded_module_t *m)
 // ── Personal-space storage ──────────────────────────────────────────────────
 // See claw_loader.h's own header comment on this section for the design.
 
-#define PERSONAL_ROOT "/sdcard/personal"
-
-// Builds /sdcard/personal/<username> into `out` (out_sz-bounded). Shared by
-// every function below so the path format lives in exactly one place.
-static void personal_dir_path(const char *username, char *out, size_t out_sz)
+// SD preferred (more capacity, the original/established location) —
+// /flash/personal as a fallback for a device with no SD card at all (e.g.
+// Heltec V3, see purr_kernel_flash_available()'s own doc comment). Every
+// function below already treated "no SD" as "no personal space at all"
+// (false/0/NULL); this just widens what counts as having one, and every
+// caller's own contract is unchanged. On a flash-only device this is
+// genuinely small — Heltec's own SPIFFS partition is 1MB total, shared
+// with everything else that lands on /flash — fine for small pushed apps,
+// not a general-purpose store; that constraint is real, not hidden.
+static const char *personal_root(void)
 {
-    snprintf(out, out_sz, "%s/%s", PERSONAL_ROOT, username);
+    if (purr_kernel_sd_available())    return "/sdcard/personal";
+    if (purr_kernel_flash_available()) return "/flash/personal";
+    return NULL;
 }
 
-static void personal_file_path(const char *username, const char *appname, char *out, size_t out_sz)
+const char *claw_loader_personal_root(void) { return personal_root(); }
+
+// Builds <root>/<username> into `out` (out_sz-bounded). Shared by every
+// function below so the path format lives in exactly one place.
+static void personal_dir_path(const char *root, const char *username, char *out, size_t out_sz)
 {
-    snprintf(out, out_sz, "%s/%s/%s.claw", PERSONAL_ROOT, username, appname);
+    snprintf(out, out_sz, "%s/%s", root, username);
+}
+
+static void personal_file_path(const char *root, const char *username, const char *appname, char *out, size_t out_sz)
+{
+    snprintf(out, out_sz, "%s/%s/%s.claw", root, username, appname);
 }
 
 bool claw_loader_personal_add(const char *username, const char *appname,
                                const uint8_t *obj_bytes, size_t obj_len)
 {
-    if (!purr_kernel_sd_available()) return false;
+    const char *root = personal_root();
+    if (!root) return false;
 
-    // /sdcard/personal itself is NOT in kernel_tdp_boot.c's ensure_sd_dirs()
-    // static list (usernames aren't known at boot) — ensure both levels
-    // here instead, same stat()-then-mkdir() idiom that list already uses.
+    // <root> itself is NOT in kernel_tdp_boot.c's ensure_sd_dirs() static
+    // list (usernames aren't known at boot, and this path can now be on
+    // /flash instead of /sdcard anyway) — ensure both levels here instead,
+    // same stat()-then-mkdir() idiom that list already uses.
     struct stat st;
-    if (stat(PERSONAL_ROOT, &st) != 0) {
-        if (mkdir(PERSONAL_ROOT, 0755) != 0) {
-            ESP_LOGE(TAG, "mkdir %s failed", PERSONAL_ROOT);
+    if (stat(root, &st) != 0) {
+        if (mkdir(root, 0755) != 0) {
+            ESP_LOGE(TAG, "mkdir %s failed", root);
             return false;
         }
     }
 
     char dir_path[300];
-    personal_dir_path(username, dir_path, sizeof(dir_path));
+    personal_dir_path(root, username, dir_path, sizeof(dir_path));
     if (stat(dir_path, &st) != 0) {
         if (mkdir(dir_path, 0755) != 0) {
             ESP_LOGE(TAG, "mkdir %s failed", dir_path);
@@ -211,7 +229,7 @@ bool claw_loader_personal_add(const char *username, const char *appname,
     }
 
     char file_path[300];
-    personal_file_path(username, appname, file_path, sizeof(file_path));
+    personal_file_path(root, username, appname, file_path, sizeof(file_path));
     FILE *f = fopen(file_path, "wb");
     if (!f) {
         ESP_LOGE(TAG, "fopen %s failed", file_path);
@@ -232,10 +250,11 @@ bool claw_loader_personal_add(const char *username, const char *appname,
 
 int claw_loader_personal_count(const char *username)
 {
-    if (!purr_kernel_sd_available()) return 0;
+    const char *root = personal_root();
+    if (!root) return 0;
 
     char dir_path[300];
-    personal_dir_path(username, dir_path, sizeof(dir_path));
+    personal_dir_path(root, username, dir_path, sizeof(dir_path));
     DIR *d = opendir(dir_path);
     if (!d) return 0;
 
@@ -251,10 +270,11 @@ int claw_loader_personal_count(const char *username)
 
 bool claw_loader_personal_at(const char *username, int idx, char *name_out, size_t name_out_sz)
 {
-    if (!purr_kernel_sd_available() || idx < 0) return false;
+    const char *root = personal_root();
+    if (!root || idx < 0) return false;
 
     char dir_path[300];
-    personal_dir_path(username, dir_path, sizeof(dir_path));
+    personal_dir_path(root, username, dir_path, sizeof(dir_path));
     DIR *d = opendir(dir_path);
     if (!d) return false;
 
@@ -283,10 +303,11 @@ bool claw_loader_personal_at(const char *username, int idx, char *name_out, size
 
 bool claw_loader_personal_remove(const char *username, const char *appname)
 {
-    if (!purr_kernel_sd_available()) return false;
+    const char *root = personal_root();
+    if (!root) return false;
 
     char file_path[300];
-    personal_file_path(username, appname, file_path, sizeof(file_path));
+    personal_file_path(root, username, appname, file_path, sizeof(file_path));
     if (remove(file_path) != 0) {
         ESP_LOGW(TAG, "personal: remove %s failed (not found?)", file_path);
         return false;
@@ -297,10 +318,11 @@ bool claw_loader_personal_remove(const char *username, const char *appname)
 
 bool claw_loader_personal_load(const char *username, const char *appname, claw_loaded_module_t *out)
 {
-    if (!purr_kernel_sd_available()) return false;
+    const char *root = personal_root();
+    if (!root) return false;
 
     char file_path[300];
-    personal_file_path(username, appname, file_path, sizeof(file_path));
+    personal_file_path(root, username, appname, file_path, sizeof(file_path));
     FILE *f = fopen(file_path, "rb");
     if (!f) {
         ESP_LOGE(TAG, "personal: fopen %s failed", file_path);
