@@ -223,7 +223,68 @@ const char *wifi_mgr_ip_str(void)       { return s_ip_str; }
 
 // ── Module lifecycle ──────────────────────────────────────────────────────────
 
+// Brings up the underlying WiFi driver (STA mode, not connected to
+// anything) if it isn't already — this file's own top comment used to
+// assume kernel_tdp_boot.c (tdeck_plus's specialized boot file) always
+// did this first, which is real and true THERE, but nothing did it on a
+// device using the generic boot.c (confirmed: zero WiFi-related calls in
+// it at all) — Heltec included, despite listing wifi_mgr in its own
+// [modules] (via apply_radio_companion_defaults(), purrstrap.py, same
+// server=true condition that already adds proximity). Real, confirmed
+// consequence: wifi_mgr_init() below called esp_wifi_start() straight
+// into a driver that was never initialized, and Server Manager's own
+// WIFI_STATUS/SET handlers (server_mgr.c) reported this device as
+// permanently "unsupported" as a result — the actual root cause behind
+// remote WiFi setup never working on Heltec.
+//
+// Deliberately duplicates proximity_module.c's own ensure_wifi_ready()
+// rather than depending on it — proximity is the radio-companion-
+// specific module, wifi_mgr is the more fundamental one, and reaching
+// "up" to depend on it would be backwards. Both are small (~15 lines)
+// and idempotent (esp_wifi_get_mode() succeeding means someone already
+// did this, safe to skip) — cheap enough that keeping them independent
+// beats a new cross-module dependency for this little code. On
+// tdeck_plus, kernel_tdp_boot.c already did this work, so this sees
+// WiFi already up and returns immediately — a no-op, not a behavior
+// change there.
+static void ensure_wifi_stack_ready(void) {
+    wifi_mode_t mode;
+    if (esp_wifi_get_mode(&mode) == ESP_OK) return;   // already up — nothing to do
+
+    esp_err_t err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "esp_netif_init() failed: %d", (int)err);
+        return;
+    }
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "esp_event_loop_create_default() failed: %d", (int)err);
+        return;
+    }
+    // Not idempotent — allocates a fresh netif every call — so this only
+    // runs if no default STA netif exists yet (same guard proximity_
+    // module.c's own copy uses).
+    if (!esp_netif_get_handle_from_ifkey("WIFI_STA_DEF")) {
+        esp_netif_create_default_wifi_sta();
+    }
+
+    wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    err = esp_wifi_init(&wifi_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_init() failed: %d", (int)err);
+        return;
+    }
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_mode() failed: %d", (int)err);
+    }
+    // esp_wifi_start() itself still happens below, in wifi_mgr_init() —
+    // not duplicated here, so there's exactly one call site for it.
+}
+
 int wifi_mgr_init(void) {
+    ensure_wifi_stack_ready();
+
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL, &s_wifi_ev_inst));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(

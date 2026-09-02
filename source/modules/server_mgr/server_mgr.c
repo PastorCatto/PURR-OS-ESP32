@@ -31,6 +31,8 @@ static const char *TAG = "server_mgr";
 #define SRVMGR_ACTION_APP_UPLOAD_BEGIN 0x5002   // req: upload_begin_req_t -> resp: 1B status
 #define SRVMGR_ACTION_APP_UPLOAD_CHUNK 0x5003   // req: 4B offset + up to SRVMGR_UPLOAD_CHUNK_MAX raw bytes -> resp: 1B status
 #define SRVMGR_ACTION_APP_UPLOAD_END   0x5004   // req: upload_end_req_t -> resp: 1B status
+#define SRVMGR_ACTION_MESH_STATUS      0x5005   // req: none -> resp: 1B purr_mesh_backend_t value
+#define SRVMGR_ACTION_MESH_SET         0x5006   // req: 1B target purr_mesh_backend_t value -> resp: 1B status (0=fail, 1=ok)
 
 #define SRVMGR_RPC_TIMEOUT_MS    3000UL   // same as pairing's/milkbar's own RPC timeout convention
 #define SRVMGR_UPLOAD_CHUNK_MAX  1900     // comfortably under PROXIMITY_RPC_MAX_MSG (2048, proximity_rpc.h) with the 4B offset header
@@ -172,6 +174,51 @@ static bool handle_wifi_set(const uint8_t mac[6], uint16_t action_id,
     wifi_mgr_connect(ssid, password);   // "" is wifi_mgr_connect()'s own open-network spelling, not NULL
     ESP_LOGI(TAG, "wifi set: connecting to '%s' (pushed remotely)", ssid);
     resp_out[0] = 1;
+    return true;
+}
+
+// ── Mesh backend — responder ────────────────────────────────────────────────
+// No encryption (unlike WIFI_SET) — a backend selection isn't a secret,
+// pairing_is_trusted(mac) is the only gate needed here, same as the app-
+// upload actions below.
+
+static bool handle_mesh_status(const uint8_t mac[6], uint16_t action_id,
+                                const uint8_t *req, size_t req_len,
+                                uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out)
+{
+    (void)action_id; (void)req; (void)req_len;
+    if (resp_cap < 1) { *resp_len_out = 0; return false; }
+
+    if (!pairing_is_trusted(mac)) { *resp_len_out = 0; return false; }
+
+    resp_out[0] = (uint8_t)purr_kernel_mesh_backend_get();
+    *resp_len_out = 1;
+    return true;
+}
+
+static bool handle_mesh_set(const uint8_t mac[6], uint16_t action_id,
+                             const uint8_t *req, size_t req_len,
+                             uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out)
+{
+    (void)action_id;
+    if (req_len != 1 || resp_cap < 1) { *resp_len_out = 0; return false; }
+    resp_out[0] = 0;
+    *resp_len_out = 1;
+
+    if (!pairing_is_trusted(mac)) return true;
+    if (req[0] > (uint8_t)PURR_MESH_BACKEND_RNODE) {
+        ESP_LOGW(TAG, "mesh set: out-of-range backend value %u", (unsigned)req[0]);
+        return true;
+    }
+
+    int rc = purr_kernel_mesh_backend_switch((purr_mesh_backend_t)req[0]);
+    // Same success mapping settings.c's own on_mesh_switch_confirm() uses
+    // for this exact call — "already active" isn't a failure, it's a
+    // no-op success.
+    if (rc == PURR_MODCTL_OK || rc == PURR_MODCTL_ERR_ALREADY) {
+        resp_out[0] = 1;
+        ESP_LOGI(TAG, "mesh set: switched to backend %u (pushed remotely)", (unsigned)req[0]);
+    }
     return true;
 }
 
@@ -480,6 +527,32 @@ bool server_mgr_wifi_set(const uint8_t mac[6], const char *ssid, const char *pas
     return ok && resp_len == 1 && resp[0] == 1;
 }
 
+// ── Mesh backend — client (caller) side ──────────────────────────────────
+
+bool server_mgr_mesh_status(const uint8_t mac[6], uint8_t *out_backend)
+{
+    if (!mac) return false;
+
+    uint8_t resp[1]; size_t resp_len = 0;
+    bool ok = proximity_rpc_call(mac, SRVMGR_ACTION_MESH_STATUS, NULL, 0,
+                                  resp, sizeof(resp), &resp_len, SRVMGR_RPC_TIMEOUT_MS);
+    if (!ok || resp_len != 1) return false;
+
+    if (out_backend) *out_backend = resp[0];
+    return true;
+}
+
+bool server_mgr_mesh_set(const uint8_t mac[6], uint8_t target_backend)
+{
+    if (!mac || target_backend > (uint8_t)PURR_MESH_BACKEND_RNODE) return false;
+
+    uint8_t req[1] = { target_backend };
+    uint8_t resp[1]; size_t resp_len = 0;
+    bool ok = proximity_rpc_call(mac, SRVMGR_ACTION_MESH_SET, req, sizeof(req),
+                                  resp, sizeof(resp), &resp_len, SRVMGR_RPC_TIMEOUT_MS);
+    return ok && resp_len == 1 && resp[0] == 1;
+}
+
 // ── App transfer — client (caller) side ──────────────────────────────────
 
 bool server_mgr_app_upload(const uint8_t mac[6], const char *name, const uint8_t *data, size_t len)
@@ -551,6 +624,8 @@ int server_mgr_init(void)
     proximity_rpc_register(SRVMGR_ACTION_APP_UPLOAD_BEGIN, handle_upload_begin);
     proximity_rpc_register(SRVMGR_ACTION_APP_UPLOAD_CHUNK, handle_upload_chunk);
     proximity_rpc_register(SRVMGR_ACTION_APP_UPLOAD_END,   handle_upload_end);
+    proximity_rpc_register(SRVMGR_ACTION_MESH_STATUS,      handle_mesh_status);
+    proximity_rpc_register(SRVMGR_ACTION_MESH_SET,         handle_mesh_set);
 
     ESP_LOGI(TAG, "ready");
     return 0;
@@ -563,6 +638,8 @@ void server_mgr_deinit(void)
     proximity_rpc_register(SRVMGR_ACTION_APP_UPLOAD_BEGIN, NULL);
     proximity_rpc_register(SRVMGR_ACTION_APP_UPLOAD_CHUNK, NULL);
     proximity_rpc_register(SRVMGR_ACTION_APP_UPLOAD_END,   NULL);
+    proximity_rpc_register(SRVMGR_ACTION_MESH_STATUS,      NULL);
+    proximity_rpc_register(SRVMGR_ACTION_MESH_SET,         NULL);
     abort_upload();
     s_pending_active = false;
 }

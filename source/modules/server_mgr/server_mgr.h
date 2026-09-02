@@ -115,6 +115,35 @@ bool server_mgr_wifi_status(const uint8_t mac[6], server_mgr_wifi_status_t *out_
 // an RPC-level failure.
 bool server_mgr_wifi_set(const uint8_t mac[6], const char *ssid, const char *password);
 
+// ── Mesh backend — client (caller) side ──────────────────────────────────
+// Lets a remote client start/stop RNode mode (or switch to any other mesh
+// backend) on a server with no local way to do it itself — Heltec's own
+// oled_ui has no purr_win UI, so Settings' "Use RNode Mode" button
+// (settings.c) can never actually be tapped there; this is the real
+// control path for that device. Same "blocking proximity_rpc_call(),
+// background task only" rule as WiFi above. Unencrypted, unlike WIFI_SET
+// — a mesh backend selection isn't a secret, pairing_is_trusted(mac) is
+// the only gate needed, same as every other non-credential action in
+// this file (the app-transfer actions above are the same shape).
+//
+// The wire value mirrors purr_mesh_backend_t (purr_kernel.h) exactly —
+// kept as a plain uint8_t here rather than pulling that enum into this
+// header, matching server_mgr_wifi_status_t's own "small enum local to
+// this file" precedent. Caller passes/receives the same raw values:
+// 0=meshtastic, 1=meshcore, 2=reticulum, 3=rnode.
+
+// False only on an RPC-level failure (unreachable/timeout).
+bool server_mgr_mesh_status(const uint8_t mac[6], uint8_t *out_backend);
+
+// True means the switch was accepted (or the target was already active)
+// — same "asynchronous, the target module still has to actually finish
+// starting" nature purr_kernel_mesh_backend_switch() itself already has
+// for the local Settings UI, not a synchronous "and it's running now"
+// guarantee. False on an RPC-level failure, an out-of-range backend
+// value, or a real switch failure on the server (see purr_kernel.h's own
+// PURR_MODCTL_* codes for what "failure" can mean there).
+bool server_mgr_mesh_set(const uint8_t mac[6], uint8_t target_backend);
+
 // ── App transfer — client (caller) side ─────────────────────────────────
 // One call does the whole begin/chunk-loop/end sequence — the transfer
 // itself has no human-approval wait built in (that happens locally, later,

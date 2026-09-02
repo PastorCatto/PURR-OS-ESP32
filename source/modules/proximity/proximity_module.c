@@ -446,7 +446,14 @@ static void ensure_wifi_ready(void) {
 
 int proximity_init(void) {
     esp_read_mac(s_own_mac, ESP_MAC_WIFI_STA);
-    snprintf(s_own_name, sizeof(s_own_name), "PurrOS-%02X%02X", s_own_mac[4], s_own_mac[5]);
+    // purr_kernel_hostname_get() falls back to this exact "PurrOS-XXXX"
+    // MAC-suffix shape on its own when nothing's configured, so an
+    // unconfigured device's beacon name doesn't change — this just makes
+    // it overridable via Settings/purr_kernel_hostname_set() instead of
+    // this module deriving its own name independently.
+    char hostname[sizeof(s_own_name)];
+    purr_kernel_hostname_get(hostname, sizeof(hostname));
+    snprintf(s_own_name, sizeof(s_own_name), "%s", hostname);
 
     // HAS_DISPLAY/STRONG_COMPUTE — generic, cross-device signals (unlike
     // oled_ui_module.c's own RADIO_COMPANION call, which is specific to

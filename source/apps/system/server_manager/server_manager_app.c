@@ -1,19 +1,27 @@
 // server_manager_app.c — PURR OS Server Manager (.claw)
 //
-// Settings/transfer/approval surface for a connected server — reached
-// ONLY via app_manager.h's synthetic "Server Manager" remote-mode entry
-// (a server admin, on the remote desktop — see that header's own doc
-// comment), never launched any other way. Milkbar itself stays a pure
-// connection surface (Connect -> Dashboard -> Desktop, all unchanged);
-// this app owns everything past that — WiFi setup and app transfer/
-// approval, per this session's own "Server Manager" plan doc. See
-// source/modules/server_mgr/server_mgr.h for the wire protocol both
-// screens below talk over; this file only ever calls its public API,
-// never proximity_rpc/mbedtls directly.
+// Settings/transfer/approval surface for a connected server. Reachable
+// two ways: app_manager.h's synthetic "Server Manager" remote-mode entry
+// (a server admin, on the remote desktop) pre-selects the already-
+// connected server; a normal local Start Menu icon launch starts with no
+// target and offers "Select Server" instead — a device picker over
+// pairing.h's own trust list (pairing_device_count()/at()). Earlier this
+// app was hidden from the normal listing entirely (app_manager.c's own
+// is_hidden_local_app()) on the assumption the synthetic entry was the
+// only reasonable way in — real, reported consequence: with no local
+// icon AND no picker, there was no way to reach it at all outside an
+// active remote-mode session, and no Control Panel/Settings entry either.
+// Milkbar itself stays a pure connection surface (Connect -> Dashboard ->
+// Desktop, all unchanged); this app owns everything past that — WiFi
+// setup and app transfer/approval, per this session's own "Server
+// Manager" plan doc. See source/modules/server_mgr/server_mgr.h for the
+// wire protocol both screens below talk over; this file only ever calls
+// its public API, never proximity_rpc/mbedtls directly.
 //
-// Three windows: the root (server name + WiFi/Apps buttons), and two lazy
-// sub-windows, same "create once, show/hide after" idiom every other
-// multi-screen app in this codebase (milkbar, settings, diagnostics) uses.
+// Four windows: the root (server name + Select Server/WiFi/Apps
+// buttons), and three lazy sub-windows, same "create once, show/hide
+// after" idiom every other multi-screen app in this codebase (milkbar,
+// settings, diagnostics) uses.
 
 #include <string.h>
 #include <stdio.h>
@@ -21,6 +29,7 @@
 #include <dirent.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_local_paths's own comment below
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
@@ -28,6 +37,7 @@
 #include "purr_kernel.h"
 #include "purr_module.h"
 #include "app_manager.h"
+#include "app_manager_remote.h"
 #include "pairing.h"
 #include "server_mgr.h"
 
@@ -52,6 +62,102 @@ static void on_subwin_back(purr_wid_t w, purr_event_t e, void *u) {
 static void add_back_button(purr_win_t win) {
     purr_win_button(win, "< Back", on_subwin_back, (void *)(uintptr_t)win);
 }
+
+// Re-derives s_server_lbl's text from s_have_target/s_target_mac — called
+// after init() and after a picker selection, so both paths share one
+// place that knows how to render "no target yet" vs. a real paired
+// device's display name.
+static void update_server_label(void) {
+    char server_line[64];
+    if (s_have_target) {
+        char server_name[20] = "?";
+        int n = pairing_device_count();
+        for (int i = 0; i < n; i++) {
+            paired_device_t pd;
+            if (pairing_device_at(i, &pd) && memcmp(pd.mac, s_target_mac, 6) == 0) {
+                snprintf(server_name, sizeof(server_name), "%s", pd.name);
+                break;
+            }
+        }
+        snprintf(server_line, sizeof(server_line), "Server: %s", server_name);
+    } else {
+        snprintf(server_line, sizeof(server_line), "Server: (none selected)");
+    }
+    if (s_server_lbl) purr_win_label_set(s_server_lbl, server_line);
+}
+
+// ── Target picker ────────────────────────────────────────────────────────
+// Launched normally (a local Start Menu icon, not through app_manager.h's
+// synthetic remote-mode entry — see this file's own top comment, updated:
+// that entry still works and still pre-selects the already-connected
+// server, but it's no longer the ONLY way in), this app starts with no
+// target at all. "Select Server" lists every paired device (pairing_
+// device_count()/at(), pairing.h — the same trust list milkbar's own
+// Connection screen reads) and lets the user pick one, filling in
+// s_target_mac/s_have_target exactly as app_manager_remote_mac() would
+// have. WiFi/Apps both already handle !s_have_target gracefully (a clear
+// status, no crash), so nothing downstream needs to change for this.
+static purr_win_t s_picker_win  = 0;
+static purr_wid_t s_picker_list = 0;
+#define MAX_PICKER_ROWS 16
+// EXT_RAM_BSS_ATTR — see s_local_paths's own comment below; same class of
+// buffer (rebuilt-on-refresh display rows, never touched before PSRAM is
+// up), same fix.
+static EXT_RAM_BSS_ATTR char s_picker_names[MAX_PICKER_ROWS][20];
+static const char *s_picker_name_ptrs[MAX_PICKER_ROWS];
+static EXT_RAM_BSS_ATTR uint8_t s_picker_macs[MAX_PICKER_ROWS][6];
+static int          s_picker_count = 0;
+
+static void refresh_target_picker(void) {
+    if (!s_picker_list) return;
+    s_picker_count = 0;
+    int n = pairing_device_count();
+    for (int i = 0; i < n && s_picker_count < MAX_PICKER_ROWS; i++) {
+        paired_device_t pd;
+        if (!pairing_device_at(i, &pd)) continue;
+        snprintf(s_picker_names[s_picker_count], sizeof(s_picker_names[s_picker_count]), "%s", pd.name);
+        s_picker_name_ptrs[s_picker_count] = s_picker_names[s_picker_count];
+        memcpy(s_picker_macs[s_picker_count], pd.mac, 6);
+        s_picker_count++;
+    }
+    purr_win_list_set_items(s_picker_list, s_picker_name_ptrs, s_picker_count);
+}
+
+static void on_picker_select(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)user;
+    if (e != PURR_EVENT_ACTIVATED) return;
+    int idx = purr_win_list_get_selected(s_picker_list);
+    if (idx < 0 || idx >= s_picker_count) return;
+    memcpy(s_target_mac, s_picker_macs[idx], 6);
+    s_have_target = true;
+    // Also points app_manager.h's own remote mode at the selection — the
+    // Apps tab's "On this server" list reads app_manager_count()/get()
+    // directly (see refresh_remote_apps()'s own comment), which reflects
+    // app_manager's remote-mode state, NOT this app's own s_target_mac.
+    // Without this, WiFi/push would correctly target the picked device
+    // (server_mgr_wifi_status()/_set()/app_upload() all take s_target_mac
+    // directly) while "On this server" silently showed the wrong thing —
+    // same class of bug this file's own top comment already documents
+    // for the pre-picker "launched with no target" case. Best-effort:
+    // WiFi/push still work from s_target_mac alone even if this fails.
+    app_manager_remote_connect(s_target_mac);
+    update_server_label();
+    if (s_picker_win) purr_win_hide(s_picker_win);
+}
+
+static void open_target_picker(void) {
+    if (!s_picker_win) {
+        s_picker_win = purr_win_create("Select Server");
+        add_back_button(s_picker_win);
+        purr_win_label(s_picker_win, "Paired devices:");
+        s_picker_list = purr_win_list(s_picker_win, 100, 60);
+        purr_win_list_on_select(s_picker_list, on_picker_select, NULL);
+    }
+    refresh_target_picker();
+    purr_win_show(s_picker_win);
+}
+
+static void on_open_picker_click(purr_wid_t w, purr_event_t e, void *user) { (void)w; (void)e; (void)user; open_target_picker(); }
 
 // ── WiFi sub-window ──────────────────────────────────────────────────────
 static purr_win_t     s_wifi_win        = 0;
@@ -165,12 +271,124 @@ static void open_wifi(void) {
     purr_win_show(s_wifi_win);
 }
 
+// ── Mesh backend sub-window ──────────────────────────────────────────────
+// Same shape as the WiFi sub-window above. The real point of this one:
+// Heltec's own oled_ui has no purr_win UI at all, so its local Settings
+// screen's "Use RNode Mode" button (settings.c) can never actually be
+// tapped there — this is the ONLY way to start/stop RNode mode (or
+// switch to any other mesh backend) on a device like that. Unencrypted
+// wire (server_mgr.h's own doc comment) — a backend selection isn't a
+// secret the way a WiFi password is.
+
+static purr_win_t    s_mesh_win        = 0;
+static purr_wid_t    s_mesh_status_lbl = 0;
+static volatile bool s_mesh_busy       = false;
+
+// Mirrors purr_mesh_backend_t (purr_kernel.h) exactly — kept as raw
+// indices here rather than pulling that header in, same "small local
+// mirror" shape server_mgr.h's own wire values already use.
+static const char *s_mesh_backend_names[] = { "Meshtastic", "MeshCore", "Reticulum", "RNode" };
+#define MESH_BACKEND_COUNT 4
+
+static void mesh_status_task(void *arg) {
+    (void)arg;
+    uint8_t backend = 0;
+    bool ok = server_mgr_mesh_status(s_target_mac, &backend);
+
+    char buf[48];
+    if (!ok) {
+        snprintf(buf, sizeof(buf), "Unreachable");
+    } else if (backend < MESH_BACKEND_COUNT) {
+        snprintf(buf, sizeof(buf), "Active: %s", s_mesh_backend_names[backend]);
+    } else {
+        snprintf(buf, sizeof(buf), "Active: unknown (%u)", (unsigned)backend);
+    }
+    if (s_mesh_status_lbl) purr_win_label_set(s_mesh_status_lbl, buf);
+    s_mesh_busy = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void on_mesh_refresh_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    if (!s_have_target || s_mesh_busy) return;
+    if (s_mesh_status_lbl) purr_win_label_set(s_mesh_status_lbl, "Checking...");
+    s_mesh_busy = true;
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(mesh_status_task, "srvmgr_mesh_st", 4096, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { s_mesh_busy = false; if (s_mesh_status_lbl) purr_win_label_set(s_mesh_status_lbl, "Could not start - try again"); }
+}
+
+typedef struct {
+    uint8_t mac[6];
+    uint8_t target;
+} mesh_set_ctx_t;
+
+static void mesh_set_task(void *arg) {
+    mesh_set_ctx_t *ctx = (mesh_set_ctx_t *)arg;
+    bool ok = server_mgr_mesh_set(ctx->mac, ctx->target);
+    if (s_mesh_status_lbl) {
+        purr_win_label_set(s_mesh_status_lbl,
+            ok ? "Switched - may take a moment to come up" : "Failed (unreachable, or refused on the server)");
+    }
+    free(ctx);
+    s_mesh_busy = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void on_mesh_switch_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e;
+    if (!s_have_target || s_mesh_busy) return;
+
+    mesh_set_ctx_t *ctx = malloc(sizeof(*ctx));
+    if (!ctx) return;
+    memcpy(ctx->mac, s_target_mac, 6);
+    ctx->target = (uint8_t)(uintptr_t)user;
+
+    if (s_mesh_status_lbl) purr_win_label_set(s_mesh_status_lbl, "Switching...");
+    s_mesh_busy = true;
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(mesh_set_task, "srvmgr_mesh_set", 4096, ctx, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) {
+        s_mesh_busy = false;
+        free(ctx);
+        if (s_mesh_status_lbl) purr_win_label_set(s_mesh_status_lbl, "Could not start - try again");
+    }
+}
+
+static void open_mesh(void) {
+    if (s_mesh_win) { purr_win_show(s_mesh_win); return; }
+
+    s_mesh_win = purr_win_create("Mesh Backend");
+    add_back_button(s_mesh_win);
+    s_mesh_status_lbl = purr_win_label(s_mesh_win,
+        s_have_target ? "Tap Refresh to check status" : "Not connected to a server");
+
+    purr_wid_t row1 = purr_win_row(s_mesh_win, 2);
+    purr_win_button(s_mesh_win, "Meshtastic", on_mesh_switch_click, (void *)(uintptr_t)0);
+    purr_win_button(s_mesh_win, "MeshCore",   on_mesh_switch_click, (void *)(uintptr_t)1);
+    purr_win_layout_end(row1);
+    purr_wid_t row2 = purr_win_row(s_mesh_win, 2);
+    purr_win_button(s_mesh_win, "Reticulum",  on_mesh_switch_click, (void *)(uintptr_t)2);
+    purr_win_button(s_mesh_win, "RNode",      on_mesh_switch_click, (void *)(uintptr_t)3);
+    purr_win_layout_end(row2);
+
+    purr_win_button(s_mesh_win, "Refresh", on_mesh_refresh_click, NULL);
+
+    purr_win_show(s_mesh_win);
+}
+
 // ── Apps sub-window ──────────────────────────────────────────────────────
-// Two lists: "On this server" is just app_manager_count()/get() directly —
-// this app only ever runs while app_manager is already in remote mode
-// (that's the only way to reach it, see this file's top comment), so
-// there's no second caller-side listing call needed here at all, skipping
-// the synthetic "Server Manager" row itself (see refresh_remote_apps()).
+// Two lists: "On this server" is just app_manager_count()/get() directly
+// when app_manager IS already in remote mode (the synthetic-entry launch
+// path, or a normal local launch that also happens to be in remote mode
+// for some other reason) — no second caller-side listing call needed at
+// all for that case, skipping the synthetic "Server Manager" row itself
+// (see refresh_remote_apps()). A normal local launch typically ISN'T in
+// remote mode though (that's what Select Server/s_have_target is for
+// instead) — refresh_remote_apps() checks s_have_target first and shows
+// an honest empty list rather than this device's own local registry in
+// that case (a real, previously-reported bug: "On this server" silently
+// showing local apps instead).
 // "Push from this device" is a small local readdir() over this device's
 // OWN /flash/apps + /sdcard/apps (the exact paths app_manager.c's own
 // s_scan_paths[] already uses) — not a second app_manager instance.
@@ -182,13 +400,22 @@ static purr_wid_t    s_apps_status_lbl = 0;
 static volatile bool s_push_busy       = false;
 
 #define MAX_REMOTE_ROWS 32
-static char        s_remote_row_bufs[MAX_REMOTE_ROWS][64];
+static EXT_RAM_BSS_ATTR char s_remote_row_bufs[MAX_REMOTE_ROWS][64];
 static const char *s_remote_row_ptrs[MAX_REMOTE_ROWS];
 
 #define MAX_LOCAL_ROWS 32
-static char        s_local_row_bufs[MAX_LOCAL_ROWS][48];
+static EXT_RAM_BSS_ATTR char s_local_row_bufs[MAX_LOCAL_ROWS][48];
 static const char *s_local_row_ptrs[MAX_LOCAL_ROWS];
-static char         s_local_paths[MAX_LOCAL_ROWS][300];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — this file is new enough that
+// its DRAM cost was never budgeted: these five row/picker buffers alone were
+// ~13.9KB of static internal DRAM (confirmed via purr_os.map), a real
+// contributor to a genuine link-time `region dram0_0_seg overflowed` once
+// combined with msn.c's own 16KB s_chat_logs (see that file's matching fix,
+// 2026-09-01). Safe: pure display-row/path text, rebuilt on every refresh,
+// never touched before PSRAM is up (this app is a normal launched .claw, not
+// early-boot code) — same class MiniWin's own control/list arrays already
+// use this attribute for.
+static EXT_RAM_BSS_ATTR char s_local_paths[MAX_LOCAL_ROWS][300];
 static int           s_local_count = 0;
 
 static void refresh_remote_apps(void) {
@@ -350,38 +577,28 @@ static void open_apps(void) {
 // ── Root window ──────────────────────────────────────────────────────────
 
 static void on_open_wifi_click(purr_wid_t w, purr_event_t e, void *user)  { (void)w; (void)e; (void)user; open_wifi(); }
+static void on_open_mesh_click(purr_wid_t w, purr_event_t e, void *user)  { (void)w; (void)e; (void)user; open_mesh(); }
 static void on_open_apps_click(purr_wid_t w, purr_event_t e, void *user)  { (void)w; (void)e; (void)user; open_apps(); }
 
 static int server_manager_init(void) {
+    // Pre-fills from the synthetic remote-mode entry if that's how this
+    // launch happened (app_manager_remote_mac() true) — a normal local
+    // Start Menu launch starts with no target instead, resolved via
+    // Select Server below.
     s_have_target = app_manager_remote_mac(s_target_mac);
-
-    char server_line[64];
-    if (s_have_target) {
-        char server_name[20] = "?";
-        int n = pairing_device_count();
-        for (int i = 0; i < n; i++) {
-            paired_device_t pd;
-            if (pairing_device_at(i, &pd) && memcmp(pd.mac, s_target_mac, 6) == 0) {
-                snprintf(server_name, sizeof(server_name), "%s", pd.name);
-                break;
-            }
-        }
-        snprintf(server_line, sizeof(server_line), "Server: %s", server_name);
-    } else {
-        // Shouldn't happen in practice — this app only ever launches
-        // through app_manager.h's synthetic entry, which only exists
-        // while remote mode is on — but fails toward an honest message
-        // rather than a blank label if it somehow does.
-        snprintf(server_line, sizeof(server_line), "Server: (not connected)");
-        ESP_LOGW(TAG, "launched with no remote target — app_manager_remote_mac() returned false");
+    if (!s_have_target) {
+        ESP_LOGI(TAG, "launched with no remote target — use Select Server to pick a paired device");
     }
 
     s_win = purr_win_create("Server Manager");
-    s_server_lbl = purr_win_label(s_win, server_line);
+    s_server_lbl = purr_win_label(s_win, "");
+    update_server_label();
 
-    purr_wid_t row = purr_win_row(s_win, 2);
-    purr_win_button(s_win, "WiFi", on_open_wifi_click, NULL);
-    purr_win_button(s_win, "Apps", on_open_apps_click, NULL);
+    purr_wid_t row = purr_win_row(s_win, 4);
+    purr_win_button(s_win, "Select Server", on_open_picker_click, NULL);
+    purr_win_button(s_win, "WiFi",          on_open_wifi_click,   NULL);
+    purr_win_button(s_win, "Mesh",          on_open_mesh_click,   NULL);
+    purr_win_button(s_win, "Apps",          on_open_apps_click,   NULL);
     purr_win_layout_end(row);
 
     purr_win_show(s_win);
@@ -389,9 +606,17 @@ static int server_manager_init(void) {
 }
 
 static void server_manager_deinit(void) {
+    if (s_picker_win) {
+        purr_win_destroy(s_picker_win);
+        s_picker_win = 0; s_picker_list = 0;
+    }
     if (s_wifi_win) {
         purr_win_destroy(s_wifi_win);
         s_wifi_win = 0; s_wifi_status_lbl = 0; s_wifi_ssid_input = 0; s_wifi_pass_input = 0;
+    }
+    if (s_mesh_win) {
+        purr_win_destroy(s_mesh_win);
+        s_mesh_win = 0; s_mesh_status_lbl = 0;
     }
     if (s_apps_win) {
         purr_win_destroy(s_apps_win);

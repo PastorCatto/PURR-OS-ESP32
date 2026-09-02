@@ -37,6 +37,7 @@
 #include "lvgl.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_wins's own comment below
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "../../kernel/catcalls/catcall_ui.h"
@@ -50,14 +51,21 @@ static const char *TAG = "mochi_win";
 #define MAX_WINS  16
 #define MAX_WIDS  128
 
-static lv_obj_t *s_wins[MAX_WINS];
-static lv_obj_t *s_wids[MAX_WIDS];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) on this file's handle/metadata
+// tables — index-by-handle lookups at UI-event rate, not per-frame-render
+// rate, so PSRAM's extra latency is not in a hot path. Same call already
+// made for MiniWin's own analogous tables (mw_all_windows/mw_all_controls,
+// MiniWin/miniwin.c) with good, confirmed results. Real, confirmed via
+// purr_os.map: a genuine link-time DRAM overflow once the current app set
+// was all compiled in together (see msn.c's matching comment, 2026-09-01).
+static EXT_RAM_BSS_ATTR lv_obj_t *s_wins[MAX_WINS];
+static EXT_RAM_BSS_ATTR lv_obj_t *s_wids[MAX_WIDS];
 
-static lv_obj_t *s_active_layout[MAX_WINS];
-static int       s_layout_owner_win[MAX_WIDS];
+static EXT_RAM_BSS_ATTR lv_obj_t *s_active_layout[MAX_WINS];
+static EXT_RAM_BSS_ATTR int       s_layout_owner_win[MAX_WIDS];
 
 typedef struct { purr_win_cb_t cb; void *user; } close_hook_t;
-static close_hook_t s_close_hooks[MAX_WINS];
+static EXT_RAM_BSS_ATTR close_hook_t s_close_hooks[MAX_WINS];
 
 static lv_obj_t  *s_keyboard = NULL;
 static purr_win_t s_keyboard_owner_win = 0;
@@ -82,7 +90,7 @@ static void free_win(purr_win_t h) {
 // app is foreground at a time, so a single stack is equivalent to "this app's
 // open windows" — and it catches lazily-created sub-windows that app_manager
 // never tracked, which a plain hide-app->window misses.
-static purr_win_t s_win_stack[MAX_WINS];
+static EXT_RAM_BSS_ATTR purr_win_t s_win_stack[MAX_WINS];
 static int        s_win_stack_count = 0;
 
 static void win_stack_remove(purr_win_t h) {
@@ -346,7 +354,7 @@ static void tb_label_align(purr_wid_t wid, purr_align_t align) {
 // The group a button lands in. Consecutive buttons share one; anything else
 // (a label, list, textarea, or an explicit row/col) closes it, so a label acts
 // as a section header exactly as it does in iOS Settings.
-static lv_obj_t *s_group[MAX_WINS];
+static EXT_RAM_BSS_ATTR lv_obj_t *s_group[MAX_WINS];
 
 static void group_close(purr_win_t h) {
     if (h >= 1 && h <= MAX_WINS) s_group[h - 1] = NULL;
@@ -390,7 +398,7 @@ typedef struct {
     void         *user;
     int           selected;
 } menu_state_t;
-static menu_state_t s_menus[MAX_MENUS];
+static EXT_RAM_BSS_ATTR menu_state_t s_menus[MAX_MENUS];
 
 static menu_state_t *menu_find(purr_wid_t wid) {
     for (int i = 0; i < MAX_MENUS; i++) if (s_menus[i].wid == wid) return &s_menus[i];
@@ -661,7 +669,7 @@ static void tb_ta_cb(purr_wid_t wid, purr_win_cb_t cb, void *user) {
 // ── List ────────────────────────────────────────────────────────────────────
 
 typedef struct { purr_win_cb_t cb; void *user; int selected_idx; } list_meta_t;
-static list_meta_t s_list_meta[MAX_WIDS];
+static EXT_RAM_BSS_ATTR list_meta_t s_list_meta[MAX_WIDS];
 
 static void list_btn_event_cb(lv_event_t *e) {
     cb_ctx_t *ctx = (cb_ctx_t *)lv_event_get_user_data(e);

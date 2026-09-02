@@ -3,6 +3,7 @@
 #include "driver_manager.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "esp_log.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_drivers's own comment below
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -19,7 +20,13 @@ static const char *s_scan_paths[] = {
     NULL
 };
 
-static drv_entry_t s_drivers[MAX_DRIVERS];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — a passive registry, scanned
+// late in boot (Phase 2 "SD extras", well after PSRAM init — see
+// kernel_tdp_boot.c), not touched by anything earlier. Same class MiniWin's
+// own control/list arrays already use this for — real, confirmed via
+// purr_os.map: a genuine link-time DRAM overflow once the current app set
+// was all compiled in together (see msn.c's matching comment, 2026-09-01).
+static EXT_RAM_BSS_ATTR drv_entry_t s_drivers[MAX_DRIVERS];
 static int         s_driver_count = 0;
 
 // ── Compat check ──────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@
 #include "MiniWin/ui/ui_text_box.h"
 #include "MiniWin/ui/ui_list_box.h"
 #include "sdkconfig.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_label_data's own comment below
 #ifdef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
 #include "miniwin_wince_desktop.h"
 #endif
@@ -73,8 +74,15 @@ typedef struct {
     uint8_t  pad;
 } layout_state_t;
 
+// s_wins deliberately NOT EXT_RAM_BSS_ATTR — get_win(h) walks it on every
+// single purr_win_*() call from app code (not just redraw/interaction
+// events like the widget-data pools below), the one MiniWin structure in
+// this file frequent enough that PSRAM's per-access latency seemed worth
+// not risking. s_wids is the same shape as those widget-data pools (only
+// touched per-widget-operation, not per-purr_win_*()-call) — see s_list_
+// data's own comment just below for the shared reasoning.
 static win_slot_t     s_wins[MAX_WINS];
-static wid_slot_t     s_wids[MAX_WIDS];
+static EXT_RAM_BSS_ATTR wid_slot_t s_wids[MAX_WIDS];
 static int16_t        s_cursor_y[MAX_WINS];
 static layout_state_t s_layout[MAX_WINS];
 static purr_wid_t     s_ta_focused[MAX_WINS];   // wid of focused textarea per window, 0 = none
@@ -105,12 +113,21 @@ typedef struct {
     int last_pressed;
 } list_slot_t;
 
-static list_slot_t s_list_data[MAX_WIDS];
+// EXT_RAM_BSS_ATTR — PSRAM instead of internal DRAM. Same reasoning as
+// MiniWin/miniwin.c's own mw_all_windows/mw_all_controls/mw_all_timers
+// (see that file's comment): real, measured internal-DRAM pressure on
+// tdeck_plus, only read on redraw/interaction (not a tight per-tick
+// loop), safe and free on any PSRAM-less device via this attribute's own
+// no-op fallback.
+static EXT_RAM_BSS_ATTR list_slot_t s_list_data[MAX_WIDS];
 
 // ── Textarea storage ─────────────────────────────────────────────────────
 // Also declared up here — win_message_func()'s MW_KEY_PRESSED_MESSAGE
 // handler needs to reach a focused textarea's buffer directly.
-static mw_ui_text_box_data_t s_ta_data[MAX_WIDS];
+// s_ta_data: EXT_RAM_BSS_ATTR, same reasoning as s_list_data above.
+// s_ta_buf is just an array of pointers (512 bytes total) to individually
+// malloc'd buffers elsewhere — not worth moving on its own.
+static EXT_RAM_BSS_ATTR mw_ui_text_box_data_t s_ta_data[MAX_WIDS];
 static char *s_ta_buf[MAX_WIDS];
 
 // Forward-declared — defined with the rest of the textarea widget functions
@@ -220,24 +237,39 @@ static void win_paint_func(mw_handle_t window_handle, const mw_gl_draw_info_t *d
         s_canvas_draw_info = NULL;
     }
 
+    // Every textarea in this window gets ONE outline, always — grey when
+    // idle, blue when it's the focused field. The underlying control
+    // (ui_text_box.c, upstream) draws no border of its own at all (it was
+    // built as a read-only display widget, not an editable field — see
+    // mw_ta_create()'s own comment), so a field was previously a flat,
+    // borderless white rectangle floating on whatever background colour
+    // surrounded it. Drawn here (window paint), not at control-creation
+    // time, so it survives every window repaint instead of getting erased
+    // by this same function's own background fill above.
+    //
+    // Deliberately ONE ring per field, not a separate always-there grey
+    // ring plus a second, differently-inset blue ring stacked around it —
+    // that first version drew both, 1px apart, for whichever field was
+    // focused, and read as "the lines don't line up" rather than a single
+    // clean border. Same inset for every field regardless of focus state
+    // fixes that: only the colour changes.
     purr_wid_t focused = s_ta_focused[win-1];
-    if (focused == 0) return;
-    wid_slot_t *s = get_wid(focused);
-    if (!s) return;
-
-    // Focus indicator drawn strictly outside the textarea's own rect, so
-    // paint order relative to the control repainting itself doesn't matter.
-    mw_util_rect_t r = mw_get_control_rect(s->mw_ctrl);
     mw_gl_set_fill(MW_GL_NO_FILL);
     mw_gl_set_border(MW_GL_BORDER_ON);
     mw_gl_set_line(MW_GL_SOLID_LINE);
-    mw_gl_set_fg_colour(MW_HAL_LCD_BLUE);
-    mw_gl_rectangle(draw_info,
-        (int16_t)(r.x - 1), (int16_t)(r.y - 1),
-        (int16_t)(r.width + 2), (int16_t)(r.height + 2));
+    for (int i = 0; i < MAX_WIDS; i++) {
+        if (!s_wids[i].used || s_wids[i].mw_win != window_handle || !s_ta_buf[i]) continue;
+        mw_util_rect_t tr = mw_get_control_rect(s_wids[i].mw_ctrl);
+        mw_gl_set_fg_colour(((purr_wid_t)(i + 1) == focused) ? MW_HAL_LCD_BLUE : MW_HAL_LCD_GREY10);
+        mw_gl_rectangle(draw_info,
+            (int16_t)(tr.x - 1), (int16_t)(tr.y - 1),
+            (int16_t)(tr.width + 2), (int16_t)(tr.height + 2));
+    }
 }
 
 static void mw_win_destroy(purr_win_t h);   // defined below; forward-declared for the close-icon handler
+
+static void mw_ta_focus(purr_wid_t wid);   // defined below — this function's own MW_TEXT_BOX_TOUCHED_MESSAGE case needs it
 
 static void win_message_func(const mw_message_t *msg)
 {
@@ -298,6 +330,21 @@ static void win_message_func(const mw_message_t *msg)
                     s_wids[i].cb((purr_wid_t)(i+1), PURR_EVENT_SELECTED, s_wids[i].user);
                     s_wids[i].cb((purr_wid_t)(i+1), PURR_EVENT_ACTIVATED, s_wids[i].user);
                 }
+                break;
+            }
+        }
+    } else if (msg->message_id == MW_TEXT_BOX_TOUCHED_MESSAGE) {
+        // PURR OS's own MiniWin/miniwin.h addition — see that message's own
+        // doc comment and ui_text_box.c's MW_TOUCH_DOWN_MESSAGE case for
+        // why: real, live bug, "only the first field ever takes text" no
+        // matter which one was actually tapped, since nothing previously
+        // updated s_ta_focused[] except an app's own one-time initial
+        // purr_win_textarea_focus() call.
+        mw_handle_t touched_ctrl = (mw_handle_t)msg->message_data;
+        mw_handle_t win_h        = msg->recipient_handle;
+        for (int i = 0; i < MAX_WIDS; i++) {
+            if (s_wids[i].used && s_wids[i].mw_win == win_h && s_wids[i].mw_ctrl == touched_ctrl) {
+                mw_ta_focus((purr_wid_t)(i + 1));
                 break;
             }
         }
@@ -474,7 +521,24 @@ static void mw_win_destroy(purr_win_t h) {
     mw_handle_t wh = s_wins[h-1].mw_win;
     bool already_torn_down = s_wins[h-1].torn_down;
 
-    free_widget_storage_for_window(wh, /*also_remove_control=*/!already_torn_down);
+    // also_remove_control=false in BOTH cases here — a real, live bug found
+    // via a genuine top-down destroy actually happening for the first time
+    // (app_manager's memory watchdog force-stopping OOBE): the !already_
+    // torn_down branch below calls MiniWin's own mw_remove_window(wh)
+    // right after this, which ALREADY iterates and removes every control
+    // whose parent_handle == wh (MiniWin/miniwin.c's own mw_remove_window(),
+    // "remove all controls that have this window as a parent"). Passing
+    // true here as well made free_widget_storage_for_window() remove them
+    // FIRST, so mw_remove_window()'s own loop then tried to remove the same
+    // already-freed control handles a second time — MW_ASSERT("Bad control
+    // handle"), confirmed live (crash_guard: "MW_ASSERT mw_remove_control:
+    // 5352 Bad control handle"). The already_torn_down==true branch was
+    // already correctly false (MiniWin's own close-icon handling already
+    // removed them before mw_win_destroy() ever runs) — this function's
+    // own remaining job in both cases is just freeing THIS file's own
+    // malloc'd storage (textarea buffers, list entries) and marking s_wids
+    // slots unused, never touching MiniWin's control array itself.
+    free_widget_storage_for_window(wh, /*also_remove_control=*/false);
     s_ta_focused[h-1] = 0;
 
     if (!already_torn_down) {
@@ -571,8 +635,12 @@ static void mw_win_clear(purr_win_t h) {
 
 // ── Labels ────────────────────────────────────────────────────────────────────
 
-static mw_ui_label_data_t s_label_data[MAX_WIDS];
-static char               s_label_text[MAX_WIDS][MW_UI_LABEL_MAX_CHARS + 1];
+// EXT_RAM_BSS_ATTR — see s_list_data's own comment above for the full
+// reasoning (real measured internal-DRAM pressure on tdeck_plus, safe
+// here since these are only touched on redraw, no-op on PSRAM-less
+// devices).
+static EXT_RAM_BSS_ATTR mw_ui_label_data_t s_label_data[MAX_WIDS];
+static EXT_RAM_BSS_ATTR char               s_label_text[MAX_WIDS][MW_UI_LABEL_MAX_CHARS + 1];
 static uint8_t            s_label_align[MAX_WIDS];
 static int16_t            s_label_width[MAX_WIDS];
 
@@ -659,7 +727,8 @@ static void mw_label_align(purr_wid_t wid, purr_align_t align) {
 
 // ── Buttons ───────────────────────────────────────────────────────────────────
 
-static mw_ui_button_data_t s_btn_data[MAX_WIDS];
+// EXT_RAM_BSS_ATTR — see s_list_data's own comment above.
+static EXT_RAM_BSS_ATTR mw_ui_button_data_t s_btn_data[MAX_WIDS];
 
 static purr_wid_t mw_btn_create(purr_win_t h, const char *label,
                                   purr_win_cb_t cb, void *user) {

@@ -150,7 +150,17 @@ static const char   *s_buddy_icon_ptrs[MAX_CHATS];
 #endif
 
 // Per-buddy chat state (parallel arrays, indexed same as s_buddy_id_strs).
-static char        s_chat_logs[MAX_CHATS][CHAT_LOG_LEN];
+//
+// Heap-allocated from PSRAM (not a static array) — same fix, same reason as
+// s_room_logs below, applied here too on 2026-09-01: MAX_CHATS(16) *
+// CHAT_LOG_LEN(1024) = 16KB of static internal DRAM was never actually
+// exercised by anything runtime-testable (nothing renders "0 apps" or
+// crashes from a link failure), it just silently sat in dram0_0_seg's
+// budget until an unrelated device.pcat/build change tipped tdeck_plus's
+// link over the edge (`region dram0_0_seg overflowed`) — confirmed via the
+// real purr_os.map, not guessed. Lazily allocated in open_chat(), same
+// call site s_room_logs uses in open_room().
+static char        *s_chat_logs[MAX_CHATS];
 static size_t      s_chat_loglen[MAX_CHATS];
 static purr_win_t  s_chat_win[MAX_CHATS];
 static purr_wid_t  s_chat_out[MAX_CHATS];
@@ -535,7 +545,7 @@ static const char *skip_lines(const char *text, int n) {
 }
 
 static void render_chat_view(int idx) {
-    if (!s_chat_win[idx] || !s_chat_out[idx]) return;
+    if (!s_chat_win[idx] || !s_chat_out[idx] || !s_chat_logs[idx]) return;
     int max_scroll = count_lines(s_chat_logs[idx]) - 1;
     if (max_scroll < 0) max_scroll = 0;
     if (s_chat_scroll[idx] > max_scroll) s_chat_scroll[idx] = max_scroll;
@@ -567,6 +577,13 @@ static void on_room_scroll_click(purr_wid_t w, purr_event_t e, void *user) {
 }
 
 static void chat_log_append(int idx, const char *text) {
+    // Same guard as room_log_append() below: a message for a buddy whose
+    // chat was never opened this boot (so s_chat_logs[idx] is still
+    // unallocated) still surfaces as a notification banner (on_mesh_rx()'s
+    // own comment) but isn't appended to the persisted log until the chat
+    // is actually opened — open_chat() reloads history from SD at that
+    // point anyway.
+    if (!s_chat_logs[idx]) return;
     log_append(s_chat_logs[idx], &s_chat_loglen[idx], text);
     s_buddy_last_ms[idx] = (uint32_t)purr_kernel_uptime_ms();
     render_chat_view(idx);
@@ -610,6 +627,11 @@ static void open_chat(int idx) {
         return;
     }
 
+    if (!s_chat_logs[idx]) {
+        s_chat_logs[idx] = heap_caps_malloc(CHAT_LOG_LEN, MALLOC_CAP_SPIRAM);
+        if (s_chat_logs[idx]) s_chat_logs[idx][0] = '\0';
+        else return;
+    }
     // First time this conversation's been opened this boot — resume its
     // history from SD before building the window.
     if (s_chat_loglen[idx] == 0) {
@@ -781,7 +803,7 @@ static void reset_all_buddy_windows(void) {
             purr_win_destroy(s_chat_win[i]);
             s_chat_win[i] = 0; s_chat_out[i] = 0; s_chat_in[i] = 0;
         }
-        s_chat_logs[i][0] = '\0';
+        if (s_chat_logs[i]) s_chat_logs[i][0] = '\0';
         s_chat_loglen[i]  = 0;
     }
 }

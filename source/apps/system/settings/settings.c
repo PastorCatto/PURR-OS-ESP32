@@ -27,6 +27,7 @@
 #include "systemui.h"   // purr_systemui_fx_refresh() — see on_effects_toggle()
 #include "user_mgr.h"   // the new "Users" tab — see on_open_users()
 #include "sdkconfig.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_wifi_labels's own comment below
 
 // LV_SYMBOL_* glyphs for the category tile grid below — meaningless (and
 // their backing font absent) under MiniWin/Pounce, same as msn.c's own
@@ -71,9 +72,9 @@ static purr_wid_t  s_general_status_lbl = 0;
 static purr_win_t  s_users_win        = 0;   // separate "Users" window, built on demand
 static purr_wid_t  s_users_list       = 0;
 static purr_wid_t  s_users_status_lbl = 0;
-static char        s_users_labels[MAX_USERS_ROWS][USER_MGR_USERNAME_MAX + 24];   // "name (network) [admin]"
+static EXT_RAM_BSS_ATTR char s_users_labels[MAX_USERS_ROWS][USER_MGR_USERNAME_MAX + 24];   // "name (network) [admin]"
 static const char *s_users_label_ptrs[MAX_USERS_ROWS];
-static char        s_users_names[MAX_USERS_ROWS][USER_MGR_USERNAME_MAX];         // parallel to the list above — bare username, for the Remove action
+static EXT_RAM_BSS_ATTR char s_users_names[MAX_USERS_ROWS][USER_MGR_USERNAME_MAX];         // parallel to the list above — bare username, for the Remove action
 static int         s_users_count = 0;
 
 static purr_win_t  s_add_user_win  = 0;
@@ -84,6 +85,8 @@ static purr_wid_t  s_display_status_lbl = 0;
 static purr_win_t  s_customization_win        = 0;
 static purr_wid_t  s_customization_status_lbl = 0;
 static purr_win_t  s_connectivity_win = 0;
+static purr_wid_t  s_hostname_lbl   = 0;
+static purr_wid_t  s_hostname_input = 0;
 static purr_wid_t  s_mesh_backend_status_lbl = 0;
 static purr_win_t  s_mesh_switch_confirm_win = 0;
 static purr_mesh_backend_t s_mesh_switch_target;
@@ -136,10 +139,18 @@ static purr_wid_t  s_about_lbl = 0;
 static purr_win_t  s_wifi_win        = 0;   // separate "WiFi Settings" window, built on demand
 static purr_wid_t  s_wifi_status_lbl = 0;
 static purr_wid_t  s_wifi_list       = 0;
-static char        s_wifi_labels[MAX_WIFI_RESULTS][64];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — this app's row/list buffers
+// (WiFi/BT scan results, wallpaper list, Users list) are pure rebuilt-on-
+// refresh display text, never touched before PSRAM is up (settings is a
+// normal launched app, not early-boot code) — same class MiniWin's own
+// control/list arrays and msn.c's/server_manager_app.c's row buffers
+// already use this attribute for (real, confirmed via purr_os.map: a
+// genuine link-time DRAM overflow once the current app set was all
+// compiled in together, see msn.c's matching comment, 2026-09-01).
+static EXT_RAM_BSS_ATTR char s_wifi_labels[MAX_WIFI_RESULTS][64];
 static const char *s_wifi_label_ptrs[MAX_WIFI_RESULTS];
-static char        s_wifi_ssids[MAX_WIFI_RESULTS][33];   // parallel to the list above
-static bool        s_wifi_secured[MAX_WIFI_RESULTS];
+static EXT_RAM_BSS_ATTR char s_wifi_ssids[MAX_WIFI_RESULTS][33];   // parallel to the list above
+static EXT_RAM_BSS_ATTR bool s_wifi_secured[MAX_WIFI_RESULTS];
 static int         s_wifi_count = 0;
 
 static purr_win_t  s_wifi_dlg_win   = 0;
@@ -155,9 +166,9 @@ static char        s_wifi_dlg_ssid[33] = "";
 static purr_win_t  s_bt_win        = 0;   // separate "Bluetooth Settings" window, built on demand
 static purr_wid_t  s_bt_status_lbl = 0;
 static purr_wid_t  s_bt_list       = 0;
-static char        s_bt_labels[MAX_BT_RESULTS][48];
+static EXT_RAM_BSS_ATTR char s_bt_labels[MAX_BT_RESULTS][48];
 static const char *s_bt_label_ptrs[MAX_BT_RESULTS];
-static uint8_t     s_bt_addrs[MAX_BT_RESULTS][6];
+static EXT_RAM_BSS_ATTR uint8_t s_bt_addrs[MAX_BT_RESULTS][6];
 static int         s_bt_count = 0;
 // Set while a scan task (below) is in flight — blocks a second concurrent
 // scan rather than racing s_bt_count/s_bt_labels between two background
@@ -172,8 +183,8 @@ static SemaphoreHandle_t s_bt_scan_done = NULL;
 #endif  // CONFIG_BT_NIMBLE_ENABLED
 
 static purr_wid_t  s_wallpaper_list = 0;
-static char        s_wallpaper_paths[MAX_WALLPAPERS][WALLPAPER_PATH_LEN];
-static char        s_wallpaper_labels[MAX_WALLPAPERS][40];
+static EXT_RAM_BSS_ATTR char s_wallpaper_paths[MAX_WALLPAPERS][WALLPAPER_PATH_LEN];
+static EXT_RAM_BSS_ATTR char s_wallpaper_labels[MAX_WALLPAPERS][40];
 static const char *s_wallpaper_label_ptrs[MAX_WALLPAPERS];
 static int         s_wallpaper_count = 0;
 // The currently-configured selection — previously write-only (saved to NVS,
@@ -1053,7 +1064,9 @@ static void update_mesh_backend_status(void) {
     if (!s_mesh_backend_status_lbl) return;
     bool mt_active = purr_kernel_get_module("meshtastic") != NULL;
     bool mc_active = purr_kernel_get_module("meshcore") != NULL;
-    const char *active = mt_active ? "Meshtastic" : (mc_active ? "MeshCore" : "none");
+    bool rt_active = purr_kernel_get_module("reticulum") != NULL;
+    bool rn_active = purr_kernel_get_module("rnode") != NULL;
+    const char *active = mt_active ? "Meshtastic" : (mc_active ? "MeshCore" : (rt_active ? "Reticulum" : (rn_active ? "RNode" : "none")));
     char buf[48];
     snprintf(buf, sizeof(buf), "Mesh backend: %s", active);
     purr_win_label_set(s_mesh_backend_status_lbl, buf);
@@ -1110,12 +1123,58 @@ static void on_mesh_switch_meshcore(purr_wid_t w, purr_event_t e, void *u) {
     open_mesh_switch_confirm(PURR_MESH_BACKEND_MESHCORE, "MeshCore");
 }
 
+static void on_mesh_switch_reticulum(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (purr_kernel_get_module("reticulum")) return;   // already active
+    open_mesh_switch_confirm(PURR_MESH_BACKEND_RETICULUM, "Reticulum");
+}
+
+static void on_mesh_switch_rnode(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (purr_kernel_get_module("rnode")) return;   // already active
+    open_mesh_switch_confirm(PURR_MESH_BACKEND_RNODE, "RNode");
+}
+
+// ── Device name (hostname) ───────────────────────────────────────────────
+// purr_kernel_hostname_get()/_set() (purr_kernel.h) — the user-facing name
+// shown to other devices/networks this device participates in. proximity's
+// own ESP-NOW beacon and reticulum's Announce app_data both already read
+// it; this is the one place it's actually set.
+
+static void refresh_hostname_label(void) {
+    if (!s_hostname_lbl) return;
+    char hostname[PURR_HOSTNAME_MAX];
+    purr_kernel_hostname_get(hostname, sizeof(hostname));
+    char buf[48];
+    snprintf(buf, sizeof(buf), "Device name: %s", hostname);
+    purr_win_label_set(s_hostname_lbl, buf);
+}
+
+static void on_hostname_save(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    const char *name = s_hostname_input ? purr_win_textarea_get(s_hostname_input) : NULL;
+    if (!name || !purr_kernel_hostname_set(name)) {
+        if (s_hostname_lbl) purr_win_label_set(s_hostname_lbl, "Device name: invalid name (empty or too long)");
+        return;
+    }
+    refresh_hostname_label();
+    purr_win_textarea_clear(s_hostname_input);
+}
+
 static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
     if (s_connectivity_win) { purr_win_show(s_connectivity_win); update_mesh_backend_status(); return; }
 
     s_connectivity_win = purr_win_create("Connectivity");
     add_back_button(s_connectivity_win);
+
+    purr_win_label(s_connectivity_win, "Device Name");
+    s_hostname_lbl = purr_win_label(s_connectivity_win, "Device name: ...");
+    s_hostname_input = purr_win_textarea(s_connectivity_win, 90, 20);
+    purr_wid_t hr = purr_win_row(s_connectivity_win, 1);
+    purr_win_button(s_connectivity_win, "Save Name", on_hostname_save, NULL);
+    purr_win_layout_end(hr);
+    refresh_hostname_label();
 
     purr_win_label(s_connectivity_win, "Network");
     purr_wid_t nr = purr_win_row(s_connectivity_win, 4);
@@ -1130,6 +1189,14 @@ static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
     purr_wid_t mr = purr_win_row(s_connectivity_win, 4);
     purr_win_button(s_connectivity_win, "Use Meshtastic", on_mesh_switch_meshtastic, NULL);
     purr_win_button(s_connectivity_win, "Use MeshCore",   on_mesh_switch_meshcore,   NULL);
+    purr_win_button(s_connectivity_win, "Use Reticulum",  on_mesh_switch_reticulum,  NULL);
+#ifdef CONFIG_BT_NIMBLE_ENABLED
+    // RNode mode is meaningless without BLE — same reasoning the
+    // Bluetooth Settings button above is already gated the same way.
+    // Showing this on a build that would just silently decline is worse
+    // than hiding it.
+    purr_win_button(s_connectivity_win, "Use RNode Mode",  on_mesh_switch_rnode,     NULL);
+#endif
     purr_win_layout_end(mr);
     update_mesh_backend_status();
 
@@ -1549,7 +1616,7 @@ static void settings_deinit(void) {
     if (s_general_win)       { purr_win_destroy(s_general_win);       s_general_win       = 0; s_general_status_lbl       = 0; }
     if (s_display_win)       { purr_win_destroy(s_display_win);       s_display_win       = 0; s_display_status_lbl       = 0; }
     if (s_customization_win) { purr_win_destroy(s_customization_win); s_customization_win = 0; s_customization_status_lbl = 0; }
-    if (s_connectivity_win)  { purr_win_destroy(s_connectivity_win);  s_connectivity_win  = 0; s_mesh_backend_status_lbl = 0; }
+    if (s_connectivity_win)  { purr_win_destroy(s_connectivity_win);  s_connectivity_win  = 0; s_mesh_backend_status_lbl = 0; s_hostname_lbl = 0; s_hostname_input = 0; }
     // No wait-on-semaphore here the way s_bt_scanning above needs one:
     // ota_check_task()/ota_apply_task() only ever touch ota_mgr's own static
     // state (via ota_mgr_check()/ota_mgr_apply()), never a widget directly —

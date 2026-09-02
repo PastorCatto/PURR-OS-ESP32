@@ -1359,24 +1359,26 @@ static int remote_count(void)
 }
 
 // True for a local app that must never appear in the NORMAL (non-remote)
-// registry — currently just "server_manager": reachable ONLY via the
-// synthetic remote-mode entry (remote_launch_idx() above calls
-// app_manager_launch_by_name("server_manager") directly, bypassing this
-// filter entirely — it doesn't go through local_count()/get() at all).
-// Confirmed live this was NOT actually enforced before this fix:
-// app_manager_scan() finds it exactly like any other real .claw app (it
-// has to, for that launch_by_name() call to find it), and with nothing
-// filtering the normal listing it showed up as an ordinary Start Menu
-// icon — reachable and launchable with no remote session active at all.
-// Once launched that way it has no remote target
-// (app_manager_remote_mac() returns false), and — a real, reported bug —
-// its own "On this server" list silently fell back to showing THIS
-// device's local registry instead of a server's, since app_manager_
-// count()/get() have no way to know why a caller assumes remote mode is
-// on.
+// registry. Nothing currently qualifies — "server_manager" used to
+// (hiding it from the Start Menu, reachable only via the synthetic
+// remote-mode entry) until that turned out to make the app entirely
+// unreachable from its own local icon: launched with no remote target
+// (app_manager_remote_mac() returns false, the expected case for a
+// normal local launch, not the "shouldn't happen" case the app's own
+// original comment assumed), it had no way to pick one either — no
+// Control Panel entry, nothing to manage, a real reported dead end.
+// server_manager_app.c now has its own device picker (pairing_device_
+// count()/at()) for exactly that case, so hiding it here is no longer
+// needed — the synthetic remote-mode entry still exists too, as a
+// convenience that pre-selects the already-connected server instead of
+// asking. This function (and translate_local_idx()'s own compacted-
+// index handling) stays in place for whatever future app genuinely
+// needs it — real, defensive scaffolding, not dead code just because
+// nothing uses it today.
 static bool is_hidden_local_app(const char *name)
 {
-    return strcmp(name, "server_manager") == 0;
+    (void)name;
+    return false;
 }
 
 // Translates a UI-facing (compacted, hidden-entries-skipped) LOCAL index

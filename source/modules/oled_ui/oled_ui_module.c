@@ -216,9 +216,9 @@ static void mesh_rx_for_oled(uint32_t from_node, uint32_t to_node, int channel_i
 // forward through these, long press jumps straight back to SCREEN_LOG.
 // Order/count here must match s_screen_names[] below.
 
-typedef enum { SCREEN_LOG = 0, SCREEN_INFO, SCREEN_ABOUT, SCREEN_SEND, SCREEN_NODES, SCREEN_MESSAGES, SCREEN_PAIR, SCREEN_LOGIN_REQ, SCREEN_APP_APPROVAL, SCREEN_SHUTDOWN, SCREEN_COUNT } screen_t;
+typedef enum { SCREEN_LOG = 0, SCREEN_INFO, SCREEN_ABOUT, SCREEN_SEND, SCREEN_NODES, SCREEN_MESSAGES, SCREEN_PAIR, SCREEN_LOGIN_REQ, SCREEN_APP_APPROVAL, SCREEN_RNODE, SCREEN_SHUTDOWN, SCREEN_COUNT } screen_t;
 
-static const char *s_screen_names[SCREEN_COUNT] = { "Log", "Info", "About", "Send", "Nodes", "Msgs", "Pair", "Login", "App", "Power" };
+static const char *s_screen_names[SCREEN_COUNT] = { "Log", "Info", "About", "Send", "Nodes", "Msgs", "Pair", "Login", "App", "RNode", "Power" };
 
 static screen_t s_screen = SCREEN_LOG;
 
@@ -579,6 +579,38 @@ static void render_app_approval(void) {
     draw_str(0, FONT_H * 7, "tap=reject", COL_WHITE, COL_BLACK);
 }
 
+// --- RNode mode (local on/off control) --------------------------------------
+// A LOCAL control surface, on top of the remote one (server_mgr.h's
+// SRVMGR_ACTION_MESH_STATUS/_SET, driven from a paired client's Server
+// Manager app) — this device has no purr_win UI at all (oled_ui, not
+// Cheetah/Cupcake), so without this screen the ONLY way to start/stop
+// RNode mode here would be remotely, over a connection RNode mode itself
+// doesn't provide (it bridges to a third-party BLE host, not to another
+// paired PURR OS device). Same single-step hold=toggle shape as the Pair
+// screen's own "hold to unpair" branch (render_pair() below) — turning
+// RNode mode on/off is easily reversible, unlike Send/Shutdown's
+// deliberately harder-to-trigger two-tier unlock+very-long-press gate.
+//
+// "On" goes through purr_kernel_mesh_backend_switch() (sets the NVS
+// preference, stops whatever else is running, starts rnode) — the same
+// path Settings' own "Use RNode Mode" button and the remote SRVMGR_
+// ACTION_MESH_SET action both take, required because rnode_module.c's
+// own mutual-exclusion guard declines unless the preference already says
+// RNODE. "Off" is a direct purr_kernel_module_set_enabled(false) instead
+// — no other mesh backend value means "off" in this enum, so this
+// mirrors the same "manual stop, NVS preference left alone" shape
+// Terminal's own `stop <module>` command already has (tdeck_plus/
+// device.pcat's own comment on toggling meshcore this same way, before
+// the NVS-driven switch existed) — hold again to start it back up.
+static void render_rnode(void) {
+    draw_title_bar(s_screen_names[SCREEN_RNODE]);
+
+    bool active = purr_kernel_get_module("rnode") != NULL;
+    draw_str(0, FONT_H * 2, active ? "RNode: ON" : "RNode: OFF", COL_WHITE, COL_BLACK);
+    draw_str(0, FONT_H * 4, active ? "Advertising over BLE" : "Not running", COL_WHITE, COL_BLACK);
+    draw_str(0, FONT_H * 6, active ? "hold=turn off" : "hold=turn on", COL_WHITE, COL_BLACK);
+}
+
 // --- Render -----------------------------------------------------------------
 
 static void render(void) {
@@ -597,6 +629,7 @@ static void render(void) {
         case SCREEN_PAIR:      render_pair();      break;
         case SCREEN_LOGIN_REQ:     render_login_req();     break;
         case SCREEN_APP_APPROVAL:  render_app_approval();  break;
+        case SCREEN_RNODE:         render_rnode();         break;
         case SCREEN_SHUTDOWN:      render_shutdown();      break;
         default: break;
     }
@@ -681,6 +714,14 @@ static bool handle_button_event(const input_event_t *ev) {
             // reason — see render_app_approval()'s own comment.
             if (held_ms >= LONG_PRESS_MS) server_mgr_approve_app();
             else                          server_mgr_reject_app();
+        } else if (s_screen == SCREEN_RNODE && held_ms >= LONG_PRESS_MS) {
+            // See render_rnode()'s own comment for why "on" and "off" take
+            // different paths.
+            if (purr_kernel_get_module("rnode")) {
+                purr_kernel_module_set_enabled("rnode", false);
+            } else {
+                purr_kernel_mesh_backend_switch(PURR_MESH_BACKEND_RNODE);
+            }
         } else if (s_screen == SCREEN_SEND && !s_send_unlocked && held_ms >= LONG_PRESS_MS) {
             s_send_unlocked = true;                                 // long press on locked Send: unlock, don't leave
         } else if (s_screen == SCREEN_NODES && !s_nodes_unlocked && held_ms >= LONG_PRESS_MS) {

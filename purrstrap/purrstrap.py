@@ -274,6 +274,80 @@ BUILD_PROFILES = {
                         "For relieving internal-SRAM/DMA-pool pressure "
                         "while testing device pairing and Server Manager.",
     },
+    # The opposite trim from "server_test": that profile KEEPS the radio-
+    # companion/server stack because it's what's being tested; this one
+    # SHEDS it, because RNode mode (source/modules/rnode, see the plan doc)
+    # has no use for PURR-to-PURR pairing/remote-launch (proximity/pairing/
+    # proximity_rpc/app_manager_remote/homebase) at all — it's a bridge for
+    # a THIRD-PARTY BLE host (Sideband/rns/NomadNet), not another PURR OS
+    # device. Written for heltec specifically: no PSRAM at all (unlike
+    # tdeck_plus), so NimBLE's host mbuf/event/ACL pools can't escape into
+    # PSRAM the way tdeck_plus's own BT fix relies on — every KB shed here
+    # is a KB NimBLE might actually need to link at all, not just a nice-
+    # to-have. Only settings kept among bundled apps, same "base-config
+    # necessity, not overhead" reasoning as server_test's own comment.
+    "rnode_test": {
+        "description": "core OS + Lua + the active UI backend + BLE "
+                        "(bt_mgr/rnode), radio-companion/server stack "
+                        "DROPPED (proximity/pairing/wifi_mgr/user_mgr/"
+                        "app_manager_remote/homebase — not needed for a "
+                        "third-party BLE bridge), only settings kept among "
+                        "bundled apps. For maximizing internal-DRAM "
+                        "headroom on PSRAM-less boards (heltec) while "
+                        "proving RNode-over-BLE fits at all.",
+    },
+    # The combination "rnode_test" deliberately doesn't test: RNode mode
+    # (BLE/LoRa) running ALONGSIDE the PURR-to-PURR radio-companion/server
+    # stack (WiFi/ESP-NOW) — a real, legitimate combined use case (this
+    # device stays remotely pairable/manageable by another PURR OS device
+    # over WiFi while also bridging a third-party BLE host like Sideband
+    # over LoRa) that "rnode_test" intentionally sheds for pure DRAM-
+    # headroom measurement. No radio conflict between them (three
+    # physically separate radios: LoRa/SPI, BLE, WiFi — the coexistence
+    # firmware already visible in every boot log's own "coex firmware
+    # version" line handles WiFi/BT sharing the 2.4GHz front end), so the
+    # only real question is whether both fit in flash/DRAM together.
+    # meshtastic and reticulum are dropped here — neither is what's being
+    # tested (they're alternate, mutually-exclusive-at-runtime mesh
+    # backends unrelated to PURR-to-PURR pairing), and the full/default
+    # profile with all four backends plus BLE compiled in genuinely
+    # overflows heltec's 2MB OTA partition by ~108KB (confirmed live) —
+    # dropping the two backends not part of this specific combination is
+    # the real fix, not growing the partition table for a size that was
+    # never actually needed.
+    "rnode_paired": {
+        "description": "core OS + Lua + the active UI backend + BLE "
+                        "(bt_mgr/rnode) + the FULL radio-companion/server "
+                        "stack (proximity/pairing/wifi_mgr/user_mgr/"
+                        "app_manager_remote/homebase), kept together on "
+                        "purpose — meshtastic/reticulum dropped (neither "
+                        "part of this combination, and keeping all four "
+                        "mesh backends plus BLE together overflows "
+                        "heltec's flash). For testing RNode mode running "
+                        "alongside real PURR-to-PURR pairing/remote-launch.",
+    },
+    # tdeck_plus's own equivalent of "rnode_paired" — a device that acts
+    # as the remote CLIENT for server_mgr.h's SRVMGR_ACTION_MESH_STATUS/
+    # _SET (starting/stopping RNode mode on ANOTHER device, e.g. heltec),
+    # and can run RNode mode itself. Unlike heltec this device has real
+    # PSRAM (CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y, sdkconfig_
+    # tdeck_plus.overrides), so BT's own host buffer pools aren't fighting
+    # internal DRAM the same way — the full/default profile's own DRAM
+    # overflow with BT on (~24.6KB, confirmed live) was the kitchen-sink
+    # app set, not a fundamental BT-vs-PSRAM conflict; trimming the app
+    # set (same "minimal" philosophy, applied here) is the real fix.
+    "rnode_client": {
+        "description": "core OS + Lua + the active UI backend + WiFi + "
+                        "BLE (bt_mgr/rnode) + the FULL radio-companion "
+                        "stack (proximity/pairing/proximity_rpc/"
+                        "app_manager_remote/homebase/msn_relay), kept — "
+                        "meshtastic/meshcore/reticulum dropped (not part "
+                        "of this combination), only settings/"
+                        "server_manager kept among bundled apps (server_"
+                        "manager is this profile's whole point: the "
+                        "client UI for remotely switching another "
+                        "device's mesh backend).",
+    },
 }
 
 def apply_build_profile(cfg, profile_name):
@@ -321,7 +395,63 @@ def apply_build_profile(cfg, profile_name):
         # settings — a base-config necessity (WiFi/BT/display/etc config),
         # not an optional extra like terminal/fileman/diagnostics/magidos/
         # doom/moy — kept alongside milkbar/oobe/server_manager per request.
-        keep_apps = {"apps.milkbar", "apps.oobe", "apps.server_manager", "apps.settings"}
+        keep_apps = {"apps.milkbar", "apps.oobe", "apps.server_manager", "apps.settings", "apps.reticulum_app"}
+        for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
+            cfg[key] = "false"
+
+    if profile_name == "rnode_test":
+        # Radio-companion/server stack — same opt-out flag "minimal" uses
+        # (apply_radio_companion_defaults() checks this itself), plus the
+        # module keys it doesn't cover: wifi_mgr/user_mgr/server aren't
+        # part of that function's own module set (see heltec/device.pcat's
+        # own comments on why each is a separate explicit entry there), so
+        # they need popping by hand too.
+        cfg["modules.radio_companion"] = "false"
+        for key in ("modules.proximity", "modules.pairing", "modules.proximity_rpc",
+                    "modules.app_manager_remote", "modules.homebase", "modules.msn_relay",
+                    "modules.wifi_mgr", "modules.user_mgr", "modules.server"):
+            cfg.pop(key, None)
+
+        # Only settings kept — same "base-config necessity, not overhead"
+        # reasoning as server_test's own comment above.
+        keep_apps = {"apps.settings"}
+        for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
+            cfg[key] = "false"
+
+    if profile_name == "rnode_paired":
+        # Radio-companion/server stack — deliberately LEFT ALONE (that's
+        # the whole point of this profile, opposite of rnode_test's own
+        # trim). Only the alternate mesh backends not part of this
+        # combination are dropped, to fit in flash — see this profile's
+        # own description above for the measured ~108KB overflow that
+        # keeping all four alongside BLE causes.
+        for key in ("modules.mesh", "modules.reticulum"):
+            cfg.pop(key, None)
+
+        # Same "settings only" trim as rnode_test — not about DRAM this
+        # time, just no reason to carry terminal/fileman/calculator for a
+        # device with no purr_win UI to render them anyway.
+        keep_apps = {"apps.settings"}
+        for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
+            cfg[key] = "false"
+
+    if profile_name == "rnode_client":
+        # Radio-companion stack — deliberately LEFT ALONE (this profile's
+        # whole point, same reasoning as rnode_paired's own).
+        for key in ("modules.mesh", "modules.meshcore", "modules.reticulum"):
+            cfg.pop(key, None)
+
+        # settings (base-config necessity) + server_manager (the actual
+        # client UI this profile exists for) + milkbar (the real
+        # proximity/pairing connection surface — Connect -> Dashboard ->
+        # Desktop, server_manager_app.c's own header comment — dropping
+        # this the first time round left the actual "proximity" half of
+        # this profile's own point unreachable, a real miss, not just a
+        # trim). Everything else (terminal/fileman/msn/diagnostics/
+        # magidos/doom/moy/oobe/reticulum_app) still dropped — this is
+        # what actually frees enough internal DRAM for BT to fit without
+        # a repeat of the full/default profile's own overflow.
+        keep_apps = {"apps.settings", "apps.server_manager", "apps.milkbar"}
         for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
             cfg[key] = "false"
 
@@ -1642,9 +1772,19 @@ def cmd_build(args):
 def cmd_flash(args):
     cmd_build(args)
 
+    # Same out_name a profiled build actually writes (see cmd_build's own
+    # "Only the merged artifact's filename changes under a profile" comment)
+    # — found live: this used to always look for the bare PURR_OS_<device>.bin
+    # regardless of --profile, so `flash --profile <name>` built the right
+    # profile-suffixed artifact and then immediately reported "build did not
+    # produce a flashable image" because it was checking for the wrong
+    # filename, aborting before ever calling esptool.
+    profile = getattr(args, "profile", None)
+    out_name = f"{args.device}_{profile}" if profile else args.device
+
     # Abort if the build didn't produce a merged image
     out_dir    = os.path.join(OUTPUT_DIR, args.device)
-    merged_bin = os.path.join(out_dir, f"PURR_OS_{args.device}.bin")
+    merged_bin = os.path.join(out_dir, f"PURR_OS_{out_name}.bin")
     if not os.path.isfile(merged_bin):
         warn("build did not produce a flashable image — aborting flash")
         return

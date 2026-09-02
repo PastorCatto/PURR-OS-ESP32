@@ -366,6 +366,14 @@ static lv_obj_t *s_status_taskmgr_box;
 
 static lv_obj_t *s_lock_screen;
 static bool      s_locked = false;
+// True from the moment a dismiss tap hands off to the real credential
+// screen (purr_systemui_show_relock()) until purr_systemui_tick() sees
+// purr_systemui_relock_active() go back to false. Needed because s_locked
+// alone can't tell "just idle-timed-out, overlay showing, no tap yet"
+// (relock_active also still false) apart from "tap happened, real screen
+// is up, waiting on its result" — same s_locked/!relock_active pair,
+// different meaning, without this.
+static bool      s_awaiting_relock_result = false;
 
 // Actual implementation of the forward-declared lp_show_status()/lp_hide_
 // status() from earlier — deferred to here since they need the icon handles
@@ -1133,8 +1141,17 @@ static void ck_lock_dismiss_cb(lv_event_t *e)
         lv_indev_get_vect(indev, &vect);
         if (vect.y < -20) return;
     }
-    s_locked = false;
-    lv_obj_add_flag(s_lock_screen, LV_OBJ_FLAG_HIDDEN);
+    // Hand off to the real credential screen instead of unlocking outright —
+    // this glanceable overlay (clock/notifications/battery) stays up as the
+    // dimmed backdrop underneath; purr_systemui_show_relock() builds its
+    // screen after this one, so it lands on top by construction order alone,
+    // same trick boot-time login and XP's own relock already rely on. Its
+    // own no-cancel-path guarantee (see systemui.h's doc comment) is what
+    // makes purr_systemui_tick()'s relock_active check below safe: this
+    // overlay only actually clears on a real, successful unlock.
+    if (s_awaiting_relock_result) return;   // already showing, nothing to do
+    s_awaiting_relock_result = true;
+    purr_systemui_show_relock(s_host);
     // No need to reset the idle timestamp here — this dismiss callback
     // only runs as a downstream effect of the same touch that just fired
     // touch_read_cb()/mark_activity() in cupcake_hal.c earlier in this
@@ -1435,6 +1452,18 @@ void purr_systemui_tick(void)
     ck_refresh_status_icons();
     ck_lock_check_idle();
     if (s_locked) { ck_lock_refresh_info(); ck_lock_refresh_notifs(); }
+
+    // A dismiss tap handed off to the real credential screen — see
+    // ck_lock_dismiss_cb(). Once purr_systemui_relock_active() drops back to
+    // false, that screen has no cancel/back path (systemui.h's own doc
+    // comment: "locking is a real security boundary, not a dismiss
+    // gesture"), so the only way it can happen is a real, successful
+    // unlock — clear this overlay along with it.
+    if (s_locked && s_awaiting_relock_result && !purr_systemui_relock_active()) {
+        s_locked = false;
+        s_awaiting_relock_result = false;
+        lv_obj_add_flag(s_lock_screen, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // Re-hide a swipe-revealed nav bar once its countdown expires — deadline
     // 0 means "no pending auto-hide" (home screen, or an app just opened

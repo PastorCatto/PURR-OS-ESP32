@@ -17,6 +17,7 @@
 #include "proximity_rpc.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/core/purr_module.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_history's own comment below
 #include <string.h>
 
 // ── Fresh-slate remote view (Phase D2) — history ring buffer ───────────────
@@ -30,7 +31,16 @@
 #define HISTORY_RING_SIZE 32
 #define MAX_HISTORY_PER_RESPONSE 4   // keeps a GET_HISTORY response (~852 bytes) inside a shared 1024-byte caller-side buffer
 
-static msn_relay_history_entry_t s_history[HISTORY_RING_SIZE];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — a passive ring buffer, never
+// touched before PSRAM is up (this module registers like any other kernel
+// module, well after boot's PSRAM init). Safe no-op on a PSRAM-less board
+// (CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY unset there — see esp_attr.h)
+// — relevant since this module also targets headless devices like Heltec
+// V3 per this file's own header comment. Same class MiniWin's own control/
+// list arrays already use this for — real, confirmed via purr_os.map: a
+// genuine link-time DRAM overflow once the current app set was all
+// compiled in together (see msn.c's matching comment, 2026-09-01).
+static EXT_RAM_BSS_ATTR msn_relay_history_entry_t s_history[HISTORY_RING_SIZE];
 static uint32_t s_history_next_seq = 1;   // 0 is never assigned, so since_seq=0 always means "from the start"
 
 static void on_mesh_rx_for_history(uint32_t from_node, uint32_t to_node, int channel_idx, int portnum,

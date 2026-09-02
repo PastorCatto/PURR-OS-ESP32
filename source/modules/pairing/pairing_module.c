@@ -482,6 +482,7 @@ static bool constant_time_eq32(const uint8_t a[32], const uint8_t b[32]) {
 #define PAIRING_ACTION_USERAUTH_REGISTER  0x2003   // req: userauth_register_req_t -> resp: 1B status (0=fail, 1=ok)
 #define PAIRING_ACTION_USERAUTH_CHALLENGE 0x2004   // req: username -> resp: 16B challenge (0-length = not registered)
 #define PAIRING_ACTION_USERAUTH_VERIFY    0x2005   // req: userauth_verify_req_t -> resp: 1B status (0=fail, 1=ok)
+#define PAIRING_ACTION_USERAUTH_FORCE_LOGOUT 0x2006   // req: none -> resp: 1B status (always 1 once accepted)
 
 // Remote OOBE (first-run setup pushed from an already-trusted client) —
 // see pairing.h's own "Remote OOBE" doc comment for the full design. Next
@@ -490,8 +491,13 @@ static bool constant_time_eq32(const uint8_t a[32], const uint8_t b[32]) {
 // at 0x4000 rather than reclaiming a freed value — a stale client still
 // running old firmware would otherwise get a real (if wrong) response
 // instead of a clean "unknown action" from proximity_rpc's own dispatch.
-#define PAIRING_ACTION_OOBE_QUERY 0x4000   // req: none -> resp: 1B (1=needs setup, 0=already configured)
-#define PAIRING_ACTION_OOBE_PUSH  0x4001   // req: oobe_push_req_t -> resp: 1B status (0=fail, 1=ok)
+#define PAIRING_ACTION_OOBE_QUERY   0x4000   // req: none -> resp: 1B (1=needs setup, 0=already configured)
+#define PAIRING_ACTION_OOBE_PUSH    0x4001   // req: oobe_push_req_t -> resp: 1B status (0=fail, 1=ok)
+// Ongoing "add a user" — same block as OOBE (shares its wire shape) but a
+// separate action ID: unlike OOBE_PUSH, not gated on user_mgr_oobe_
+// completed(), and its status byte has more values than OOBE's flat 0/1 —
+// see pairing.h's pairing_user_create_status_t for what each one means.
+#define PAIRING_ACTION_USER_CREATE  0x4002   // req: oobe_push_req_t -> resp: 1B pairing_user_create_status_t
 
 #define PAIRING_RPC_TIMEOUT_MS 3000UL   // same as milkbar's own RPC_TIMEOUT_MS convention
 
@@ -786,13 +792,39 @@ static bool handle_userauth_salt(const uint8_t mac[6], uint16_t action_id,
     char username[USERAUTH_USERNAME_MAX];
     copy_req_username(req, req_len, username);
 
+    if (resp_cap < 16) { *resp_len_out = 0; return true; }
+
     uint8_t salt[16];
-    if (resp_cap < 16 || !user_mgr_get_salt(username, salt)) {
-        *resp_len_out = 0;   // valid response: "no such user" / no-password account
+    if (user_mgr_get_salt(username, salt)) {
+        memcpy(resp_out, salt, 16);
+        *resp_len_out = 16;
         return true;
     }
-    memcpy(resp_out, salt, 16);
-    *resp_len_out = 16;
+
+    // user_mgr_get_salt() fails for three different reasons it doesn't
+    // distinguish: unknown username, a REMOTE-type record, or a real LOCAL
+    // account that simply has no password set (has_password=0). Only the
+    // last case should still let the client through — user_mgr_verify()'s
+    // own rule for a no-password LOCAL account is "any password matches,
+    // this is an auto-login identity" (user_mgr.c), and remote login has
+    // to honor that same rule, or a fresh/no-password account (the ONLY
+    // account that can possibly exist on a server right after its first
+    // pairing) becomes impossible to remote-login into at all: the client
+    // gets an empty response here and gives up immediately, indistinguishable
+    // from a genuinely wrong username — confirmed live as exactly the
+    // "incorrect password" report on a first-handshake login. Handing back
+    // a dummy (all-zero) salt lets the client proceed to USERAUTH_REQUEST
+    // as normal; what it hashes and sends there is never actually checked
+    // for this case — see handle_userauth_request()'s matching bypass.
+    if (user_mgr_exists(username) &&
+        user_mgr_account_type(username) == USER_ACCOUNT_LOCAL &&
+        !user_mgr_has_password(username)) {
+        memset(resp_out, 0, 16);
+        *resp_len_out = 16;
+        return true;
+    }
+
+    *resp_len_out = 0;   // genuinely no such user (or a REMOTE-type record)
     return true;
 }
 
@@ -815,24 +847,39 @@ static bool handle_userauth_request(const uint8_t mac[6], uint16_t action_id,
         return true;
     }
 
-    uint8_t secret[32];
-    if (!get_paired_secret(mac, secret)) { resp_out[0] = 0; *resp_len_out = 1; return true; }
-    uint8_t msg_key[32];
-    derive_msg_key(secret, r.nonce, msg_key);
+    // Mirrors handle_userauth_salt()'s own dummy-salt bypass above, and
+    // ultimately user_mgr_verify()'s "no password = auto-login identity"
+    // rule (user_mgr.c) — a LOCAL account with no password accepts this
+    // login unconditionally, without ever decrypting or looking at what
+    // the client sent. Any OTHER account shape (has a password, is a
+    // REMOTE-type record, or doesn't exist) still goes through the real
+    // GCM-decrypt-and-compare check below exactly as before.
+    bool password_ok;
+    if (user_mgr_exists(username) &&
+        user_mgr_account_type(username) == USER_ACCOUNT_LOCAL &&
+        !user_mgr_has_password(username)) {
+        password_ok = true;
+    } else {
+        uint8_t secret[32];
+        if (!get_paired_secret(mac, secret)) { resp_out[0] = 0; *resp_len_out = 1; return true; }
+        uint8_t msg_key[32];
+        derive_msg_key(secret, r.nonce, msg_key);
 
-    mbedtls_gcm_context gcm;
-    mbedtls_gcm_init(&gcm);
-    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, msg_key, 256);
-    uint8_t pwhash[32];
-    int rc = mbedtls_gcm_auth_decrypt(&gcm, 32, r.nonce, sizeof(r.nonce), NULL, 0, r.tag, sizeof(r.tag), r.ciphertext, pwhash);
-    mbedtls_gcm_free(&gcm);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "userauth request for '%s': GCM auth failed (rc=%d)", username, rc);
-        resp_out[0] = 0; *resp_len_out = 1;
-        return true;
+        mbedtls_gcm_context gcm;
+        mbedtls_gcm_init(&gcm);
+        mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, msg_key, 256);
+        uint8_t pwhash[32];
+        int rc = mbedtls_gcm_auth_decrypt(&gcm, 32, r.nonce, sizeof(r.nonce), NULL, 0, r.tag, sizeof(r.tag), r.ciphertext, pwhash);
+        mbedtls_gcm_free(&gcm);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "userauth request for '%s': GCM auth failed (rc=%d)", username, rc);
+            resp_out[0] = 0; *resp_len_out = 1;
+            return true;
+        }
+        password_ok = user_mgr_verify_hash(username, pwhash);
     }
 
-    if (!user_mgr_verify_hash(username, pwhash)) {
+    if (!password_ok) {
         ESP_LOGW(TAG, "userauth request: wrong password for '%s'", username);
         resp_out[0] = 0; *resp_len_out = 1;
         return true;
@@ -999,6 +1046,42 @@ static bool handle_userauth_verify(const uint8_t mac[6], uint16_t action_id,
     return true;
 }
 
+// ── Forced logout (client side) ───────────────────────────────────────────
+// A trusted server telling THIS device "you're being disconnected" — the
+// reverse direction from every other action in this file (client calling
+// server). Real use: a server about to tear its own pairing/proximity/WiFi
+// stack down to free memory for something else (RNode mode,
+// source/modules/rnode/rnode_module.c) sends this to whichever device it
+// knows is/was connected FIRST, while proximity_rpc itself is still up to
+// carry the call — see pairing_force_logout()/_all() below for the server
+// (caller) side.
+//
+// Deliberately minimal here: only user_mgr_logout() (generic, UI-agnostic,
+// correct regardless of what triggered this) plus the kernel-level notify
+// — NOT app_manager_clear_remote() directly, which would pull app_manager
+// into this file for no real benefit. Whoever registers via purr_kernel_
+// set_remote_logout_cb() (milkbar_app.c, today) owns the rest of the
+// "actually disconnect and show the right screen" recipe, same one its own
+// local Disconnect button already runs (disconnect_to_connection_screen()).
+// Trust-gated like every other inbound frame here (this file's own top
+// comment) — an untrusted peer can't force a stranger's session closed.
+static bool handle_userauth_force_logout(const uint8_t mac[6], uint16_t action_id,
+                                          const uint8_t *req, size_t req_len,
+                                          uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out) {
+    (void)action_id; (void)req; (void)req_len;
+    if (resp_cap < 1) { *resp_len_out = 0; return false; }
+    resp_out[0] = 0;
+    *resp_len_out = 1;
+
+    if (!pairing_is_trusted(mac)) return true;
+
+    ESP_LOGI(TAG, "forced logout requested by a trusted server");
+    user_mgr_logout();
+    purr_kernel_notify_remote_logout();
+    resp_out[0] = 1;
+    return true;
+}
+
 // ── Remote OOBE (server side) ────────────────────────────────────────────
 // See pairing.h's own "Remote OOBE" doc comment. Both handlers require
 // pairing_is_trusted(mac) — this device must already trust the peer, same
@@ -1094,6 +1177,88 @@ static bool handle_oobe_push(const uint8_t mac[6], uint16_t action_id,
     ESP_LOGI(TAG, "remote oobe: setup complete via pushed config, account '%s'",
              username[0] ? username : user_mgr_default_username());
     resp_out[0] = 1;
+    return true;
+}
+
+// Ongoing "add a user" — see pairing.h's own doc comment on
+// pairing_remote_user_create() for how this differs from OOBE push above
+// (repeatable, not gated on user_mgr_oobe_completed(), a richer status
+// byte). Shares oobe_push_req_t/oobe_payload_t's wire shape since the
+// actual content (username + password, AES-256-GCM under the Phase A
+// secret) is identical — only the gate and what happens with a
+// successfully-decrypted payload differ.
+static bool handle_user_create(const uint8_t mac[6], uint16_t action_id,
+                                const uint8_t *req, size_t req_len,
+                                uint8_t *resp_out, size_t resp_cap, size_t *resp_len_out) {
+    (void)action_id;
+    if (req_len != sizeof(oobe_push_req_t) || resp_cap < 1) { *resp_len_out = 0; return false; }
+    resp_out[0] = PAIRING_USER_CREATE_FAIL;
+    *resp_len_out = 1;
+
+    // Same trust bar as every other ongoing server-management action
+    // (server_mgr.c's WiFi-set/app-push handlers) — a paired device is
+    // already trusted to administer this server. Deliberately no user_
+    // mgr_oobe_completed() check: that's exactly the one-time restriction
+    // this action exists to not have.
+    if (!pairing_is_trusted(mac)) return true;
+
+    uint8_t secret[32];
+    if (!get_paired_secret(mac, secret)) return true;
+
+    oobe_push_req_t r;
+    memcpy(&r, req, sizeof(r));
+    uint8_t msg_key[32];
+    derive_msg_key(secret, r.nonce, msg_key);
+
+    oobe_payload_t payload;
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, msg_key, 256);
+    int rc = mbedtls_gcm_auth_decrypt(&gcm, sizeof(payload), r.nonce, sizeof(r.nonce), NULL, 0,
+                                       r.tag, sizeof(r.tag), r.ciphertext, (uint8_t *)&payload);
+    mbedtls_gcm_free(&gcm);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "remote user create: GCM auth failed (rc=%d)", rc);
+        return true;
+    }
+    char username[USERAUTH_USERNAME_MAX];
+    copy_req_username((const uint8_t *)payload.username, sizeof(payload.username), username);
+    char password[sizeof(payload.password) + 1];
+    memcpy(password, payload.password, sizeof(payload.password));
+    password[sizeof(payload.password)] = 0;
+    memset(&payload, 0, sizeof(payload));   // done with the plaintext copy
+
+    // Unlike OOBE push, an empty username has no "keep the default
+    // account" meaning here — there's no default to fall back to, this
+    // always creates a genuinely new account — so user_mgr_valid_
+    // username()'s own empty-string rejection is exactly the right check,
+    // no special-casing needed.
+    if (!user_mgr_valid_username(username)) {
+        ESP_LOGW(TAG, "remote user create: invalid username '%s'", username);
+        resp_out[0] = PAIRING_USER_CREATE_INVALID_NAME;
+        memset(password, 0, sizeof(password));
+        return true;
+    }
+    if (user_mgr_exists(username)) {
+        ESP_LOGW(TAG, "remote user create: '%s' already exists", username);
+        resp_out[0] = PAIRING_USER_CREATE_ALREADY_EXISTS;
+        memset(password, 0, sizeof(password));
+        return true;
+    }
+    if (!user_mgr_create(username, password)) {
+        // valid_username()/exists() above already ruled out the other two
+        // reasons user_mgr_create() itself can refuse — USER_MGR_MAX_USERS
+        // is the only one left.
+        ESP_LOGW(TAG, "remote user create: create('%s') failed - server full?", username);
+        resp_out[0] = PAIRING_USER_CREATE_SERVER_FULL;
+        memset(password, 0, sizeof(password));
+        return true;
+    }
+    memset(password, 0, sizeof(password));
+
+    ESP_LOGI(TAG, "remote user create: created '%s' via %02x:%02x:%02x:%02x:%02x:%02x",
+             username, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    resp_out[0] = PAIRING_USER_CREATE_OK;
     return true;
 }
 
@@ -1440,6 +1605,37 @@ bool pairing_get_shared_secret(const uint8_t mac[6], uint8_t out_secret[32]) {
     return get_paired_secret(mac, out_secret);
 }
 
+// ── Forced logout (server side) ──────────────────────────────────────────
+// See handle_userauth_force_logout()'s own comment for the client side and
+// the real motivating use case. No encryption/payload needed — this isn't
+// carrying a secret, just an instruction, same as OOBE_QUERY above.
+
+bool pairing_force_logout(const uint8_t mac[6]) {
+    if (!mac) return false;
+    uint8_t resp[1]; size_t resp_len = 0;
+    bool ok = proximity_rpc_call(mac, PAIRING_ACTION_USERAUTH_FORCE_LOGOUT, NULL, 0,
+                                  resp, sizeof(resp), &resp_len, PAIRING_RPC_TIMEOUT_MS);
+    return ok && resp_len == 1 && resp[0] == 1;
+}
+
+// Best-effort broadcast to every device THIS one currently trusts — not
+// "every device currently logged in" (this codebase has no live session
+// tracking today, only a durable trust list — see pairing_device_at()'s
+// own doc comment), so most calls here will simply reach a device that was
+// never actually connected and no-op harmlessly (user_mgr_logout() on a
+// device that's already logged out, or logged in locally rather than as a
+// remote user, does nothing either way). Deliberately doesn't stop on the
+// first failure/timeout — an unreachable or offline paired device is
+// expected, not an error worth aborting the whole broadcast over.
+void pairing_force_logout_all(void) {
+    int n = pairing_device_count();
+    for (int i = 0; i < n; i++) {
+        paired_device_t pd;
+        if (!pairing_device_at(i, &pd)) continue;
+        pairing_force_logout(pd.mac);
+    }
+}
+
 // ── Remote OOBE (client side) ────────────────────────────────────────────
 // See pairing.h's own "Remote OOBE" doc comment.
 
@@ -1483,6 +1679,41 @@ bool pairing_remote_oobe_push(const uint8_t mac[6], const char *username, const 
                                   (const uint8_t *)&req, sizeof(req), resp, sizeof(resp), &resp_len,
                                   PAIRING_RPC_TIMEOUT_MS);
     return ok && resp_len == 1 && resp[0] == 1;
+}
+
+// ── Remote user creation (client side) ───────────────────────────────────
+// See pairing.h's own doc comment on how this differs from Remote OOBE
+// push just above — same wire shape (oobe_push_req_t/oobe_payload_t),
+// different action ID and a richer response.
+pairing_user_create_status_t pairing_remote_user_create(const uint8_t mac[6], const char *username, const char *password) {
+    if (!mac || !username || !username[0]) return PAIRING_USER_CREATE_INVALID_NAME;
+
+    uint8_t secret[32];
+    if (!get_paired_secret(mac, secret)) return PAIRING_USER_CREATE_FAIL;
+
+    oobe_payload_t payload = {0};
+    strncpy(payload.username, username, sizeof(payload.username) - 1);
+    if (password) strncpy(payload.password, password, sizeof(payload.password) - 1);
+
+    oobe_push_req_t req = {0};
+    esp_fill_random(req.nonce, sizeof(req.nonce));
+    uint8_t msg_key[32];
+    derive_msg_key(secret, req.nonce, msg_key);
+
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, msg_key, 256);
+    mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, sizeof(payload), req.nonce, sizeof(req.nonce), NULL, 0,
+                               (const uint8_t *)&payload, req.ciphertext, sizeof(req.tag), req.tag);
+    mbedtls_gcm_free(&gcm);
+    memset(&payload, 0, sizeof(payload));   // done with the plaintext copy
+
+    uint8_t resp[4]; size_t resp_len = 0;
+    bool ok = proximity_rpc_call(mac, PAIRING_ACTION_USER_CREATE,
+                                  (const uint8_t *)&req, sizeof(req), resp, sizeof(resp), &resp_len,
+                                  PAIRING_RPC_TIMEOUT_MS);
+    if (!ok || resp_len != 1) return PAIRING_USER_CREATE_FAIL;
+    return (pairing_user_create_status_t)resp[0];
 }
 
 // ── TEMPORARY selftest ───────────────────────────────────────────────────
@@ -1770,12 +2001,16 @@ int pairing_init(void) {
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_REGISTER,  handle_userauth_register);
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_CHALLENGE, handle_userauth_challenge);
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_VERIFY,    handle_userauth_verify);
+    proximity_rpc_register(PAIRING_ACTION_USERAUTH_FORCE_LOGOUT, handle_userauth_force_logout);
 
     // Remote OOBE — same "always-on, module init" reasoning as USERAUTH_*
     // just above: a fresh device needing setup has no app open at all yet,
     // so this can't be scoped to one.
-    proximity_rpc_register(PAIRING_ACTION_OOBE_QUERY, handle_oobe_query);
-    proximity_rpc_register(PAIRING_ACTION_OOBE_PUSH,  handle_oobe_push);
+    proximity_rpc_register(PAIRING_ACTION_OOBE_QUERY,  handle_oobe_query);
+    proximity_rpc_register(PAIRING_ACTION_OOBE_PUSH,   handle_oobe_push);
+    // Ongoing, NOT scoped to the one-time OOBE gate — see handle_user_
+    // create()'s own comment.
+    proximity_rpc_register(PAIRING_ACTION_USER_CREATE, handle_user_create);
 
     // Small/no PSRAM hazard here either way, but internal RAM keeps this
     // consistent with "only pairing_task() touches NVS" — plain
@@ -1800,11 +2035,20 @@ int pairing_init(void) {
         ESP_LOGE(TAG, "failed to create pairing task — persistence disabled");
     }
 
+    // See purr_kernel.h's own purr_kernel_set_radio_offload_cb() doc
+    // comment for why rnode_module.c goes through this rather than
+    // calling pairing_force_logout_all() directly — keeps a build that
+    // never lists "pairing" in its own [modules] from linking this file
+    // at all. pairing_force_logout_all() itself already matches this
+    // callback's void(void) signature exactly, no wrapper needed.
+    purr_kernel_set_radio_offload_cb(pairing_force_logout_all);
+
     ESP_LOGI(TAG, "ready (%d paired device%s)", s_paired_count, s_paired_count == 1 ? "" : "s");
     return 0;
 }
 
 void pairing_deinit(void) {
+    purr_kernel_set_radio_offload_cb(NULL);
     if (s_task) {
         if (s_dirty) {
             s_dirty = false;
@@ -1820,8 +2064,10 @@ void pairing_deinit(void) {
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_REGISTER,  NULL);
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_CHALLENGE, NULL);
     proximity_rpc_register(PAIRING_ACTION_USERAUTH_VERIFY,    NULL);
-    proximity_rpc_register(PAIRING_ACTION_OOBE_QUERY, NULL);
-    proximity_rpc_register(PAIRING_ACTION_OOBE_PUSH,  NULL);
+    proximity_rpc_register(PAIRING_ACTION_USERAUTH_FORCE_LOGOUT, NULL);
+    proximity_rpc_register(PAIRING_ACTION_OOBE_QUERY,  NULL);
+    proximity_rpc_register(PAIRING_ACTION_OOBE_PUSH,   NULL);
+    proximity_rpc_register(PAIRING_ACTION_USER_CREATE, NULL);
     s_state = PAIRING_STATE_NONE;
     s_userauth_req_state = USERAUTH_REQ_NONE;
 }

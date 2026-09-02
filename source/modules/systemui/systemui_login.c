@@ -1,20 +1,37 @@
 // systemui_login.c — Windows XP-style login/welcome screen for PURR OS.
 //
-// Shared across every host that hosts source/modules/systemui/ (Cupcake,
-// Mochi, Flow, Tabby), the same way the status bar and lock screen already
-// are — see systemui.h's own doc comment on purr_systemui_show_login() for
-// the call-site contract. NOT split by CONFIG_PURR_SYSTEMUI_STYLE_* the way
-// systemui_android.c/systemui_ios.c are: the login prompt is one
-// implementation regardless of which chrome style the rest of systemui is
-// drawing, so this file gates only on the plain module-on/off symbol. Its
-// stub (for when the module is off entirely) lives with every other stub in
-// systemui_android.c's own `#elif !defined(CONFIG_PURR_SYSTEMUI)` block —
+// Shared across every XP/Android-style host of source/modules/systemui/, the
+// same way the status bar and lock screen already are — see systemui.h's own
+// doc comment on purr_systemui_show_login() for the call-site contract.
+//
+// 2026-09-01: NO LONGER style-independent. iOS-style hosts (Mochi et al, see
+// device.pcat's ui.systemui_style) now get systemui_login_ios.c instead — a
+// macOS-style login window (dimmed wallpaper, avatar, a real inline multi-
+// account row) matching that chrome's own visual language, the way this
+// file's flat blue gradient never did. This file's own guard below changed
+// from plain CONFIG_PURR_SYSTEMUI to explicitly excluding
+// CONFIG_PURR_SYSTEMUI_STYLE_IOS, so exactly one of the two ever defines
+// purr_systemui_show_login()/_show_relock()/_relock_active() per build —
+// same "exactly one TU" invariant purr_systemui_init() already relies on
+// across the three chrome-style files. XP and Android are otherwise
+// completely unchanged by this — this file, this screen, same as before.
+//
+// Its stub (for when the module is off entirely) lives with every other stub
+// in systemui_android.c's own `#elif !defined(CONFIG_PURR_SYSTEMUI)` block —
 // not duplicated here — so exactly one definition of the symbol ever exists,
 // same rule the rest of this module already follows.
 //
 // ── Redesigned to the user's own spec ────────────────────────────────────
-// No tile picker any more — a real, deliberate simplification, not the
-// original design degrading. Exactly one account is shown directly (avatar,
+// CORRECTION, 2026-09-01: the claim two paragraphs down ("no tile picker any
+// more") went stale at some point without this comment being updated — the
+// user picker was added back (show_user_picker(), further down) and has
+// been live this whole time; this paragraph is kept for the single-account
+// case it still accurately describes, not as evidence the picker doesn't
+// exist. See systemui_login_ios.c for how the sibling file handles the
+// same two cases (single account vs. more than one) differently — an
+// always-visible inline avatar row instead of a tap-to-reveal overlay.
+//
+// Exactly one account is shown directly (avatar,
 // name, password field, all always visible, no tap-to-reveal step):
 // user_mgr_default_username() at boot, user_mgr_current_user() on relock —
 // both already exist precisely to answer "which account does a login flow
@@ -75,7 +92,8 @@
 #include "../app_manager_remote/app_manager_remote.h"
 #endif
 
-#ifdef CONFIG_PURR_SYSTEMUI
+// See this file's own header comment, 2026-09-01 entry.
+#if defined(CONFIG_PURR_SYSTEMUI) && !defined(CONFIG_PURR_SYSTEMUI_STYLE_IOS)
 
 static const char *TAG = "systemui_login";
 
@@ -1287,4 +1305,4 @@ void purr_systemui_show_relock(const purr_systemui_host_t *host)
 
 bool purr_systemui_relock_active(void) { return s_relock_active; }
 
-#endif // CONFIG_PURR_SYSTEMUI
+#endif // defined(CONFIG_PURR_SYSTEMUI) && !defined(CONFIG_PURR_SYSTEMUI_STYLE_IOS)

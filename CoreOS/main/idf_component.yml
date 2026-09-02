@@ -2,6 +2,27 @@
 dependencies:
   lvgl/lvgl:
     version: ">=8.3.0,<9.0.0"
+  # joltwallet/littlefs — main/CMakeLists.txt REQUIRES joltwallet__littlefs
+  # (mounts the app_cfg partition, see that REQUIRES entry's own comment) but
+  # this manifest never actually declared it, so the component manager had
+  # nothing to resolve it from — CMake configure failed outright
+  # ("Failed to resolve component 'joltwallet__littlefs'") the first time
+  # dependencies.lock got regenerated in a fresh environment, unrelated to
+  # whatever else prompted that regen. Pre-existing gap, found while
+  # verifying an unrelated change.
+  joltwallet/littlefs:
+    version: ">=1.5.1"
+  # espressif/cjson — same gap as joltwallet/littlefs above, found by the
+  # same rebuild: ota_mgr's and moy's own CMakeLists.txt REQUIRES
+  # espressif__cjson directly (their own comments: "already present under
+  # managed_components/ as a transitive dependency of something else") —
+  # true only as long as some other resolved dependency happened to pull it
+  # in as an optional extra; once dependencies.lock got regenerated fresh
+  # in this environment, nothing pulled it in any more and both components
+  # failed to resolve. Declaring it directly removes the reliance on an
+  # incidental transitive pull.
+  espressif/cjson:
+    version: ">=1.7.14"
   espressif/arduino-esp32:
     version: ">=3.0.0"
     # esp32p4 (tab5): excluded. Native-kernel devices never call into Arduino —

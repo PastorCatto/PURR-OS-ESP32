@@ -350,11 +350,25 @@ static void launch(int registry_idx)
             // — app_manager_launch_by_name() is the local-registry call,
             // independent of s_remote_mode.
             app_manager_launch_by_name(app->name);
-        } else {
-            open_install_dialog(registry_idx, app->name, remote_mac, app->placement != APP_PLACE_LOCAL);
+            purr_systemui_enter_app(registry_idx);
+            return;
         }
-        purr_systemui_enter_app(registry_idx);
-        return;
+        if (app->downloadable) {
+            open_install_dialog(registry_idx, app->name, remote_mac, app->placement != APP_PLACE_LOCAL);
+            purr_systemui_enter_app(registry_idx);
+            return;
+        }
+        // Not downloadable at all (app->downloadable — see app_entry_t's
+        // own doc comment: a pre-linked/compiled-in app like Terminal or
+        // Settings, or an already-personal one) — no install choice to
+        // offer, ever, for this specific app. Real, reported bug when
+        // this check didn't exist: choosing Install for a pre-linked app
+        // always failed server-side (handle_download_info()/_chunk()
+        // both correctly refuse it), with only a confusing "install
+        // failed" notification as the sign anything was wrong. Falls
+        // straight through to the ordinary remote launch below instead —
+        // the same thing tapping it always did before any of this
+        // placement/install work existed.
     }
 #endif
 

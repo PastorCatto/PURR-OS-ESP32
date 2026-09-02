@@ -51,6 +51,30 @@ void miniwin_keyboard_poll(void)
             // shell_message()/desktop_message() themselves, since it
             // doesn't flow through this poll loop.
             if (ev.type == INPUT_EVENT_KEY_DOWN) {
+#ifdef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
+                // While locked, hand real keystrokes to the WinCE desktop's
+                // own credential dialog (real user_mgr_verify() password
+                // entry) instead of miniwin_lock_handle_key()'s legacy
+                // Space→Enter-only dismiss path — that path never delivered
+                // a real character anywhere, which is exactly why the old
+                // lock dialog's User/Password fields were decorative. Still
+                // goes through miniwin_lock_handle_key() itself for the
+                // very first (wake-only) keypress while the screen is dark,
+                // same as before — only once genuinely awake does a key
+                // reach the dialog. Not-yet-logged-in-at-boot needs none of
+                // this special-casing: miniwin_lock_is_locked() is false
+                // then, so the plain find-focused-window path below already
+                // delivers keys to the (modal, frontmost) login dialog.
+                if (miniwin_lock_is_locked()) {
+                    if (miniwin_lock_is_screen_dark()) {
+                        miniwin_lock_handle_key((uint8_t)(ev.keycode & 0xFF));
+                    } else {
+                        extern void wce_credential_dialog_handle_key(uint8_t keycode);
+                        wce_credential_dialog_handle_key((uint8_t)(ev.keycode & 0xFF));
+                    }
+                    continue;
+                }
+#endif
                 if (miniwin_lock_handle_key((uint8_t)(ev.keycode & 0xFF))) continue;
             } else {
                 if (miniwin_lock_handle_other()) continue;
@@ -105,7 +129,6 @@ void miniwin_keyboard_poll(void)
                 continue;
             }
 
-            ESP_LOGD(TAG, "key 0x%04x → window %u", ev.keycode, (unsigned)focused);
             mw_post_message(MW_KEY_PRESSED_MESSAGE,
                             MW_UNUSED_MESSAGE_PARAMETER,
                             focused,

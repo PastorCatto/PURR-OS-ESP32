@@ -1,0 +1,74 @@
+# PURR OS — heltec manual overrides (hand-maintained; chained after the
+# AUTO-GENERATED CoreOS/sdkconfig_heltec in SDKCONFIG_DEFAULTS)
+
+# C++ exceptions — project default is CONFIG_COMPILER_CXX_EXCEPTIONS=n
+# (CoreOS/sdkconfig.defaults). source/modules/reticulum vendors microReticulum
+# (see its own vendor/VENDORED.md), which leans on real throw/try/catch
+# throughout — same reasoning as CoreOS/sdkconfig_tdeck_plus.overrides' own
+# identical line; see that file's comment for the full story. Remember the
+# same gotcha (esp-idf-activation-recipe memory): editing this line has no
+# effect on an already-resolved CoreOS/build_heltec/sdkconfig — delete that
+# file and rebuild for it to actually take effect.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+
+# Bluetooth (NimBLE, BLE-only — see device.pcat's own [modules] bt =
+# "bt_mgr" comment for why, and why this board is riskier than tdeck_plus:
+# no PSRAM at all, so CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL (tdeck_
+# plus's own fix for the host mbuf/event/ACL pools, ~15-20KB) isn't
+# available here — those pools are forced into internal DRAM same as the
+# controller layer already is everywhere. These two are the same
+# controller-layer trims tdeck_plus needed (sdkconfig_tdeck_plus.
+# overrides' own Bluetooth section has the full live-crash history this
+# is ported from) — one phone/host connection at a time is all bt_mgr.c/
+# rnode_ble.c ever need.
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM=24
+
+# WiFi buffer trimming — for RNode mode running alongside the full PURR-
+# to-PURR pairing/server stack (rnode_paired build profile), which needs
+# WiFi (ESP-NOW, via proximity/pairing) and BLE (NimBLE, via rnode) up at
+# the same time. Confirmed live: with WiFi's own stock buffer counts,
+# esp_wifi_init()'s allocations (10 static RX buffers @ ~1.6KB each,
+# never freed until deinit, plus AMPDU BA-window buffers, plus the
+# dynamic RX/TX/management pools) fragment this board's tiny internal
+# DRAM heap badly enough that NimBLE's own later init fails outright
+# ("BLE_INIT: hci inits failed" -> "nimble_port_init failed: ESP_FAIL")
+# even though *total* free bytes still looked healthy (48.9KB) — the
+# largest *contiguous* block left was only 14.5KB. Same underlying
+# lesson as the BT trims above (this board's heap is small enough that
+# fragmentation, not just total usage, matters), just on the WiFi side
+# this time. All symbols confirmed against the real Kconfig
+# (components/esp_wifi/Kconfig) before writing, not guessed.
+#
+# ESP-NOW (what proximity/pairing/homebase actually use) is small,
+# infrequent, broadcast/unicast control-style traffic — none of these
+# trims should meaningfully affect it; they'd matter for sustained high-
+# throughput TCP/IP traffic, which this device's own WiFi use doesn't do
+# (Server Manager's remote WiFi setup is config/control, not bulk
+# transfer either).
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=3
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_MGMT_SBUF_NUM=6
+# AMPDU (802.11n frame aggregation) exists purely for throughput — real
+# cost is a whole separate BA-window buffer allocation machinery neither
+# ESP-NOW nor this device's own light WiFi use benefits from. Disabling
+# both directions removes that machinery entirely rather than just
+# shrinking its window size.
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+
+# Tried pushing these further (2/4/4 + CONFIG_ESP_WIFI_RX_MGMT_BUF_NUM_DEF=2)
+# to also fit rnode_module.c's own RX task after BLE activates — reverted,
+# confirmed WORSE: the task creation "succeeded" but left internal_free in
+# the low HUNDREDS of bytes (once even 148), and the device shortly hit a
+# real Guru Meditation LoadProhibited crash + watchdog reboot loop from
+# starvation elsewhere. A clean, graceful decline (this level) beats a
+# "technically starts, then crashes" state (the further-trimmed level) —
+# see the plan doc's own "RNode + PURR-to-PURR pairing together on
+# heltec" section: this combination genuinely doesn't fit yet, and the
+# real fix is a memory-safety check in rnode_module.c's own module_init()
+# (decline cleanly below some free-memory threshold, same as any other
+# "no reply/fail honestly" guard elsewhere in this codebase), not more
+# WiFi squeezing.

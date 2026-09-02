@@ -1,0 +1,99 @@
+# PURR OS — tdeck_plus_probe manual overrides (hand-maintained; chained after
+# the AUTO-GENERATED CoreOS/sdkconfig_tdeck_plus_probe in SDKCONFIG_DEFAULTS)
+
+# ── Console on the native USB port ───────────────────────────────────────────
+#
+# The T-Deck has no USB-serial bridge chip: its USB-C goes straight to the
+# ESP32-S3's own controller, which is why the board enumerates as /dev/ttyACM0
+# (COMx on Windows). The project default leaves the console on UART0 with USB
+# Serial JTAG as a log-only secondary, which is fine for watching boot messages
+# and useless here — the probe needs STDIN, and UART0 is not reachable over the
+# one cable this board has.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ── Verbose at boot, quiet on demand ─────────────────────────────────────────
+#
+# INFO rather than WARN, specifically so this build is useful for bringing up an
+# emulator. A firmware that goes silent somewhere in system init is a needle in
+# a haystack at WARN; at INFO every startup stage announces itself, and "it
+# stops after MSPI timing" becomes a named line.
+#
+# This MUST be the compile-time default, not an esp_log_level_set() call in the
+# kernel. The interesting stages — MSPI timing tuning, PSRAM detection, heap and
+# partition init — all run inside system startup BEFORE app_main is reached, so
+# anything the kernel sets at runtime is set far too late to have shown them.
+#
+# The cost is a noisier channel, which the protocol was already built to absorb:
+# every protocol line starts with '%' and a host parser drops anything else.
+# For a clean trace capture, `log 0` silences ESP_LOG at runtime without a
+# reflash — probe_host.py's capture mode already does this after reading `id`.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+
+# The second-stage bootloader runs before any of the above and has its own
+# level. Chasing a hang through system init means wanting its stage messages
+# too — segment loads, the partition table, PSRAM bring-up.
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+
+# ── Main task ────────────────────────────────────────────────────────────────
+#
+# app_main becomes the command loop and never returns. It carries the line
+# buffer, the tokenizer's argv, and the SPI trace formatting buffers, and it
+# calls printf — 8 KB rather than the 3.5 KB default, because a stack overflow
+# here presents as the board going silent, which is indistinguishable from the
+# hardware fault the operator is trying to diagnose.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ── Debug build ──────────────────────────────────────────────────────────────
+#
+# -Og, unlike tdeck_plus's -O2. This build has no render loop to speed up, and
+# the one thing it must do well is be steppable in a debugger when a register
+# poke wedges the chip.
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
+
+# ── Recover unattended, don't wait for a human ───────────────────────────────
+#
+# This was CONFIG_ESP_SYSTEM_PANIC_GDBSTUB, which is the right choice for a
+# board on the bench with someone sitting at it, and the wrong one here.
+# GDB-stub halts the CPU and waits: from the host's side the port simply goes
+# quiet forever, and a probe driven remotely by a script — the whole point of
+# this build — is then dead until somebody walks over and power-cycles it. A
+# poke that wedges a peripheral is an EXPECTED outcome of this tool, not an
+# exceptional one, so recovery has to be automatic.
+#
+# PRINT_REBOOT dumps the backtrace to the console (the host sees it, and can
+# keep it) and then reboots. `id`'s reset_reason reports the panic afterwards,
+# so a script can notice it rebooted and why.
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+
+# Task watchdog on the command loop. A panic is caught above; this catches the
+# other failure mode — a write that leaves a peripheral spinning or a bus
+# stalled, where nothing faults but the loop stops servicing commands. The
+# loop feeds the watchdog on every input poll, so a genuine idle wait never
+# trips it (see probe_cmd_loop). 10 s is far longer than any legitimate
+# operation, including a full `snap` of a 4 KB window.
+# _EN is the feature gate that actually compiles task_wdt.c into esp_system;
+# _INIT only asks startup to initialize it. Setting _INIT alone links against
+# functions that were never built — the symptom is an "undefined reference to
+# esp_task_wdt_add" at link, not a config warning.
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+# Panic (and so, with PANIC_PRINT_REBOOT above, reboot) rather than only
+# logging. A watchdog that prints and carries on leaves the board in exactly
+# the wedged state it was meant to rescue.
+CONFIG_ESP_TASK_WDT_PANIC=y
+# The idle tasks are not the subject here and this build starves them briefly
+# during a tight poll loop by design. Watch only the command loop, which
+# subscribes itself.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# ── Radios off ───────────────────────────────────────────────────────────────
+#
+# WiFi and BT are not merely unused here: their stacks take internal RAM and
+# generate background bus and interrupt activity that lands in the middle of a
+# captured trace and makes it unreproducible.
+CONFIG_ESP_WIFI_ENABLED=n
+# CONFIG_BT_ENABLED is not set

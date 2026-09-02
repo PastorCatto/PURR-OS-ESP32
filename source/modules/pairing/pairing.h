@@ -187,6 +187,29 @@ bool pairing_register_user_key(const uint8_t mac[6], const char *username);
 // called).
 bool pairing_verify_user(const uint8_t mac[6], const char *username);
 
+// ── Forced logout (server -> client) ─────────────────────────────────────
+// The one action in this file that runs in reverse — a SERVER calls these
+// to tell an already-trusted CLIENT "you're being disconnected", rather
+// than a client asking a server for something. Real use: freeing this
+// device's own pairing/proximity/WiFi memory for something mutually
+// exclusive with acting as a login server (RNode mode — source/modules/
+// rnode/rnode_module.c) needs any currently-connected client told first,
+// while proximity_rpc itself is still up to carry the call. On the
+// receiving device, this fires user_mgr_logout() and purr_kernel_notify_
+// remote_logout() (purr_kernel.h) — whichever app owns the visible
+// "connected" UI (milkbar, today) reacts via purr_kernel_set_remote_
+// logout_cb(), never a direct call into this file.
+//
+// False only on an RPC-level failure (unreachable/timeout/untrusted) —
+// same "best-effort" contract every other caller-side function here has.
+bool pairing_force_logout(const uint8_t mac[6]);
+// Best-effort broadcast to every device in this file's own trust list —
+// see pairing_force_logout_all()'s own implementation comment
+// (pairing_module.c) for why "every trusted device" rather than "every
+// currently-connected device" (this codebase has no live session tracking
+// today) is the right, safe scope for this.
+void pairing_force_logout_all(void);
+
 // ── Remote OOBE (first-run setup, pushed from a client) ─────────────────
 // For a paired device with no screen/keyboard of its own to run the local
 // oobe app (source/apps/system/oobe/oobe_app.c) — e.g. Heltec's oled_ui —
@@ -220,6 +243,36 @@ bool pairing_remote_oobe_needed(const uint8_t mac[6]);
 // admin password deserves the same protection pairing_request_user_
 // access()'s own password hash already gets, not less.
 bool pairing_remote_oobe_push(const uint8_t mac[6], const char *username, const char *password);
+
+// ── Remote user creation (ongoing, admin action — distinct from OOBE) ────
+// Unlike Remote OOBE above, this is NOT a one-time mechanism: it creates
+// an ADDITIONAL named LOCAL account on the responder, any number of times,
+// for as long as USER_MGR_MAX_USERS allows — "give someone else their own
+// login on my server" after first-run setup is already done, not "set the
+// server up for the first time" (that's still Remote OOBE's job; this
+// function makes no attempt to touch the bootstrap account). Gated the
+// same way every other ongoing server-management action already is
+// (server_mgr.h's own WiFi-set/app-push handlers): pairing_is_trusted(mac)
+// alone, deliberately NOT user_mgr_oobe_completed() — a paired device is
+// already trusted to administer the server at that level, and this action
+// is meant to keep working indefinitely, not close itself off after one
+// use the way Remote OOBE intentionally does.
+typedef enum {
+    PAIRING_USER_CREATE_FAIL = 0,        // untrusted peer, unreachable, or RPC failure
+    PAIRING_USER_CREATE_OK,
+    PAIRING_USER_CREATE_ALREADY_EXISTS,  // a genuine name collision — not OOBE's blanket "already set up"
+    PAIRING_USER_CREATE_INVALID_NAME,
+    PAIRING_USER_CREATE_SERVER_FULL,     // USER_MGR_MAX_USERS reached
+} pairing_user_create_status_t;
+
+// Blocking proximity_rpc_call() — same "never call from cupcake_task or
+// proximity_task" rule as every other function in this header. `password`
+// may be NULL/"" for no password (mirrors user_mgr_create()'s own
+// contract — user_mgr_verify()'s "no password = auto-login identity" rule
+// then applies to this new account the same as any other). Both strings
+// are AES-256-GCM-encrypted under the Phase A pairing secret before going
+// over the air, same protection Remote OOBE's own payload gets.
+pairing_user_create_status_t pairing_remote_user_create(const uint8_t mac[6], const char *username, const char *password);
 
 // ── Shared secret (for other trusted-peer wire protocols) ────────────────
 // The same Phase A ECDH shared secret this file's own USERAUTH/OOBE

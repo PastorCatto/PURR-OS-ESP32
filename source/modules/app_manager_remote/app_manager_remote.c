@@ -61,9 +61,10 @@ static bool handle_list(const uint8_t mac[6], uint16_t action_id,
         if (!app) continue;
         memset(&out[written], 0, sizeof(out[written]));
         strncpy(out[written].name, app->name, sizeof(out[written].name) - 1);
-        out[written].tier      = (uint8_t)app->tier;
-        out[written].state     = (uint8_t)app->state;
-        out[written].placement = (uint8_t)app->placement;
+        out[written].tier         = (uint8_t)app->tier;
+        out[written].state        = (uint8_t)app->state;
+        out[written].placement    = (uint8_t)app->placement;
+        out[written].downloadable = path_not_downloadable(app->path) ? 0 : 1;
         written++;
     }
     *resp_len_out = (size_t)written * sizeof(remote_app_entry_t);
@@ -220,9 +221,10 @@ static int provider_list(const uint8_t mac[6], app_entry_t *out, int max) {
     for (int i = 0; i < n; i++) {
         memset(&out[i], 0, sizeof(out[i]));
         strncpy(out[i].name, entries[i].name, sizeof(out[i].name) - 1);
-        out[i].tier      = (app_tier_t)entries[i].tier;
-        out[i].state     = (app_state_t)entries[i].state;
-        out[i].placement = (app_placement_t)entries[i].placement;
+        out[i].tier         = (app_tier_t)entries[i].tier;
+        out[i].state        = (app_state_t)entries[i].state;
+        out[i].placement    = (app_placement_t)entries[i].placement;
+        out[i].downloadable = entries[i].downloadable != 0;
         // path/window/error/speed_demon/mem_free_at_launch stay zeroed —
         // nothing downstream of app_manager's remote-mode dereferences them
         // (app_manager_launch_idx()/_stop()'s remote branches key off

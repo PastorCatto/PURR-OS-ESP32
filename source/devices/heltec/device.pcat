@@ -19,7 +19,12 @@ psram       = false
 # purrstrap.py's own build_flash_image()/cmd_build() plumbing).
 ota            = true
 spiffs_kb      = 1024
-spiffs_offset  = "0x320000"
+# 0x4A0000 — moved from 0x420000 when partitions_8mb_ota.csv's ota_0/
+# ota_1 grew again, 2MB -> 2.25MB each, to absorb source/modules/rnode's
+# own esp_wifi/esp_netif linkage overflow (see that CSV's own comment for
+# the measurement this is based on). Must match the CSV exactly — see
+# this section's own top comment on why.
+spiffs_offset  = "0x4A0000"
 
 [drivers]
 display     = "ssd1306"
@@ -58,12 +63,25 @@ mesh        = "meshtastic"
 # stack) are correctly NOT auto-added — this device can be logged INTO,
 # but has no screen to log OUT to another server FROM; that stays
 # restricted to purr_win/bigger-screen devices like tdeck_plus. This board
-# gets its own hand-built Pair screen in oled_ui_module.c instead. No
-# wifi_mgr on this device (no WiFi network connectivity needed) —
-# proximity_module.c brings up the WiFi driver itself in STA mode (never
-# connected to an AP) since nothing else on this device does, see its own
-# ensure_wifi_ready() comment.
+# gets its own hand-built Pair screen in oled_ui_module.c instead.
 server      = true
+# wifi_mgr — REQUIRED for Server Manager's remote WiFi setup
+# (SRVMGR_ACTION_WIFI_STATUS/_SET, server_mgr.c) to actually work on this
+# device: both handlers gate on purr_kernel_get_module("wifi_mgr") !=
+# NULL, reporting "unsupported" otherwise — confirmed live, that's all
+# this device ever reported before this entry existed. NOT auto-added by
+# apply_radio_companion_defaults() (it isn't in that function's own
+# module set at all, unlike proximity/pairing/server_mgr above), so it
+# needs the same explicit entry user_mgr's own comment below already
+# established the pattern for. Was deliberately left off earlier — "no
+# WiFi network connectivity needed" was true right up until Server
+# Manager's own remote WiFi setup became a real requirement; that
+# decision doesn't hold any more. wifi_mgr_init() itself now brings up
+# its own prerequisites if nothing already has (wifi_mgr.c's own
+# ensure_wifi_stack_ready(), mirroring proximity_module.c's identical
+# ensure_wifi_ready() — this device's generic boot.c does none of that
+# groundwork the way kernel_tdp_boot.c does for tdeck_plus).
+wifi_mgr    = "wifi_mgr"
 # user_mgr — REQUIRED for the server stack above to actually work, not
 # optional groundwork: found live on real hardware while verifying this
 # very feature. apply_radio_companion_defaults()/pairing's own CMakeLists
@@ -84,6 +102,49 @@ server      = true
 # that fleet-wide is a separate, deliberately out-of-scope follow-up from
 # this one device's own pass.
 user_mgr    = "user_mgr"
+# reticulum — Stage 1 compile-proof only, same temporary entry as tdeck_
+# plus's device.pcat (see its own comment there / the plan doc / vendor/
+# VENDORED.md under source/modules/reticulum/). This board has NO PSRAM at
+# all, making it the real worst-case signal for whether the vendored stack
+# fits — that's Stage 2's job (real memory numbers), this line only proves
+# it compiles here too.
+reticulum   = "reticulum"
+# rnode — RNode-over-BLE mode (see the plan doc): this device acting as a
+# real RNode radio for an external host (Sideband/rns/NomadNet) over BLE
+# (Nordic UART Service), driving the same catcall_radio_t meshtastic/
+# reticulum already use. Mutually exclusive with them at runtime via
+# purr_kernel_mesh_backend_t, not at build time — all four compile in
+# together, purr_kernel_mesh_backend_get() (NVS-backed) picks one at boot.
+# This is the primary target device for RNode mode: it's the actual
+# RNode-shaped hardware (small, LoRa-focused), unlike tdeck_plus — see
+# that device's own device.pcat comment for why BT was tried and reverted
+# there (full/default-profile DRAM overflow at link time).
+#
+# source/modules/rnode/ now exists (Stage 1) — turned on.
+rnode       = "rnode"
+# bt — NimBLE, BLE-only (same ESP32-S3 chip family as tdeck_plus, same
+# "no classic BT hardware at all" reasoning — see bt_mgr.c/sdkconfig_
+# heltec.overrides). [radio] bt = true above has been true from this
+# device's very first version, but that flag alone does NOT drive
+# CONFIG_BT_NIMBLE_ENABLED — only this [modules] line does (purrstrap's
+# _sdkconfig_lines() derives it from here, same as tdeck_plus). Needed by
+# both meshtastic's own phone-companion BLE (mesh_ble.c, dormant on this
+# device until someone actually enables it) and rnode's BLE transport
+# (rnode_ble.c) above.
+#
+# UNPROVEN on this board: this device has NO PSRAM at all ([device]
+# psram = false), so CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL (the fix
+# that let tdeck_plus's NimBLE HOST pools — msys/event/ACL, ~15-20KB —
+# escape into PSRAM) is not an option here; those pools are forced into
+# internal DRAM same as the lower controller layer already is on every
+# device. Expect a materially bigger fixed internal-DRAM cost than
+# tdeck_plus's own measured ~26-27KB steady-state (that number already
+# excludes the PSRAM-redirected host pools). See CoreOS/sdkconfig_heltec.
+# overrides for the same trimming knobs tdeck_plus needed, and the
+# "rnode_test" build profile (purrstrap.py's BUILD_PROFILES) for shedding
+# the radio-companion/server stack and non-essential apps to maximize
+# what's left for this.
+bt          = "bt_mgr"
 
 [ui]
 style       = "full"
@@ -114,6 +175,10 @@ oled_ui               = 2
 app_manager           = 2
 meshtastic             = 2
 user_mgr               = 2
+wifi_mgr               = 2
+reticulum              = 3
+rnode                  = 3
+bt_mgr                 = 2
 battery/adc_battery    = 3
 apps/settings          = 3
 apps/terminal          = 3

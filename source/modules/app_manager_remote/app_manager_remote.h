@@ -66,11 +66,16 @@ typedef struct __attribute__((packed)) {
 // app_state_t's raw values (app_manager.h) — Milkbar interprets them the
 // same way the local Cat Apps launcher does. placement is app_placement_t
 // (app_manager.h) — REMOTE (0) for every app that predates this field.
+// downloadable mirrors app_entry_t.downloadable (app_manager.h) — see
+// its own doc comment; computed server-side by handle_list() the same
+// way handle_download_info()/_chunk() already gate the real thing, so
+// the two can never disagree.
 typedef struct __attribute__((packed)) {
     char    name[48];
     uint8_t tier;
     uint8_t state;
     uint8_t placement;
+    uint8_t downloadable;
 } remote_app_entry_t;
 
 // Called once from app_manager_init() to register this device as a Remote

@@ -96,6 +96,18 @@ typedef struct {
     uint32_t    mem_free_at_launch;
     // See app_placement_t's own doc comment just above.
     app_placement_t placement;
+    // REMOTE-listing only (always true for a genuinely local entry, see
+    // app_manager_remote.c's own handle_list() for where this is
+    // actually computed) — false means this app has no real, extractable
+    // file behind it to serve (a pre-linked/compiled-in app like
+    // Terminal or Settings, or one already loaded from claw_loader's
+    // personal-space storage) and can never be downloaded, only run on
+    // the server. A UI offering the install-vs-run-remote choice
+    // (cheetah_home.c's launch()) must check this BEFORE showing
+    // "Install" — a real, reported bug when it didn't: choosing Install
+    // for a pre-linked app like Terminal always failed, with a confusing
+    // "install failed" notification as the only sign anything was wrong.
+    bool downloadable;
 } app_entry_t;
 
 // ── Public API ────────────────────────────────────────────────────────────────

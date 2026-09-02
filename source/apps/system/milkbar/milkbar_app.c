@@ -386,6 +386,15 @@ static purr_wid_t s_setup_status_lbl = 0;
 static uint8_t        s_setup_target_mac[6];
 static volatile bool  s_setup_in_flight = false;
 
+// "Add User" — ongoing (pairing_remote_user_create(), not the one-time
+// OOBE push above), same statics shape as Push Setup just above.
+static purr_win_t s_adduser_dlg        = 0;
+static purr_wid_t s_adduser_user_input = 0;
+static purr_wid_t s_adduser_pass_input = 0;
+static purr_wid_t s_adduser_status_lbl = 0;
+static uint8_t        s_adduser_target_mac[6];
+static volatile bool  s_adduser_in_flight = false;
+
 // Gated on s_nearby_win: skips all of this (formatting rows nobody would
 // see, pushing them to widgets that don't exist yet) until the Nearby
 // section has actually been opened once — same "don't do the work for a
@@ -651,6 +660,107 @@ static void on_nearby_setup_click(purr_wid_t w, purr_event_t e, void *user) {
     open_setup_dialog();
 }
 
+// ── Add User (ongoing — see pairing.h's pairing_remote_user_create() for
+// how this differs from Push Setup above) ────────────────────────────────
+
+typedef struct {
+    uint8_t mac[6];
+    char    username[USER_MGR_USERNAME_MAX];
+    char    password[64];
+} adduser_ctx_t;
+
+// Same fire-and-forget one-shot-task shape as setup_push_task() above —
+// same reasoning: never call pairing_remote_user_create() (a blocking
+// proximity_rpc_call()) from cupcake_task.
+static void adduser_task(void *arg) {
+    adduser_ctx_t *ctx = (adduser_ctx_t *)arg;
+    pairing_user_create_status_t st = pairing_remote_user_create(ctx->mac, ctx->username, ctx->password);
+    if (s_adduser_status_lbl) {
+        // Distinct wording per status — the whole point of this action
+        // having a richer response than Push Setup's flat ok/fail (see
+        // pairing.h's own comment on why: "already exists" is a genuine
+        // name collision here, not OOBE's blanket "already set up").
+        const char *msg;
+        switch (st) {
+            case PAIRING_USER_CREATE_OK:             msg = "User created!"; break;
+            case PAIRING_USER_CREATE_ALREADY_EXISTS:  msg = "That username is already taken on this server"; break;
+            case PAIRING_USER_CREATE_INVALID_NAME:    msg = "Enter a valid username"; break;
+            case PAIRING_USER_CREATE_SERVER_FULL:     msg = "That server already has its maximum number of users"; break;
+            default:                                  msg = "Could not reach the server"; break;
+        }
+        purr_win_label_set(s_adduser_status_lbl, msg);
+    }
+    memset(ctx->password, 0, sizeof(ctx->password));
+    free(ctx);
+    s_adduser_in_flight = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void on_adduser_create_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    if (s_adduser_in_flight) return;   // already running — ignore a double-tap
+
+    const char *u = s_adduser_user_input ? purr_win_textarea_get(s_adduser_user_input) : NULL;
+    if (!u || !u[0]) {
+        if (s_adduser_status_lbl) purr_win_label_set(s_adduser_status_lbl, "Enter a username");
+        return;
+    }
+
+    adduser_ctx_t *ctx = malloc(sizeof(*ctx));
+    if (!ctx) return;
+    memcpy(ctx->mac, s_adduser_target_mac, 6);
+    const char *p = s_adduser_pass_input ? purr_win_textarea_get(s_adduser_pass_input) : NULL;
+    snprintf(ctx->username, sizeof(ctx->username), "%s", u);
+    snprintf(ctx->password, sizeof(ctx->password), "%s", p ? p : "");
+
+    if (s_adduser_status_lbl) purr_win_label_set(s_adduser_status_lbl, "Creating user...");
+    s_adduser_in_flight = true;
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(adduser_task, "milkbar_adduser", 4096, ctx, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) {
+        s_adduser_in_flight = false;
+        free(ctx);
+        if (s_adduser_status_lbl) purr_win_label_set(s_adduser_status_lbl, "Could not start - try again");
+    }
+}
+
+static void on_adduser_cancel_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    if (s_adduser_dlg) purr_win_hide(s_adduser_dlg);
+}
+
+// Lazy create-then-show, same pattern open_setup_dialog() above uses.
+static void open_adduser_dialog(void) {
+    if (!s_adduser_dlg) {
+        s_adduser_dlg = purr_win_create("Add User");
+        purr_win_label(s_adduser_dlg, "Username:");
+        s_adduser_user_input = purr_win_textarea(s_adduser_dlg, 100, 16);
+        purr_win_label(s_adduser_dlg, "Password (optional):");
+        s_adduser_pass_input = purr_win_textarea(s_adduser_dlg, 100, 16);
+        s_adduser_status_lbl = purr_win_label(s_adduser_dlg, "");
+
+        purr_wid_t row = purr_win_row(s_adduser_dlg, 2);
+        purr_win_button(s_adduser_dlg, "Create", on_adduser_create_click, NULL);
+        purr_win_button(s_adduser_dlg, "Cancel", on_adduser_cancel_click, NULL);
+        purr_win_layout_end(row);
+    }
+
+    if (s_adduser_user_input) purr_win_textarea_clear(s_adduser_user_input);
+    if (s_adduser_pass_input) purr_win_textarea_clear(s_adduser_pass_input);
+    if (s_adduser_status_lbl) purr_win_label_set(s_adduser_status_lbl, "");
+    purr_win_show(s_adduser_dlg);
+}
+
+static void on_nearby_adduser_click(purr_wid_t w, purr_event_t e, void *user) {
+    (void)w; (void)e; (void)user;
+    int idx = purr_win_list_get_selected(s_nearby_paired_list);
+    if (idx < 0) return;
+    paired_device_t pd;
+    if (!pairing_device_at(idx, &pd)) return;
+    memcpy(s_adduser_target_mac, pd.mac, 6);
+    open_adduser_dialog();
+}
+
 static void open_nearby(purr_wid_t w, purr_event_t e, void *u) {
     (void)w; (void)e; (void)u;
     if (s_nearby_win) { purr_win_show(s_nearby_win); refresh_nearby(); return; }
@@ -659,12 +769,13 @@ static void open_nearby(purr_wid_t w, purr_event_t e, void *u) {
     add_back_button(s_nearby_win);
     s_nearby_status_lbl = purr_win_label(s_nearby_win, "Proximity: starting...");
 
-    purr_wid_t row = purr_win_row(s_nearby_win, 5);
+    purr_wid_t row = purr_win_row(s_nearby_win, 6);
     purr_win_button(s_nearby_win, "Refresh", on_nearby_refresh_click, NULL);
     purr_win_button(s_nearby_win, "Pair", on_nearby_pair_click, NULL);
     purr_win_button(s_nearby_win, "Unpair", on_nearby_unpair_click, NULL);
     purr_win_button(s_nearby_win, "Set Home", on_nearby_set_home_click, NULL);
     purr_win_button(s_nearby_win, "Setup", on_nearby_setup_click, NULL);
+    purr_win_button(s_nearby_win, "Add User", on_nearby_adduser_click, NULL);
     purr_win_layout_end(row);
 
     s_nearby_list = purr_win_list(s_nearby_win, 100, 40);
@@ -751,6 +862,18 @@ static int milkbar_app_init(void) {
         purr_win_show(s_win);
     }
 
+    // Registers this app as the single UI-agnostic consumer of a forced
+    // remote logout (purr_kernel.h's purr_kernel_set_remote_logout_cb() —
+    // see pairing_module.c's handle_userauth_force_logout() for the real
+    // trigger). disconnect_to_connection_screen() itself is already the
+    // exact right recipe (same one the local Disconnect button runs), and
+    // its purr_win_*/user_mgr_logout()/app_manager_clear_remote() calls
+    // are all safe to run from whatever task context fires this callback
+    // on (proximity_rpc's own dispatch, not this app's own task) — same
+    // "backend defers internally" contract every other cross-task purr_
+    // win_* call in this codebase already relies on.
+    purr_kernel_set_remote_logout_cb(disconnect_to_connection_screen);
+
     s_running = true;
     // Background task refreshes Connection/Nearby/Dashboard's own local
     // reads — none of them block on a network round trip any more (the
@@ -767,6 +890,10 @@ static void milkbar_app_deinit(void) {
     if (s_refresh_done) xSemaphoreTake(s_refresh_done, pdMS_TO_TICKS(2000));
     s_refresh_task = NULL;
 
+    // Unregister — disconnect_to_connection_screen() itself is about to
+    // become invalid to call (s_win/s_dashboard_win get destroyed below).
+    purr_kernel_set_remote_logout_cb(NULL);
+
     // This app is the one that turned remote mode on (ensure_remote_
     // connected()) — turn it back off if it's still running when this app
     // is stopped, same hygiene reasoning systemui_xp.c's menu_logoff_cb()
@@ -777,6 +904,10 @@ static void milkbar_app_deinit(void) {
     if (s_setup_dlg) {
         purr_win_destroy(s_setup_dlg);
         s_setup_dlg = 0; s_setup_user_input = 0; s_setup_pass_input = 0; s_setup_status_lbl = 0;
+    }
+    if (s_adduser_dlg) {
+        purr_win_destroy(s_adduser_dlg);
+        s_adduser_dlg = 0; s_adduser_user_input = 0; s_adduser_pass_input = 0; s_adduser_status_lbl = 0;
     }
     if (s_nearby_win) {
         purr_win_destroy(s_nearby_win);

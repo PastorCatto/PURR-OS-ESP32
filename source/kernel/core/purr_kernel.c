@@ -17,6 +17,8 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_sleep.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_notify_buf's own comment below
+#include "esp_mac.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -192,6 +194,24 @@ static purr_mem_pressure_cb_t s_mem_pressure_cb = NULL;
 
 void purr_kernel_set_mem_pressure_cb(purr_mem_pressure_cb_t cb) {
     s_mem_pressure_cb = cb;
+}
+
+static purr_remote_logout_cb_t s_remote_logout_cb = NULL;
+
+void purr_kernel_set_remote_logout_cb(purr_remote_logout_cb_t cb) {
+    s_remote_logout_cb = cb;
+}
+void purr_kernel_notify_remote_logout(void) {
+    if (s_remote_logout_cb) s_remote_logout_cb();
+}
+
+static purr_radio_offload_cb_t s_radio_offload_cb = NULL;
+
+void purr_kernel_set_radio_offload_cb(purr_radio_offload_cb_t cb) {
+    s_radio_offload_cb = cb;
+}
+void purr_kernel_notify_radio_offload_needed(void) {
+    if (s_radio_offload_cb) s_radio_offload_cb();
 }
 
 static void (*s_panic_usb_share_cb)(void) = NULL;
@@ -1635,16 +1655,67 @@ void purr_kernel_shutdown(void) {
 #define MESH_BACKEND_NVS_NS  "purr_settings"
 #define MESH_BACKEND_NVS_KEY "mesh_backend"
 
+// TEMPORARY — Stage 2 radio proof-of-concept only (see the plan doc /
+// source/modules/reticulum/vendor/VENDORED.md). Was forced to 1 to make
+// reticulum win regardless of NVS while that stage was under test; now
+// back to 0 — real switching goes through Settings' "Use Reticulum"/"Use
+// RNode Mode" buttons (purr_kernel_mesh_backend_switch()) again. Left
+// defined (rather than deleted) in case a similar single-backend forcing
+// need comes up for RNode-mode's own bring-up.
+#define RETICULUM_STAGE2_FORCE_BACKEND 0
+
+// TEMPORARY — RNode-mode proof-of-concept only (see the plan doc), spans
+// Stage 1 through Stage 3's own testing, not just Stage 1 despite the
+// name. This heltec's own NVS has no explicit mesh_backend preference
+// stored (falls through to the MESHTASTIC default), and there's no
+// interactive UI on this device (oled_ui, no purr_win backend, so
+// Settings' own "Use RNode Mode" button can't actually be tapped) to set
+// one — same reasoning RETICULUM_STAGE2_FORCE_BACKEND above already
+// established for the identical problem. Was 1 through Stage 1/2/3
+// testing (handshake, radio-parameter set+echo, real CMD_DATA bridging
+// both directions over real LoRa against a real reticulum peer) — all
+// confirmed working live, see the plan doc. Back to 0.
+//
+// Flipped to 1 again, TEMPORARILY, for one more real-hardware pass: live-
+// testing the offload/reload sequence (rnode_module.c's
+// offload_radio_companion_stack()/reload_radio_companion_stack()) under
+// the "rnode_paired" profile, where the full radio-companion stack is
+// actually present to offload — rnode_test never exercises this path
+// since that profile drops the companion stack at compile time already.
+// Found and fixed a real bug this pass: the reload direction failed
+// ("proximity_rpc: alloc failed", "homebase: failed to create homebase
+// task") because rnode_ble_deinit() only stopped BLE advertising, never
+// actually freed NimBLE's own ~64-70KB (nimble_port_stop() != nimble_
+// port_deinit() — see bt_mgr_deinit()'s own doc comment for the fix).
+// Confirmed working both directions afterward. Back to 0.
+#define RNODE_STAGE1_FORCE_BACKEND 0
+
+// Default fallback (no explicit NVS preference stored, or NVS unreadable)
+// changed from MESHTASTIC to RETICULUM — meshtastic taken out of the mix
+// "for the time being" at the user's own request, to focus dev/test effort
+// on reticulum only. Meshtastic stays fully compiled in on both devices
+// (not a device.pcat/profile change) and is still one Settings-button tap
+// (or purr_kernel_mesh_backend_switch()) away from coming back — this is
+// just which backend wins when nothing else has been explicitly chosen.
 purr_mesh_backend_t purr_kernel_mesh_backend_get(void) {
+#if RETICULUM_STAGE2_FORCE_BACKEND
+    return PURR_MESH_BACKEND_RETICULUM;
+#elif RNODE_STAGE1_FORCE_BACKEND
+    return PURR_MESH_BACKEND_RNODE;
+#else
     nvs_handle_t h;
     if (nvs_open(MESH_BACKEND_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
-        return PURR_MESH_BACKEND_MESHTASTIC;
+        return PURR_MESH_BACKEND_RETICULUM;
     }
-    uint8_t v = PURR_MESH_BACKEND_MESHTASTIC;
+    uint8_t v = PURR_MESH_BACKEND_RETICULUM;
     esp_err_t err = nvs_get_u8(h, MESH_BACKEND_NVS_KEY, &v);
     nvs_close(h);
-    if (err != ESP_OK) return PURR_MESH_BACKEND_MESHTASTIC;
-    return (v == PURR_MESH_BACKEND_MESHCORE) ? PURR_MESH_BACKEND_MESHCORE : PURR_MESH_BACKEND_MESHTASTIC;
+    if (err != ESP_OK) return PURR_MESH_BACKEND_RETICULUM;
+    if (v == PURR_MESH_BACKEND_MESHTASTIC) return PURR_MESH_BACKEND_MESHTASTIC;
+    if (v == PURR_MESH_BACKEND_MESHCORE)   return PURR_MESH_BACKEND_MESHCORE;
+    if (v == PURR_MESH_BACKEND_RNODE)      return PURR_MESH_BACKEND_RNODE;
+    return PURR_MESH_BACKEND_RETICULUM;
+#endif
 }
 
 void purr_kernel_mesh_backend_set(purr_mesh_backend_t backend) {
@@ -1671,11 +1742,14 @@ void purr_kernel_mesh_backend_set(purr_mesh_backend_t backend) {
 int purr_kernel_mesh_backend_switch(purr_mesh_backend_t backend) {
     purr_kernel_mesh_backend_set(backend);
 
-    const char *target_name = (backend == PURR_MESH_BACKEND_MESHCORE) ? "meshcore" : "meshtastic";
-    const char *other_name  = (backend == PURR_MESH_BACKEND_MESHCORE) ? "meshtastic" : "meshcore";
+    static const char *kAllBackends[] = { "meshtastic", "meshcore", "reticulum", "rnode" };
+    const char *target_name = kAllBackends[(int)backend];
 
-    if (purr_kernel_get_module(other_name)) {
-        purr_kernel_module_set_enabled(other_name, false);
+    for (size_t i = 0; i < sizeof(kAllBackends) / sizeof(kAllBackends[0]); i++) {
+        if (kAllBackends[i] == target_name) continue;
+        if (purr_kernel_get_module(kAllBackends[i])) {
+            purr_kernel_module_set_enabled(kAllBackends[i], false);
+        }
     }
     if (purr_kernel_get_module(target_name)) {
         return PURR_MODCTL_ERR_ALREADY;   // already running — nothing left to do
@@ -1683,12 +1757,74 @@ int purr_kernel_mesh_backend_switch(purr_mesh_backend_t backend) {
     return purr_kernel_module_set_enabled(target_name, true);
 }
 
+// ── Device hostname ───────────────────────────────────────────────────────
+
+#define HOSTNAME_NVS_NS  "purr_settings"
+#define HOSTNAME_NVS_KEY "hostname"
+
+static void hostname_default(char *out, size_t out_len) {
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    // Same "PurrOS-XXXX" MAC-suffix shape proximity_module.c has always
+    // generated on its own — an unconfigured device keeps showing the
+    // identical name it always has.
+    snprintf(out, out_len, "PurrOS-%02X%02X", mac[4], mac[5]);
+}
+
+bool purr_kernel_hostname_valid(const char *name) {
+    if (!name || !name[0]) return false;
+    size_t len = strlen(name);
+    if (len > PURR_HOSTNAME_MAX - 1) return false;
+    for (size_t i = 0; i < len; i++) {
+        if ((unsigned char)name[i] < 0x20) return false;
+    }
+    return true;
+}
+
+void purr_kernel_hostname_get(char *out, size_t out_len) {
+    if (!out || out_len == 0) return;
+
+    nvs_handle_t h;
+    if (nvs_open(HOSTNAME_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        size_t len = out_len;
+        esp_err_t err = nvs_get_str(h, HOSTNAME_NVS_KEY, out, &len);
+        nvs_close(h);
+        if (err == ESP_OK && out[0]) return;
+    }
+    hostname_default(out, out_len);
+}
+
+bool purr_kernel_hostname_set(const char *name) {
+    if (!purr_kernel_hostname_valid(name)) return false;
+
+    nvs_handle_t h;
+    if (nvs_open(HOSTNAME_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t err = nvs_set_str(h, HOSTNAME_NVS_KEY, name);
+    if (err == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
 // ── Notifications ─────────────────────────────────────────────────────────────
 // Ring buffer indexed by insertion order; s_notify_head points at the slot
 // the *next* notification will be written to, so the most recent entry is
 // always at (s_notify_head - 1).
 
-static purr_notification_t s_notify_buf[PURR_NOTIFY_MAX];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — the biggest static chunk
+// left in the kernel's own core file (32 * ~120-byte entries), self-
+// contained (only touched by this ring buffer's own read/write/compact
+// logic right below) and never touched during an actual panic/fault: its
+// one crash-adjacent caller, purr_crash_guard_check_reset_reason(), only
+// runs on the NEXT boot after a crash, well after PSRAM init, not from
+// fault/ISR context (see that function's own "purr_kernel_notify() is
+// RAM-only" comment). Deliberately NOT applied to s_modules/s_static_reg/
+// s_inputs/s_health or either static task stack in this file — those are
+// foundational registries and watchdog infrastructure this kernel leans on
+// being unconditionally available, not display buffers. Real, confirmed
+// via purr_os.map: a genuine link-time DRAM overflow once the current app
+// set was all compiled in together (see msn.c's matching comment,
+// 2026-09-01).
+static EXT_RAM_BSS_ATTR purr_notification_t s_notify_buf[PURR_NOTIFY_MAX];
 static int                  s_notify_head  = 0;
 static int                  s_notify_count = 0;
 

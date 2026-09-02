@@ -293,16 +293,19 @@ bool     purr_kernel_run_bounded(const char *label, purr_bounded_fn_t fn,
 void     purr_kernel_shutdown(void);
 
 // ── Mesh backend preference ─────────────────────────────────────────────────
-// Which mesh protocol module (meshtastic vs meshcore — mutually exclusive,
-// one physical radio) should activate at boot. NVS-backed directly
-// (namespace "purr_settings", key "mesh_backend") rather than the RAM-
-// cached-and-app-persisted pattern purr_kernel_screen_timeout_min() uses:
-// mesh_manager_init()/mc_manager_init() need this value before MSN or
-// Settings exist as running apps, so every call reads/writes NVS fresh
-// rather than relying on an app having already loaded it into kernel RAM.
+// Which mesh protocol module (meshtastic vs meshcore vs reticulum vs rnode —
+// mutually exclusive, one physical radio) should activate at boot. NVS-
+// backed directly (namespace "purr_settings", key "mesh_backend") rather
+// than the RAM-cached-and-app-persisted pattern purr_kernel_screen_
+// timeout_min() uses: mesh_manager_init()/mc_manager_init()/reticulum's/
+// rnode's own module_init() need this value before MSN or Settings exist as
+// running apps, so every call reads/writes NVS fresh rather than relying
+// on an app having already loaded it into kernel RAM.
 typedef enum {
     PURR_MESH_BACKEND_MESHTASTIC = 0,  // default when no preference is stored yet
     PURR_MESH_BACKEND_MESHCORE   = 1,
+    PURR_MESH_BACKEND_RETICULUM  = 2,
+    PURR_MESH_BACKEND_RNODE      = 3,  // acts as a real RNode radio over BLE (Nordic UART Service)
 } purr_mesh_backend_t;
 
 purr_mesh_backend_t purr_kernel_mesh_backend_get(void);
@@ -317,6 +320,31 @@ void                 purr_kernel_mesh_backend_set(purr_mesh_backend_t backend);
 // to be fully unloaded from the registry, not a reboot). Returns a
 // PURR_MODCTL_* result code for the "start target" step.
 int purr_kernel_mesh_backend_switch(purr_mesh_backend_t backend);
+
+// ── Device hostname ──────────────────────────────────────────────────────
+// A user-facing device name, shown to other devices/networks this device
+// participates in — proximity's own ESP-NOW beacon and reticulum's
+// Announce app_data are the first two consumers, both reading this
+// instead of deriving their own name independently. NVS-backed directly
+// (namespace "purr_settings", key "hostname"), same reasoning as mesh
+// backend above: needed before Settings exists as a running app.
+#define PURR_HOSTNAME_MAX 32   // includes NUL — matches proximity's own
+                                // beacon.name[20] wire field being the
+                                // tighter of the two real consumers; this
+                                // is the generic ceiling, not that one
+
+// Always writes a NUL-terminated name into out (truncating to out_len if
+// needed) — the configured hostname if one has been set, otherwise the
+// same "PurrOS-XXXX" MAC-suffix default proximity_module.c has always
+// auto-generated on its own, so an unconfigured device's name doesn't
+// change out from under anything already reading it today.
+void purr_kernel_hostname_get(char *out, size_t out_len);
+
+// False (no change made) if name is empty, longer than PURR_HOSTNAME_MAX-1,
+// or contains a control character (bytes < 0x20) — display/wire safety,
+// not a strict Unix-hostname charset; spaces and punctuation are fine.
+bool purr_kernel_hostname_set(const char *name);
+bool purr_kernel_hostname_valid(const char *name);
 
 // Called by SD / WiFi / PMIC / LoRa drivers when their state changes
 void     purr_kernel_set_sd_available(bool v);
@@ -538,6 +566,58 @@ void purr_kernel_notify_window_created(purr_win_t win);
 typedef bool (*purr_mem_pressure_cb_t)(void);
 
 void purr_kernel_set_mem_pressure_cb(purr_mem_pressure_cb_t cb);
+
+// ── Remote forced logout ─────────────────────────────────────────────────
+// Same single-slot registration shape as purr_kernel_set_window_created_cb()/
+// purr_kernel_set_mem_pressure_cb() above — the ONE place a network-facing,
+// UI-agnostic module (pairing.c) can hand off "this device just got forced
+// off a remote server" to whichever app actually owns the visible
+// "connected" UI, without pairing.c/app_manager_remote.c ever linking a UI
+// header themselves. milkbar is the natural (and today, only) consumer —
+// it's the one PURR_MOD_APP that stays resident for the whole duration of
+// a remote session (see its own header comment on why it keeps running
+// with no window during Desktop mode) — registering during its own
+// init(), unregistering at deinit(). Real trigger: pairing_module.c's own
+// PAIRING_ACTION_USERAUTH_FORCE_LOGOUT responder (pairing.h) calls
+// purr_kernel_notify_remote_logout() the moment a trusted server asks this
+// device to disconnect — e.g. because that server is about to shut its
+// own pairing/proximity/WiFi stack down to free memory for RNode mode
+// (source/modules/rnode/rnode_module.c).
+typedef void (*purr_remote_logout_cb_t)(void);
+
+void purr_kernel_set_remote_logout_cb(purr_remote_logout_cb_t cb);
+
+// Called by pairing_module.c's own responder — not meant to be called
+// directly by apps.
+void purr_kernel_notify_remote_logout(void);
+
+// ── Radio-companion offload ──────────────────────────────────────────────
+// Same single-slot shape one more time — this one exists to avoid the
+// REVERSE dependency direction the two callbacks above don't have:
+// rnode_module.c (source/modules/rnode/) needs to tell a currently-
+// connected client "you're being disconnected" as part of freeing memory
+// for RNode mode (see that file's own "Radio-companion offload/reload"
+// header comment), which really means calling pairing_force_logout_all()
+// (pairing.h) — but rnode_module.c must NOT #include pairing.h or add
+// "pairing" to its own CMakeLists REQUIRES to do that: every
+// PURR_MODULE_REGISTER() struct is a non-static global (purr_module.h),
+// so the linker can never prove ANY of a module's own functions are dead
+// once that struct is reachable — confirmed live, linking pairing.c into
+// a build that never even registers it (rnode_test, no radio-companion
+// stack at all) grew that image from 89% to 99% of its OTA partition,
+// pulling in pairing's entire OOBE/USERAUTH/crypto implementation for
+// nothing. Routing through this callback instead means a build that never
+// lists "pairing" in its own [modules] never links pairing.c at all —
+// pairing_module.c's own pairing_init()/_deinit() register/unregister
+// this, and rnode_module.c only ever calls the generic notify function,
+// which is a safe, cheap no-op when nothing has registered.
+typedef void (*purr_radio_offload_cb_t)(void);
+
+void purr_kernel_set_radio_offload_cb(purr_radio_offload_cb_t cb);
+
+// Called by rnode_module.c before it tears its own radio-companion stack
+// down — not meant to be called directly by apps.
+void purr_kernel_notify_radio_offload_needed(void);
 
 // ── Boot readiness ────────────────────────────────────────────────────────────
 // Set once by the specialized kernel boot, after every static module/app has

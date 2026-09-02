@@ -72,6 +72,28 @@ bool miniwin_lock_handle_touch(bool in_hotspot);
 // was consumed by the lock.
 bool miniwin_lock_handle_other(void);
 
+// True once the wake-on-first-input step has already happened (backlight
+// restored) and this input can be treated as a real interaction rather
+// than "just wake up" — false right after miniwin_lock_check_idle() first
+// dims the screen. A caller that wants to hand REAL keystrokes to its own
+// credential UI instead of miniwin_lock_handle_key()'s Space→Enter-only
+// path (see miniwin_wince_desktop.c's credential dialog) still needs to
+// let the very first input through miniwin_lock_handle_key()/_touch()/
+// _other() as normal — this is what tells it when it's safe to stop doing
+// that and start delivering keys for real.
+bool miniwin_lock_is_screen_dark(void);
+
+// Externally forces the locked→unlocked transition (fires the same
+// registered miniwin_lock_transition_cb_t a Space→Enter dismiss would),
+// for a caller that has independently verified the correct credentials
+// itself (miniwin_wince_desktop.c's credential dialog, via user_mgr_
+// verify()) rather than going through this module's own dismiss gesture.
+// Purely additive — every existing dismiss path (Space→Enter,
+// touch-in-hotspot) is untouched, so this has no effect on any caller that
+// doesn't call it (kernel_tdeck_plus_arduino/wince_shell.cpp's own use of
+// this shared lock keeps working exactly as before).
+void miniwin_lock_force_unlock(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,6 +26,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_drv_row_bufs's own comment below
 #include "purr_win.h"
 #include "purr_kernel.h"
 #include "purr_module.h"
@@ -73,7 +74,14 @@ static void add_back_button(purr_win_t win) {
 static purr_win_t  s_drv_win        = 0;
 static purr_wid_t  s_drv_list       = 0;
 static purr_wid_t  s_drv_status_lbl = 0;
-static char        s_drv_row_bufs[DRV_MAX_ROWS][96];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) on this file's row/log buffers
+// — pure rebuilt-on-refresh display text, never touched before PSRAM is up
+// (diagnostics is a normal launched app). Same class MiniWin's own control/
+// list arrays and settings.c's/fileman.c's row buffers already use this
+// for — real, confirmed via purr_os.map: a genuine link-time DRAM overflow
+// once the current app set was all compiled in together (see msn.c's
+// matching comment, 2026-09-01).
+static EXT_RAM_BSS_ATTR char s_drv_row_bufs[DRV_MAX_ROWS][96];
 static const char *s_drv_row_ptrs[DRV_MAX_ROWS];
 
 static void refresh_drivers(void) {
@@ -136,7 +144,7 @@ static bool s_hw_running = false;
 // keeps diagnostics_deinit()'s wait unconditionally safe.
 static SemaphoreHandle_t s_hw_poller_done = NULL;
 
-static char s_hw_log[HW_LOG_LINES][HW_LINE_LEN];
+static EXT_RAM_BSS_ATTR char s_hw_log[HW_LOG_LINES][HW_LINE_LEN];
 static int  s_hw_log_head  = 0;
 static int  s_hw_log_count = 0;
 
@@ -258,7 +266,7 @@ static purr_win_t  s_svc_win        = 0;
 static purr_wid_t  s_svc_list       = 0;
 static purr_wid_t  s_svc_mem_lbl    = 0;
 static purr_wid_t  s_svc_status_lbl = 0;
-static char        s_svc_row_bufs[SVC_MAX_ROWS][80];
+static EXT_RAM_BSS_ATTR char s_svc_row_bufs[SVC_MAX_ROWS][80];
 static const char *s_svc_row_ptrs[SVC_MAX_ROWS];
 
 static bool svc_is_filtered_health_name(const char *name) {
@@ -518,8 +526,8 @@ static purr_wid_t  s_task_list       = 0;
 // Row i of s_task_list corresponds to app_manager index s_task_row_idx[i] —
 // the list only shows RUNNING apps, so row indices and app_manager indices
 // diverge as soon as anything is IDLE/STOPPED/ERROR.
-static int         s_task_row_idx[TASK_MAX_ROWS];
-static char        s_task_row_labels[TASK_MAX_ROWS][64];
+static EXT_RAM_BSS_ATTR int  s_task_row_idx[TASK_MAX_ROWS];
+static EXT_RAM_BSS_ATTR char s_task_row_labels[TASK_MAX_ROWS][64];
 static const char *s_task_row_label_ptrs[TASK_MAX_ROWS];
 static int         s_task_row_count = 0;
 

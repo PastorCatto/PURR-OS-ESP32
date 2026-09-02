@@ -1,0 +1,13 @@
+# apps/system/reticulum_app/app.pcat
+# Named reticulum_app, not reticulum — source/modules/reticulum already
+# registers a module under the name "reticulum", and purr_kernel_get_
+# module()/PURR_MODULE_REGISTER names share one flat namespace regardless
+# of module_type, so the two can't collide.
+
+name        = "reticulum_app"
+version     = "0.1.0"
+tier        = "claw"
+author      = "PURR OS"
+description = "Basic chat over the Reticulum Network Stack — see peers heard via Announce on the reticulum mesh backend, open a Link, exchange plain-text messages."
+
+idf_requires = "esp_common driver freertos"
