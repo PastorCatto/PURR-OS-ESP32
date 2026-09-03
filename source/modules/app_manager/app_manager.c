@@ -569,6 +569,22 @@ static void speed_demon_enter_trampoline(void *arg) {
 
 static void native_task(void *arg) {
     app_task_ctx_t *ctx = (app_task_ctx_t *)arg;
+
+    // Stamp our own task handle into the context BEFORE init() runs. The
+    // create call at the launch site writes &ctx->task too, but this task is
+    // pinned to core 0 while the launcher runs on the UI task (core 1), so
+    // this task can reach init() — and init()'s first purr_win_create() — a
+    // hair before xTaskCreate*() has returned and stored the handle. When it
+    // does, app_manager_on_window_created()'s find_app_by_current_task()
+    // lookup misses (s_ctxs[].task still holds the old/NULL handle) and the
+    // app's window is silently dropped to 0. Confirmed live: taskmgr, whose
+    // init() calls purr_win_create() as its very first statement, consistently
+    // lost this race ("win_create 'Task Manager' -> handle=6" but "init()
+    // returned ... window=0"), so re-taps hit the running-with-no-window
+    // no-op path. Writing our own handle here (same value the create call
+    // writes) closes the window between task start and handle storage.
+    ctx->task = xTaskGetCurrentTaskHandle();
+
     ESP_LOGI(TAG, "native app task start: %s (core=%d prio=%u)",
              ctx->app->name, xPortGetCoreID(), (unsigned)uxTaskPriorityGet(NULL));
 

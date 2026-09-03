@@ -40,48 +40,36 @@ bt          = false
 lora        = ""
 
 [modules]
-# cupcake — the experiment from a1b3e8af, now actually buildable.
+# mochi — iOS-style springboard (LVGL 8), the backend the upstream author
+# is actively building on for his own hardware (tdeck_plus). This branch
+# tracks bringing it up on the Tab5's 640x360 landscape surface.
 #
-# It never built before, and the reason was a myth rather than a limitation:
-# CoreOS/CMakeLists.txt excluded `cupcake` for tab5 "because tab5 resolves LVGL
-# v9 and Cupcake is v8-coded". No such resolution exists. The manifest pins
-# `lvgl/lvgl: ">=8.3.0,<9.0.0"` for every target, managed_components is shared,
-# and the resolved component is 8.4.0. Tab5 has always had LVGL 8.
+# The springboard grid derives from panel size (DP8 fixed the old hardcoded
+# 4x2), so the wide P4 panel lays out as 8x3. Mochi detects keyboard-vs-
+# trackball by capability (a keyboard-class driver implements set_backlight;
+# tab5_kbd does), so it registers tab5_kbd as its keypad indev and skips the
+# absent trackball with no error — confirmed live: "inputs: keyboard=tab5_kbd
+# trackball=none".
 #
-# So the component was excluded while this line still selected it, and purrstrap
-# generated glue registering a module that was never compiled:
-#
-#     undefined reference to `purr_module_cupcake'
-#
-# Invisible for a week, because purrstrap marks a device [OK] whenever a
-# firmware.bin exists without checking the current run produced it — tab5 kept
-# shipping a stale image.
-#
-# Both sides are corrected now (exclusion list, and the equally-false
-# lv_conf_v9.h selection). This device builds Cupcake against LVGL 8 like every
-# other device.
-#
-# NOT hardware-verified — no Tab5 on the bench. It builds; whether the Android-
-# style UI is usable on a 1280x720 P4 panel is the question a1b3e8af was
-# actually asking, and it still needs someone with the board.
-ui          = "cupcake"
+# Requires the two generic-kernel fixes earlier on this branch (crash-guard
+# strike reset in core/boot.c, NULL-scan guard in app_manager) — without them
+# a single app_manager strike latched the device into a permanent crash loop
+# that no reflash could clear. Cupcake masked this because its own launcher
+# tolerated app_manager coming up empty; Mochi's springboard surfaced it.
+ui          = "mochi"
 app_manager = "app_manager"
 lua         = "lua_runtime"
-# systemui — Cupcake's window model has no per-window title bar or close
-# button by design (see cupcake_win.c): Back/Home/Recents live entirely in
-# this module's nav bar. Without this entry CONFIG_PURR_SYSTEMUI is unset,
-# systemui.c compiles to a no-op stub, and there is no way back to the
-# launcher once an app is open — confirmed live: 640x360 Cupcake on real
-# Tab5 hardware, opening Terminal from the launcher left no path back to
-# Home at all (not a gesture/touch-mapping bug — the nav bar code was never
-# even compiled in). tdeck_plus is the reference for this pairing.
+# systemui — Mochi hosts it (iOS-style status bar, drag-down panels, Recents,
+# lock screen) and suppresses the nav bar in favour of a home-indicator
+# gesture (purr_systemui_host_t::suppress_navbar). Declaring it in mochi's
+# module.pcat [depends] only makes the code link; CONFIG_PURR_SYSTEMUI is set
+# from THIS entry independently — same trap Cupcake hit (see PR #4).
 systemui    = "systemui"
 
 [ui]
-# systemui_style — Cupcake's nav bar (Back/Home/Recents) is the "android"
-# style; "ios" draws no nav bar at all and expects Mochi/Tabby's home
-# indicator instead. Must match the launcher in [modules] above.
-systemui_style = "android"
+# systemui_style — Mochi draws no nav bar (home-indicator gesture, like real
+# iOS); "ios" is the correct pairing. "android" is Cupcake's nav-bar style.
+systemui_style = "ios"
 theme       = "wce"
 
 [apps]

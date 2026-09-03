@@ -30,3 +30,18 @@ CONFIG_SPI_FLASH_AUTO_SUSPEND=y
 # actually flashed/monitored over its USB-C port.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# LVGL allocator — route it off the tiny fixed internal arena onto the general
+# heap. Without this, LVGL uses a static LV_MEM_SIZE pool (default 32 KB of
+# internal SRAM); once several Mochi app windows are open it exhausts, and
+# lv_mem_buf_get() drawing a scaled app icon fails, hitting LVGL's default
+# assert handler — a bare while(1) — which presents as "UI TASK UNRESPONSIVE".
+# Root-caused live via JTAG: mochi task spinning at a self-jump in
+# lv_mem_buf_get (lv_mem.c:311, LV_ASSERT_MSG buf!=NULL) after a 720-byte
+# lv_mem_realloc returned NULL with the pool full. tdeck_plus already sets both
+# of these (see sdkconfig_tdeck_plus.overrides); tab5's overrides never did —
+# same inherited-config gap as MOCHI_STACK_SIZE. LV_CONF_SKIP=n is mandatory:
+# the lvgl component's Kconfig defaults it to y, which silently skips our
+# source/config/lv_conf.h (wired via LV_CONF_PATH) entirely.
+CONFIG_LV_MEM_CUSTOM=y
+CONFIG_LV_CONF_SKIP=n

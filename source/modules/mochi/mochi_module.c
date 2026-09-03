@@ -29,8 +29,24 @@ static TaskHandle_t s_task = NULL;
 //
 // 8192 matches the size already proven safe for those, and stays within the
 // internal DRAM budget — 12288 here on top of the existing static stacks
-// overflowed the segment at link time on this device.
+// overflowed the segment at link time on this device (T-Deck Plus, ~144KB
+// internal SRAM).
+//
+// The ESP32-P4 (Tab5) is a different world: ~640KB internal SRAM (~415KB still
+// free at runtime) and a 640x360 desktop rendering multiple stacked app
+// windows through LVGL's recursive draw pipeline + off-screen compose. 8192 is
+// not enough there — confirmed live via JTAG: with several apps open the mochi
+// task's saved PC lands in ROM with an unwindable ("corrupt") stack, the
+// classic smashed-return-address signature of a stack overflow, presenting as
+// "UI TASK UNRESPONSIVE @ timer_handler" a few seconds later. Heap poisoning
+// (LIGHT and COMPREHENSIVE) never fired — it is a stack overrun, not a heap
+// one. Scale the stack with the target: the P4 has the headroom and the render
+// depth to need it; the T-Deck Plus keeps its RAM-constrained 8192.
+#if CONFIG_IDF_TARGET_ESP32P4
+#define MOCHI_STACK_SIZE 32768
+#else
 #define MOCHI_STACK_SIZE 8192
+#endif
 static StackType_t  s_mochi_stack[MOCHI_STACK_SIZE];
 static StaticTask_t s_mochi_tcb;
 
