@@ -287,10 +287,14 @@ moy         = true
 # entry (see app_manager_launch_by_name("server_manager")), never a Start
 # Menu icon. Needs to be explicit here like milkbar/oobe above rather than
 # relying on apply_radio_companion_defaults()'s PURR_WIN_UI_BACKENDS
-# auto-add: modules.ui = "cheetah" (this device) isn't in that set, so that
-# block never fires for tdeck_plus at all — msn/milkbar's own comment above
-# already flags they predate that mechanism and stay explicit for the same
-# reason. Root-caused after `apps.server_manager=true` silently never made
+# auto-add: stale note corrected 2026-09-02 — modules.ui is "mochi" now,
+# not "cheetah" as this comment used to say, and "mochi" IS in that set
+# (purrstrap.py's PURR_WIN_UI_BACKENDS), so the auto-add block DOES fire
+# for tdeck_plus today. It's just a no-op here regardless: cfg.setdefault()
+# only ever fills in an ABSENT key, and msn/milkbar/server_manager are all
+# already explicit below — msn/milkbar's own comment above already flags
+# they predate that mechanism and stay explicit for the same reason. Root-
+# caused after `apps.server_manager=true` silently never made
 # it into the component list despite being set the identical setdefault way
 # msn is.
 server_manager = true

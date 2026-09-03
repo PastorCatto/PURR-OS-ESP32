@@ -255,11 +255,13 @@ static void on_dashboard_disconnect_click(purr_wid_t w, purr_event_t e, void *us
 // ── "Desktop" — hand off to the real launcher, remote-mode ─────────────────
 // Not a window this app draws any more (see this file's top comment) —
 // ensure_remote_connected() above points app_manager at the selected
-// server, then this just gets out of the way. cheetah_home.c's icon grid
-// and systemui_xp.c's taskbar/Start Menu both already drive themselves
-// purely off app_manager_count()/get()/launch_idx() — the instant remote
-// mode is on, they show the server's apps with no code of their own aware
-// anything changed.
+// server, then this just gets out of the way. mochi_springboard.c's icon
+// grid (tdeck_plus's real launcher — Cheetah is dead code on every device
+// this tree currently builds, see mochi_springboard.c's own header
+// comment) and systemui_xp.c's taskbar/Start Menu both already drive
+// themselves purely off app_manager_count()/get()/launch_idx() — the
+// instant remote mode is on, they show the server's apps with no code of
+// their own aware anything changed.
 static void enter_remote_desktop(void) {
     if (!s_have_selection) return;
     ensure_remote_connected();

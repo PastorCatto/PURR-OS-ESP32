@@ -1954,11 +1954,25 @@ def cmd_bake(args):
     if not devices:
         die("no devices found in source/devices/")
 
+    requested = getattr(args, "device", None)
+    if requested:
+        known = {slug for slug, _, _ in devices}
+        unknown = [d for d in requested if d not in known]
+        if unknown:
+            die(f"unknown device(s) for --device: {', '.join(unknown)} — "
+                f"run 'purrstrap list' for valid slugs")
+        devices = [d for d in devices if d[0] in requested]
+
+    # argparse's choices=sorted(BUILD_PROFILES) on --profile already rejects
+    # an unknown name before cmd_bake ever runs.
+    profile = getattr(args, "profile", None)
+
     release_dir = os.path.join(RELEASES_DIR, f"v{PURROS_VERSION}")
     os.makedirs(release_dir, exist_ok=True)
 
     div()
-    info(f"baking PURR OS v{PURROS_VERSION} — {len(devices)} device(s)")
+    info(f"baking PURR OS v{PURROS_VERSION} — {len(devices)} device(s)"
+         + (f"  [profile: {profile}]" if profile else ""))
     info(f"output → releases/v{PURROS_VERSION}/")
     div()
 
@@ -1973,8 +1987,13 @@ def cmd_bake(args):
     for slug, name, chip in devices:
         div(slug)
 
-        # Reuse cmd_build logic
+        # Reuse cmd_build logic. NOTE: can't write `profile = profile` here —
+        # inside a class body that shadows the enclosing local with a
+        # not-yet-bound class attribute of the same name and raises
+        # NameError (same trap as `x = x` in a function); set it as a
+        # separate attribute assignment after the class exists instead.
         class _Args: device = slug
+        _Args.profile = profile
         try:
             cmd_build(_Args())
         except SystemExit as e:
@@ -1985,9 +2004,13 @@ def cmd_bake(args):
         dest_dir = os.path.join(release_dir, slug)
         os.makedirs(dest_dir, exist_ok=True)
 
-        # Copy artifacts
+        # Copy artifacts. The merged image's filename picks up the same
+        # _<profile> suffix cmd_build()'s own out_name does — copy it too,
+        # under its real name, so a profiled bake doesn't silently drop the
+        # one artifact most people actually want to flash.
+        out_name = f"{slug}_{profile}" if profile else slug
         copied = []
-        for fname in ("flash.bin", "build.json", "firmware.bin"):
+        for fname in ("flash.bin", "build.json", "firmware.bin", f"PURR_OS_{out_name}.bin"):
             src = os.path.join(out_dir, fname)
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(dest_dir, fname))
@@ -2024,7 +2047,7 @@ def cmd_bake(args):
 
     # Write manifest
     manifest_path = os.path.join(release_dir, "manifest.json")
-    with open(manifest_path, "w") as f:
+    with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
     div()
@@ -2041,9 +2064,9 @@ def cmd_bake(args):
     # from a GitHub Action on a release tag, not part of every routine
     # local bake.
     if getattr(args, "dp", False):
-        _bake_dp_release(devices, manifest)
+        _bake_dp_release(devices, manifest, profile=profile)
 
-def _bake_dp_release(devices, manifest):
+def _bake_dp_release(devices, manifest, profile=None):
     """
     Package a full developer-preview release into CatReleases/DP<N>/,
     matching the existing CatReleases/DP1..DP3 shape exactly: every
@@ -2070,27 +2093,48 @@ def _bake_dp_release(devices, manifest):
         out_dir  = os.path.join(OUTPUT_DIR, slug)
         dest_dir = os.path.join(dp_dir, slug)
         os.makedirs(dest_dir, exist_ok=True)
+        # Merged image's filename picks up the same _<profile> suffix
+        # cmd_build()'s own out_name applies — match it or a profiled bake
+        # silently ships every split image but skips the one merged file
+        # (cmd_build never writes the bare PURR_OS_<slug>.bin when a
+        # profile is set, so the old hardcoded name here would just miss).
+        out_name = f"{slug}_{profile}" if profile else slug
         for fname in ("bootloader.bin", "partition-table.bin", "firmware.bin",
-                      "flash.bin", f"PURR_OS_{slug}.bin", "build.json"):
+                      "flash.bin", f"PURR_OS_{out_name}.bin", "build.json"):
             src = os.path.join(out_dir, fname)
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(dest_dir, fname))
 
     dp_manifest_path = os.path.join(dp_dir, "manifest.json")
-    with open(dp_manifest_path, "w") as f:
+    with open(dp_manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
+    all_slugs = {slug for slug, _, _ in list_devices()}
+    scoped = len(devices) < len(all_slugs)
+    coverage_line = (
+        f"Scoped build — {len(devices)} of {len(all_slugs)} supported devices "
+        f"(--device filter applied). Every device folder"
+        if scoped else
+        f"Full-stack build of all {len(devices)} supported devices. Every device folder"
+    )
+    merged_name = "PURR_OS_<device>_" + profile + ".bin" if profile else "PURR_OS_<device>.bin"
+    profile_line = (
+        [f"Built with the **{profile}** profile — see `purrstrap profiles` for what it "
+         f"trims relative to each device's default full build.", ""]
+        if profile else []
+    )
     readme_lines = [
         f"# PURR OS — {dp_name} (Developer Preview {m.group(1)})",
         "",
-        f"Full-stack build of all {len(devices)} supported devices. Every device folder",
+        coverage_line,
         "has both split images and one pre-merged image, plus a `manifest.json`",
         "recording chip/name/copied-files for all of them in one place.",
         "",
+        *profile_line,
         "## Flashing the merged image (recommended)",
         "",
         "```bash",
-        "esptool.py -p <PORT> write_flash 0x0 PURR_OS_<device>.bin",
+        f"esptool.py -p <PORT> write_flash 0x0 {merged_name}",
         "```",
         "",
         "## Flashing split images",
@@ -2119,7 +2163,14 @@ def _bake_dp_release(devices, manifest):
     for slug, name, chip in devices:
         dev_status = manifest["devices"].get(slug, {}).get("status", "error")
         readme_lines.append(f"| {name} | {chip} | {dev_status} |")
-    with open(os.path.join(dp_dir, "README.md"), "w") as f:
+    # encoding="utf-8" explicit — without it, open()'s default on Windows is
+    # the locale codepage (often cp1252), not UTF-8, and this file's own em
+    # dashes come out as mojibake ("PURR OS  DP9") the moment anything
+    # UTF-8-aware (a browser, `cat` in a POSIX-locale shell) reads it back.
+    # Confirmed live: the very first DP9 README this function generated had
+    # exactly that corruption, pre-existing in this function before this
+    # comment — not introduced by the --device scoping above.
+    with open(os.path.join(dp_dir, "README.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(readme_lines) + "\n")
 
     zip_base = os.path.join(REPO_DIR, "CatReleases", dp_name)
@@ -2779,6 +2830,23 @@ def main():
                               "CatReleases/DP<N>/ (split+merged images, README, zip) — "
                               "opt-in, meant for a tagged-release GitHub Action, not "
                               "routine local bakes.")
+    p_bake.add_argument("--device", action="append", metavar="SLUG",
+                         help="Bake only this device (repeatable: --device tdeck_plus "
+                              "--device heltec). Default is every device in "
+                              "source/devices/ — 14 as of this writing, including "
+                              "several no session has touched/verified recently and "
+                              "two hardware-probe debug kernels (tdeck_plus_probe[_uart]) "
+                              "that aren't real end-user builds at all. A --dp package "
+                              "meant to represent 'what's actually been verified this "
+                              "cycle' should almost always scope this explicitly rather "
+                              "than bake the full, uncurated device list.")
+    p_bake.add_argument("--profile", default=None, choices=sorted(BUILD_PROFILES),
+                         help="Build every device with this profile instead of each "
+                              "device's default full build — see `purrstrap profiles`. "
+                              "Threaded straight through to cmd_build() per-device, same "
+                              "as `build <device> --profile <name>` would; the merged "
+                              "artifact and dp-package filenames pick up the "
+                              "_<profile> suffix cmd_build() already applies.")
     sub.add_parser("list",   help="List supported devices")
     sub.add_parser("status", help="Show workspace config")
     sub.add_parser("doctor", help="Check environment health")

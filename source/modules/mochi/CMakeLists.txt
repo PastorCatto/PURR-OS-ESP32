@@ -59,6 +59,15 @@ else()
     set(MOCHI_SRCS "")
 endif()
 
+# app_manager_remote/proximity/user_mgr/claw_loader — mochi_springboard.c's
+# launch_app() now offers to download+install a remote app on first tap
+# (ported from cheetah_home.c's own identical feature, which is dead code
+# on every device this tree currently builds — see mochi_springboard.c's
+# own header comment for the full story of why this was missing). Same
+# "conditionally-empty on esp32p4/tab5, safe to REQUIRE unconditionally
+# either way" shape cheetah/CMakeLists.txt already documents for its own,
+# now-unreachable copy of this same feature — the C code itself guards the
+# actual calls behind CONFIG_IDF_TARGET_ESP32P4.
 idf_component_register(
     SRCS ${MOCHI_SRCS}
     INCLUDE_DIRS
@@ -67,5 +76,9 @@ idf_component_register(
         ../../kernel/catcalls
         ../../assets/icons
         ../systemui
-    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager systemui
+        ../app_manager_remote
+        ../proximity
+        ../user_mgr
+        ../claw_loader
+    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager systemui app_manager_remote proximity user_mgr claw_loader
 )

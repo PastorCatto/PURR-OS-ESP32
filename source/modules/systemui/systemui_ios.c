@@ -41,6 +41,7 @@
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/catcalls/purr_win.h"
 #include "../app_manager/app_manager.h"
+#include "../user_mgr/user_mgr.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -540,11 +541,66 @@ static void ctrl_kill_cb(lv_event_t *e)
     if (idx == s_lp_foreground_idx) purr_systemui_return_home();
 }
 
+// Same recipe systemui_xp.c's own menu_logoff_cb() already established —
+// see that function's comment for why app_manager_clear_remote() has to run
+// before user_mgr_logout(), not just after: a remote session otherwise
+// survives into the NEXT login's UI (stale server's apps showing under a
+// different account) until something else happens to clear it.
+//
+// This is "switch user" too, not just "log out": purr_systemui_show_login()
+// lands on the real login screen, and systemui_login_ios.c's own login
+// window already shows every known account as a tappable avatar row
+// whenever there's more than one — logging out and picking a different
+// avatar there IS switching users, no separate mechanism needed.
+static void ctrl_logout_cb(lv_event_t *e)
+{
+    (void)e;
+    panel_set_state(&s_ctrl_panel, PANEL_PEEK);
+    ESP_LOGI(TAG, "log out (Control Center)");
+    app_manager_clear_remote();
+    user_mgr_logout();
+    purr_systemui_return_home();
+    if (s_host) purr_systemui_show_login(s_host);
+}
+
 static void refresh_ctrl(void)
 {
     if (!s_ctrl_panel.scroll) return;
     lv_obj_clean(s_ctrl_panel.scroll);
     lv_coord_t w = (lv_coord_t)(s_host->width() - 24);
+
+    // Account row — always present, first, regardless of what's running
+    // below it. Shows who's actually logged in (user_mgr_current_user(),
+    // not user_mgr_default_username() — the account that's really active,
+    // same distinction systemui_login_ios.c's own relock-vs-login draws).
+    const char *current = user_mgr_current_user();
+    if (current && current[0]) {
+        lv_obj_t *acct = lv_obj_create(s_ctrl_panel.scroll);
+        lv_obj_remove_style_all(acct);
+        lv_obj_set_size(acct, w, 34);
+        purr_fx_radius(acct, 10);
+        lv_obj_set_style_bg_color(acct, COL_CARD, 0);
+        purr_systemui_fx_bg_opa_keep(acct, LV_OPA_20);
+        lv_obj_clear_flag(acct, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *lbl = lv_label_create(acct);
+        lv_label_set_text(lbl, current);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, (lv_coord_t)(w - 90));
+        lv_obj_set_style_text_color(lbl, COL_LOCK_TEXT, 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 10, 0);
+
+        lv_obj_t *out = lv_btn_create(acct);
+        lv_obj_set_size(out, 70, 24);
+        purr_fx_radius(out, 12);
+        lv_obj_set_style_bg_color(out, COL_RED, 0);
+        lv_obj_align(out, LV_ALIGN_RIGHT_MID, -6, 0);
+        lv_obj_t *ol = lv_label_create(out);
+        lv_label_set_text(ol, "Log Out");
+        lv_obj_center(ol);
+        lv_obj_add_event_cb(out, ctrl_logout_cb, LV_EVENT_CLICKED, NULL);
+    }
 
     int n = app_manager_count();
     bool any = false;

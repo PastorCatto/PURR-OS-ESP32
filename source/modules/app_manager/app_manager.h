@@ -103,10 +103,13 @@ typedef struct {
     // Terminal or Settings, or one already loaded from claw_loader's
     // personal-space storage) and can never be downloaded, only run on
     // the server. A UI offering the install-vs-run-remote choice
-    // (cheetah_home.c's launch()) must check this BEFORE showing
-    // "Install" — a real, reported bug when it didn't: choosing Install
-    // for a pre-linked app like Terminal always failed, with a confusing
-    // "install failed" notification as the only sign anything was wrong.
+    // (mochi_springboard.c's launch_app() — ported from cheetah_home.c's
+    // own identical launch(), which is dead code on every device this
+    // tree currently builds; see mochi_springboard.c's own header comment)
+    // must check this BEFORE showing "Install" — a real, reported bug
+    // when it didn't: choosing Install for a pre-linked app like Terminal
+    // always failed, with a confusing "install failed" notification as
+    // the only sign anything was wrong.
     bool downloadable;
 } app_entry_t;
 
