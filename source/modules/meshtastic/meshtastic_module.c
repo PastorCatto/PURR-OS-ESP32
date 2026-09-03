@@ -518,26 +518,44 @@ static void mesh_persist_task(void *arg)
 
 int mesh_manager_init(void)
 {
-    // Mutually exclusive with meshcore — one physical radio, one
-    // catcall_radio_t slot, two incompatible on-air presets.
+    // Mutually exclusive with meshcore, reticulum, AND rnode — one physical
+    // radio, one catcall_radio_t slot, four incompatible on-air protocols.
     //
     // Preference check first: MSN's backend chooser (and Settings'
     // mirrored control) persist which protocol the user actually wants via
     // purr_kernel_mesh_backend_set(), then reboot — so by the time this
     // runs again, the preference is the authoritative source of truth, not
     // [flash] load order. Declines via PURR_MODULE_INIT_DECLINED (not -1)
-    // since this fires on every boot where the preference names meshcore —
-    // not a crash-loop symptom, see PURR_MODULE_INIT_DECLINED's doc comment.
-    if (purr_kernel_mesh_backend_get() == PURR_MESH_BACKEND_MESHCORE) {
+    // since this fires on every boot where the preference names another
+    // backend — not a crash-loop symptom, see PURR_MODULE_INIT_DECLINED's
+    // doc comment.
+    purr_mesh_backend_t pref = purr_kernel_mesh_backend_get();
+    if (pref == PURR_MESH_BACKEND_MESHCORE) {
         ESP_LOGI(TAG, "declining to start — mesh backend preference is meshcore");
         return PURR_MODULE_INIT_DECLINED;
     }
+    if (pref == PURR_MESH_BACKEND_RETICULUM) {
+        ESP_LOGI(TAG, "declining to start — mesh backend preference is reticulum");
+        return PURR_MODULE_INIT_DECLINED;
+    }
+    if (pref == PURR_MESH_BACKEND_RNODE) {
+        ESP_LOGI(TAG, "declining to start — mesh backend preference is rnode");
+        return PURR_MODULE_INIT_DECLINED;
+    }
     // Secondary safety net, kept from before the preference existed: covers
-    // a manual Terminal `start meshtastic` while meshcore happens to already
-    // be running (preference and actually-loaded state can legitimately
-    // diverge until the next reboot).
+    // a manual Terminal `start meshtastic` while another backend happens to
+    // already be running (preference and actually-loaded state can
+    // legitimately diverge until the next reboot).
     if (purr_kernel_get_module("meshcore")) {
         ESP_LOGW(TAG, "refusing to start — meshcore is active (stop it first)");
+        return PURR_MODULE_INIT_DECLINED;
+    }
+    if (purr_kernel_get_module("reticulum")) {
+        ESP_LOGW(TAG, "refusing to start — reticulum is active (stop it first)");
+        return PURR_MODULE_INIT_DECLINED;
+    }
+    if (purr_kernel_get_module("rnode")) {
+        ESP_LOGW(TAG, "refusing to start — rnode is active (stop it first)");
         return PURR_MODULE_INIT_DECLINED;
     }
 

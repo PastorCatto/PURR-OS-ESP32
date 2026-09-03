@@ -366,6 +366,14 @@ static lv_obj_t *s_status_taskmgr_box;
 
 static lv_obj_t *s_lock_screen;
 static bool      s_locked = false;
+// True from the moment a dismiss tap hands off to the real credential
+// screen (purr_systemui_show_relock()) until purr_systemui_tick() sees
+// purr_systemui_relock_active() go back to false. Needed because s_locked
+// alone can't tell "just idle-timed-out, overlay showing, no tap yet"
+// (relock_active also still false) apart from "tap happened, real screen
+// is up, waiting on its result" — same s_locked/!relock_active pair,
+// different meaning, without this.
+static bool      s_awaiting_relock_result = false;
 
 // Actual implementation of the forward-declared lp_show_status()/lp_hide_
 // status() from earlier — deferred to here since they need the icon handles
@@ -1133,8 +1141,17 @@ static void ck_lock_dismiss_cb(lv_event_t *e)
         lv_indev_get_vect(indev, &vect);
         if (vect.y < -20) return;
     }
-    s_locked = false;
-    lv_obj_add_flag(s_lock_screen, LV_OBJ_FLAG_HIDDEN);
+    // Hand off to the real credential screen instead of unlocking outright —
+    // this glanceable overlay (clock/notifications/battery) stays up as the
+    // dimmed backdrop underneath; purr_systemui_show_relock() builds its
+    // screen after this one, so it lands on top by construction order alone,
+    // same trick boot-time login and XP's own relock already rely on. Its
+    // own no-cancel-path guarantee (see systemui.h's doc comment) is what
+    // makes purr_systemui_tick()'s relock_active check below safe: this
+    // overlay only actually clears on a real, successful unlock.
+    if (s_awaiting_relock_result) return;   // already showing, nothing to do
+    s_awaiting_relock_result = true;
+    purr_systemui_show_relock(s_host);
     // No need to reset the idle timestamp here — this dismiss callback
     // only runs as a downstream effect of the same touch that just fired
     // touch_read_cb()/mark_activity() in cupcake_hal.c earlier in this
@@ -1397,6 +1414,9 @@ void purr_systemui_init(const purr_systemui_host_t *host)
     if (!host) { ESP_LOGE(TAG, "init called with NULL host — system UI disabled"); return; }
     s_host = host;
 
+    // Multi-user plumbing — see systemui.h's own doc comment on this call.
+    purr_systemui_boot_login_check();
+
     uint16_t w = s_host->width();
     uint16_t h = s_host->height();
 
@@ -1410,6 +1430,13 @@ void purr_systemui_init(const purr_systemui_host_t *host)
     ck_build_status_panels(w);
     ck_build_status_icons(w);
     ck_build_lock_screen(w, h);
+
+    // Real credential UI, if the boot-login-check above left the session
+    // logged out — must be LAST, so it lands on top of everything else built
+    // in this function by construction order alone. See its own doc comment
+    // in systemui.h.
+    purr_systemui_show_login(host);
+
     ESP_LOGI(TAG, "system UI built (%ux%u) — status bar, %s, recents, lock",
              w, h, s_host->suppress_navbar ? "no nav bar (host-suppressed)" : "nav bar");
 }
@@ -1425,6 +1452,18 @@ void purr_systemui_tick(void)
     ck_refresh_status_icons();
     ck_lock_check_idle();
     if (s_locked) { ck_lock_refresh_info(); ck_lock_refresh_notifs(); }
+
+    // A dismiss tap handed off to the real credential screen — see
+    // ck_lock_dismiss_cb(). Once purr_systemui_relock_active() drops back to
+    // false, that screen has no cancel/back path (systemui.h's own doc
+    // comment: "locking is a real security boundary, not a dismiss
+    // gesture"), so the only way it can happen is a real, successful
+    // unlock — clear this overlay along with it.
+    if (s_locked && s_awaiting_relock_result && !purr_systemui_relock_active()) {
+        s_locked = false;
+        s_awaiting_relock_result = false;
+        lv_obj_add_flag(s_lock_screen, LV_OBJ_FLAG_HIDDEN);
+    }
 
     // Re-hide a swipe-revealed nav bar once its countdown expires — deadline
     // 0 means "no pending auto-hide" (home screen, or an app just opened
@@ -1462,5 +1501,14 @@ void purr_systemui_close_recents(void)                    { }
 // keys off this, so reporting "locked" here would strand input handling.
 bool purr_systemui_is_locked(void)                        { return false; }
 void purr_systemui_wake(void)                             { }
+// purr_systemui_show_login()'s real implementation lives in
+// systemui_login.c, gated on plain CONFIG_PURR_SYSTEMUI (no style split —
+// see that file's own header comment for why). This is its "module fully
+// off" stub, same convention as every other symbol in this block.
+void purr_systemui_show_login(const purr_systemui_host_t *host) { (void)host; }
+// Same story as purr_systemui_show_login() above — real implementation in
+// systemui_login.c, this is its "module fully off" stub.
+void purr_systemui_show_relock(const purr_systemui_host_t *host) { (void)host; }
+bool purr_systemui_relock_active(void)                           { return false; }
 
 #endif // CONFIG_PURR_SYSTEMUI && style

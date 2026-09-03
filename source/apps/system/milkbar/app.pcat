@@ -1,12 +1,14 @@
 # apps/system/milkbar/app.pcat
 # Milkbar — Remote Apps manager. Lists paired devices (pairing.h's trust
 # list), and for a selected one, lists/launches/stops its apps over
-# proximity_rpc (see app_manager_remote.h for the wire protocol).
+# proximity_rpc (see app_manager_remote.h for the wire protocol). Also owns
+# device discovery/pairing now (its Nearby section, merged from the old
+# standalone nearby app) — see milkbar_app.c's file header.
 
 name        = "milkbar"
-version     = "1.0.0"
+version     = "1.2.0"
 tier        = "claw"
 author      = "PURR OS"
-description = "Milkbar: manage apps on a paired PurrOS device remotely."
+description = "Milkbar: discover, pair with, and manage apps on nearby PurrOS devices remotely."
 
 idf_requires = "esp_common driver freertos"

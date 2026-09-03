@@ -9,5 +9,22 @@ idf_component_register(
         ../../modules/meshtastic
         ../../modules/pairing
         ../../modules/proximity
-    REQUIRES esp_common driver freertos nvs_flash esp_timer meshtastic pairing proximity
+        ../../modules/user_mgr
+        ../../modules/server_mgr
+        ../../modules/app_manager
+    # user_mgr — auto-login at boot (oled_ui_init()) and render_info()'s
+    # "User:" line. server_mgr — SCREEN_APP_APPROVAL's pending-upload
+    # approve/reject. app_manager — oled_ui_init()'s auto-login now also
+    # calls app_manager_notify_unlocked() right after user_mgr_set_logged_
+    # in() (same reasoning systemui.h's purr_systemui_boot_login_check()
+    # and oobe_app.c's own on_skip()/on_continue() document: any boot path
+    # that logs a session in WITHOUT going through systemui_login.c's real
+    # screen bypasses its try_unlock() -> app_manager_notify_unlocked()
+    # call too, and would otherwise leave the local registry permanently
+    # idle/empty). Same "explicit, not inherited" reasoning app_manager's
+    # own CMakeLists.txt documents for esp_app_format/app_update — none of
+    # these three would otherwise reach here transitively through
+    # `pairing` (which already REQUIRES user_mgr; server_mgr/app_manager
+    # aren't even transitively reachable through pairing at all).
+    REQUIRES esp_common driver freertos nvs_flash esp_timer meshtastic pairing proximity user_mgr server_mgr app_manager
 )

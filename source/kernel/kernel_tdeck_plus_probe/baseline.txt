@@ -1,0 +1,87 @@
+# baseline.txt — standard characterisation run for the emulator.
+#   probe_host.py --port COM3 script baseline.txt
+#
+# One command per line, '#' comments ignored. Runs in a single session, so
+# spiopen's peripheral state carries into every transfer below it.
+
+# --- provenance: record these alongside any capture you intend to diff ---
+id
+guardtest
+regions
+
+# --- peripheral state before anything touches it ---
+#
+# NOT "reset values", despite the obvious reading. SPI2 is CLOCK-GATED at this
+# point and an unclocked peripheral on this chip reads as all-zeros — measured:
+# 0 of 1024 words non-zero here, including SPI_DATE_REG (+0x0F0), a hardwired
+# constant that cannot be zero on a readable peripheral. The snapshot is kept
+# because that contrast against the post-spiopen one further down is itself the
+# finding; just do not mistake it for reset state.
+#
+# GPIO and IO_MUX ARE clocked from boot, so theirs are real.
+snap SPI2
+snap GPIO
+snap IO_MUX
+snap LEDC
+
+# --- SPI2 at register level ---
+spiopen 10000000 0
+
+# Three shapes, not one: a command with a real reply, a single byte, and an
+# all-zero payload. An emulator can special-case any single one by accident.
+x 04 00 00 00
+x 00
+x 00 00 00 00 00 00 00 00
+
+# --- timing and event ordering, tight single-register polling ---
+# Use these numbers, not the trace's. The trace carries several hundred cycles
+# of read overhead per sample and cannot resolve events a few cycles apart.
+spitiming 04 00 00 00 n=100
+spitiming 00 00 00 00 00 00 00 00 n=100
+
+# --- interrupts ---
+# intmatrix enables no CPU interrupt and cannot wedge anything. intfire
+# installs a real handler; note it reports count=2 on real silicon — the ISR
+# re-enters once despite masking ENA immediately.
+intmatrix
+intfire 04 00 00 00
+intfire 00
+
+# --- DMA ---
+# The path the real st7789 driver actually uses. Watch owner_cleared: it is 0
+# on real hardware for TX descriptors, which is the opposite of RX.
+dmaopen
+dmax 64 pat=a5
+dmax 512 pat=5a
+dmax 2048 pat=ff
+
+# Full duplex. RX writes back (owner cleared, length filled, eof set) while the
+# TX descriptor in the SAME transfer does not — the asymmetry an emulator has to
+# reproduce, and the likely shape of a display read that hangs.
+# GDMA channel state BEFORE any transfer: PERI_SEL is already bound but the
+# link address is still zero. That pair of facts is what distinguishes "the
+# driver never programmed the engine" from "we are watching the wrong channel".
+gdma
+
+dmarx 64 pat=00
+dmarx 256 pat=a5
+
+# ...and after. OUT_LINK holds only the low 20 bits of the descriptor address;
+# OUT_EOF_DES holds the full 32 bits.
+gdma
+
+# --- SAR ADC ---
+# MEAS1_CTRL2 is 0x6000880c. Start a conversion, then clear start and watch
+# DONE stay set with a stale sample — hardware does not protect that race.
+snap SENS
+r 6000880c
+w 6000880c 60000
+r 6000880c
+w 6000880c 0
+r 6000880c
+
+# --- SPI2 once clocked and configured ---
+# Diff against the first snap SPI2 above. Two things fall out: which registers
+# spiopen actually changed, and the fact that the whole 4 KB window is the same
+# 0x100-byte register file mirrored 16 times.
+snap SPI2

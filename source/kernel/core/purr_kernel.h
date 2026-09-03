@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 #include "purr_module.h"
 #include "../catcalls/catcalls.h"
 #include "../catcalls/catcall_ui.h"
@@ -48,6 +49,12 @@ int  purr_kernel_load_module(const char *path);
 
 // Unload by name.
 void purr_kernel_unload_module(const char *name);
+
+// "MAJOR.MINOR.PATCH" string comparison — <0/0/>0 as a < b / a == b / a > b.
+// Used internally for a module's kernel_min/kernel_max gating; exported so
+// ota_mgr's manifest-version check reuses the same parsing instead of a
+// second implementation.
+int purr_kernel_version_cmp(const char *a, const char *b);
 
 // Get loaded module header by name (NULL if not loaded).
 const purr_module_header_t *purr_kernel_get_module(const char *name);
@@ -204,11 +211,63 @@ size_t purr_kernel_klog_tail(char *out, size_t out_size);
 uint32_t purr_kernel_free_ram(void);
 uint64_t purr_kernel_uptime_ms(void);
 bool     purr_kernel_sd_available(void);
+// True once boot.c's mount_flash_vfs() has successfully mounted /flash
+// (SPIFFS) — mirrors purr_kernel_sd_available() exactly, same reason:
+// claw_loader.c's personal-space storage (source/modules/claw_loader/)
+// falls back to /flash/personal on a device with no SD card (e.g.
+// Heltec V3), and needs a way to know that root exists before touching it.
+bool     purr_kernel_flash_available(void);
 bool     purr_kernel_wifi_connected(void);
 int      purr_kernel_battery_percent(void);  // -1 = unknown (no PMIC/fuel gauge)
 int      purr_kernel_battery_voltage_mv(void);  // -1 = unknown
 bool     purr_kernel_lora_available(void);
 void     purr_kernel_reboot(void);
+
+// ── Wall-clock time ──────────────────────────────────────────────────────────
+//
+// Distinct from purr_kernel_uptime_ms() (monotonic since boot): this is UTC
+// wall-clock time, and it is UNSET on every cold boot — no device in the
+// supported table carries a battery-backed RTC chip, so there is nothing to
+// read at power-on until a source syncs it. purr_kernel_time_load_nvs() (see
+// purr_kernel.c) seeds a coarse guess from the last accepted sync as source
+// PURR_TIME_SOURCE_NVS before any module runs, so the clock reads "roughly
+// right" instead of 1970 in the meantime.
+//
+// Sources call purr_kernel_time_set() to push a reading: wifi_mgr's SNTP
+// callback and generic_nmea's GPS date/time fields are the two today. A
+// future battery-backed RTC driver is meant to plug in the same way, at
+// PURR_TIME_SOURCE_RTC_HW — that is why this is an authority-ranked enum
+// and not a bool, even though nothing claims the top rank yet.
+typedef enum {
+    PURR_TIME_SOURCE_NONE   = 0,
+    PURR_TIME_SOURCE_NVS    = 1,   // coarse fallback persisted from the last accepted sync
+    PURR_TIME_SOURCE_GPS    = 2,
+    PURR_TIME_SOURCE_NTP    = 3,
+    PURR_TIME_SOURCE_RTC_HW = 4,   // reserved — no current driver claims this
+} purr_time_source_t;
+
+// False until some source has synced time this boot (NVS fallback counts).
+bool                purr_kernel_time_is_synced(void);
+// Seconds since the Unix epoch, UTC. 0 if never synced.
+time_t              purr_kernel_time_now(void);
+// Which source the current reading came from.
+purr_time_source_t  purr_kernel_time_source(void);
+
+// Called by a time source to push a reading. A lower-authority source
+// cannot overwrite a still-fresh higher-authority one (e.g. a GPS fix
+// landing seconds after NTP synced should not downgrade precision) — but
+// does take over once that reading goes stale (see PURR_TIME_FRESH_WINDOW_MS
+// in purr_kernel.c), so e.g. GPS keeps the clock drifting less than doing
+// nothing would if WiFi/NTP has been unreachable for hours. Every accepted
+// call (other than PURR_TIME_SOURCE_NVS loading itself back) persists to
+// NVS as the next boot's coarse fallback.
+void purr_kernel_time_set(purr_time_source_t source, time_t epoch_utc);
+
+// Pure calendar math (UTC, no libc TZ/mktime dependence) for turning a
+// source's calendar fields — GPS's $GPRMC date/time, or a future RTC chip's
+// register set — into the epoch purr_kernel_time_set() wants.
+time_t purr_kernel_time_from_utc_calendar(uint16_t year, uint8_t month, uint8_t day,
+                                           uint8_t hour, uint8_t minute, uint8_t second);
 
 // Runs fn(arg) on a helper task and waits up to timeout_ms for it to
 // finish; returns false on timeout instead of blocking forever. Built for
@@ -234,16 +293,19 @@ bool     purr_kernel_run_bounded(const char *label, purr_bounded_fn_t fn,
 void     purr_kernel_shutdown(void);
 
 // ── Mesh backend preference ─────────────────────────────────────────────────
-// Which mesh protocol module (meshtastic vs meshcore — mutually exclusive,
-// one physical radio) should activate at boot. NVS-backed directly
-// (namespace "purr_settings", key "mesh_backend") rather than the RAM-
-// cached-and-app-persisted pattern purr_kernel_screen_timeout_min() uses:
-// mesh_manager_init()/mc_manager_init() need this value before MSN or
-// Settings exist as running apps, so every call reads/writes NVS fresh
-// rather than relying on an app having already loaded it into kernel RAM.
+// Which mesh protocol module (meshtastic vs meshcore vs reticulum vs rnode —
+// mutually exclusive, one physical radio) should activate at boot. NVS-
+// backed directly (namespace "purr_settings", key "mesh_backend") rather
+// than the RAM-cached-and-app-persisted pattern purr_kernel_screen_
+// timeout_min() uses: mesh_manager_init()/mc_manager_init()/reticulum's/
+// rnode's own module_init() need this value before MSN or Settings exist as
+// running apps, so every call reads/writes NVS fresh rather than relying
+// on an app having already loaded it into kernel RAM.
 typedef enum {
     PURR_MESH_BACKEND_MESHTASTIC = 0,  // default when no preference is stored yet
     PURR_MESH_BACKEND_MESHCORE   = 1,
+    PURR_MESH_BACKEND_RETICULUM  = 2,
+    PURR_MESH_BACKEND_RNODE      = 3,  // acts as a real RNode radio over BLE (Nordic UART Service)
 } purr_mesh_backend_t;
 
 purr_mesh_backend_t purr_kernel_mesh_backend_get(void);
@@ -259,8 +321,34 @@ void                 purr_kernel_mesh_backend_set(purr_mesh_backend_t backend);
 // PURR_MODCTL_* result code for the "start target" step.
 int purr_kernel_mesh_backend_switch(purr_mesh_backend_t backend);
 
+// ── Device hostname ──────────────────────────────────────────────────────
+// A user-facing device name, shown to other devices/networks this device
+// participates in — proximity's own ESP-NOW beacon and reticulum's
+// Announce app_data are the first two consumers, both reading this
+// instead of deriving their own name independently. NVS-backed directly
+// (namespace "purr_settings", key "hostname"), same reasoning as mesh
+// backend above: needed before Settings exists as a running app.
+#define PURR_HOSTNAME_MAX 32   // includes NUL — matches proximity's own
+                                // beacon.name[20] wire field being the
+                                // tighter of the two real consumers; this
+                                // is the generic ceiling, not that one
+
+// Always writes a NUL-terminated name into out (truncating to out_len if
+// needed) — the configured hostname if one has been set, otherwise the
+// same "PurrOS-XXXX" MAC-suffix default proximity_module.c has always
+// auto-generated on its own, so an unconfigured device's name doesn't
+// change out from under anything already reading it today.
+void purr_kernel_hostname_get(char *out, size_t out_len);
+
+// False (no change made) if name is empty, longer than PURR_HOSTNAME_MAX-1,
+// or contains a control character (bytes < 0x20) — display/wire safety,
+// not a strict Unix-hostname charset; spaces and punctuation are fine.
+bool purr_kernel_hostname_set(const char *name);
+bool purr_kernel_hostname_valid(const char *name);
+
 // Called by SD / WiFi / PMIC / LoRa drivers when their state changes
 void     purr_kernel_set_sd_available(bool v);
+void     purr_kernel_set_flash_available(bool v);   // boot.c's mount_flash_vfs() only
 void     purr_kernel_set_wifi_connected(bool v);
 void     purr_kernel_set_battery_percent(int v);
 void     purr_kernel_set_battery_voltage_mv(int mv);
@@ -330,6 +418,52 @@ bool     purr_kernel_ui_effects_enabled(void);
 void     purr_kernel_set_ui_effects(bool v);
 uint32_t purr_kernel_accent_color(void);
 void     purr_kernel_set_accent_color(uint32_t rgb);
+
+// ── Dark mode ──────────────────────────────────────────────────────────────
+// OFF (light) by default — the iOS-7 app-widget theme's existing palette
+// (IOS_CELL_BG/IOS_CELL_TEXT etc. in cheetah_win.c) is light-first, same as
+// real iOS 7 was. This is purely a colour-palette swap read at widget
+// CONSTRUCTION time, same "already-built surfaces don't retroactively
+// change" caveat as purr_kernel_ui_effects_enabled() above — a caller that
+// wants an already-built screen to pick up a toggle needs its own rebuild/
+// refresh path, this flag alone does not walk the LVGL tree.
+//
+// Same load-order lesson as kernel_load_persisted_settings()'s own doc
+// comment: loaded by the KERNEL before any module initialises, not lazily
+// by settings.c, so a persisted preference is correct on the very first
+// frame instead of only after something happens to rebuild it.
+bool     purr_kernel_dark_mode_enabled(void);
+void     purr_kernel_set_dark_mode(bool v);
+
+// ── Per-app config (LittleFS, /config) ────────────────────────────────────
+// One file per app, holding whatever that app's own user data is — the one
+// genuinely mutable partition in an otherwise semi-immutable image (app
+// code and baked-in assets are read-only at runtime; NVS is kernel/module
+// settings, a different concern from an app's own data). Mounted at kernel
+// boot, before any module's init() runs — see mount_app_config_vfs() in
+// each device's own kernel_*_boot.c (currently just kernel_tdp_boot.c;
+// other devices fall back to the ESP_ERR_NOT_FOUND path below until they
+// grow their own app_cfg partition + mount call).
+//
+// Whole-file semantics, not a key/value store: an app owns the layout of
+// its own config file completely (a config format is that app's own
+// concern, not this API's), and every write REPLACES the file wholesale —
+// there is no append or partial-update here. `name` becomes /config/
+// <name>.cfg; keep it a plain app/module name (no path separators — this
+// does not sanitize one), same names app_manager.c's own app_entry_t::name
+// already uses.
+
+// Reads app `name`'s config file into buf, up to buf_cap bytes. Returns the
+// number of bytes actually read; 0 if the file doesn't exist yet (a new
+// app's first read — not an error, callers should apply their own
+// defaults), or -1 on a real I/O error (VFS not mounted, buf_cap too small
+// for what's stored, etc.).
+int  purr_app_config_read(const char *name, void *buf, size_t buf_cap);
+
+// Overwrites app `name`'s config file wholesale with `len` bytes from buf,
+// creating it if it doesn't exist yet. Returns false on any I/O error
+// (including the VFS simply not being mounted on this device).
+bool purr_app_config_write(const char *name, const void *buf, size_t len);
 
 // Screen idle timeout, minutes — off by default until Settings loads the
 // persisted value (same "purr_settings" NVS namespace, synced on
@@ -432,6 +566,58 @@ void purr_kernel_notify_window_created(purr_win_t win);
 typedef bool (*purr_mem_pressure_cb_t)(void);
 
 void purr_kernel_set_mem_pressure_cb(purr_mem_pressure_cb_t cb);
+
+// ── Remote forced logout ─────────────────────────────────────────────────
+// Same single-slot registration shape as purr_kernel_set_window_created_cb()/
+// purr_kernel_set_mem_pressure_cb() above — the ONE place a network-facing,
+// UI-agnostic module (pairing.c) can hand off "this device just got forced
+// off a remote server" to whichever app actually owns the visible
+// "connected" UI, without pairing.c/app_manager_remote.c ever linking a UI
+// header themselves. milkbar is the natural (and today, only) consumer —
+// it's the one PURR_MOD_APP that stays resident for the whole duration of
+// a remote session (see its own header comment on why it keeps running
+// with no window during Desktop mode) — registering during its own
+// init(), unregistering at deinit(). Real trigger: pairing_module.c's own
+// PAIRING_ACTION_USERAUTH_FORCE_LOGOUT responder (pairing.h) calls
+// purr_kernel_notify_remote_logout() the moment a trusted server asks this
+// device to disconnect — e.g. because that server is about to shut its
+// own pairing/proximity/WiFi stack down to free memory for RNode mode
+// (source/modules/rnode/rnode_module.c).
+typedef void (*purr_remote_logout_cb_t)(void);
+
+void purr_kernel_set_remote_logout_cb(purr_remote_logout_cb_t cb);
+
+// Called by pairing_module.c's own responder — not meant to be called
+// directly by apps.
+void purr_kernel_notify_remote_logout(void);
+
+// ── Radio-companion offload ──────────────────────────────────────────────
+// Same single-slot shape one more time — this one exists to avoid the
+// REVERSE dependency direction the two callbacks above don't have:
+// rnode_module.c (source/modules/rnode/) needs to tell a currently-
+// connected client "you're being disconnected" as part of freeing memory
+// for RNode mode (see that file's own "Radio-companion offload/reload"
+// header comment), which really means calling pairing_force_logout_all()
+// (pairing.h) — but rnode_module.c must NOT #include pairing.h or add
+// "pairing" to its own CMakeLists REQUIRES to do that: every
+// PURR_MODULE_REGISTER() struct is a non-static global (purr_module.h),
+// so the linker can never prove ANY of a module's own functions are dead
+// once that struct is reachable — confirmed live, linking pairing.c into
+// a build that never even registers it (rnode_test, no radio-companion
+// stack at all) grew that image from 89% to 99% of its OTA partition,
+// pulling in pairing's entire OOBE/USERAUTH/crypto implementation for
+// nothing. Routing through this callback instead means a build that never
+// lists "pairing" in its own [modules] never links pairing.c at all —
+// pairing_module.c's own pairing_init()/_deinit() register/unregister
+// this, and rnode_module.c only ever calls the generic notify function,
+// which is a safe, cheap no-op when nothing has registered.
+typedef void (*purr_radio_offload_cb_t)(void);
+
+void purr_kernel_set_radio_offload_cb(purr_radio_offload_cb_t cb);
+
+// Called by rnode_module.c before it tears its own radio-companion stack
+// down — not meant to be called directly by apps.
+void purr_kernel_notify_radio_offload_needed(void);
 
 // ── Boot readiness ────────────────────────────────────────────────────────────
 // Set once by the specialized kernel boot, after every static module/app has

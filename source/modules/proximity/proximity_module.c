@@ -45,6 +45,43 @@ static const char *TAG = "proximity";
 #define TICK_MS              500UL
 #define PROXIMITY_WATCHDOG_STALE_MS 5000UL
 
+// ── Channel-hop discovery ───────────────────────────────────────────────
+// Real root cause of "0 devices nearby" between a device that's joined a
+// home AP (tdeck_plus, via wifi_mgr — its STA is then locked to whatever
+// channel that AP broadcasts on, e.g. 11) and one that hasn't (heltec —
+// no wifi_mgr, ensure_wifi_ready() above only ever brings STA up
+// unassociated): ESP-NOW is strictly channel-bound (see on_espnow_send()'s
+// own comment above), so two peers parked on different channels never see
+// each other's beacons no matter how close together they are. Confirmed
+// live: tdeck_plus's own boot log shows "wifi:connected with HouseCats,
+// channel 11"; heltec's shows STA brought up with no AP connection at all.
+//
+// Fix: while this device has NO known peers (s_device_count == 0, i.e.
+// "actively searching") AND its own STA is NOT associated to an AP (an
+// associated STA's channel is dictated by that AP — esp_wifi_set_channel()
+// on one either fails or gets silently overridden, so hopping is only ever
+// attempted on the unassociated side), cycle through channels 1-11
+// (capped there, not 12/13 — universally allowed under every ESP-IDF
+// default country/regulatory config, and covers the realistic range of
+// home-AP channel choices including this exact case). The associated side
+// never needs to hop: it just needs to still be listening — which it
+// always is — when the hopping side happens to land on its channel.
+//
+// SEARCH_BEACON_INTERVAL_MS (much faster than the steady-state 8s) is what
+// actually makes a given channel dwell reliable rather than a coin flip:
+// with HOP_DWELL_MS >= 2x the search beacon interval, both directions are
+// guaranteed at least one beacon transmission opportunity while parked on
+// a shared channel, instead of depending on the hop's arbitrary phase
+// lining up with a slow, independent 8s beacon clock. Worst case, a full
+// 11-channel sweep is HOP_DWELL_MS * 11 =~ 22s — once ANY peer is found,
+// s_device_count > 0 freezes hopping (parks on the working channel) and
+// beacon cadence relaxes back to BEACON_INTERVAL_MS; hopping only resumes
+// if that peer goes stale (STALE_MS with no beacon) and the table empties.
+#define SEARCH_BEACON_INTERVAL_MS 1000UL
+#define HOP_DWELL_MS               2000UL
+#define HOP_CHANNEL_MIN                1
+#define HOP_CHANNEL_MAX               11
+
 #define BEACON_MAGIC   0x50525842UL   // 'PRXB'
 #define BEACON_VERSION 1
 
@@ -89,6 +126,8 @@ static uint8_t       s_own_mac[6];
 static char          s_own_name[20];
 static uint8_t       s_own_caps = 0;
 static volatile uint32_t s_last_heartbeat_ms = 0;
+static uint8_t        s_hop_channel = HOP_CHANNEL_MIN;
+static uint32_t       s_last_hop_ms = 0;
 
 static const uint8_t s_broadcast_mac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -214,6 +253,15 @@ static void send_beacon(void) {
     }
 }
 
+// True if this device's STA is currently associated to a real AP — an
+// associated STA's channel is dictated by that AP, so channel-hopping is
+// only ever attempted while this returns false. See the channel-hop
+// discovery comment above BEACON_INTERVAL_MS for the full reasoning.
+static bool sta_is_associated(void) {
+    wifi_ap_record_t ap_info;
+    return esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK;
+}
+
 // ── Task ─────────────────────────────────────────────────────────────────
 
 static void proximity_task(void *arg) {
@@ -222,10 +270,21 @@ static void proximity_task(void *arg) {
 
     for (;;) {
         uint32_t now_ms = (uint32_t)purr_kernel_uptime_ms();
+        bool searching = (s_device_count == 0);
 
-        if (now_ms - last_beacon_ms >= BEACON_INTERVAL_MS) {
+        uint32_t beacon_interval = searching ? SEARCH_BEACON_INTERVAL_MS : BEACON_INTERVAL_MS;
+        if (now_ms - last_beacon_ms >= beacon_interval) {
             send_beacon();
             last_beacon_ms = now_ms;
+        }
+
+        if (searching && !sta_is_associated()) {
+            if (now_ms - s_last_hop_ms >= HOP_DWELL_MS) {
+                s_hop_channel++;
+                if (s_hop_channel > HOP_CHANNEL_MAX) s_hop_channel = HOP_CHANNEL_MIN;
+                esp_wifi_set_channel(s_hop_channel, WIFI_SECOND_CHAN_NONE);
+                s_last_hop_ms = now_ms;
+            }
         }
 
         rx_queue_item_t item;
@@ -256,7 +315,18 @@ bool proximity_device_at(int idx, proximity_device_t *out) {
     return true;
 }
 
-void proximity_set_own_caps(uint8_t caps) { s_own_caps = caps; }
+bool proximity_find_device_by_mac(const uint8_t mac[6], proximity_device_t *out) {
+    if (!mac || !out) return false;
+    int idx = find_device_by_mac(mac);
+    if (idx < 0) return false;
+    *out = s_devices[idx];
+    return true;
+}
+
+// ORs in, never replaces — see proximity.h's own doc comment on why.
+void proximity_set_own_caps(uint8_t caps) { s_own_caps |= caps; }
+
+uint8_t proximity_get_own_caps(void) { return s_own_caps; }
 
 void proximity_get_own_name(char *out, size_t out_len) {
     if (!out || out_len == 0) return;
@@ -376,7 +446,29 @@ static void ensure_wifi_ready(void) {
 
 int proximity_init(void) {
     esp_read_mac(s_own_mac, ESP_MAC_WIFI_STA);
-    snprintf(s_own_name, sizeof(s_own_name), "PurrOS-%02X%02X", s_own_mac[4], s_own_mac[5]);
+    // purr_kernel_hostname_get() falls back to this exact "PurrOS-XXXX"
+    // MAC-suffix shape on its own when nothing's configured, so an
+    // unconfigured device's beacon name doesn't change — this just makes
+    // it overridable via Settings/purr_kernel_hostname_set() instead of
+    // this module deriving its own name independently.
+    char hostname[sizeof(s_own_name)];
+    purr_kernel_hostname_get(hostname, sizeof(hostname));
+    snprintf(s_own_name, sizeof(s_own_name), "%s", hostname);
+
+    // HAS_DISPLAY/STRONG_COMPUTE — generic, cross-device signals (unlike
+    // oled_ui_module.c's own RADIO_COMPANION call, which is specific to
+    // that one "minimal/no touchscreen UI" case), detected here so every
+    // device gets them right automatically with no per-device boot-file
+    // wiring needed. proximity is P3/OPTIONAL — by the time this runs,
+    // P1 display drivers have already registered (or not), so
+    // purr_kernel_display() is reliable here. |= (via proximity_set_own_
+    // caps(), see its own doc comment) rather than a direct s_own_caps
+    // write, purely for symmetry with oled_ui_module.c's own call —
+    // functionally identical either way within this same file.
+    uint8_t detected_caps = 0;
+    if (purr_kernel_display()) detected_caps |= PROXIMITY_CAP_HAS_DISPLAY;
+    if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) detected_caps |= PROXIMITY_CAP_STRONG_COMPUTE;
+    if (detected_caps) proximity_set_own_caps(detected_caps);
 
     ensure_wifi_ready();
 

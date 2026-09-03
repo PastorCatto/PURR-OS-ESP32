@@ -41,7 +41,7 @@ settings    = true
 # about — folded into Settings' own About tab, see cyd/device.pcat's comment
 terminal    = true
 fileman     = true
-taskmgr     = true
+diagnostics = true
 
 [flash]
 display/st7789    = 1
@@ -55,7 +55,7 @@ gps/generic_nmea  = 3
 apps/settings     = 3
 apps/terminal     = 3
 apps/fileman      = 3
-apps/taskmgr      = 3
+apps/diagnostics  = 3
 
 [pins]
 display_cs    = 12

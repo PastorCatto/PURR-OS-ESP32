@@ -1,0 +1,28 @@
+[module]
+name        = "cheetah"
+version     = "0.1.0"
+type        = "ui"
+description = "Cheetah — Windows XP-style desktop (favorites + Choose Favorites picker)"
+author      = "PURR OS"
+
+[requires]
+catcalls    = "display"
+kernel_min  = "1.0.0"
+
+# PURR package dependencies (resolved by `purrstrap pkg add`), distinct from
+# [build].requires below which lists IDF/C component names for the compiler —
+# see mochi/module.pcat's matching comment.
+[depends]
+app_manager = ">=0.1.0"
+# systemui — Cheetah hosts it for the taskbar (Start Menu, running-app
+# buttons, tray) and the shared login/lock welcome screen — see
+# systemui_xp.c and systemui_login.c.
+systemui    = ">=0.1.0"
+# mochi — Cheetah reuses mochi_icon_for_app()/mochi_color_for_app() rather than
+# keeping a third copy of the same name->icon table. See cheetah.h's header
+# comment and mochi/CMakeLists.txt's Kconfig guard.
+mochi       = ">=0.1.0"
+
+[build]
+sources     = "cheetah_module.c cheetah_hal.c cheetah_home.c cheetah_win.c"
+requires    = "lvgl app_manager systemui mochi"

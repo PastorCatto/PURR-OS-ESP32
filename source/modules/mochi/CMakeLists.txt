@@ -17,7 +17,19 @@
 # Listed explicitly rather than globbed: CMake globs are evaluated at configure
 # time, so a newly generated icon would not trigger a reconfigure and would
 # silently fail to link until a clean build.
-if(CONFIG_PURR_UI_BACKEND_MOCHI)
+#
+# OR CONFIG_PURR_UI_BACKEND_CHEETAH: Cheetah (source/modules/cheetah/, née
+# Flow) reuses this same icon set and mochi_icon_for_app()/mochi_color_for_app()
+# directly rather than keeping a third copy — see cheetah.h's header comment.
+# Safe to compile Mochi's sources in as a side effect of Cheetah being
+# selected: module boot-registration is driven entirely by device.pcat's
+# [modules] keys through purrstrap's generated `extern purr_module_<id>;`
+# glue (_generate_glue() in purrstrap.py), not by linker-section auto-
+# discovery, so nothing references purr_module_mochi on a device whose
+# [modules] ui = "cheetah" — and mochi_init() itself is still independently
+# guarded on the (in that case unset) CONFIG_PURR_UI_BACKEND_MOCHI, so it
+# no-ops even if somehow called.
+if(CONFIG_PURR_UI_BACKEND_MOCHI OR CONFIG_PURR_UI_BACKEND_CHEETAH)
     set(MOCHI_ICON_DIR ../../assets/icons/generated/48)
     set(MOCHI_SRCS
         mochi_module.c
@@ -47,6 +59,15 @@ else()
     set(MOCHI_SRCS "")
 endif()
 
+# app_manager_remote/proximity/user_mgr/claw_loader — mochi_springboard.c's
+# launch_app() now offers to download+install a remote app on first tap
+# (ported from cheetah_home.c's own identical feature, which is dead code
+# on every device this tree currently builds — see mochi_springboard.c's
+# own header comment for the full story of why this was missing). Same
+# "conditionally-empty on esp32p4/tab5, safe to REQUIRE unconditionally
+# either way" shape cheetah/CMakeLists.txt already documents for its own,
+# now-unreachable copy of this same feature — the C code itself guards the
+# actual calls behind CONFIG_IDF_TARGET_ESP32P4.
 idf_component_register(
     SRCS ${MOCHI_SRCS}
     INCLUDE_DIRS
@@ -55,5 +76,9 @@ idf_component_register(
         ../../kernel/catcalls
         ../../assets/icons
         ../systemui
-    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager systemui
+        ../app_manager_remote
+        ../proximity
+        ../user_mgr
+        ../claw_loader
+    REQUIRES esp_common driver freertos nvs_flash lvgl__lvgl app_manager systemui app_manager_remote proximity user_mgr claw_loader
 )

@@ -426,6 +426,16 @@ def build_app(name, app_dir, pcat_path, tier):
             "name": name, "tier": tier, "version": version,
             "sources": c_files, "built_at": datetime.datetime.now().isoformat(),
             "status": "registered",
+            # placement — "remote" (default, unset) | "local" | "hybrid".
+            # See app_manager.h's app_placement_t. Recorded here for now as
+            # documentation/a future codegen source, NOT yet consumed at
+            # runtime — a compiled app has no path back to its own
+            # app.pcat, and purr_module_header_t has no spare room left to
+            # carry this without an ABI change (see app_manager.c's own
+            # s_placement_table comment). Until that codegen step exists,
+            # actually taking effect means adding a matching entry to
+            # app_manager.c's s_placement_table by hand.
+            "placement": cfg.get("placement", "remote"),
         }, f, indent=2)
     info(f"    registered — included in next purrstrap build")
     return True

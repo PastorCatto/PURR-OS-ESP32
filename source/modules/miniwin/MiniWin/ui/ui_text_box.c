@@ -229,6 +229,25 @@ static void text_box_message_function(const mw_message_t *message)
 		}
 		break;
 
+	case MW_TOUCH_DOWN_MESSAGE:
+		/* PURR OS addition — see MW_TEXT_BOX_TOUCHED_MESSAGE's own doc
+		 * comment in miniwin.h for why: upstream this control has no
+		 * touch handling at all (it's read-only display upstream), so
+		 * with several sibling editable text boxes in one window
+		 * (source/modules/miniwin/miniwin_win.c's own mw_ta_create()
+		 * repurposes this control for that) there was no way for the
+		 * window to learn which one was actually tapped. Same "tell the
+		 * parent window" pattern as MW_TEXT_BOX_SCROLLING_REQUIRED_
+		 * MESSAGE just above, not a new mechanism.
+		 */
+		mw_post_message(MW_TEXT_BOX_TOUCHED_MESSAGE,
+				MW_UNUSED_MESSAGE_PARAMETER,
+				mw_get_control_parent_window_handle(message->recipient_handle),
+				(uint32_t)message->recipient_handle,
+				NULL,
+				MW_WINDOW_MESSAGE);
+		break;
+
 	default:
 		/* keep MISRA happy */
 		break;

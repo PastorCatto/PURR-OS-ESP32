@@ -112,3 +112,7 @@ bool miniwin_lock_handle_other(void)
     }
     return true;
 }
+
+bool miniwin_lock_is_screen_dark(void) { return s_screen_dark; }
+
+void miniwin_lock_force_unlock(void) { set_locked(false); }

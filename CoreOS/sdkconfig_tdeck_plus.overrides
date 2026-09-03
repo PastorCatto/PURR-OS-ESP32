@@ -100,8 +100,40 @@ CONFIG_LV_CONF_SKIP=n
 # relieving it — not yet understood. Reverted both to defaults (16384,
 # unset) pending a narrower, incremental retest. Root cause of the tight
 # internal-RAM budget itself is still real and still open.
-# CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
+#
+# 2026-09-01: narrower retest, per the note directly above — ALWAYSINTERNAL
+# alone this time, TRY_ALLOCATE_WIFI_LWIP left unset/default, to isolate
+# which of the two actually broke task creation last time. Forced by a real,
+# newly-observed failure: Mochi (LVGL-based, unlike MiniWin's non-LVGL
+# engine) + systemui "ios" + the current 12-app registry now trips the
+# kernel's own memory watchdog ("memory watchdog: 99% internal SRAM used
+# (critical) ... restarting" at ~5.7s uptime, internal_free=827) and boot-
+# loops — confirmed live via capture_boot.py, not guessed.
+#
+# RESULT: safe (no cupcake_task/mesh_task creation failure — that regression
+# is NOT caused by this knob alone) but insufficient by itself: internal_free
+# improved 827 -> 2155 bytes, watchdog still trips (98% instead of 99%).
+# Kept — strictly better than the 16384 default, zero observed downside —
+# but the boot loop needs more than this alone.
+#
+# 2026-09-01, second half of the same retest: TRY_ALLOCATE_WIFI_LWIP=y
+# alone (ALWAYSINTERNAL reverted to its 16384 default for this one test) —
+# RESULT: confirmed, definitively, to be the actual culprit, independent of
+# ALWAYSINTERNAL. Reproduced the exact same task-creation-failure class
+# ("failed to create pairing task", "failed to create mesh task", "failed
+# to create homebase task", "failed to create rx queue" — proximity), only
+# minutes into boot, before WiFi/BT had done any real work — and internal
+# heap was WORSE, not better (internal_free down to 47-139 bytes, still
+# tripped the 99% watchdog and still boot-looped). Whatever WIFI_LWIP's
+# PSRAM preference does to this board's early allocation order, it actively
+# starves other tasks' stack creation rather than freeing internal RAM for
+# them — do not re-enable this without solving that first. Reverted
+# immediately per this comment's own instruction from the previous entry.
 # CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+#
+# ALWAYSINTERNAL=512 alone (see the entry above this one) is the confirmed-
+# safe, confirmed-improvement state and is what's actually active below.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=512
 
 # Bluetooth — OFF as of this pass (gated behind CONFIG_BT_NIMBLE_ENABLED,
 # same "bt_mgr.c" file the comments below still describe — see bt_mgr.c's
@@ -284,3 +316,20 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
 # TE pin, which is not broken out on this board (F4), so on T-Deck Plus this is
 # a genuine choose-one.
 CONFIG_LV_SHADOW_CACHE_SIZE=0
+
+# C++ exceptions — project default is CONFIG_COMPILER_CXX_EXCEPTIONS=n
+# (CoreOS/sdkconfig.defaults). source/modules/reticulum vendors microReticulum
+# (see its own vendor/VENDORED.md), which leans on real throw/try/catch
+# throughout (Bytes.h, Identity.cpp, Packet.cpp, Destination.cpp, Interface.cpp,
+# Transport.cpp, the Cryptography layer) — confirmed live: without this,
+# compilation fails outright ("exception handling disabled, use '-fexceptions'
+# to enable"), not just a runtime behavior difference. A per-component
+# -fexceptions compiler flag alone isn't enough — ESP-IDF's C++ exception
+# unwind runtime (the real __cxa_throw/personality-routine support, not just
+# the compile-time flag) is a project-wide link decision, hence a real
+# sdkconfig change here rather than something scoped to reticulum's own
+# CMakeLists.txt. Remember this file's own gotcha (see the esp-idf-
+# activation-recipe memory): editing this line has NO effect on an already-
+# resolved CoreOS/build_tdeck_plus/sdkconfig — delete that file and rebuild
+# for it to actually take effect.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y

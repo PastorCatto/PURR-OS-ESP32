@@ -189,6 +189,24 @@ static void miniwin_task(void *arg)
 {
     (void)arg;
 
+    // Wait for boot.c/kernel_tdp_boot.c to finish loading every static
+    // module/app AND for the boot splash's own remaining steps to run —
+    // same purr_kernel_boot_ready() wait every other UI backend module
+    // already does (cheetah_module.c/cardstack_module.c/tabby_module.c/
+    // cupcake_module.c/mochi_module.c/nougat_module.c all have this exact
+    // loop; MiniWin never did). Without it, this task — spawned from
+    // miniwin_init() while purr_kernel_load_static_modules() is still
+    // mid-boot — races ahead of the rest of boot on its own concurrent
+    // task: HAL/mw_init()/mw_user_init() (this file's own boot-login gate
+    // included) run and the first mw_paint_all() actually hits the
+    // display WHILE the boot splash is still mid-progress-bar, so the
+    // desktop (and an auto-login decision, if the account has no
+    // password) visibly appears before the splash is done. Confirmed
+    // live as exactly that symptom.
+    while (!purr_kernel_boot_ready()) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
     // Initialise HAL subsystems
     mw_hal_non_vol_init();
     mw_hal_timer_init();
@@ -229,7 +247,9 @@ static void miniwin_task(void *arg)
     mw_util_rect_t status_rect = { 0, 0, (int16_t)disp_w, STATUS_BAR_H };
 #endif
 #ifdef CONFIG_PURR_MINIWIN_DESKTOP_WINCE
-#define STATUS_ROTATE_TICKS 4
+// 5s: clock/battery-icon corner toggle cadence, matched to this loop's own
+// 1s status-repaint tick.
+#define STATUS_ROTATE_TICKS 5
     int status_ticks = 0;
 #endif
 

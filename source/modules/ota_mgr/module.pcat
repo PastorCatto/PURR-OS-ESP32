@@ -1,0 +1,14 @@
+# modules/ota_mgr/module.pcat
+# OTA update manager — WiFi HTTPS delivery (esp_https_ota), manifest
+# version-check, SHA-256 verify before staging the new boot partition.
+# Requires device.pcat [device] ota = true (dual-slot partition table) —
+# declines at init on a device that doesn't have one. See ota_mgr.h.
+
+name            = "ota_mgr"
+version         = "1.0.0"
+module_type     = "PURR_MOD_SYSTEM"
+kernel_min      = "0.11.1"
+kernel_max      = ""
+
+provides        = ["ota_update"]
+required_catcalls = []

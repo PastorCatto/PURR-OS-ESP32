@@ -1,0 +1,34 @@
+{
+  "name": "microStore",
+  "version": "0.1.7",
+  "description": "A high performance single-header embeddable persistent key-value store for constrained devices with indexing capabilities and time-based pruning.",
+  "keywords": [
+    "kv",
+    "database",
+    "bitcask",
+    "mcu",
+    "embedded",
+    "esp32",
+    "nrf52",
+    "native"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/attermann/microStore"
+  },
+  "authors": [
+    {
+      "name": "Chad Attermann",
+      "maintainer": true
+    }
+  ],
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "includeDir": "include",
+    "srcFilter": [
+      "-<*>"
+    ]
+  }
+}

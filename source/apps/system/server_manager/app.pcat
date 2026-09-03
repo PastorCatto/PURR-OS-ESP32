@@ -1,0 +1,9 @@
+# apps/system/server_manager/app.pcat
+
+name        = "server_manager"
+version     = "1.0.0"
+tier        = "claw"
+author      = "PURR OS"
+description = "Remote WiFi setup and app transfer/approval for a connected server. Reached from the remote desktop only."
+
+idf_requires = "esp_common driver freertos"

@@ -482,10 +482,22 @@ void app_main(void)
     // sx1262_configure() must run before purr_kernel_load_static_modules()
     // below, since that's what calls the radio module's own module_init() ->
     // sx1262_init(), which reads these pins at SPI-bus-setup time.
+    //
+    // Guarded the same way as kernel_tdeck_plus's twin of this file — see
+    // its comment at the matching call for the full explanation.
+    // PURR_HAS_RADIO_DRIVER is shared build-system plumbing (CoreOS/main/
+    // CMakeLists.txt), not specific to either kernel.
+#ifndef PURR_HAS_RADIO_DRIVER
+#define PURR_HAS_RADIO_DRIVER 1
+#endif
+#if PURR_HAS_RADIO_DRIVER
     sx1262_configure(TDP_LORA_MOSI, TDP_LORA_MISO, TDP_LORA_SCLK,
                       TDP_LORA_CS, TDP_LORA_RST, TDP_LORA_BUSY, TDP_LORA_IRQ);
     // Default SPI2_HOST (sx1262_set_spi_host() available if a future fix
     // needs to move this — see mount_sd_vfs()'s comment).
+#else
+    ESP_LOGI(TAG, "drivers.radio unset in device.pcat — skipping sx1262_configure()");
+#endif
 
     ESP_LOGI(TAG, "=== phase 1: static modules ===");
     extern void purr_register_static_modules(void);
@@ -510,11 +522,16 @@ void app_main(void)
     app_manager_scan();
 
     // T-Deck Plus Pounce is currently a Meshtastic hardware/debugging
-    // build — go straight to the diagnostics screen instead of the
-    // launcher so RSSI/node-count/kernel-log visibility doesn't require
-    // navigating anywhere first.
+    // build — go straight to Diagnostics' Mesh section instead of the
+    // launcher (or Diagnostics' own category picker) so RSSI/node-count/
+    // kernel-log visibility doesn't require navigating anywhere first.
+    // meshdiag was merged into diagnostics.c as a section — see that file's
+    // header for the full mapping and diagnostics_open_mesh()'s own comment
+    // for why this two-call sequence is safe.
     extern int app_manager_launch_by_name(const char *name);
-    app_manager_launch_by_name("meshdiag");
+    app_manager_launch_by_name("diagnostics");
+    extern void diagnostics_open_mesh(void);
+    diagnostics_open_mesh();
 
     purr_kernel_set_boot_ready(true);
 

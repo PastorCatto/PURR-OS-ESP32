@@ -12,6 +12,15 @@
 #include "freertos/queue.h"
 #include <string.h>
 #include <stdio.h>
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+// Only pulled in on OTA-enabled builds (device.pcat [device] ota = true —
+// see purrstrap.py's _generate_sdkconfig()) — see this file's OTA rollback
+// block, right after purr_crash_guard_check_reset_reason()'s existing
+// `unclean` classification, for why esp_app_desc.h above wasn't already
+// enough (it only reads the CURRENT image's description; confirming or
+// rolling back an OTA needs esp_ota_ops.h's state-machine calls).
+#include "esp_ota_ops.h"
+#endif
 
 static const char *TAG = "crash_guard";
 
@@ -396,6 +405,40 @@ void purr_crash_guard_check_reset_reason(void)
                     r == ESP_RST_TASK_WDT || r == ESP_RST_WDT ||
                     r == ESP_RST_BROWNOUT || r == ESP_RST_CPU_LOCKUP ||
                     r == ESP_RST_PWR_GLITCH);
+
+#if CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    // OTA rollback confirmation. Independent of, and runs before, the
+    // strike/breadcrumb attribution below (which is about blaming a
+    // specific entity for the NEXT boot's recovery) — this is a coarser,
+    // one-shot check on the image itself: is what's running right now
+    // ota_mgr_apply()'s freshly-staged, still-unconfirmed image?
+    // ESP_OTA_IMG_PENDING_VERIFY is exactly that state, set automatically by
+    // the bootloader on first boot into a new OTA slot (CONFIG_BOOTLOADER_
+    // APP_ROLLBACK_ENABLE) and cleared by whichever of the two calls below
+    // runs. A clean boot this far is confirmation enough — no separate
+    // stability-timer/heartbeat needed, this line only runs once esp_app_
+    // main/kernel boot has already gotten well past the point anything in
+    // Phase 0/1 would have hard-crashed. An unclean boot means the fresh
+    // image didn't even survive its first boot; don't wait for a second
+    // strike; roll back immediately.
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t   ota_state;
+    if (running && esp_ota_get_state_partition(running, &ota_state) == ESP_OK &&
+        ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+        if (unclean) {
+            ESP_LOGE(TAG, "OTA image crashed on its first boot (reason=%d) — rolling back", (int)r);
+            esp_ota_mark_app_invalid_rollback_and_reboot();
+            // Reboots into the previous slot on success and does not return.
+            // Falling through (a failed rollback call) leaves ota_state as
+            // PENDING_VERIFY — the strike/breadcrumb path below still runs
+            // normally against whatever entity this crash gets attributed to.
+        } else {
+            ESP_LOGI(TAG, "OTA image booted cleanly — marking valid, cancelling rollback");
+            esp_ota_mark_app_valid_cancel_rollback();
+        }
+    }
+#endif
+
     if (!unclean) {
         // Clean boot (power-on / intentional esp_restart / deep sleep
         // wake) — whatever breadcrumb is left over, if any, is stale

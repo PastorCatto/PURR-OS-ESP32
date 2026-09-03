@@ -34,7 +34,17 @@ static void mount_flash_vfs(void)
         .base_path              = "/flash",
         .partition_label        = NULL,   // uses first SPIFFS partition in table
         .max_files              = 12,
-        .format_if_mount_failed = false,
+        // true, not false — kernel_tdp_boot.c's own specialized boot
+        // already uses true for exactly this reason: a partition that has
+        // never held a valid SPIFFS filesystem (first-ever boot, or one
+        // freshly repartitioned — confirmed live on a real Heltec board
+        // this session: "SPIFFS: mount failed, -10025" / SPIFFS_ERR_NOT_A_
+        // FS, forever, on every single boot) fails to mount every time
+        // with false, with no way to self-heal. This only ever matters on
+        // a board where the mount was ALREADY failing — an already-good
+        // filesystem is never reformatted by this flag, so extending the
+        // generic path to match the specialized one is low-risk.
+        .format_if_mount_failed = true,
     };
     esp_err_t ret = esp_vfs_spiffs_register(&conf);
     if (ret != ESP_OK) {
@@ -44,6 +54,7 @@ static void mount_flash_vfs(void)
         esp_spiffs_info(NULL, &total, &used);
         ESP_LOGI(TAG, "flash VFS: %u KB used / %u KB total",
                  (unsigned)(used / 1024), (unsigned)(total / 1024));
+        purr_kernel_set_flash_available(true);
     }
 }
 

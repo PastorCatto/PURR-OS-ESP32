@@ -1,0 +1,53 @@
+# PURR OS — tdeck_plus_probe_uart manual overrides
+#
+# The probe, with its console on UART0 instead of the native USB port.
+# Identical firmware otherwise — the kernel directory is six one-line wrappers
+# around kernel_tdeck_plus_probe's sources, so there is one copy of the probe.
+#
+# WHY THIS BUILD EXISTS
+#
+# Under emulation the entire console — every ESP_LOG line and every '%' protocol
+# line — leaves through a single peripheral. On the USB build that peripheral is
+# USB-Serial-JTAG, which Espressif's QEMU fork ships as a stub: reads return
+# zero, writes are dropped. Firmware then boots to complete silence, which is
+# indistinguishable from firmware that hung during startup, and raising the log
+# level does not help because nothing reaches the console at all.
+#
+# UART0 is modelled properly by QEMU and by every other tool in the chain, so
+# this build separates "the firmware stopped" from "the console model dropped
+# it". Reach for it first when bringing up an emulator; the USB build is the
+# one to use on real hardware, where the native port is the only cable.
+#
+#   qemu-system-xtensa ... -serial stdio
+#
+# On real hardware this needs UART0's pins (TX GPIO43 / RX GPIO44 on the T-Deck,
+# shared with the GPS header) — the USB-C port will stay silent for this build.
+
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_NUM_0=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+# No USB-Serial-JTAG secondary. The point is to prove output arrives over UART;
+# a secondary sink would leave it ambiguous which one produced what.
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# ── Everything below matches sdkconfig_tdeck_plus_probe.overrides ────────────
+# Kept in step deliberately: a variant that differs in more than the console
+# would stop being a control for the console question it exists to answer.
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_VERBOSE=y
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
+
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+CONFIG_ESP_TASK_WDT_EN=y
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+CONFIG_ESP_WIFI_ENABLED=n
+# CONFIG_BT_ENABLED is not set

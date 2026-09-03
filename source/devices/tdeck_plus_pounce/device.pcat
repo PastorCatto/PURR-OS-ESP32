@@ -47,11 +47,10 @@ wifi        = "wifi_mgr"
 settings    = true
 terminal    = true
 fileman     = true
-hwtest      = true
-drivermgr   = true
 msn         = true
-meshdiag    = true
-services    = true
+# Merges what used to be hwtest/drivermgr/meshdiag/services — see
+# source/apps/system/diagnostics/diagnostics.c's file header.
+diagnostics = true
 
 [flash]
 display/st7789    = 1
@@ -68,11 +67,8 @@ gps/generic_nmea  = 3
 apps/settings     = 3
 apps/terminal     = 3
 apps/fileman      = 3
-apps/hwtest       = 3
-apps/drivermgr    = 3
 apps/msn          = 3
-apps/meshdiag     = 3
-apps/services     = 3
+apps/diagnostics  = 3
 
 [pins]
 display_cs    = 12

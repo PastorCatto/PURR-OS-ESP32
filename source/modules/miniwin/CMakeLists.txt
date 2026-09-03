@@ -14,7 +14,6 @@ idf_component_register(
         miniwin_module.c
         miniwin_win.c
         miniwin_wince_desktop.c
-        miniwin_wince_icons.c
         miniwin_cursor.c
         miniwin_keyboard.c
         miniwin_lock.c
@@ -111,5 +110,6 @@ idf_component_register(
         ../../kernel/core
         ../../kernel/catcalls
         ../../modules/meshtastic
-    REQUIRES esp_common driver freertos nvs_flash meshtastic
+        ../../modules/user_mgr
+    REQUIRES esp_common driver freertos nvs_flash meshtastic user_mgr
 )

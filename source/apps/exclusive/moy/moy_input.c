@@ -51,9 +51,19 @@
 #define TRACKBALL_CLICK 0x0028      // see trackball.c's header comment
 
 typedef struct {
-    bool held[MOY_BTN_COUNT];
+    bool held[MOY_BTN_COUNT];       // combined, what btn() reports
     bool prev[MOY_BTN_COUNT];       // previous tick, for btnp edges
 } pad_t;
+
+// Keyboard-held is tracked SEPARATELY from the trackball and the two are
+// combined each tick. They cannot share one array: the keyboard is event-driven
+// (a key stays held until purr_port synthesises its release) while the
+// trackball is a timed hold that expires on its own.
+//
+// Sharing them was the first version and it latched. Nothing ever wrote `false`
+// back for an expired trackball hold, so the first roll in any direction stuck
+// that direction on for the rest of the session.
+static bool s_kb_held[MOY_BTN_COUNT];
 
 static pad_t   s_pad;
 static int64_t s_ball_until[MOY_BTN_COUNT];   // trackball hold expiry, us
@@ -64,6 +74,40 @@ static bool    s_key_held[128];
 static bool    s_key_prev[128];
 static int     s_key_last;
 static bool    s_textmode;
+
+// ── Host exit ───────────────────────────────────────────────────────────────
+//
+// spec 7.3: "The host owns exit. There is no exit button in the console's input
+// model, and no cart is required to provide one." A cart may call quit(), but
+// most will not — brick_siege does not — so without a gesture here the only way
+// out of a running cart is the reset button. That was the case on the first
+// hardware build and it is the bug this section fixes.
+//
+// BACKSPACE is the gesture key: it is not in the button map (WASD/space/B/R),
+// so a cart cannot lose an input to it, and it is not a natural game key.
+//
+// TWO forms are accepted, deliberately, because it is still unconfirmed whether
+// the bbq20 repeats a held key (see purr_port_key_next's comment):
+//
+//   * HELD for EXIT_HOLD_MS      — works if the keyboard repeats, since the
+//                                  repeats keep purr_port's hold alive
+//   * TAPPED 3x within EXIT_TAP_WINDOW_MS — works if each press reports once
+//
+// Whichever fires, the log says which, so the first exit also settles the
+// repeat question empirically.
+//
+// Short taps still reach the cart through key()/keyp(): only the gesture is
+// consumed, not the key.
+#define EXIT_HOLD_MS        1000
+#define EXIT_TAPS           3
+#define EXIT_TAP_WINDOW_MS  2000
+#define EXIT_KEY            0x08        // backspace
+
+static int64_t s_exit_down_us;          // when the current hold began, 0 = not held
+static int     s_exit_taps;
+static int64_t s_exit_first_tap_us;
+static bool    s_exit_requested;
+static const char *s_exit_via = "";
 
 static const catcall_input_t *s_ball;
 
@@ -161,16 +205,43 @@ void moy_input_poll(void)
         if (k.down)       s_key_last = code;
 
         int b = key_to_btn(k.code);
-        if (b >= 0) s_pad.held[b] = k.down;
+        if (b >= 0) s_kb_held[b] = k.down;
+
+        // Host exit gesture. Tracked on the raw events rather than on the held
+        // array so that the tap count sees every press, including ones that
+        // start and end inside a single tick.
+        if (code == EXIT_KEY) {
+            if (k.down) {
+                if (!s_exit_down_us) s_exit_down_us = now;
+
+                if (!s_exit_taps || now - s_exit_first_tap_us > (int64_t)EXIT_TAP_WINDOW_MS * 1000) {
+                    s_exit_taps = 1;
+                    s_exit_first_tap_us = now;
+                } else {
+                    s_exit_taps++;
+                }
+                if (s_exit_taps >= EXIT_TAPS) { s_exit_requested = true; s_exit_via = "3 taps"; }
+            } else {
+                s_exit_down_us = 0;     // released — restart any hold
+            }
+        }
+    }
+
+    // Hold form, checked every tick rather than on an event: if the keyboard
+    // does repeat, the repeats keep purr_port's hold alive and this fires
+    // without needing an event at the one-second mark.
+    if (s_exit_down_us && now - s_exit_down_us > (int64_t)EXIT_HOLD_MS * 1000) {
+        s_exit_requested = true;
+        s_exit_via = "hold";
     }
 
     poll_trackball(now);
 
-    // Merge the trackball in. OR rather than override: a cart should not care
-    // which device the player used, and holding W while rolling should not
-    // fight itself.
+    // Rebuild the combined state from scratch every tick. Assignment, not OR
+    // into whatever was there before — that is what makes an expired trackball
+    // hold actually clear.
     for (int b = 0; b < MOY_BTN_COUNT; b++)
-        if (s_ball_until[b] > now) s_pad.held[b] = true;
+        s_pad.held[b] = s_kb_held[b] || (s_ball_until[b] > now);
 
     if (s_ball_click) s_pad.held[MOY_BTN_A] = true;
 }
@@ -230,4 +301,56 @@ bool moy_touch(int *x, int *y, bool *tapped, bool *held)
     // true means "this host has a pointer", not "it is being touched" — spec
     // 7.3 says touch() returns nil only where there is no pointer at all.
     return true;
+}
+
+// Has the player asked to leave? Latches until read, so a gesture completed
+// mid-frame cannot be missed by a tick that polls at the wrong moment.
+bool moy_exit_requested(const char **how)
+{
+    if (!s_exit_requested) return false;
+    if (how) *how = s_exit_via;
+    return true;
+}
+
+// Clear every scrap of input state.
+//
+// MUST be called at the start of each launch. All the state in this file is
+// file-static, which on an app compiled into the firmware means it persists for
+// the whole BOOT, not the app — so a second launch inherits whatever the first
+// left behind.
+//
+// That is not theoretical: s_exit_requested latches until read, so after
+// exiting moy once, the next launch saw a stale exit request and quit ~30ms in,
+// before the picker could draw a frame. The log read
+//
+//   moy_menu: exit gesture (hold) from the picker
+//   moy: no cart chosen - leaving
+//
+// on a launch where nothing had been pressed at all.
+void moy_input_reset(void)
+{
+    memset(&s_pad, 0, sizeof(s_pad));
+    memset(s_kb_held, 0, sizeof(s_kb_held));
+    memset(s_ball_until, 0, sizeof(s_ball_until));
+    memset(s_key_held, 0, sizeof(s_key_held));
+    memset(s_key_prev, 0, sizeof(s_key_prev));
+    s_ball_click = false;
+    s_key_last   = 0;
+    s_textmode   = false;
+
+    s_exit_down_us      = 0;
+    s_exit_taps         = 0;
+    s_exit_first_tap_us = 0;
+    s_exit_requested    = false;
+    s_exit_via          = "";
+
+    // Re-resolved on the next poll: the catcall registry is rebuilt by speed
+    // demon's restore, so a pointer cached in a previous run may be stale.
+    s_ball = NULL;
+
+    // Drain anything the launcher's own keypress left in the driver queue —
+    // otherwise the key that STARTED moy arrives as the first game input.
+    const catcall_input_t *kbd = purr_port_find_keyboard();
+    input_event_t ev;
+    if (kbd && kbd->poll_event) while (kbd->poll_event(&ev)) { }
 }

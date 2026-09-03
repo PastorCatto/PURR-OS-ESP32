@@ -112,6 +112,11 @@ set(USB_MSC_REQUIRES "")
 # evaluated in an isolated scope. Absent means the kernel's own default.
 set(PURR_BOOT_SETTLE_ENV $ENV{PURR_BOOT_SETTLE_MS})
 
+# Whether [drivers].radio names a driver — see purrstrap.py's own comment on
+# PURR_HAS_RADIO_DRIVER for why a specialized kernel's boot file needs this
+# at compile time rather than just skipping the driver's module registration.
+set(PURR_HAS_RADIO_DRIVER_ENV $ENV{PURR_HAS_RADIO_DRIVER})
+
 idf_component_register(
     SRCS
         ${BOOT_SRCS}
@@ -133,6 +138,35 @@ idf_component_register(
         freertos
         nvs_flash
         spiffs
+        # joltwallet__littlefs — mounts the app_cfg partition (see
+        # partitions_16mb_ota.csv), the one genuinely mutable partition in an
+        # otherwise semi-immutable image. See mount_app_config_vfs() in this
+        # device's own kernel_tdp_boot.c and purr_kernel_app_config_read()/
+        # _write() in purr_kernel.h.
+        joltwallet__littlefs
+        # esp_partition — esp_partition_find_first()/_mmap()/_write()/
+        # _erase_range(), used by claw_loader_selftest.c (EXPERIMENTAL,
+        # exercises the cross-device .claw loading module below). Explicit
+        # rather than relying on app_update/esp_app_format's transitive
+        # pull-in of it, same "explicit, not inherited" reasoning as
+        # esp_app_format's own comment below.
+        esp_partition
+        # claw_loader — loads a compiled-but-never-linked .claw object at
+        # runtime (source/modules/claw_loader/). claw_loader_selftest.c
+        # (this device's own kernel_tdeck_plus dir, EXPERIMENTAL) exercises
+        # it; app_manager.c's launch_personal() is the real, non-test caller.
+        claw_loader
+        # app_manager, user_mgr — TEMPORARY, same reasoning as claw_loader
+        # just above: claw_loader_selftest.c's run4() exercises the personal-
+        # app app_manager integration end-to-end (scan/launch/stop through
+        # the public API, under a throwaway user_mgr account it creates and
+        # removes). Neither is otherwise needed by "main" directly — every
+        # other kernel_tdp_boot.c call into app_manager already goes through
+        # a local `extern` declaration instead of including the header, to
+        # avoid exactly this REQUIRES growth. Remove alongside run4() once
+        # this is no longer needed for verification.
+        app_manager
+        user_mgr
         fatfs
         sdmmc
         # esp_app_format — for esp_app_get_description() in purr_crash_guard.c,
@@ -144,6 +178,17 @@ idf_component_register(
         # failed with "esp_app_desc.h: No such file or directory" — a difference
         # only a multi-device bake surfaces.
         esp_app_format
+        # app_update — esp_ota_ops.h's esp_ota_get_running_partition()/
+        # esp_ota_get_state_partition()/esp_ota_mark_app_valid_cancel_rollback()/
+        # esp_ota_mark_app_invalid_rollback_and_reboot(), used by
+        # purr_crash_guard.c's OTA rollback block (only active under
+        # CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE — see device.pcat [device] ota).
+        # Same "explicit, not inherited" reasoning as esp_app_format just above:
+        # it happens to already be linkable everywhere via a transitive path
+        # from esp_app_desc.h's own esp_app_get_description(), but this makes
+        # that dependency real instead of assumed, on every device regardless
+        # of whether that transitive path stays true as REQUIRES elsewhere change.
+        app_update
         ${DRIVER_REQUIRES}
         ${EXTRA_REQUIRES}
         ${USB_MSC_REQUIRES}
@@ -153,4 +198,12 @@ idf_component_register(
 if(PURR_BOOT_SETTLE_ENV)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOOT_SETTLE_MS=${PURR_BOOT_SETTLE_ENV}UL)
     message(STATUS "PURR: boot settle ${PURR_BOOT_SETTLE_ENV} ms (from device.pcat)")
+endif()
+
+# Only defined when purrstrap actually set it — a bare `idf.py build` (no
+# PURR_HAS_RADIO_DRIVER in the environment at all) leaves kernel_tdp_boot.c's
+# own #ifndef fallback (defaults to 1, today's unconditional behaviour) in
+# charge, same as PURR_BOOT_SETTLE_ENV's "absent means the kernel default" above.
+if(DEFINED ENV{PURR_HAS_RADIO_DRIVER})
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE PURR_HAS_RADIO_DRIVER=${PURR_HAS_RADIO_DRIVER_ENV})
 endif()

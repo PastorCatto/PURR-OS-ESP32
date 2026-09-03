@@ -45,7 +45,19 @@ typedef struct __attribute__((packed)) {
 
 #define RPC_MAX_INFLIGHT_CALLS      4
 #define RPC_MAX_INBOUND_REASSEMBLY  2
-#define RPC_MAX_ACTIONS             16
+// 16 silently overflowed on real hardware once app_manager_remote.c's
+// two new DOWNLOAD_* actions pushed the real total past it: pairing_
+// module.c registers 8 (6 USERAUTH_* + 2 OOBE_*), app_manager_remote.c
+// registers 5 (LIST/LAUNCH/STOP + DOWNLOAD_INFO/DOWNLOAD_CHUNK), server_
+// mgr.c registers 5 (WIFI_STATUS/SET + 3 APP_UPLOAD_*) — 18 already,
+// with server_mgr's own last two (UPLOAD_CHUNK/END) losing the race and
+// silently never registering (confirmed live: "action table full (16) —
+// action_id=20483 not registered"), breaking its app-push feature
+// entirely with no compile-time signal at all. 32 gives real headroom
+// for what's already here plus room to grow — each action_slot_t is a
+// few bytes (bool + uint16_t + a function pointer), so doubling costs
+// nothing that matters.
+#define RPC_MAX_ACTIONS             32
 
 typedef struct {
     bool              in_use;

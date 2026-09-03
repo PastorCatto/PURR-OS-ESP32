@@ -23,8 +23,11 @@
 #include "wifi_mgr.h"
 #include "bt_mgr.h"
 #include "mesh_ble.h"
+#include "ota_mgr.h"
 #include "systemui.h"   // purr_systemui_fx_refresh() — see on_effects_toggle()
+#include "user_mgr.h"   // the new "Users" tab — see on_open_users()
 #include "sdkconfig.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_wifi_labels's own comment below
 
 // LV_SYMBOL_* glyphs for the category tile grid below — meaningless (and
 // their backing font absent) under MiniWin/Pounce, same as msn.c's own
@@ -64,22 +67,47 @@ static purr_wid_t  s_general_menu = 0;
 // would be permanently unreachable/undismissable once opened.
 static purr_win_t  s_general_win        = 0;
 static purr_wid_t  s_general_status_lbl = 0;
+
+#define MAX_USERS_ROWS USER_MGR_MAX_USERS
+static purr_win_t  s_users_win        = 0;   // separate "Users" window, built on demand
+static purr_wid_t  s_users_list       = 0;
+static purr_wid_t  s_users_status_lbl = 0;
+static EXT_RAM_BSS_ATTR char s_users_labels[MAX_USERS_ROWS][USER_MGR_USERNAME_MAX + 24];   // "name (network) [admin]"
+static const char *s_users_label_ptrs[MAX_USERS_ROWS];
+static EXT_RAM_BSS_ATTR char s_users_names[MAX_USERS_ROWS][USER_MGR_USERNAME_MAX];         // parallel to the list above — bare username, for the Remove action
+static int         s_users_count = 0;
+
+static purr_win_t  s_add_user_win  = 0;
+static purr_wid_t  s_add_user_name = 0;
+static purr_wid_t  s_add_user_pass = 0;
 static purr_win_t  s_display_win        = 0;
 static purr_wid_t  s_display_status_lbl = 0;
 static purr_win_t  s_customization_win        = 0;
 static purr_wid_t  s_customization_status_lbl = 0;
 static purr_win_t  s_connectivity_win = 0;
+static purr_wid_t  s_hostname_lbl   = 0;
+static purr_wid_t  s_hostname_input = 0;
 static purr_wid_t  s_mesh_backend_status_lbl = 0;
 static purr_win_t  s_mesh_switch_confirm_win = 0;
 static purr_mesh_backend_t s_mesh_switch_target;
 static purr_win_t  s_about_win = 0;
+
+// Updates category — see on_open_updates(). ota_mgr_check()/apply() are
+// documented-blocking network calls, same class of problem bt_scan_task()
+// below already solved for Bluetooth scanning: never run them on cupcake_task,
+// always on their own background task, guarded by s_ota_busy the same way
+// s_bt_scanning guards a concurrent scan.
+static purr_win_t  s_updates_win        = 0;
+static purr_wid_t  s_updates_status_lbl = 0;
+static purr_win_t  s_ota_url_dlg_win    = 0;
+static purr_wid_t  s_ota_url_dlg_input  = 0;
+static volatile bool s_ota_busy = false;
 
 static purr_wid_t  s_brightness_lbl = 0;
 static purr_wid_t  s_screen_timeout_lbl = 0;
 
 static uint8_t     s_brightness = 255;
 static uint8_t     s_screen_timeout_min = 1;   // must match purr_kernel.h's own default
-static char        s_theme[16]  = "wce";
 
 static uint8_t     s_dev_mode     = 0;   // 0/1 — see purr_kernel.h's doc comment
 
@@ -100,6 +128,10 @@ static uint32_t    s_accent_color           = 0x1C1C2E;
 static purr_wid_t  s_effects_lbl            = 0;
 static purr_wid_t  s_accent_lbl             = 0;
 static purr_wid_t  s_accent_input           = 0;
+// Default matches purr_kernel.c's own — light — so a device with nothing
+// stored behaves identically to one that never had this setting.
+static uint8_t     s_dark_mode              = 0;
+static purr_wid_t  s_dark_mode_lbl          = 0;
 
 static purr_wid_t  s_about_lbl = 0;
 
@@ -107,10 +139,18 @@ static purr_wid_t  s_about_lbl = 0;
 static purr_win_t  s_wifi_win        = 0;   // separate "WiFi Settings" window, built on demand
 static purr_wid_t  s_wifi_status_lbl = 0;
 static purr_wid_t  s_wifi_list       = 0;
-static char        s_wifi_labels[MAX_WIFI_RESULTS][64];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — this app's row/list buffers
+// (WiFi/BT scan results, wallpaper list, Users list) are pure rebuilt-on-
+// refresh display text, never touched before PSRAM is up (settings is a
+// normal launched app, not early-boot code) — same class MiniWin's own
+// control/list arrays and msn.c's/server_manager_app.c's row buffers
+// already use this attribute for (real, confirmed via purr_os.map: a
+// genuine link-time DRAM overflow once the current app set was all
+// compiled in together, see msn.c's matching comment, 2026-09-01).
+static EXT_RAM_BSS_ATTR char s_wifi_labels[MAX_WIFI_RESULTS][64];
 static const char *s_wifi_label_ptrs[MAX_WIFI_RESULTS];
-static char        s_wifi_ssids[MAX_WIFI_RESULTS][33];   // parallel to the list above
-static bool        s_wifi_secured[MAX_WIFI_RESULTS];
+static EXT_RAM_BSS_ATTR char s_wifi_ssids[MAX_WIFI_RESULTS][33];   // parallel to the list above
+static EXT_RAM_BSS_ATTR bool s_wifi_secured[MAX_WIFI_RESULTS];
 static int         s_wifi_count = 0;
 
 static purr_win_t  s_wifi_dlg_win   = 0;
@@ -126,9 +166,9 @@ static char        s_wifi_dlg_ssid[33] = "";
 static purr_win_t  s_bt_win        = 0;   // separate "Bluetooth Settings" window, built on demand
 static purr_wid_t  s_bt_status_lbl = 0;
 static purr_wid_t  s_bt_list       = 0;
-static char        s_bt_labels[MAX_BT_RESULTS][48];
+static EXT_RAM_BSS_ATTR char s_bt_labels[MAX_BT_RESULTS][48];
 static const char *s_bt_label_ptrs[MAX_BT_RESULTS];
-static uint8_t     s_bt_addrs[MAX_BT_RESULTS][6];
+static EXT_RAM_BSS_ATTR uint8_t s_bt_addrs[MAX_BT_RESULTS][6];
 static int         s_bt_count = 0;
 // Set while a scan task (below) is in flight — blocks a second concurrent
 // scan rather than racing s_bt_count/s_bt_labels between two background
@@ -143,12 +183,57 @@ static SemaphoreHandle_t s_bt_scan_done = NULL;
 #endif  // CONFIG_BT_NIMBLE_ENABLED
 
 static purr_wid_t  s_wallpaper_list = 0;
-static char        s_wallpaper_paths[MAX_WALLPAPERS][WALLPAPER_PATH_LEN];
-static char        s_wallpaper_labels[MAX_WALLPAPERS][40];
+static EXT_RAM_BSS_ATTR char s_wallpaper_paths[MAX_WALLPAPERS][WALLPAPER_PATH_LEN];
+static EXT_RAM_BSS_ATTR char s_wallpaper_labels[MAX_WALLPAPERS][40];
 static const char *s_wallpaper_label_ptrs[MAX_WALLPAPERS];
 static int         s_wallpaper_count = 0;
+// The currently-configured selection — previously write-only (saved to NVS,
+// never read back into anything), so the wallpaper list never showed which
+// one was actually active and nothing re-applied it. Loaded by
+// settings_cfg_load(), used to pre-select the matching list row in
+// refresh_wallpaper_list().
+static char        s_wallpaper_selected[WALLPAPER_PATH_LEN] = "default";
+
+// ── App config (LittleFS, /config/settings.cfg) ─────────────────────────────
+// Brightness and wallpaper are genuinely THIS app's own data — unlike dark_
+// mode/ui_effects/accent_color/screen_timeout/dev_mode/navbar_always_visible
+// below, which stay in kernel NVS via purr_kernel_set_*() (kernel_load_
+// persisted_settings() needs them before Settings, or anything else, has
+// ever run — moving them here would make systemui/cheetah depend on an
+// app-specific file instead of the kernel's own boot-time state). Per the
+// "semi-immutable OS" design: app code/assets are build-time and read-only,
+// this file is the one mutable, per-app blob — see purr_app_config_read()/
+// _write()'s doc comments in purr_kernel.h.
+#define SETTINGS_CFG_MAGIC 0x53455401u   // "SET" + struct version 1
+
+typedef struct {
+    uint32_t magic;
+    uint8_t  brightness;
+    char     wallpaper[WALLPAPER_PATH_LEN];
+} settings_app_cfg_t;
+
+static void settings_cfg_load(void) {
+    settings_app_cfg_t cfg;
+    int got = purr_app_config_read("settings", &cfg, sizeof(cfg));
+    if (got == (int)sizeof(cfg) && cfg.magic == SETTINGS_CFG_MAGIC) {
+        s_brightness = cfg.brightness;
+        strncpy(s_wallpaper_selected, cfg.wallpaper, sizeof(s_wallpaper_selected) - 1);
+        s_wallpaper_selected[sizeof(s_wallpaper_selected) - 1] = 0;
+    }
+    // else: no config file yet (or a stale/foreign one) — keep the
+    // compiled-in defaults (255 brightness, "default" wallpaper), same
+    // first-boot behavior every other config-backed value already has.
+}
+
+static void settings_cfg_save(void) {
+    settings_app_cfg_t cfg = { .magic = SETTINGS_CFG_MAGIC, .brightness = s_brightness };
+    strncpy(cfg.wallpaper, s_wallpaper_selected, sizeof(cfg.wallpaper) - 1);
+    purr_app_config_write("settings", &cfg, sizeof(cfg));
+}
 
 // ── NVS helpers ───────────────────────────────────────────────────────────────
+// Everything below is kernel-level state Settings only provides the UI for —
+// see the app-config comment above for why it stays here instead.
 
 static void nvs_save_str(const char *key, const char *val) {
     nvs_handle_t h;
@@ -169,14 +254,12 @@ static void nvs_save_u8(const char *key, uint8_t val) {
 static void nvs_load(void) {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
-    size_t len = sizeof(s_theme);
-    nvs_get_str(h, "theme", s_theme, &len);
-    nvs_get_u8(h, "brightness", &s_brightness);
     nvs_get_u8(h, "screen_timeout", &s_screen_timeout_min);
     nvs_get_u8(h, "dev_mode", &s_dev_mode);
     nvs_get_u8(h, "navbar_always_visible", &s_navbar_always_visible);
     nvs_get_u8(h, "lock_hide_notifs", &s_lock_hide_notifs);
     nvs_get_u8(h, "ui_effects", &s_ui_effects);
+    nvs_get_u8(h, "dark_mode", &s_dark_mode);
     // Accent is stored as the same "RRGGBB" text the user types. strtoul with
     // base 16 on a buffer that nvs_get_str left untouched would parse whatever
     // garbage was on the stack, so the read is only trusted when it succeeds
@@ -204,6 +287,14 @@ static void nvs_load(void) {
     // pushed across here at boot.
     purr_kernel_set_ui_effects(s_ui_effects != 0);
     purr_kernel_set_accent_color(s_accent_color);
+    // Same reasoning again: the iOS-7 app-widget theme reads this at
+    // construction time, so a stored preference needs pushing across here
+    // at boot too, same redundant-but-harmless duplicate write the flags
+    // above already do (kernel_load_persisted_settings() in purr_kernel.c
+    // is the one that actually matters for load-order correctness; this
+    // one keeps settings.c's own local copy and the kernel flag in sync
+    // regardless of which loaded first).
+    purr_kernel_set_dark_mode(s_dark_mode != 0);
 }
 
 static void set_general_status(const char *msg) {
@@ -228,27 +319,16 @@ static void add_back_button(purr_win_t win) {
     purr_win_button(win, "< Back", on_subwin_back, (void *)(uintptr_t)win);
 }
 
-// ── Theme buttons ─────────────────────────────────────────────────────────────
-
-static void apply_theme_nvs(const char *id) {
-    nvs_save_str("theme", id);
-    strncpy(s_theme, id, sizeof(s_theme) - 1);
-
-    char msg[48];
-    snprintf(msg, sizeof(msg), "Theme set to '%s' — reboot to apply.", id);
-    set_customization_status(msg);
-}
-
-static void on_theme_wce(purr_wid_t w, purr_event_t e, void *u)  { (void)w;(void)e;(void)u; apply_theme_nvs("wce");  }
-static void on_theme_dark(purr_wid_t w, purr_event_t e, void *u) { (void)w;(void)e;(void)u; apply_theme_nvs("dark"); }
-
 // ── Brightness ────────────────────────────────────────────────────────────────
+// Was NVS-backed (dropped along with the dead WCE/Dark theme picker that used
+// to live in this section — see on_open_customization()'s comment) — now the
+// app-config file, alongside wallpaper below.
 
 static void set_brightness(uint8_t level) {
     s_brightness = level;
     const catcall_display_t *disp = purr_kernel_display();
     if (disp && disp->set_brightness) disp->set_brightness(level);
-    nvs_save_u8("brightness", level);
+    settings_cfg_save();
     char buf[32];
     snprintf(buf, sizeof(buf), "Brightness: %d%%", (level * 100) / 255);
     purr_win_label_set(s_brightness_lbl, buf);
@@ -282,9 +362,14 @@ static void on_timeout_5(purr_wid_t w, purr_event_t e, void *u) { (void)w;(void)
 // ── Wallpaper ─────────────────────────────────────────────────────────────────
 // "Default" (the launcher's built-in gradient) plus every file found under
 // /sdcard/wallpapers/ — same opendir/readdir listing pattern fileman.c already
-// uses. Selecting one just persists the choice to NVS; the launcher reads it
-// back and loads the image itself on next boot (matching the existing
-// theme/brightness "reboot to apply" behavior below).
+// uses. Selecting one persists the choice via the app-config file above.
+//
+// KNOWN GAP, not fixed by this pass: only cupcake_ui.c actually reads this
+// value back and renders it — cheetah_home.c (the active backend on
+// tdeck_plus) still draws its flat/gradient placeholder regardless of what's
+// selected here. That's a real desktop-rendering feature (decode + draw an
+// arbitrary image file), a different piece of work than where the selection
+// is stored, which is all this pass changes.
 
 static void refresh_wallpaper_list(void) {
     s_wallpaper_count = 0;
@@ -317,9 +402,11 @@ static void on_wallpaper_select(purr_wid_t w, purr_event_t e, void *u) {
     int idx = purr_win_list_get_selected(s_wallpaper_list);
     if (idx < 0 || idx >= s_wallpaper_count) return;
 
-    nvs_save_str("wallpaper", s_wallpaper_paths[idx]);
+    strncpy(s_wallpaper_selected, s_wallpaper_paths[idx], sizeof(s_wallpaper_selected) - 1);
+    s_wallpaper_selected[sizeof(s_wallpaper_selected) - 1] = 0;
+    settings_cfg_save();
     char msg[WALLPAPER_PATH_LEN + 64];
-    snprintf(msg, sizeof(msg), "Wallpaper set to '%s' — reboot to apply.", s_wallpaper_paths[idx]);
+    snprintf(msg, sizeof(msg), "Wallpaper set to '%s'.", s_wallpaper_paths[idx]);
     set_customization_status(msg);
 }
 
@@ -639,6 +726,29 @@ static void refresh_effects_labels(void) {
     }
 }
 
+// Light/dark for the iOS-7 app-widget theme (cheetah_win.c) — separate from
+// the Effects toggle above, which is about translucency, not palette. Same
+// "already-built surfaces don't retroactively change" caveat: only windows
+// built after the toggle pick up the new palette. No systemui refresh call
+// here the way on_effects_toggle() has one — that theme lives entirely in
+// the app-window widget layer, not in systemui's own chrome.
+static void refresh_dark_mode_label(void) {
+    if (s_dark_mode_lbl) {
+        purr_win_label_set(s_dark_mode_lbl, s_dark_mode ? "Theme: Dark" : "Theme: Light");
+    }
+}
+
+static void on_dark_mode_toggle(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    s_dark_mode = s_dark_mode ? 0 : 1;
+    purr_kernel_set_dark_mode(s_dark_mode != 0);
+    nvs_save_u8("dark_mode", s_dark_mode);
+    refresh_dark_mode_label();
+    set_customization_status(s_dark_mode
+        ? "Dark theme — new windows only."
+        : "Light theme — new windows only.");
+}
+
 static void on_effects_toggle(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
     s_ui_effects = s_ui_effects ? 0 : 1;
@@ -898,15 +1008,11 @@ static void on_open_customization(purr_wid_t w, purr_event_t e, void *u) {
     s_customization_win = purr_win_create("Customization");
     add_back_button(s_customization_win);
 
-    purr_win_label(s_customization_win, "Theme");
-    purr_wid_t tr = purr_win_row(s_customization_win, 4);
-    purr_win_button(s_customization_win, "WCE Classic", on_theme_wce,  NULL);
-    purr_win_button(s_customization_win, "Dark",        on_theme_dark, NULL);
-    purr_win_layout_end(tr);
-
-    char theme_str[40];
-    snprintf(theme_str, sizeof(theme_str), "Active: %s", s_theme);
-    purr_win_label(s_customization_win, theme_str);
+    // Used to open with its own "WCE Classic"/"Dark" theme picker here —
+    // removed: nothing has read that NVS key since the XP/Cheetah systemui
+    // redesign (it predates dark mode), so it saved a choice that did
+    // nothing and duplicated the real, working "Theme" section (the
+    // dark-mode toggle) further down this same screen.
 
     purr_win_label(s_customization_win, "Wallpaper");
     s_wallpaper_list = purr_win_list(s_customization_win, 90, 30);
@@ -926,6 +1032,10 @@ static void on_open_customization(purr_wid_t w, purr_event_t e, void *u) {
     // Effects + accent. Sits under Lock Screen because turning effects off is
     // most visible there — the lock screen scrim over the wallpaper is the
     // largest translucent surface in the system.
+    purr_win_label(s_customization_win, "Theme");
+    s_dark_mode_lbl = purr_win_label(s_customization_win, "");
+    purr_win_button(s_customization_win, "Toggle Theme", on_dark_mode_toggle, NULL);
+
     purr_win_label(s_customization_win, "Effects");
     s_effects_lbl = purr_win_label(s_customization_win, "");
     purr_win_button(s_customization_win, "Toggle Effects", on_effects_toggle, NULL);
@@ -938,6 +1048,7 @@ static void on_open_customization(purr_wid_t w, purr_event_t e, void *u) {
     // Both labels are created empty above and filled here, so the initial text
     // and every later update go through exactly one formatting path.
     refresh_effects_labels();
+    refresh_dark_mode_label();
 
     s_customization_status_lbl = purr_win_label(s_customization_win, "Ready.");
     purr_win_show(s_customization_win);
@@ -953,7 +1064,9 @@ static void update_mesh_backend_status(void) {
     if (!s_mesh_backend_status_lbl) return;
     bool mt_active = purr_kernel_get_module("meshtastic") != NULL;
     bool mc_active = purr_kernel_get_module("meshcore") != NULL;
-    const char *active = mt_active ? "Meshtastic" : (mc_active ? "MeshCore" : "none");
+    bool rt_active = purr_kernel_get_module("reticulum") != NULL;
+    bool rn_active = purr_kernel_get_module("rnode") != NULL;
+    const char *active = mt_active ? "Meshtastic" : (mc_active ? "MeshCore" : (rt_active ? "Reticulum" : (rn_active ? "RNode" : "none")));
     char buf[48];
     snprintf(buf, sizeof(buf), "Mesh backend: %s", active);
     purr_win_label_set(s_mesh_backend_status_lbl, buf);
@@ -1010,12 +1123,58 @@ static void on_mesh_switch_meshcore(purr_wid_t w, purr_event_t e, void *u) {
     open_mesh_switch_confirm(PURR_MESH_BACKEND_MESHCORE, "MeshCore");
 }
 
+static void on_mesh_switch_reticulum(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (purr_kernel_get_module("reticulum")) return;   // already active
+    open_mesh_switch_confirm(PURR_MESH_BACKEND_RETICULUM, "Reticulum");
+}
+
+static void on_mesh_switch_rnode(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (purr_kernel_get_module("rnode")) return;   // already active
+    open_mesh_switch_confirm(PURR_MESH_BACKEND_RNODE, "RNode");
+}
+
+// ── Device name (hostname) ───────────────────────────────────────────────
+// purr_kernel_hostname_get()/_set() (purr_kernel.h) — the user-facing name
+// shown to other devices/networks this device participates in. proximity's
+// own ESP-NOW beacon and reticulum's Announce app_data both already read
+// it; this is the one place it's actually set.
+
+static void refresh_hostname_label(void) {
+    if (!s_hostname_lbl) return;
+    char hostname[PURR_HOSTNAME_MAX];
+    purr_kernel_hostname_get(hostname, sizeof(hostname));
+    char buf[48];
+    snprintf(buf, sizeof(buf), "Device name: %s", hostname);
+    purr_win_label_set(s_hostname_lbl, buf);
+}
+
+static void on_hostname_save(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    const char *name = s_hostname_input ? purr_win_textarea_get(s_hostname_input) : NULL;
+    if (!name || !purr_kernel_hostname_set(name)) {
+        if (s_hostname_lbl) purr_win_label_set(s_hostname_lbl, "Device name: invalid name (empty or too long)");
+        return;
+    }
+    refresh_hostname_label();
+    purr_win_textarea_clear(s_hostname_input);
+}
+
 static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
     (void)w;(void)e;(void)u;
     if (s_connectivity_win) { purr_win_show(s_connectivity_win); update_mesh_backend_status(); return; }
 
     s_connectivity_win = purr_win_create("Connectivity");
     add_back_button(s_connectivity_win);
+
+    purr_win_label(s_connectivity_win, "Device Name");
+    s_hostname_lbl = purr_win_label(s_connectivity_win, "Device name: ...");
+    s_hostname_input = purr_win_textarea(s_connectivity_win, 90, 20);
+    purr_wid_t hr = purr_win_row(s_connectivity_win, 1);
+    purr_win_button(s_connectivity_win, "Save Name", on_hostname_save, NULL);
+    purr_win_layout_end(hr);
+    refresh_hostname_label();
 
     purr_win_label(s_connectivity_win, "Network");
     purr_wid_t nr = purr_win_row(s_connectivity_win, 4);
@@ -1030,10 +1189,353 @@ static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
     purr_wid_t mr = purr_win_row(s_connectivity_win, 4);
     purr_win_button(s_connectivity_win, "Use Meshtastic", on_mesh_switch_meshtastic, NULL);
     purr_win_button(s_connectivity_win, "Use MeshCore",   on_mesh_switch_meshcore,   NULL);
+    purr_win_button(s_connectivity_win, "Use Reticulum",  on_mesh_switch_reticulum,  NULL);
+#ifdef CONFIG_BT_NIMBLE_ENABLED
+    // RNode mode is meaningless without BLE — same reasoning the
+    // Bluetooth Settings button above is already gated the same way.
+    // Showing this on a build that would just silently decline is worse
+    // than hiding it.
+    purr_win_button(s_connectivity_win, "Use RNode Mode",  on_mesh_switch_rnode,     NULL);
+#endif
     purr_win_layout_end(mr);
     update_mesh_backend_status();
 
     purr_win_show(s_connectivity_win);
+}
+
+// ── Updates ───────────────────────────────────────────────────────────────────
+
+static void set_updates_status(const char *msg) {
+    if (s_updates_status_lbl) purr_win_label_set(s_updates_status_lbl, msg);
+}
+
+// Re-reads ota_mgr's current status/progress into the label — same manual
+// "Refresh" pattern taskmgr/services use rather than a polling timer, since
+// nothing in purr_win.h offers one and ota_mgr_check()/apply() already run on
+// their own background task regardless.
+static void refresh_updates_status(void) {
+    char buf[96];
+    switch (ota_mgr_status()) {
+        case OTA_MGR_IDLE:
+            snprintf(buf, sizeof(buf), "Current version: %s", ota_mgr_current_version());
+            break;
+        case OTA_MGR_CHECKING:
+            snprintf(buf, sizeof(buf), "Checking for updates...");
+            break;
+        case OTA_MGR_UP_TO_DATE:
+            snprintf(buf, sizeof(buf), "Up to date (v%s).", ota_mgr_current_version());
+            break;
+        case OTA_MGR_AVAILABLE:
+            snprintf(buf, sizeof(buf), "Update available: v%s (current v%s)",
+                     ota_mgr_available_version(), ota_mgr_current_version());
+            break;
+        case OTA_MGR_DOWNLOADING:
+            snprintf(buf, sizeof(buf), "Downloading v%s... %d%%",
+                     ota_mgr_available_version(), ota_mgr_progress_percent());
+            break;
+        case OTA_MGR_VERIFYING:
+            snprintf(buf, sizeof(buf), "Verifying checksum...");
+            break;
+        case OTA_MGR_READY_TO_REBOOT:
+            snprintf(buf, sizeof(buf), "v%s staged — reboot to apply.", ota_mgr_available_version());
+            break;
+        case OTA_MGR_FAILED:
+            snprintf(buf, sizeof(buf), "Failed: %s", ota_mgr_error());
+            break;
+        default:
+            snprintf(buf, sizeof(buf), "?");
+            break;
+    }
+    set_updates_status(buf);
+}
+
+static void on_updates_refresh(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    refresh_updates_status();
+}
+
+static void ota_check_task(void *arg) {
+    (void)arg;
+    ota_mgr_check();
+    s_ota_busy = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void ota_apply_task(void *arg) {
+    (void)arg;
+    ota_mgr_apply();
+    s_ota_busy = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+static void ota_apply_sd_task(void *arg) {
+    (void)arg;
+    ota_mgr_apply_from_sd(OTA_MGR_SD_DEFAULT_PATH);
+    s_ota_busy = false;
+    vTaskDeleteWithCaps(NULL);
+}
+
+// PSRAM-backed stack and a size on par with bt_scan_task's own reasoning —
+// TLS handshakes (esp_https_ota goes through esp-tls/mbedtls) are the
+// deepest, most stack-hungry part of this call, more so than BLE scanning,
+// so this task gets a larger allocation than bt_scan_task's 4096.
+#define OTA_TASK_STACK 8192
+
+static void on_updates_check(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (!ota_mgr_is_supported()) { set_updates_status("OTA not available on this build."); return; }
+    if (ota_mgr_manifest_url()[0] == '\0') { set_updates_status("Set an update URL first."); return; }
+    if (s_ota_busy) return;
+    s_ota_busy = true;
+    set_updates_status("Checking for updates...");
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(ota_check_task, "ota_check", OTA_TASK_STACK, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { s_ota_busy = false; set_updates_status("Could not start update check."); }
+}
+
+static void on_updates_download(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (ota_mgr_status() != OTA_MGR_AVAILABLE) { set_updates_status("Check for updates first."); return; }
+    if (s_ota_busy) return;
+    s_ota_busy = true;
+    set_updates_status("Starting download...");
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(ota_apply_task, "ota_apply", OTA_TASK_STACK, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { s_ota_busy = false; set_updates_status("Could not start download."); }
+}
+
+// No "check for update available" precondition here, unlike
+// on_updates_download() above — copying a file to OTA_MGR_SD_DEFAULT_PATH IS
+// the user's decision to install it (see ota_mgr_apply_from_sd()'s own doc
+// comment on why there's no version gate on this path).
+static void on_updates_install_sd(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (!purr_kernel_sd_available()) { set_updates_status("No SD card mounted."); return; }
+    if (s_ota_busy) return;
+    s_ota_busy = true;
+    set_updates_status("Reading " OTA_MGR_SD_DEFAULT_PATH "...");
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreateWithCaps(ota_apply_sd_task, "ota_apply_sd", OTA_TASK_STACK, NULL, 3, &task, MALLOC_CAP_SPIRAM);
+    if (ok != pdPASS) { s_ota_busy = false; set_updates_status("Could not start SD install."); }
+}
+
+static void on_updates_reboot(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (ota_mgr_status() != OTA_MGR_READY_TO_REBOOT) return;
+    set_updates_status("Rebooting...");
+    purr_kernel_reboot();
+}
+
+static void close_ota_url_dialog(void) {
+    if (s_ota_url_dlg_win) purr_win_destroy(s_ota_url_dlg_win);
+    s_ota_url_dlg_win = 0;
+    s_ota_url_dlg_input = 0;
+}
+
+static void on_ota_url_dlg_cancel(purr_wid_t w, purr_event_t e, void *u) { (void)w;(void)e;(void)u; close_ota_url_dialog(); }
+
+static void on_ota_url_dlg_save(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    const char *url = s_ota_url_dlg_input ? purr_win_textarea_get(s_ota_url_dlg_input) : "";
+    if (url && url[0]) ota_mgr_set_manifest_url(url);
+    close_ota_url_dialog();
+    refresh_updates_status();
+}
+
+static void on_updates_set_url(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (s_ota_url_dlg_win) { purr_win_show(s_ota_url_dlg_win); return; }
+
+    s_ota_url_dlg_win = purr_win_create("Update URL");
+    purr_win_label(s_ota_url_dlg_win, "Manifest URL (http/https):");
+    s_ota_url_dlg_input = purr_win_textarea(s_ota_url_dlg_win, 90, 20);
+    if (ota_mgr_manifest_url()[0]) purr_win_textarea_set(s_ota_url_dlg_input, ota_mgr_manifest_url());
+
+    purr_wid_t row = purr_win_row(s_ota_url_dlg_win, 4);
+    purr_win_button(s_ota_url_dlg_win, "Save",   on_ota_url_dlg_save,   NULL);
+    purr_win_button(s_ota_url_dlg_win, "Cancel", on_ota_url_dlg_cancel, NULL);
+    purr_win_layout_end(row);
+
+    purr_win_textarea_focus(s_ota_url_dlg_input);
+    purr_win_show(s_ota_url_dlg_win);
+    purr_win_keyboard_show(s_ota_url_dlg_win, s_ota_url_dlg_input);
+}
+
+static void on_open_updates(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w;(void)e;(void)u;
+    if (s_updates_win) { purr_win_show(s_updates_win); refresh_updates_status(); return; }
+
+    s_updates_win = purr_win_create("Updates");
+    add_back_button(s_updates_win);
+
+    if (!ota_mgr_is_supported()) {
+        // No second OTA slot on this device's partition table (device.pcat
+        // [device] ota is unset/false) — ota_mgr still compiles in (same
+        // "always REQUIRES'd, runtime-optional" shape as wifi_mgr/bt_mgr/
+        // meshtastic elsewhere in this file), it just never finds a target
+        // partition. Say so plainly rather than showing controls that would
+        // only ever fail.
+        purr_win_label(s_updates_win, "OTA updates are not available on this build.");
+        purr_win_show(s_updates_win);
+        return;
+    }
+
+    s_updates_status_lbl = purr_win_label(s_updates_win, "...");
+
+    purr_wid_t row1 = purr_win_row(s_updates_win, 4);
+    purr_win_button(s_updates_win, "Check for Updates", on_updates_check, NULL);
+    purr_win_button(s_updates_win, "Set URL",           on_updates_set_url, NULL);
+    purr_win_layout_end(row1);
+
+    purr_wid_t row2 = purr_win_row(s_updates_win, 4);
+    purr_win_button(s_updates_win, "Download & Verify", on_updates_download, NULL);
+    purr_win_button(s_updates_win, "Reboot to Apply",   on_updates_reboot,   NULL);
+    purr_win_layout_end(row2);
+
+    purr_win_label(s_updates_win, "From SD card (" OTA_MGR_SD_DEFAULT_PATH "):");
+    purr_win_button(s_updates_win, "Install from SD", on_updates_install_sd, NULL);
+
+    purr_win_button(s_updates_win, "Refresh", on_updates_refresh, NULL);
+
+    refresh_updates_status();
+    purr_win_show(s_updates_win);
+}
+
+// ── Users ─────────────────────────────────────────────────────────────────
+// Add/remove accounts (user_mgr.h) — same purr_win_list()-driven shape
+// settings.c's own WiFi networks list already uses (parallel label/name
+// arrays, since the list widget only ever holds display strings, not the
+// bare data a row's action needs).
+
+static void users_refresh(void) {
+    if (!s_users_list) return;
+    s_users_count = user_mgr_count();
+    if (s_users_count > MAX_USERS_ROWS) s_users_count = MAX_USERS_ROWS;
+    for (int i = 0; i < s_users_count; i++) {
+        if (!user_mgr_at(i, s_users_names[i], sizeof(s_users_names[i]))) {
+            s_users_names[i][0] = '\0';
+        }
+        bool remote = user_mgr_account_type(s_users_names[i]) == USER_ACCOUNT_REMOTE;
+        bool admin  = user_mgr_is_admin(s_users_names[i]);
+        snprintf(s_users_labels[i], sizeof(s_users_labels[i]), "%s%s%s",
+                 s_users_names[i], remote ? " (network)" : " (local)", admin ? " [admin]" : "");
+        s_users_label_ptrs[i] = s_users_labels[i];
+    }
+    purr_win_list_set_items(s_users_list, s_users_label_ptrs, s_users_count);
+}
+
+static void on_add_user_confirm(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    const char *name = purr_win_textarea_get(s_add_user_name);
+    const char *pass = purr_win_textarea_get(s_add_user_pass);
+    if (!name) name = "";
+    if (!pass) pass = "";
+
+    if (!user_mgr_valid_username(name)) {
+        purr_win_label_set(s_users_status_lbl, "Username: lowercase letters/numbers/_, must start with a letter.");
+        return;
+    }
+    if (user_mgr_exists(name)) {
+        purr_win_label_set(s_users_status_lbl, "That username is already taken.");
+        return;
+    }
+    if (!user_mgr_create(name, pass)) {
+        purr_win_label_set(s_users_status_lbl, "Could not create that account.");
+        return;
+    }
+
+    if (s_add_user_win) { purr_win_destroy(s_add_user_win); s_add_user_win = 0; s_add_user_name = 0; s_add_user_pass = 0; }
+    purr_win_label_set(s_users_status_lbl, "Account created.");
+    users_refresh();
+}
+
+static void on_open_add_user(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    if (s_add_user_win) { purr_win_show(s_add_user_win); return; }
+
+    // Same shape OOBE's own on_continue() screen already establishes for
+    // "create a local account" — see oobe_app.c.
+    s_add_user_win = purr_win_create("Add User");
+    purr_win_label(s_add_user_win, "Username:");
+    s_add_user_name = purr_win_textarea(s_add_user_win, 90, 20);
+    purr_win_label(s_add_user_win, "Password (optional):");
+    s_add_user_pass = purr_win_textarea(s_add_user_win, 90, 20);
+    purr_win_button(s_add_user_win, "Create", on_add_user_confirm, NULL);
+    purr_win_show(s_add_user_win);
+}
+
+static void on_remove_user(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    int sel = purr_win_list_get_selected(s_users_list);
+    if (sel < 0 || sel >= s_users_count) {
+        purr_win_label_set(s_users_status_lbl, "Select a user first.");
+        return;
+    }
+    const char *name = s_users_names[sel];
+
+    // Refuse removing the last LOCAL account — user_mgr_remove() itself
+    // is a plain table delete with no such guard; enforced here instead,
+    // matching OOBE's own "the device always needs at least one
+    // identity" reasoning (user_mgr.h's own bootstrap-account comment).
+    if (user_mgr_account_type(name) == USER_ACCOUNT_LOCAL) {
+        int local_count = 0;
+        for (int i = 0; i < s_users_count; i++) {
+            if (user_mgr_account_type(s_users_names[i]) == USER_ACCOUNT_LOCAL) local_count++;
+        }
+        if (local_count <= 1) {
+            purr_win_label_set(s_users_status_lbl, "Can't remove the last local account.");
+            return;
+        }
+    }
+
+    if (user_mgr_remove(name)) {
+        purr_win_label_set(s_users_status_lbl, "Removed.");
+        users_refresh();
+    } else {
+        purr_win_label_set(s_users_status_lbl, "Remove failed.");
+    }
+}
+
+// Toggles offline_access (user_mgr.h) for whichever row is selected —
+// a no-op (user_mgr_set_offline_access() itself returns false, nothing
+// crashes) if that row is a LOCAL account, since the concept doesn't
+// apply there at all; the status line says so either way.
+static void on_toggle_offline_access(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    int sel = purr_win_list_get_selected(s_users_list);
+    if (sel < 0 || sel >= s_users_count) {
+        purr_win_label_set(s_users_status_lbl, "Select a user first.");
+        return;
+    }
+    const char *name = s_users_names[sel];
+    if (user_mgr_account_type(name) != USER_ACCOUNT_REMOTE) {
+        purr_win_label_set(s_users_status_lbl, "Offline access only applies to a network account.");
+        return;
+    }
+    bool now_on = !user_mgr_get_offline_access(name);
+    user_mgr_set_offline_access(name, now_on);
+    purr_win_label_set(s_users_status_lbl, now_on ? "Offline access ON for that account." : "Offline access OFF for that account.");
+}
+
+static void on_open_users(purr_wid_t w, purr_event_t e, void *u) {
+    (void)w; (void)e; (void)u;
+    if (s_users_win) { purr_win_show(s_users_win); users_refresh(); return; }
+
+    s_users_win = purr_win_create("Users");
+    add_back_button(s_users_win);
+
+    purr_win_label(s_users_win, "Accounts");
+    s_users_list = purr_win_list(s_users_win, 90, 50);
+
+    purr_wid_t row = purr_win_row(s_users_win, 3);
+    purr_win_button(s_users_win, "Add",             on_open_add_user,          NULL);
+    purr_win_button(s_users_win, "Remove",          on_remove_user,            NULL);
+    purr_win_button(s_users_win, "Offline access",  on_toggle_offline_access,  NULL);
+    purr_win_layout_end(row);
+
+    s_users_status_lbl = purr_win_label(s_users_win, "Ready.");
+    users_refresh();
+    purr_win_show(s_users_win);
 }
 
 // ── Category picker nav ──────────────────────────────────────────────────
@@ -1043,8 +1545,8 @@ static void on_open_connectivity(purr_wid_t w, purr_event_t e, void *u) {
 // keeping its older plain-button-row picker. Purely a top-level nav swap:
 // each category's own sub-window (on_open_general() etc.) is untouched.
 
-#define CAT_COUNT 5
-static const char *s_category_labels[CAT_COUNT] = { "General", "Display", "Customization", "Connectivity", "About" };
+#define CAT_COUNT 7
+static const char *s_category_labels[CAT_COUNT] = { "General", "Display", "Customization", "Connectivity", "Updates", "Users", "About" };
 
 static void on_cat_menu(purr_wid_t w, purr_event_t e, void *user) {
     (void)user;
@@ -1054,7 +1556,9 @@ static void on_cat_menu(purr_wid_t w, purr_event_t e, void *user) {
         case 1: on_open_display(0, PURR_EVENT_CLICKED, NULL);       break;
         case 2: on_open_customization(0, PURR_EVENT_CLICKED, NULL); break;
         case 3: on_open_connectivity(0, PURR_EVENT_CLICKED, NULL);  break;
-        case 4: on_open_about(0, PURR_EVENT_CLICKED, NULL);         break;
+        case 4: on_open_updates(0, PURR_EVENT_CLICKED, NULL);       break;
+        case 5: on_open_users(0, PURR_EVENT_CLICKED, NULL);         break;
+        case 6: on_open_about(0, PURR_EVENT_CLICKED, NULL);         break;
         default: break;
     }
 }
@@ -1074,8 +1578,18 @@ static void build_category_nav(void) {
 
 static int settings_init(void) {
     nvs_load();
+    settings_cfg_load();
     purr_kernel_set_dev_mode(s_dev_mode != 0);
     purr_kernel_set_navbar_always_visible(s_navbar_always_visible != 0);
+    // Previously loaded into s_brightness but never actually reapplied to the
+    // panel here — the saved value only took effect once the user pressed a
+    // brightness button again in this same session. Real device boot doesn't
+    // call into Settings at all, so brightness has only ever come from the
+    // display driver's own default until this line.
+    {
+        const catcall_display_t *disp = purr_kernel_display();
+        if (disp && disp->set_brightness) disp->set_brightness(s_brightness);
+    }
 
     // Top-level window is just the category picker — each button opens its
     // own lazily-built, cached sub-window (see on_open_*() above). Keeps
@@ -1102,7 +1616,18 @@ static void settings_deinit(void) {
     if (s_general_win)       { purr_win_destroy(s_general_win);       s_general_win       = 0; s_general_status_lbl       = 0; }
     if (s_display_win)       { purr_win_destroy(s_display_win);       s_display_win       = 0; s_display_status_lbl       = 0; }
     if (s_customization_win) { purr_win_destroy(s_customization_win); s_customization_win = 0; s_customization_status_lbl = 0; }
-    if (s_connectivity_win)  { purr_win_destroy(s_connectivity_win);  s_connectivity_win  = 0; s_mesh_backend_status_lbl = 0; }
+    if (s_connectivity_win)  { purr_win_destroy(s_connectivity_win);  s_connectivity_win  = 0; s_mesh_backend_status_lbl = 0; s_hostname_lbl = 0; s_hostname_input = 0; }
+    // No wait-on-semaphore here the way s_bt_scanning above needs one:
+    // ota_check_task()/ota_apply_task() only ever touch ota_mgr's own static
+    // state (via ota_mgr_check()/ota_mgr_apply()), never a widget directly —
+    // reading that state back into s_updates_status_lbl only happens from
+    // the UI-thread refresh button. A download in flight is left running
+    // (ota_mgr is a persistent system module, not owned by this app's
+    // lifetime) rather than aborted just because Settings was closed.
+    close_ota_url_dialog();
+    if (s_updates_win) { purr_win_destroy(s_updates_win); s_updates_win = 0; s_updates_status_lbl = 0; }
+    if (s_add_user_win) { purr_win_destroy(s_add_user_win); s_add_user_win = 0; s_add_user_name = 0; s_add_user_pass = 0; }
+    if (s_users_win)   { purr_win_destroy(s_users_win);   s_users_win   = 0; s_users_status_lbl = 0; s_users_list = 0; }
     if (s_about_win)         { purr_win_destroy(s_about_win);         s_about_win         = 0; s_about_lbl = 0; }
     if (s_mesh_switch_confirm_win) { purr_win_destroy(s_mesh_switch_confirm_win); s_mesh_switch_confirm_win = 0; }
     purr_win_destroy(s_win);
@@ -1117,7 +1642,7 @@ PURR_MODULE_REGISTER(settings) = {
     .module_type       = PURR_MOD_APP,
     .load_priority     = PURR_PRIORITY_OPTIONAL,
     .name              = "settings",
-    .version           = "1.0.1",
+    .version           = "1.1.0",
     .kernel_min        = "0.11.1",
     .provided_catcalls = 0,
     .required_catcalls = 0,

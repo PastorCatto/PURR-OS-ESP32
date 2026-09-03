@@ -35,6 +35,8 @@
 #include <stdbool.h>
 #include "lvgl.h"
 #include "../../kernel/core/purr_kernel.h"
+#include "../user_mgr/user_mgr.h"
+#include "../app_manager/app_manager.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -195,7 +197,104 @@ typedef struct {
     // with no edit. When true, purr_systemui_navbar_height() also reports 0,
     // so a host laying content out against it reclaims the space.
     bool suppress_navbar;
+
+    // The host's shared LVGL group for its keyboard/trackball indevs — the
+    // same group each host's own <name>_hal_group() already returns for its
+    // own widgets (mochi_hal_group(), flow_hal_group(), tabby_hal_group()).
+    // Optional: may be NULL, both for a host with no such concept and for one
+    // that simply hasn't wired it up yet (a static initializer that omits
+    // this field zero-fills it, same as suppress_navbar above).
+    //
+    // Needed here specifically so a systemui-owned text-entry surface (the
+    // login screen in systemui_login.c) can join the SAME group a physical
+    // keyboard indev is already bound to — an indev routes key events to
+    // `lv_group_get_focused(indev's group)`, so a widget outside that group
+    // never receives them no matter how it's focused. Without this hook,
+    // typing a password would only ever reach the on-screen keyboard, never
+    // a hardware one, on every device that has both.
+    lv_group_t *(*group)(void);
 } purr_systemui_host_t;
+
+// Multi-user boot-time login plumbing — core wiring only, no UI of its own.
+// See user_mgr.h for the account model this calls into.
+//
+// Call once, from each style's purr_systemui_init() (android's and ios's real
+// implementations both do — see systemui_android.c/systemui_ios.c), after
+// user_mgr itself has initialised (it is PURR_PRIORITY_IMPORTANT, same tier
+// as systemui, so load order between the two is not guaranteed — this
+// function tolerates user_mgr not being up yet by simply doing nothing,
+// rather than assuming it always is).
+//
+// Deliberately does NOT show any lock/login UI — that is a real, separate
+// piece of work (a password-entry widget belongs somewhere in the boot
+// flow, matching how ck_build_lock_screen()'s existing lock screen has none
+// today — it is purely gesture-dismissed) intentionally deferred until the
+// planned out-of-box setup flow exists to actually let someone SET a
+// password. Until then this only ever exercises its one reachable branch:
+// bootstrap default user "milkaholic" has no password, so the account
+// intended to be usable with zero configuration logs in with zero
+// friction. The has-a-password branch is real and will do the right thing
+// (not auto-login) the moment something can set one — it deliberately does
+// not try to force a lock screen open with no way to dismiss it correctly,
+// which would be a genuine lockout risk to ship ahead of that widget.
+static inline void purr_systemui_boot_login_check(void) {
+    const char *username = user_mgr_default_username();
+    if (!username || !username[0]) return;   // user_mgr not up yet — see doc comment above
+    if (user_mgr_is_logged_in()) return;      // already handled this boot
+
+    if (!user_mgr_has_password(username)) {
+        user_mgr_set_logged_in(username);
+        // This is the zero-friction bootstrap path — it bypasses
+        // systemui_login.c's real screen (and its own try_unlock() ->
+        // app_manager_notify_unlocked() call) entirely, so nothing else
+        // ever tells app_manager the local registry is safe to populate.
+        // Without this, a no-password account (the common case — see
+        // this function's own doc comment) would boot straight into a
+        // permanently idle/empty Desktop, no way to reach it short of a
+        // relock/unlock cycle that never happens on its own. See
+        // app_manager.h's own doc comment on app_manager_notify_unlocked().
+        app_manager_notify_unlocked();
+    }
+    // else: intentionally left logged out — see this function's doc comment.
+}
+
+// The real login prompt purr_systemui_boot_login_check() above deliberately
+// stops short of (see its own doc comment) — a Windows-XP-welcome-screen-
+// style credential UI (systemui_login.c), shared across every host the same
+// way the status bar and lock screen already are, rather than each backend
+// building its own.
+//
+// Call once, LAST in the host's purr_systemui_init() — after every other
+// surface (panels, status bar, the idle-lock screen) has been built — so
+// this ends up the topmost lv_layer_top() object purely by creation order,
+// the same way the idle-lock screen already relies on being built last.
+// No-ops (does not build anything) if a session already exists — including
+// via purr_systemui_boot_login_check()'s own no-password auto-login, which
+// a host should still call separately and earlier, matching both real
+// implementations (systemui_android.c / systemui_ios.c) today.
+void purr_systemui_show_login(const purr_systemui_host_t *host);
+
+// The idle-lock screen, sharing systemui_login.c's exact UI (tile picker →
+// password → Go) rather than a separate minimal dim-and-tap overlay — real
+// Windows locks to the same welcome screen it boots to. The one visual
+// difference: the row for user_mgr_current_user() gets a small "Logged on"
+// tag, since — unlike the boot-time call — a real session already exists.
+// try_unlock() succeeding still requires the password (locking is a real
+// security boundary, not a dismiss gesture); it also restores brightness
+// and clears purr_systemui_relock_active() on success.
+//
+// A style's lock_check_idle()-equivalent calls this in place of building its
+// own overlay when it decides the idle timeout has fired; this function
+// alone owns the dim-on-show / restore-on-unlock pairing, so the two can't
+// drift out of sync across two files. No-ops if no accounts exist or the
+// login screen was never built (nothing to lock against).
+void purr_systemui_show_relock(const purr_systemui_host_t *host);
+
+// True from purr_systemui_show_relock() until its own successful unlock —
+// the shared equivalent of what each style's purr_systemui_is_locked() used
+// to track locally. A style's purr_systemui_is_locked() should simply
+// return this.
+bool purr_systemui_relock_active(void);
 
 // Builds every surface. Call once, from the host's UI task, after the host's
 // own screens exist and its HAL is up. `host` must outlive the call (a static

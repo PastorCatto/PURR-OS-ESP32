@@ -1,0 +1,9 @@
+# modules/rnode/module.pcat
+
+name              = "rnode"
+version           = "0.1.0"
+module_type       = "PURR_MOD_SYSTEM"
+kernel_min        = "0.11.1"
+kernel_max        = ""
+provides          = ["mesh_rnode"]
+required_catcalls = ["radio"]

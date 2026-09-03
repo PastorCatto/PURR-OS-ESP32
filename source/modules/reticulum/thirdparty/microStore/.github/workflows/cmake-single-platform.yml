@@ -1,0 +1,60 @@
+name: PlatformIO CI
+
+on:
+  workflow_dispatch: # This enables the "Run workflow" button in the UI
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [native]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO Core
+        run: pip install --upgrade platformio
+
+      - name: Build Targets
+        run: pio run --environment ${{ matrix.env }}
+
+      - name: Run Unit Tests
+        run: pio test --environment ${{ matrix.env }}
+
+  build-embedded:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [ttgo-lora32-v21, heltec_wifi_lora_32_V3, wiscore_rak4631]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO Core
+        run: pip install --upgrade platformio
+
+      - name: Build Embedded Targets
+        run: pio run --environment ${{ matrix.env }}

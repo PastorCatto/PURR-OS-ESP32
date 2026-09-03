@@ -1,0 +1,14 @@
+# modules/user_mgr/module.pcat
+# Multi-user accounts — Unix-style username + optional password, salted
+# SHA-256 credential storage in NVS. Core plumbing only: no UI (see
+# user_mgr.h). Bootstraps a single no-password user "milkaholic" on a
+# device with no accounts configured yet.
+
+name            = "user_mgr"
+version         = "1.0.0"
+module_type     = "PURR_MOD_SYSTEM"
+kernel_min      = "0.11.1"
+kernel_max      = ""
+
+provides        = ["user_accounts"]
+required_catcalls = []

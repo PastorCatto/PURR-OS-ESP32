@@ -1,0 +1,55 @@
+# PURR OS — 8 MB flash partition table, OTA variant (dual app slot)
+# Opt in via device.pcat [device] ota = true — see purrstrap.py's
+# _generate_sdkconfig() for the flash_mb -> CSV selection. Mirrors
+# partitions_16mb_ota.csv's own shape — see that file's comment for the
+# alignment rules this follows (app-type partitions need BOTH offset and
+# size 0x10000-aligned; ota_0 starts at 0x20000, not immediately after
+# otadata at 0x12000, because 0x12000 isn't a 0x10000-aligned offset and
+# 0x20000 is the next one that is).
+#
+# Devices: heltec. Real firmware measured at ~1.04MB
+# (CoreOS/build_heltec/purr_os.bin) against the OLD single-slot,
+# factory-only table (partitions_8mb.csv) this replaces.
+#
+# ota_0/ota_1 grown from 0x180000 (1.5MB) to 0x200000 (2MB) each —
+# source/modules/reticulum (vendored microReticulum, see its own vendor/
+# VENDORED.md) alone measured 0x1a6fb0 (~1.73MB) linked, overflowing the
+# original 1.5MB slots by ~159KB even with meshtastic swapped out for it,
+# confirmed live. 2MB leaves ~270KB of real headroom over that measured
+# size, not just barely fitting it — same "real headroom, not a guess"
+# philosophy this file's own history already used for the original 1.5MB
+# sizing. Both offset and size stay 0x10000-aligned throughout (the same
+# rule the 16MB OTA table's own comment documents).
+#
+# Grown AGAIN, 0x200000 (2MB) -> 0x240000 (2.25MB) each — source/modules/
+# rnode's own real esp_wifi/esp_netif REQUIRES (its "radio-companion
+# offload/reload" sequence's esp_wifi_stop()/_deinit()/_init()/_start()
+# calls — see rnode_module.c's own header comment) linked in the WiFi
+# driver's admin API even for the "rnode alone" profile (rnode_test) that
+# never actually calls it at runtime — confirmed live, overflowed the 2MB
+# slot by 0x4930 (~18.3KB). +256KB per slot leaves real headroom over
+# that, not a tight re-fit — same philosophy as the first growth above.
+#
+# SPIFFS offset: 0x4A0000 size: 0x100000 (1 MB) — moved from 0x420000
+# because ota_1 now ends later (same reasoning as the first move, from
+# 0x320000 to 0x420000, above); any device moving to this table must
+# update its device.pcat spiffs_offset to "0x4A0000" (see the 16MB OTA
+# table's own comment on why the OTA layout's SPIFFS offset can never
+# just match the non-OTA layout's).
+#
+# Totals 0x5A0000 (5.625 MB) of the 8 MB flash — ~2.375MB is still
+# genuinely unallocated after this growth, not wasted: nothing here needs
+# it yet (Heltec doesn't get claw_slot/app_cfg, unlike the 16MB OTA table
+# — see the "Server Manager" plan doc's own "Files served, not run
+# locally" section for why Heltec never needs to locally launch a pushed
+# app in this pass). Extending this table later, the same way the 16MB
+# one grew claw_slot/app_cfg after the fact, is a small, low-risk addition
+# into that remaining space.
+#
+# Name,     Type, SubType,  Offset,    Size
+nvs,        data, nvs,      0x9000,    0x6000
+phy_init,   data, phy,      0xF000,    0x1000
+otadata,    data, ota,      0x10000,   0x2000
+ota_0,      app,  ota_0,    0x20000,   0x240000
+ota_1,      app,  ota_1,    0x260000,  0x240000
+spiffs,     data, spiffs,   0x4A0000,  0x100000

@@ -1,0 +1,350 @@
+
+
+  Key Constraints                                                                                                                                                                                                     
+                                                                                                                                                                                                                      
+  1. Peak Flash Usage During Compaction                                                                                                                                                                               
+                                                                                                                                                                                                                      
+  The critical constraint is that compact() writes a _compact.tmp file containing all live records before deleting the old segments. So at the moment compaction fires, you temporarily hold:                         
+                                                                                                                                                                                                                      
+  peak flash = (N × S) + sizeof(compact.tmp) + index file + journal                                                                                                                                                   
+                                                                                                                                                                                                                      
+  In the worst case — no dead records — compact.tmp approaches N × S, giving 2× headroom needed. In practice, compaction only helps when dead records exist, so compact.tmp will be smaller.                          
+                                                                                                                                                                                                                      
+  Practical rule: N × S ≤ F / 2 to guarantee compaction can always complete. If you allow for ~50% write amplification (typical with overwrites), N × S ≤ 0.65 × F is workable.                                       
+                                                                                                                                                                                                                      
+  2. After Compaction, seg0 Is Reserved                                                                                                                                                                               
+                                                                                                                                                                                                                      
+  rotate_segment_if_needed (FileStore.h:883) sets current_segment = 1 after compaction — seg0 is always the compacted base. So effective writable segments are N-1. With USTORE_DEFAULT_SEGMENT_COUNT=8 you get 7 writable      
+  segments before the next compaction.                                                                                                                                                                                
+                                                                                                                                                                                                                      
+  This means N ≥ 3 is a hard minimum for useful operation (1 compacted + 1 active + 1 slack).                                                                                                                         
+                                                                                                                                                                                                                      
+  3. Stack Cost in compact()                                                                                                                                                                                          
+                                                                                                                                                                                                                      
+  LiveRecVec per_seg[USTORE_DEFAULT_SEGMENT_COUNT] (FileStore.h:1053) is a stack-allocated array of vectors. On a 32-bit MCU each vector is ~12 bytes, so N=8 costs ~96 bytes — fine. But don't push N too high on systems with 
+  small stacks.                                                                                                                                                                                                       
+                                                                                                                                                                                                                      
+  ---                                                                                                                                                                                                                 
+  Sizing Formula                                                                                                                                                                                                      
+                                                                                                                                                                                                                      
+  Given flash filesystem size F:                                                                                                                                                                                      
+                                                                                                                                                                                                                      
+  N × S ≤ F × 0.5        // conservative (guaranteed compaction headroom)                                                                                                                                             
+  N × S ≤ F × 0.65       // reasonable (assumes ~50% dead data at compaction time)                                                                                                                                    
+                                                                                                                                                                                                                      
+  Then split N and S based on:                                                                                                                                                                                        
+                                                                                                                                                                                                                      
+  ┌────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐   
+  │       Factor       │                                                                                         Guidance                                                                                         │   
+  ├────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤   
+  │ S (segment size)   │ Match to flash erase block size if possible. Must be > your largest typical record (sizeof(RecordHeader) = 16 bytes + key + value + 4 byte commit). 64KB is a good default; go smaller   │   
+  │                    │ (e.g. 8–16KB) on very constrained flash.                                                                                                                                                 │   
+  ├────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤   
+  │ N (segment count)  │ More segments = less frequent compaction = less write amplification. Diminishing returns above ~8. Minimum 4 for headroom.                                                               │   
+  ├────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤   
+  │ Effective KV       │ (N-1) × S × dead_ratio, where dead_ratio is the fraction of records that are stale updates. For a store with mostly unique keys, dead_ratio ≈ 1.0. For a store where keys get updated    │   
+  │ capacity           │ frequently, dead_ratio drops.                                                                                                                                                            │   
+  └────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘   
+                                                                                                                                                                                                                      
+  Example                                                                                                                                                                                                             
+                                                                                                                                                                                                                      
+  Flash = 512KB:                                                                                                                                                                                                      
+                                                                                                                                                                                                                      
+  N × S ≤ 256KB   →   e.g. N=4, S=64KB  or  N=8, S=32KB                                                                                                                                                               
+                                                                                                                                                                                                                      
+  - With N=4, S=64KB: compacts every ~192KB of writes (3 writable segs × 64KB), effective capacity ~192KB live data
+  - With N=8, S=32KB: compacts every ~224KB of writes, same live capacity but smaller per-segment I/O during compaction (better for slow flash)
+
+  Smaller Flash (e.g. 128KB for nRF52 internal)
+
+  N × S ≤ 64KB   →   N=4, S=16KB  or  N=8, S=8KB
+
+  At 8KB segments you'll rotate frequently and compaction work per trigger is small, which suits slow SPI flash. But USTORE_MAX_VALUE_LEN must fit within a segment with room to spare — if values can be up to 1KB, a
+   8KB segment gives you only ~7 records per segment before rotation, causing very frequent compaction.
+
+  ---
+  The One Invariant to Hold
+
+  S > USTORE_MAX_VALUE_LEN + sizeof(RecordHeader) + USTORE_MAX_KEY_LEN + sizeof(RecordCommit) + USTORE_WRITE_BUFFER_SIZE
+    = max_value + 16 + 64 + 4 + 4096  (defaults)
+    ≈ max_value + 4180
+
+  If S is too close to your max record size plus the write buffer, rotate_segment_if_needed will fire on nearly every write and compaction will trigger constantly.
+
+
+
+  ---                                                                                                                                                                                                                 
+  The Model       
+                                                                                                                                                                                                                      
+  Define:         
+  - F — flash filesystem size (bytes)                                                                                                                                                                                 
+  - K — max unique keys (policy_max_recs_)                                                                                                                                                                            
+  - R — avg record wire size = avg_key + avg_value + sizeof(RecordHeader) + sizeof(RecordCommit) = avg_key + avg_value + 20                                                                                           
+                                                                                                                                                                                                                      
+  Key identity: because there's exactly one live copy per key, the maximum live data is:                                                                                                                              
+  L = K × R                                                                                                                                                                                                           
+                                                                                                                                                                                                                      
+  Compaction writes all live records into compact.tmp before deleting segments, so:                                                                                                                                   
+  peak_flash = N×S  +  L  =  N×S  +  K×R  ≤  F                                                                                                                                                                        
+                                              
+  This gives the fundamental constraint:                                                                                                                                                                              
+  N×S  ≤  F  −  K×R                                                                                                                                                                                                   
+                                                                                                                                                                                                                      
+  ---                                                                                                                                                                                                                 
+  Deriving S and N                                                                                                                                                                                                    
+                                                                                                                                                                                                                      
+  Step 1 — Fix K (your policy_max_recs_). This is the design input: how many unique keys does your application actually need?                                                                                         
+                                                                                                                                                                                                                      
+  Step 2 — Choose S based on records-per-segment, not capacity:                                                                                                                                                       
+  S = roundup_pow2( max(2 × USTORE_WRITE_BUFFER_SIZE,  M × R) )                                                                                                                                                             
+  where M is a target records-per-segment (e.g. 32–64). Smaller M means more frequent rotation and compaction; the write buffer sets a floor. On constrained flash, align S to the erase block size.                  
+                                                                                                                                                                                                                      
+  Step 3 — Derive N from the flash constraint:                                                                                                                                                                        
+  N = floor( (F − K×R) / S )                                                                                                                                                                                          
+  Then verify N ≥ 3 (seg0 = compacted base, seg1 = active writes, at least 1 slack before compaction re-triggers). If N comes out below 3, S is too large — halve it and recalculate.                                 
+                                                                                                                                                                                                                      
+  Step 4 — Verify headroom:                                                                                                                                                                                           
+  assert( N×S + K×R ≤ F )         // compaction always has room for tmp                                                                                                                                               
+  assert( K×R ≤ (N−1)×S )         // live data fits in writable segments                                                                                                                                              
+                                                                                                                                                                                                                      
+  ---                                                                                                                                                                                                                 
+  Concrete Example                                                                                                                                                                                                    
+                                                                                                                                                                                                                      
+  ┌─────────────┬──────────┐
+  │  Parameter  │  Value   │                                                                                                                                                                                          
+  ├─────────────┼──────────┤                                                                                                                                                                                          
+  │ F           │ 512 KB   │                                                                                                                                                                                          
+  ├─────────────┼──────────┤                                                                                                                                                                                          
+  │ avg_key     │ 16 B     │
+  ├─────────────┼──────────┤                                                                                                                                                                                          
+  │ avg_value   │ 64 B     │
+  ├─────────────┼──────────┤                                                                                                                                                                                          
+  │ R           │ 100 B    │
+  ├─────────────┼──────────┤
+  │ K (desired) │ 500 keys │
+  └─────────────┴──────────┘
+
+  L = 500 × 100 = 50,000 B  (~49 KB)                                                                                                                                                                                  
+  Available for segments = 512 KB − 49 KB = 463 KB
+  S = roundup_pow2(max(8192, 32×100)) = roundup_pow2(8192) = 8192  (8 KB)                                                                                                                                             
+  N = floor(463 KB / 8 KB) = 57  → cap at USTORE_DEFAULT_SEGMENT_COUNT if needed                                                                                                                                                
+                                                                                                                                                                                                                      
+  With N=8, S=32KB instead (more typical):                                                                                                                                                                            
+  N×S = 256 KB,  K×R = 49 KB,  peak = 305 KB < 512 KB  ✓                                                                                                                                                              
+
+
+
+  ---
+  The Core Rule                                                                                                                                                                                                       
+                                                                                                                                                                                                                      
+  From the peak flash constraint (N×S + K×R ≤ F) and live-data constraint (K×R ≤ (N-1)×S):
+                                                                                                                                                                                                                      
+  K_max = floor( (N-1) × S / R )                        
+                                                                                                                                                                                                                      
+  where R = avg_key + avg_value + sizeof(RecordHeader) + sizeof(RecordCommit)                                                                                                                                         
+          = avg_key + avg_value + 20                                                                                                                                                                                  
+                                                                                                                                                                                                                      
+  The binding constraint is almost always the live-data one. To maximize K, increase N rather than S.
+                                                                                                                                                                                                                      
+  ---                                                   
+  Sizing Table
+                                                                                                                                                                                                                      
+  Three record profiles across all flash sizes:
+                                                                                                                                                                                                                      
+  ┌─────────┬─────────┬───────────┬───────┐                                                                                                                                                                           
+  │ Profile │ avg_key │ avg_value │   R   │                                                                                                                                                                           
+  ├─────────┼─────────┼───────────┼───────┤                                                                                                                                                                           
+  │ Small   │ 8 B     │ 32 B      │ 60 B  │             
+  ├─────────┼─────────┼───────────┼───────┤
+  │ Medium  │ 16 B    │ 128 B     │ 164 B │                                                                                                                                                                           
+  ├─────────┼─────────┼───────────┼───────┤                                                                                                                                                                           
+  │ Large   │ 16 B    │ 512 B     │ 548 B │                                                                                                                                                                           
+  └─────────┴─────────┴───────────┴───────┘                                                                                                                                                                           
+                                                        
+  ---                                                                                                                                                                                                                 
+                                                        
+  ┌───────────┬───────────┬────────┬─────┬──────────┬───────────┬───────────┬──────────────────────────────────────────────────────────┐                                                                              
+  │ Flash (F) │ Write Buf │   S    │  N  │ K (R=60) │ K (R=164) │ K (R=548) │                          Notes                           │
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 28 KB     │ 1 KB      │ 4 KB   │ 3   │ 136      │ 49        │ ~~14~~    │ Reduce write buf from default; large records impractical │
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 256 KB    │ 2 KB      │ 16 KB  │ 8   │ 1,911    │ 699       │ 209       │                                                          │                                                                              
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 512 KB    │ 4 KB      │ 32 KB  │ 8   │ 3,822    │ 1,398     │ 418       │                                                          │                                                                              
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 1 MB      │ 4 KB      │ 64 KB  │ 8   │ 7,645    │ 2,797     │ 837       │ Default S and N                                          │
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 2 MB      │ 4 KB      │ 64 KB  │ 16  │ 16,384   │ 5,994     │ 1,793     │ Increase USTORE_DEFAULT_SEGMENT_COUNT                              │
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 4 MB      │ 4 KB      │ 64 KB  │ 32  │ 33,860   │ 12,388    │ 3,706     │                                                          │
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 8 MB      │ 4 KB      │ 64 KB  │ 64  │ 68,812   │ 25,175    │ 7,534     │ Stack in compact(): ~768 B                               │
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 12 MB     │ 4 KB      │ 64 KB  │ 96  │ 103,765  │ 37,963    │ 11,361    │ Stack: ~1.1 KB; headroom is tight                        │
+  ├───────────┼───────────┼────────┼─────┼──────────┼───────────┼───────────┼──────────────────────────────────────────────────────────┤                                                                              
+  │ 16 MB     │ 8 KB      │ 128 KB │ 64  │ 137,625  │ 50,351    │ 15,068    │ Wider S keeps N manageable                               │
+  └───────────┴───────────┴────────┴─────┴──────────┴───────────┴───────────┴──────────────────────────────────────────────────────────┘                                                                              
+                                                        
+  Verification: for every row, N×S + K×R ≤ F holds — the largest margin is 16 MB (comfortable), the tightest is 12 MB (6.3 MB segments + 6.2 MB live data).                                                           
+                                                        
+  ---                                                                                                                                                                                                                 
+  Key Observations                                      
+                                                                                                                                                                                                                      
+  28 KB requires reducing USTORE_WRITE_BUFFER_SIZE from 4 KB to 1 KB; otherwise the write buffer alone exceeds any viable segment size.
+                                                                                                                                                                                                                      
+  8 MB+ — per_seg[USTORE_DEFAULT_SEGMENT_COUNT] in compact() is stack-allocated. At N=96 that's ~1.1 KB of vector headers on the stack, which may be a concern on MCUs with 4–8 KB stacks. For 12 MB+ consider making it        
+  heap-allocated.                                                                                                                                                                                                     
+                                                                                                                                                                                                                      
+  Practical K: for most embedded applications, K will be far below K_max. The table gives a hard ceiling. Setting policy_max_recs_ at 50–70% of K_max leaves comfortable compaction headroom and avoids operating at  
+  the storage limit.
+                                                                                                                                                                                                                      
+  Choosing between profiles: if your actual values are variable-length (e.g. short strings to binary blobs), use the 75th-percentile record size as R, not the average — compaction headroom failure is a hard error.
+
+
+
+⏺ N=3:                                           
+                                                                                                                                                                                                                      
+  My earlier N≥4 claim was wrong. Looking at the rotation code: after compaction, current_segment = 1, so with N=3 you get seg0 (compacted) + seg1 + seg2 before the next compaction fires. That's 2 writable segments
+   — tight, but fully functional. N=3 is the true hard minimum. N=2 would compact after every single segment fill, which works but destroys flash endurance. N=3 is acceptable for 28KB.                              
+                                                                                                                                                                                                                      
+  ---                                                                                                                                                                                                                 
+  Write buffer sizing:                                                                                                                                                                                                
+                                                                                                                                                                                                                      
+  Looking at append_buffer() (FileStore.h:677):         
+                                                                                                                                                                                                                      
+  void append_buffer(const uint8_t* data, size_t len)
+  {                                                                                                                                                                                                                   
+      while(len) {                                                                                                                                                                                                    
+          size_t space = USTORE_WRITE_BUFFER_SIZE - write_buf_pos;                                                                                                                                                         
+          size_t n = (len < space) ? len : space;                                                                                                                                                                     
+          memcpy(write_buf+write_buf_pos, p, n);                                                                                                                                                                      
+          write_buf_pos += n;                                                                                                                                                                                         
+          p += n; len -= n;                                                                                                                                                                                           
+          if(write_buf_pos == USTORE_WRITE_BUFFER_SIZE)                                                                                                                                                                    
+              flush_buffer();                                                                                                                                                                                         
+      }
+  }                                                                                                                                                                                                                   
+                                                        
+  It's a streaming buffer — if the chunk exceeds the buffer, it flushes mid-record and continues. A single put() that appends hdr + key + value + commit in four append_buffer() calls can freely span multiple buffer
+   fills. The buffer never needs to hold a complete record.
+                                                                                                                                                                                                                      
+  So no — UFSKV_WRITE_BUFFER does not need to be sized to max record size. The right sizing constraint is the flash write page/granularity:                                                                           
+   
+  ┌──────────────────┬────────────────────────────────────────────────┬────────────────────────────────┐                                                                                                              
+  │     Platform     │            Flash write granularity             │       Recommended buffer       │
+  ├──────────────────┼────────────────────────────────────────────────┼────────────────────────────────┤                                                                                                              
+  │ POSIX (native)   │ OS page (4 KB)                                 │ 4 KB (current default is fine) │
+  ├──────────────────┼────────────────────────────────────────────────┼────────────────────────────────┤                                                                                                              
+  │ ESP32 SPIFFS     │ 256 B aligned                                  │ 256–512 B                      │                                                                                                              
+  ├──────────────────┼────────────────────────────────────────────────┼────────────────────────────────┤                                                                                                              
+  │ ESP32 LittleFS   │ prog_size, typically 256 B                     │ 256–512 B                      │                                                                                                              
+  ├──────────────────┼────────────────────────────────────────────────┼────────────────────────────────┤                                                                                                              
+  │ nRF52 InternalFS │ 4 B word writes, but LittleFS block prog 256 B │ 256–512 B                      │
+  ├──────────────────┼────────────────────────────────────────────────┼────────────────────────────────┤                                                                                                              
+  │ nRF52 SPI flash  │ 256 B page                                     │ 256 B                          │
+  └──────────────────┴────────────────────────────────────────────────┴────────────────────────────────┘                                                                                                              
+                                                        
+  Setting UFSKV_WRITE_BUFFER below the flash's minimum write unit causes read-modify-write amplification inside the filesystem layer, so that's the practical floor. For 28KB flash on nRF52, 256–512 B is the right  
+  choice — not 4 KB. That also frees up meaningful RAM in the BasicFileStore instance.
+
+
+
+                                                                                
+  What the Incremental Algorithm Actually Does                                  
+                                                                                
+  For each segment s (lines 1221–1258):                                         
+  1. Write s's live records to compact.tmp
+  2. outf.flush() — data on flash                                               
+  3. write_journal(JOURNAL_COMPACTING, s+1, valid_size) — journal updated first
+  4. _filesystem.remove(src_name) — source segment deleted                      
+                                                                                
+  Each source segment is deleted as it is processed, not all at once at the end.
+   So the filesystem holds compact.tmp (growing) plus the remaining unprocessed 
+  segments (shrinking), and the two swap out roughly in balance.                
+                                                                                
+  Peak Storage                                                                  
+   
+  Just before segment s=0 is deleted — the only moment where both all segments  
+  and some compact.tmp exist simultaneously:
+                                                                                
+  peak = N×S  +  (live records from seg0)                                       
+       = N×S  +  K₀×R                                                           
+                                                                                
+  Since K₀×R ≤ S (live records from seg0 can't exceed seg0's raw size), the peak
+   extra space required is at most one segment worth of data, not K×R as the    
+  earlier non-incremental analysis assumed.                                     
+                  
+  Required free space for compaction ≈ S   (not K×R)                            
+                                                                                
+  The governing constraint becomes:                                             
+                                                                                
+  (N + 1) × S  ≤  F                                                             
+                                                                                
+  Effect of N↑ S↓ (Constant N×S)                                                
+                                                                                
+  With the incremental algorithm, required extra space = S. Decreasing S        
+  directly reduces this:
+                                                                                
+  ┌───────────────────────┬───────┬────────────────────┐                        
+  │ Config (N×S = 512 KB) │   S   │ Extra space needed │
+  ├───────────────────────┼───────┼────────────────────┤                        
+  │ N=8, S=64 KB          │ 64 KB │ ≤ 64 KB            │
+  ├───────────────────────┼───────┼────────────────────┤                        
+  │ N=16, S=32 KB         │ 32 KB │ ≤ 32 KB            │                        
+  ├───────────────────────┼───────┼────────────────────┤                        
+  │ N=32, S=16 KB         │ 16 KB │ ≤ 16 KB            │                        
+  └───────────────────────┴───────┴────────────────────┘                        
+                  
+  So yes, it does further reduce peak overhead — but the reduction is already   
+  small in absolute terms. The big win already came from implementing
+  incremental compaction (which dropped the requirement from K×R down to S).    
+  Further halving S only halves an already-modest overhead.
+
+  The More Significant Implication                                              
+   
+  My earlier sizing table was derived under the non-incremental assumption and  
+  is significantly too conservative. The correct maximum N is:
+                                                                                
+  N_max = floor(F / S) - 1     (incremental algorithm)
+                                                                                
+  vs. my earlier:                                                               
+                                                                                
+  N_max = floor(F / (2×S))     (non-incremental)                                
+                                                                                
+  Revising the key rows:                                                        
+                                                                                
+  ┌──────┬─────┬───────────────────────┬─────────────────────┬────────────┐     
+  │  F   │  S  │     N (earlier,       │   N_max (actual,    │   K_max    │  
+  │      │     │   non-incremental)    │    incremental)     │  (R=164)   │     
+  ├──────┼─────┼───────────────────────┼─────────────────────┼────────────┤     
+  │ 256  │ 16  │ 8                     │ 15                  │ 2,187 vs   │  
+  │ KB   │ KB  │                       │                     │ 699        │     
+  ├──────┼─────┼───────────────────────┼─────────────────────┼────────────┤     
+  │ 512  │ 32  │ 8                     │ 15                  │ 4,398 vs   │
+  │ KB   │ KB  │                       │                     │ 1,398      │     
+  ├──────┼─────┼───────────────────────┼─────────────────────┼────────────┤
+  │ 1 MB │ 64  │ 8                     │ 15                  │ 8,780 vs   │     
+  │      │ KB  │                       │                     │ 2,797      │     
+  ├──────┼─────┼───────────────────────┼─────────────────────┼────────────┤
+  │ 2 MB │ 64  │ 16                    │ 31                  │ 18,335 vs  │     
+  │      │ KB  │                       │                     │ 5,994      │     
+  └──────┴─────┴───────────────────────┴─────────────────────┴────────────┘
+                                                                                
+  The actual K capacity is roughly 3× higher than the earlier estimates, and N  
+  can be nearly doubled for any given S. The earlier numbers were safe but
+  substantially under-used the available flash.                                 
+                  
+  Negative Consequences of N↑ S↓                                                
+   
+  There's one real cost: the per_seg[USTORE_DEFAULT_SEGMENT_COUNT] array in compact() is 
+  stack-allocated (line 1188). Each std::vector is ~12–24 bytes on 32-bit ARM.
+  At N=32 that's ~768 B of stack; at N=64 it's ~1.5 KB. On MCUs with 4–8 KB     
+  stacks this becomes a genuine concern.
+
+  Smaller S also means more frequent segment rotation (more file close/open     
+  cycles) and more iterations in the init() resume scan. Neither is a hard
+  constraint, but they compound on slow flash.  
+
+
+
+  

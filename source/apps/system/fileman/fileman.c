@@ -15,6 +15,7 @@
 #include "purr_win.h"
 #include "purr_kernel.h"
 #include "purr_module.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_entries's own comment below
 
 #define MAX_ENTRIES  64
 #define PATH_MAX_LEN 256
@@ -29,14 +30,21 @@ static purr_wid_t s_prev_area  = 0;   // right: file preview (textarea)
 static purr_wid_t s_status_lbl = 0;
 
 static char s_cwd[PATH_MAX_LEN] = "/flash";
-static char s_entries[MAX_ENTRIES][64];
-static int  s_entry_types[MAX_ENTRIES]; // 0=file, 1=dir
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — pure rebuilt-on-refresh
+// directory-listing text, never touched before PSRAM is up (fileman is a
+// normal launched app). Same class MiniWin's own control/list arrays and
+// settings.c's/msn.c's row buffers already use this for — real, confirmed
+// via purr_os.map: a genuine link-time DRAM overflow once the current app
+// set was all compiled in together (see msn.c's matching comment,
+// 2026-09-01).
+static EXT_RAM_BSS_ATTR char s_entries[MAX_ENTRIES][64];
+static EXT_RAM_BSS_ATTR int  s_entry_types[MAX_ENTRIES]; // 0=file, 1=dir
 static int  s_entry_count = 0;
 static int  s_selected    = -1;
 
 // Formatted list labels ("[dir]" / " file") — kept off the stack since
 // refresh_list() can be called from a task with a modest stack budget.
-static char        s_label_bufs[MAX_ENTRIES][68];
+static EXT_RAM_BSS_ATTR char s_label_bufs[MAX_ENTRIES][68];
 static const char *s_label_ptrs[MAX_ENTRIES];
 
 // ── File ops dialog (New Folder / Rename / Delete confirm) ────────────────────

@@ -365,8 +365,18 @@ bool moy_lua_start(void)
     luaL_setfuncs(L, moy_verbs, 0);
     lua_pop(L, 1);
 
-    lua_pushinteger(L, MOY_SCREEN_W); lua_setglobal(L, "SCREEN_W");
-    lua_pushinteger(L, MOY_SCREEN_H); lua_setglobal(L, "SCREEN_H");
+    // W and H, exactly as the spec names them (moy-api.lua: `W = 320`,
+    // `H = 240`). They were briefly called SCREEN_W/SCREEN_H here, which is a
+    // reasonable-looking name and completely wrong — the first cart run on
+    // hardware died on it:
+    //
+    //   _draw: main.lua:694: attempt to perform arithmetic on a nil value
+    //                        (global 'W')
+    //
+    // A reminder that the API surface is the spec's to define, not the host's
+    // to make tidy.
+    lua_pushinteger(L, MOY_SCREEN_W); lua_setglobal(L, "W");
+    lua_pushinteger(L, MOY_SCREEN_H); lua_setglobal(L, "H");
 
     // Load main.lua. Read through the cart reader so it obeys the same path
     // rules as every other asset.

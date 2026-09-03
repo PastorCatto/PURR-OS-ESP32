@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "sig_mgr.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,14 @@ typedef struct {
     char         type[16];          // "display", "touch", "input", "radio", "gps"
     drv_status_t status;
     char         fail_reason[64];   // populated on DRV_STATUS_FAIL
+    // sig_mgr_classify() result for this .purr file — see sig_mgr.h.
+    // Purely informational for OK/COMPAT/SKIP: an unsigned driver still
+    // loads (every driver in this tree is unsigned today; this field is
+    // what makes that VISIBLE, not what changes it). SIG_TIER_TAMPERED is
+    // the one tier that changes behavior — see load_driver()'s own
+    // comment — which is why DRV_STATUS_FAIL doesn't need its own
+    // separate "tampered" status: fail_reason plus this field already say so.
+    sig_tier_t   sig_tier;
 } drv_entry_t;
 
 // Called at boot — scans paths and loads all drivers found

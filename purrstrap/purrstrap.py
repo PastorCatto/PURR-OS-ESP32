@@ -27,6 +27,7 @@ import argparse
 import datetime
 import difflib
 import glob
+import hashlib
 import json
 import os
 import re
@@ -203,13 +204,266 @@ def cmd_doctor(args):
 
 # ── Build helpers ─────────────────────────────────────────────────────────────
 
-def resolve_device(device_slug):
+def resolve_device(device_slug, profile=None):
     pcat_path = os.path.join(DEVICES_DIR, device_slug, "device.pcat")
     if not os.path.isfile(pcat_path):
         die(f"no device.pcat found for '{device_slug}' — check source/devices/")
     cfg = parse_pcat(pcat_path)
     apply_radio_companion_defaults(cfg)
+    if profile:
+        apply_build_profile(cfg, profile)
     return cfg, pcat_path
+
+# ── Build profiles ───────────────────────────────────────────────────────────
+#
+# A profile is a cfg OVERLAY applied after apply_radio_companion_defaults(),
+# before anything downstream (glue, sdkconfig, flash image, components
+# manifest) reads cfg — every one of those already takes cfg as a plain
+# parameter, so mutating it here is the ONLY change needed; nothing
+# downstream has to know profiles exist.
+#
+# Why an overlay on the INPUTS (drivers.*/modules.*/apps.*) rather than a
+# filter on the component-selection OUTPUT: select_components()'s transitive
+# REQUIRES closure means some inclusions aren't optional once their asker
+# stays. Traced empirically for tdeck_plus (see PURR_OS_1.0_CHECKLIST.md's
+# "Minimal-build profile" entry, which this makes into a real feature):
+# `settings` REQUIRES bt_mgr/meshtastic/miniwin directly (its WiFi/BT scan
+# windows and mesh-backend switcher are real code, not vestigial), and
+# `cupcake`/`systemui`/`lua_runtime` ALL REQUIRE meshtastic themselves (lock
+# screen node-count line, Lua's kitt.*/radio.* bindings) — so meshtastic and
+# bt_mgr compile in as long as Cupcake/Android and Lua do, REGARDLESS of any
+# profile, because the checklist's own "core OS + Lua + Cupcake/Android +
+# WiFi" composition keeps exactly the three components that require them.
+# Trying to strip them post-hoc would just be an undefined-reference link
+# error; this profile drops what's ACTUALLY optional instead: the radio
+# companion stack (proximity/pairing/proximity_rpc/app_manager_remote/
+# homebase/msn_relay — purely a [radio] wifi=true default, not required by
+# anything kept), the GPS/LoRa/battery drivers, and every bundled app
+# (settings/terminal/fileman all REQUIRE miniwin — a second, entirely
+# separate UI backend from whatever the device actually renders with).
+BUILD_PROFILES = {
+    "minimal": {
+        "description": "core OS + Lua + the active UI backend + WiFi only — "
+                        "no radio-companion stack, no GPS/LoRa/battery "
+                        "drivers, no bundled apps (which is what pulls in a "
+                        "second UI backend via miniwin). For RAM-headroom "
+                        "measurement and lean SD/PSRAM-loader targets, not "
+                        "as a daily-driver replacement for the default build.",
+    },
+    # The opposite trim from "minimal": KEEPS the full radio-companion/
+    # server stack (proximity/pairing/proximity_rpc/app_manager_remote/
+    # homebase/server_mgr/wifi_mgr — untouched, not cleared) since that's
+    # the whole thing being tested, and only sheds the OTHER bundled apps
+    # (settings/terminal/fileman/calculator/doom/magidos/moy/about/...) —
+    # heavier ones especially (doom/magidos/moy each carry their own game/
+    # shell logic) — that aren't needed for a milkbar-Server-Manager-
+    # pairing test and were measured contributing to this session's own
+    # "memory watchdog: 93% internal SRAM used" / DMA-pool-fragmentation
+    # (dma_free down to ~2.7KB, largest_dma ~2.7KB) live on tdeck_plus —
+    # exactly the kind of pressure that can starve ESP-NOW's own buffer
+    # needs and make device-to-device pairing flaky. Drivers/modules are
+    # deliberately left alone (no GPS/LoRa/battery stripping like
+    # "minimal" does) — this profile only trims [apps], nothing else.
+    "server_test": {
+        "description": "core OS + Lua + the active UI backend + the FULL "
+                        "radio-companion/server stack, kept — only "
+                        "milkbar/oobe/server_manager/settings among the "
+                        "bundled apps (settings is a base-config necessity, "
+                        "not overhead), everything else (terminal/fileman/"
+                        "calculator/doom/magidos/moy/about/...) dropped. "
+                        "For relieving internal-SRAM/DMA-pool pressure "
+                        "while testing device pairing and Server Manager.",
+    },
+    # The opposite trim from "server_test": that profile KEEPS the radio-
+    # companion/server stack because it's what's being tested; this one
+    # SHEDS it, because RNode mode (source/modules/rnode, see the plan doc)
+    # has no use for PURR-to-PURR pairing/remote-launch (proximity/pairing/
+    # proximity_rpc/app_manager_remote/homebase) at all — it's a bridge for
+    # a THIRD-PARTY BLE host (Sideband/rns/NomadNet), not another PURR OS
+    # device. Written for heltec specifically: no PSRAM at all (unlike
+    # tdeck_plus), so NimBLE's host mbuf/event/ACL pools can't escape into
+    # PSRAM the way tdeck_plus's own BT fix relies on — every KB shed here
+    # is a KB NimBLE might actually need to link at all, not just a nice-
+    # to-have. Only settings kept among bundled apps, same "base-config
+    # necessity, not overhead" reasoning as server_test's own comment.
+    "rnode_test": {
+        "description": "core OS + Lua + the active UI backend + BLE "
+                        "(bt_mgr/rnode), radio-companion/server stack "
+                        "DROPPED (proximity/pairing/wifi_mgr/user_mgr/"
+                        "app_manager_remote/homebase — not needed for a "
+                        "third-party BLE bridge), only settings kept among "
+                        "bundled apps. For maximizing internal-DRAM "
+                        "headroom on PSRAM-less boards (heltec) while "
+                        "proving RNode-over-BLE fits at all.",
+    },
+    # The combination "rnode_test" deliberately doesn't test: RNode mode
+    # (BLE/LoRa) running ALONGSIDE the PURR-to-PURR radio-companion/server
+    # stack (WiFi/ESP-NOW) — a real, legitimate combined use case (this
+    # device stays remotely pairable/manageable by another PURR OS device
+    # over WiFi while also bridging a third-party BLE host like Sideband
+    # over LoRa) that "rnode_test" intentionally sheds for pure DRAM-
+    # headroom measurement. No radio conflict between them (three
+    # physically separate radios: LoRa/SPI, BLE, WiFi — the coexistence
+    # firmware already visible in every boot log's own "coex firmware
+    # version" line handles WiFi/BT sharing the 2.4GHz front end), so the
+    # only real question is whether both fit in flash/DRAM together.
+    # meshtastic and reticulum are dropped here — neither is what's being
+    # tested (they're alternate, mutually-exclusive-at-runtime mesh
+    # backends unrelated to PURR-to-PURR pairing), and the full/default
+    # profile with all four backends plus BLE compiled in genuinely
+    # overflows heltec's 2MB OTA partition by ~108KB (confirmed live) —
+    # dropping the two backends not part of this specific combination is
+    # the real fix, not growing the partition table for a size that was
+    # never actually needed.
+    "rnode_paired": {
+        "description": "core OS + Lua + the active UI backend + BLE "
+                        "(bt_mgr/rnode) + the FULL radio-companion/server "
+                        "stack (proximity/pairing/wifi_mgr/user_mgr/"
+                        "app_manager_remote/homebase), kept together on "
+                        "purpose — meshtastic/reticulum dropped (neither "
+                        "part of this combination, and keeping all four "
+                        "mesh backends plus BLE together overflows "
+                        "heltec's flash). For testing RNode mode running "
+                        "alongside real PURR-to-PURR pairing/remote-launch.",
+    },
+    # tdeck_plus's own equivalent of "rnode_paired" — a device that acts
+    # as the remote CLIENT for server_mgr.h's SRVMGR_ACTION_MESH_STATUS/
+    # _SET (starting/stopping RNode mode on ANOTHER device, e.g. heltec),
+    # and can run RNode mode itself. Unlike heltec this device has real
+    # PSRAM (CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y, sdkconfig_
+    # tdeck_plus.overrides), so BT's own host buffer pools aren't fighting
+    # internal DRAM the same way — the full/default profile's own DRAM
+    # overflow with BT on (~24.6KB, confirmed live) was the kitchen-sink
+    # app set, not a fundamental BT-vs-PSRAM conflict; trimming the app
+    # set (same "minimal" philosophy, applied here) is the real fix.
+    "rnode_client": {
+        "description": "core OS + Lua + the active UI backend + WiFi + "
+                        "BLE (bt_mgr/rnode) + the FULL radio-companion "
+                        "stack (proximity/pairing/proximity_rpc/"
+                        "app_manager_remote/homebase/msn_relay), kept — "
+                        "meshtastic/meshcore/reticulum dropped (not part "
+                        "of this combination), only settings/"
+                        "server_manager kept among bundled apps (server_"
+                        "manager is this profile's whole point: the "
+                        "client UI for remotely switching another "
+                        "device's mesh backend).",
+    },
+}
+
+def apply_build_profile(cfg, profile_name):
+    """Mutates cfg in place. Unknown profile name is a hard error — silently
+    building the default when --profile was typo'd would be exactly the
+    kind of "looked fine, shipped the wrong thing" failure this whole
+    mechanism exists to avoid elsewhere (see purrstrap bake's own staleness
+    gap)."""
+    if profile_name not in BUILD_PROFILES:
+        die(f"unknown build profile '{profile_name}' — known: {', '.join(sorted(BUILD_PROFILES))}")
+
+    if profile_name == "minimal":
+        # Radio-companion stack — one existing, already-tested opt-out flag
+        # (apply_radio_companion_defaults() checks this itself) rather than
+        # unwinding its six individual modules.*/flash.* keys by hand.
+        cfg["modules.radio_companion"] = "false"
+        for key in ("modules.proximity", "modules.pairing", "modules.proximity_rpc",
+                    "modules.app_manager_remote", "modules.homebase", "modules.msn_relay"):
+            cfg.pop(key, None)
+
+        # Drivers not in "core OS + Lua + Cupcake/Android + WiFi".
+        for key in ("drivers.gps", "drivers.radio", "drivers.battery", "radio.lora"):
+            cfg[key] = ""
+
+        # modules.bt/modules.mesh/modules.meshcore, if a device names them
+        # directly (tdeck_plus doesn't — its bt/mesh lines are already off/
+        # commented). meshtastic itself is NOT cleared here: it stays
+        # transitively required by cupcake/systemui/lua_runtime regardless —
+        # see this function's module doc comment.
+        for key in ("modules.bt", "modules.mesh", "modules.meshcore"):
+            cfg.pop(key, None)
+
+        # No bundled apps — see module doc comment for why this is what
+        # actually sheds miniwin (a second UI backend) rather than a
+        # cosmetic trim. Blanket over every apps.* key rather than naming
+        # today's app list, so a future app added to any device is dropped
+        # by this profile too without needing an update here.
+        for key in [k for k in cfg if k.startswith("apps.")]:
+            cfg[key] = "false"
+
+    if profile_name == "server_test":
+        # Radio-companion/server stack is deliberately left untouched — see
+        # this profile's own description above for why (it's the thing
+        # being tested, not overhead to shed).
+        # settings — a base-config necessity (WiFi/BT/display/etc config),
+        # not an optional extra like terminal/fileman/diagnostics/magidos/
+        # doom/moy — kept alongside milkbar/oobe/server_manager per request.
+        keep_apps = {"apps.milkbar", "apps.oobe", "apps.server_manager", "apps.settings", "apps.reticulum_app"}
+        for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
+            cfg[key] = "false"
+
+    if profile_name == "rnode_test":
+        # Radio-companion/server stack — same opt-out flag "minimal" uses
+        # (apply_radio_companion_defaults() checks this itself), plus the
+        # module keys it doesn't cover: wifi_mgr/user_mgr/server aren't
+        # part of that function's own module set (see heltec/device.pcat's
+        # own comments on why each is a separate explicit entry there), so
+        # they need popping by hand too.
+        cfg["modules.radio_companion"] = "false"
+        for key in ("modules.proximity", "modules.pairing", "modules.proximity_rpc",
+                    "modules.app_manager_remote", "modules.homebase", "modules.msn_relay",
+                    "modules.wifi_mgr", "modules.user_mgr", "modules.server"):
+            cfg.pop(key, None)
+
+        # Only settings kept — same "base-config necessity, not overhead"
+        # reasoning as server_test's own comment above.
+        keep_apps = {"apps.settings"}
+        for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
+            cfg[key] = "false"
+
+    if profile_name == "rnode_paired":
+        # Radio-companion/server stack — deliberately LEFT ALONE (that's
+        # the whole point of this profile, opposite of rnode_test's own
+        # trim). Only the alternate mesh backends not part of this
+        # combination are dropped, to fit in flash — see this profile's
+        # own description above for the measured ~108KB overflow that
+        # keeping all four alongside BLE causes.
+        for key in ("modules.mesh", "modules.reticulum"):
+            cfg.pop(key, None)
+
+        # Same "settings only" trim as rnode_test — not about DRAM this
+        # time, just no reason to carry terminal/fileman/calculator for a
+        # device with no purr_win UI to render them anyway.
+        keep_apps = {"apps.settings"}
+        for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
+            cfg[key] = "false"
+
+    if profile_name == "rnode_client":
+        # Radio-companion stack — deliberately LEFT ALONE (this profile's
+        # whole point, same reasoning as rnode_paired's own).
+        for key in ("modules.mesh", "modules.meshcore", "modules.reticulum"):
+            cfg.pop(key, None)
+
+        # settings (base-config necessity) + server_manager (the actual
+        # client UI this profile exists for) + milkbar (the real
+        # proximity/pairing connection surface — Connect -> Dashboard ->
+        # Desktop, server_manager_app.c's own header comment — dropping
+        # this the first time round left the actual "proximity" half of
+        # this profile's own point unreachable, a real miss, not just a
+        # trim). Everything else (terminal/fileman/msn/diagnostics/
+        # magidos/doom/moy/oobe/reticulum_app) still dropped — this is
+        # what actually frees enough internal DRAM for BT to fit without
+        # a repeat of the full/default profile's own overflow.
+        keep_apps = {"apps.settings", "apps.server_manager", "apps.milkbar"}
+        for key in [k for k in cfg if k.startswith("apps.") and k not in keep_apps]:
+            cfg[key] = "false"
+
+    return cfg
+
+def cmd_profiles(args):
+    div("build profiles")
+    for name, spec in sorted(BUILD_PROFILES.items()):
+        print(f"  {C_BOLD}{name}{C_RST}")
+        print(f"    {spec['description']}")
+    print(f"\n  usage: purrstrap build <device> --profile <name>")
+    div()
 
 # 2nd-stage bootloader flash offset — chip-specific, dictated by the ROM
 # bootloader (not configurable in ESP-IDF itself). Confirmed against IDF's
@@ -233,7 +487,7 @@ def bootloader_offset(chip):
 # free," rather than needing it hand-wired into each device.pcat one at a
 # time: proximity_module.c/pairing_module.c already handle no-PSRAM and
 # no-LoRa gracefully (see their own header comments), so WiFi is the only
-# real hardware requirement. msn + nearby (the apps that let a user actually
+# real hardware requirement. msn + milkbar (the apps that let a user actually
 # see/act on it) are added on top only when the UI backend implements
 # purr_win (catcall_ui_t) — a raw-framebuffer UI like oled_ui needs its own
 # custom screen instead (see heltec's hand-built Pair screen in
@@ -243,17 +497,51 @@ def bootloader_offset(chip):
 # direction — force it on for a WiFi device this doesn't detect correctly,
 # or off for one that technically has WiFi but shouldn't carry this (e.g. a
 # stripped-down diagnostic/test kernel).
+#
+# [modules] server = true is a SEPARATE, additive opt-in for the exact same
+# module set (see the loop just below — there is no functional difference
+# in what gets built between this and radio_companion=true). The distinct
+# name exists because the two express different things: radio_companion is
+# a HARDWARE heuristic ("this device has WiFi, so give it the stack almost
+# for free"), server is an INTENT flag ("this device is deliberately a
+# login/pairing server, full stop"). A device that already has
+# radio.wifi=true (e.g. heltec) gets this stack from the heuristic already
+# and setting server=true on it changes nothing observable — it's there so
+# device.pcat reads as a deliberate choice rather than a side effect, and
+# so the flag keeps working even if a future device needs the server stack
+# without qualifying for the WiFi heuristic. It does NOT imply the device
+# actually has working WiFi hardware — every module this adds
+# (proximity/pairing/proximity_rpc) genuinely needs the radio to function
+# at all, so setting this on a WiFi-less device is a configuration error
+# the resulting build will simply fail on, same as forcing
+# radio_companion=true on one already does today. Deliberately overrides
+# an explicit radio_companion=false too (checked first, below) — the two
+# contradict each other, and server=true is the more specific statement of
+# intent.
+#
+# Client-side consumption of this stack (milkbar, the systemui "Log in to
+# a server" screen, cheetah's remote-mode desktop) stays gated on having a
+# purr_win-capable UI (PURR_WIN_UI_BACKENDS, just below) or being
+# explicitly wired into a device.pcat (systemui/cheetah aren't part of
+# this function at all — see tdeck_plus's/tab5's own device.pcat) — a
+# server-flagged device with a raw-framebuffer UI like oled_ui answers
+# remote requests just fine without ever being able to originate one
+# itself, the same restriction heltec's own hand-built Pair screen already
+# accepts today.
 PURR_WIN_UI_BACKENDS = {"miniwin", "cupcake", "kittenui", "cardstack", "pounce", "tabby", "mochi"}
 
 def apply_radio_companion_defaults(cfg):
-    """Mutates cfg in place, adding proximity/pairing (+ msn/nearby where the
-    UI backend supports it) unless already present or explicitly opted out."""
+    """Mutates cfg in place, adding proximity/pairing (+ msn/milkbar where the
+    UI backend supports it) unless already present or explicitly opted out.
+    See this function's own module-level comment above for [modules] server's
+    role alongside radio_companion."""
+    server = cfg.get("modules.server", "").strip().lower() in ("true", "1", "yes")
     flag = cfg.get("modules.radio_companion", "").strip().lower()
-    if flag in ("false", "0", "no"):
+    if flag in ("false", "0", "no") and not server:
         return cfg
     forced_on = flag in ("true", "1", "yes")
     wifi = cfg.get("radio.wifi", "").strip().lower() in ("true", "1", "yes")
-    if not (forced_on or wifi):
+    if not (forced_on or wifi or server):
         return cfg
 
     for key, val in (("modules.proximity", "proximity"), ("modules.pairing", "pairing"),
@@ -261,13 +549,31 @@ def apply_radio_companion_defaults(cfg):
                       ("modules.app_manager_remote", "app_manager_remote"),
                       ("modules.homebase", "homebase"),
                       ("modules.msn_relay", "msn_relay"),
+                      # server_mgr — Server Manager's wire protocol (remote
+                      # WiFi config, app transfer/approval), a new pass this
+                      # session. Same family, same gate — rides server=true/
+                      # radio.wifi alongside everything else here, no new
+                      # purrstrap flag of its own. See source/modules/
+                      # server_mgr/server_mgr.h for the full design.
+                      ("modules.server_mgr", "server_mgr"),
                       ("flash.proximity", "2"), ("flash.pairing", "2"), ("flash.proximity_rpc", "2"),
-                      ("flash.app_manager_remote", "2"), ("flash.homebase", "2"), ("flash.msn_relay", "2")):
+                      ("flash.app_manager_remote", "2"), ("flash.homebase", "2"), ("flash.msn_relay", "2"),
+                      ("flash.server_mgr", "2")):
         cfg.setdefault(key, val)
 
     if cfg.get("modules.ui", "") in PURR_WIN_UI_BACKENDS:
-        for key, val in (("apps.msn", "true"), ("apps.nearby", "true"), ("apps.milkbar", "true"),
-                          ("flash.apps/msn", "3"), ("flash.apps/nearby", "3"), ("flash.apps/milkbar", "3")):
+        # nearby was folded into milkbar (its "who's beaconing nearby, pair/
+        # unpair" screen is now milkbar's own Nearby section) — see
+        # source/apps/system/milkbar/milkbar_app.c's file header.
+        #
+        # server_manager — reached only through app_manager.h's synthetic
+        # remote-mode entry (never from a home-screen icon or Start Menu
+        # listing — app_manager_launch_by_name("server_manager") is the
+        # only real launch path), but still needs to be a real, compiled
+        # app_manager entry for that by-name launch to find, same as
+        # milkbar/msn here.
+        for key, val in (("apps.msn", "true"), ("apps.milkbar", "true"), ("apps.server_manager", "true"),
+                          ("flash.apps/msn", "3"), ("flash.apps/milkbar", "3"), ("flash.apps/server_manager", "3")):
             cfg.setdefault(key, val)
     return cfg
 
@@ -373,6 +679,79 @@ def run_live(cmd, cwd=None, env=None):
         proc.terminate(); proc.wait()
         warn("Interrupted."); sys.exit(0)
     return proc.returncode
+
+# ── Partition CSV lookups ────────────────────────────────────────────────────
+
+def _partitions_csv_path(cfg):
+    """The partitions CSV this device's cfg selects — same flash_mb (+ optional
+    device.ota) resolution _generate_sdkconfig() uses, factored out so every
+    caller that needs a real offset from the table (not just the sdkconfig
+    define) resolves the SAME file rather than re-deriving the filename and
+    risking the two drifting apart."""
+    flash_mb = cfg.get("device.flash_mb", "")
+    name = f"partitions_{flash_mb}mb_ota.csv" if _pcat_bool(cfg, "device.ota") else f"partitions_{flash_mb}mb.csv"
+    return os.path.join(REPO_DIR, "CoreOS", name)
+
+def _parse_partitions_csv(partitions_csv):
+    """[(name, type, subtype, offset_int, size_int), ...] from a partitions
+    CSV, comments/blank lines stripped. Empty list if the file can't be read
+    or a row doesn't parse (offset/size fields are hex/decimal, gen_esp32part.py
+    accepts either — int(x, 0) matches that)."""
+    rows = []
+    try:
+        with open(partitions_csv, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                fields = [p.strip() for p in line.split(",")]
+                if len(fields) < 5:
+                    continue
+                try:
+                    rows.append((fields[0], fields[1], fields[2], int(fields[3], 0), int(fields[4], 0)))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return rows
+
+def _ota_slot_size_bytes(partitions_csv):
+    """Size in bytes of the ota_0 partition in an OTA-variant partitions CSV, or
+    None if the file isn't one (no ota_0 entry — a plain single-slot table).
+    Both OTA slots are always sized equal by convention here, so reading ota_0
+    alone is enough to know the budget either slot's firmware.bin must fit."""
+    for name, _type, _sub, _off, size in _parse_partitions_csv(partitions_csv):
+        if name == "ota_0":
+            return size
+    return None
+
+def _partition_offset_by_name(partitions_csv, name):
+    """Offset of the partition literally named `name` (e.g. "otadata"), or
+    None if the table has no such row — a non-OTA table has no otadata
+    partition at all, which callers use to know there's nothing to flash
+    there rather than defaulting to some offset."""
+    for pname, _type, _sub, off, _size in _parse_partitions_csv(partitions_csv):
+        if pname == name:
+            return off
+    return None
+
+def _first_app_partition_offset(partitions_csv):
+    """Flash offset firmware.bin actually belongs at: the first app-type
+    partition's own offset — "factory" on a single-slot table, "ota_0" on an
+    OTA one. NOT a fixed 0x10000: an OTA table's app partition starts later
+    (0x20000 on partitions_16mb_ota.csv, past otadata) to satisfy
+    gen_esp32part.py's 0x10000-alignment rule for app partitions — see that
+    CSV's own header comment. Every write_flash/merge_bin call that places
+    firmware.bin must ask this, not assume, or it silently writes the app
+    image into otadata's region and leaves the real app partition blank —
+    caught only by the device failing to boot, or not caught at all until
+    someone actually flashes it. Falls back to 0x10000 (the historical
+    constant, correct for every non-OTA table) if the CSV can't be read at
+    all, rather than raising and blocking a build over a read error here."""
+    for name, ptype, _sub, off, _size in _parse_partitions_csv(partitions_csv):
+        if ptype == "app":
+            return off
+    return 0x10000
 
 # ── Parse [flash] section from device.pcat ────────────────────────────────────
 #
@@ -684,12 +1063,14 @@ def _generate_glue(device, cfg, out_dir):
         val = cfg.get(key, "")
         if val:
             module_ids.append(to_sym(val))
-    # [modules] section — ui, app_manager, etc. "radio_companion" is a
-    # control flag (see apply_radio_companion_defaults()), not a module
-    # name — excluded here or to_sym("true"/"false") would produce a bogus
-    # "extern purr_module_true;" reference.
+    # [modules] section — ui, app_manager, etc. "radio_companion" and
+    # "server" are both control flags (see apply_radio_companion_defaults()'s
+    # own comment on the two), not module names — excluded here or
+    # to_sym("true"/"false") would produce a bogus "extern
+    # purr_module_true;" reference.
+    CONTROL_FLAG_MODULE_KEYS = ("modules.radio_companion", "modules.server")
     for raw_key, raw_val in sorted(cfg.items()):
-        if raw_key.startswith("modules.") and raw_val and raw_key != "modules.radio_companion":
+        if raw_key.startswith("modules.") and raw_val and raw_key not in CONTROL_FLAG_MODULE_KEYS:
             module_ids.append(to_sym(raw_val))
     # driver_manager is always included if present
     if to_sym("driver_manager") not in module_ids:
@@ -790,6 +1171,7 @@ UI_BACKEND_MAP = {
     "cupcake":   "CUPCAKE",
     "tabby":     "TABBY",
     "mochi":     "MOCHI",
+    "cheetah":   "CHEETAH",
     "lvgldebug": "LVGLDEBUG",
     "pounce":    "POUNCE",
     "nougat":    "NOUGAT",
@@ -814,13 +1196,27 @@ def _sdkconfig_lines(device, cfg):
     if flash_mb not in (4, 8, 16):
         die(f"{device}: flash_mb={flash_mb} has no matching partitions_{flash_mb}mb.csv "
             f"(only 4/8/16 MB partition tables exist)")
-    partitions_csv = os.path.join(REPO_DIR, "CoreOS", f"partitions_{flash_mb}mb.csv")
+
+    # [device] ota = true — explicit opt-in (matching this codebase's driver/module
+    # selection pattern generally), not inferred from flash size. Selects the dual
+    # app-slot _ota variant of the partition table instead of the single-slot
+    # default, and turns on bootloader rollback + plain-HTTP OTA (the latter so a
+    # local/offline update server without a TLS cert still works — consistent with
+    # unsigned/self-built firmware already being an accepted flashing path here).
+    # See PURR_OS_1.0_CHECKLIST.md-adjacent OTA plan for the per-tier partition
+    # budget reasoning (16/8 MB have headroom to spare; 4 MB needs a shrunk SPIFFS).
+    ota_enabled = _pcat_bool(cfg, "device.ota")
+    partitions_csv = _partitions_csv_path(cfg)
+    partitions_name = os.path.basename(partitions_csv)
     if not os.path.isfile(partitions_csv):
-        die(f"{device}: expected CoreOS/partitions_{flash_mb}mb.csv does not exist")
+        die(f"{device}: expected CoreOS/{partitions_name} does not exist")
 
     lines.append("")
     lines.append(f"CONFIG_ESPTOOLPY_FLASHSIZE_{flash_mb}MB=y")
-    lines.append(f'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_{flash_mb}mb.csv"')
+    lines.append(f'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="{partitions_name}"')
+    if ota_enabled:
+        lines.append("CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y")
+        lines.append("CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y")
 
     if _pcat_bool(cfg, "device.psram"):
         psram_mb_raw = cfg.get("device.psram_mb", "")
@@ -885,9 +1281,9 @@ def _sdkconfig_lines(device, cfg):
         # modules.* value into a static module registration, so a style name
         # there would emit a bogus `extern purr_module_ios;`.
         style = cfg.get("ui.systemui_style", "android").strip().lower()
-        if style not in ("android", "ios"):
+        if style not in ("android", "ios", "xp"):
             die(f"{device}: device.pcat [ui] systemui_style = \"{style}\" "
-                f"is not one of: android, ios")
+                f"is not one of: android, ios, xp")
         lines.append(f"CONFIG_PURR_SYSTEMUI_STYLE_{style.upper()}=y")
 
     if cfg.get("modules.mesh", ""):
@@ -1022,6 +1418,20 @@ def _build_kernel_spine(device, cfg, out_dir):
     if _settle.isdigit():
         env["PURR_BOOT_SETTLE_MS"] = _settle
 
+    # Whether [drivers].radio names an actual radio driver — a specialized
+    # kernel's own boot file (kernel_tdp_boot.c and its pounce twin) calls
+    # that driver's own *_configure() directly, unconditionally, before
+    # purr_kernel_load_static_modules() runs (it has to: that's what sets
+    # the pins the driver's own module_init() reads at SPI-bus-setup time).
+    # That call is an undefined reference at LINK time the moment
+    # [drivers].radio is cleared — first hit by the "minimal" build profile
+    # clearing it, not something any device.pcat had tried before. Passed
+    # through exactly like PURR_BOOT_SETTLE_MS above so kernel_tdp_boot.c
+    # can guard the call with '#if PURR_HAS_RADIO_DRIVER'; a device.pcat
+    # that predates this flag still builds correctly because the guard
+    # below defaults to 1 (today's unconditional behaviour) when unset.
+    env["PURR_HAS_RADIO_DRIVER"] = "1" if (cfg.get("drivers.radio", "") or "").strip() else "0"
+
     # idf.py's own __main__ guard does `if 'MSYSTEM' in os.environ: print_warning(...)`
     # as an if/elif/else chain — when MSYSTEM is set (Git Bash, MSYS2, any
     # MinGW-derived shell always sets it) it prints a warning and returns
@@ -1077,6 +1487,10 @@ def _build_kernel_spine(device, cfg, out_dir):
     firmware_out = os.path.join(out_dir, "firmware.bin")
     bootloader_out = os.path.join(out_dir, "bootloader.bin")
     partitions_out = os.path.join(out_dir, "partition-table.bin")
+    # Only generated by idf.py for a device whose partition table has an
+    # otadata row — the copy loop below already only copies what exists, so
+    # this stays None (nothing to flash) for a non-OTA device automatically.
+    ota_data_out = os.path.join(out_dir, "ota_data_initial.bin")
 
     div("kernel spine")
 
@@ -1103,11 +1517,19 @@ def _build_kernel_spine(device, cfg, out_dir):
 
     # Copy binaries to out_dir
     import shutil as _sh
-    for src_name, dst in (
+    to_copy = [
         (f"purr_os.bin",        firmware_out),
         ("bootloader/bootloader.bin", bootloader_out),
         ("partition_table/partition-table.bin", partitions_out),
-    ):
+    ]
+    # Only idf.py-generated for a device whose partition table has an
+    # otadata row — added to the list (with its own missing-file warning) only
+    # then, so every non-OTA device's build doesn't print a "not found"
+    # warning for a file it was never going to have.
+    if _pcat_bool(cfg, "device.ota"):
+        to_copy.append(("ota_data_initial.bin", ota_data_out))
+
+    for src_name, dst in to_copy:
         src = os.path.join(build_dir, src_name)
         if os.path.isfile(src):
             _sh.copy2(src, dst)
@@ -1115,7 +1537,44 @@ def _build_kernel_spine(device, cfg, out_dir):
         else:
             warn(f"  not found: {src_name}")
 
-    return firmware_out if os.path.isfile(firmware_out) else None
+    if not os.path.isfile(firmware_out):
+        return None
+
+    # OTA size-fit check — a firmware.bin that doesn't fit its ota_0/ota_1 slot
+    # would either fail to flash outright or, worse, corrupt whatever sits after
+    # it, discovered only at flash/update time. Same failure SHAPE as the
+    # `purrstrap bake` staleness gap this codebase already documents (reports
+    # [OK] without confirming the artifact is actually right) — closed here
+    # instead of repeated.
+    if _pcat_bool(cfg, "device.ota"):
+        ota_csv = _partitions_csv_path(cfg)
+        slot_bytes = _ota_slot_size_bytes(ota_csv)
+        actual_bytes = os.path.getsize(firmware_out)
+        if slot_bytes and actual_bytes > slot_bytes:
+            die(f"{device}: firmware.bin is {actual_bytes} bytes but each OTA slot "
+                f"({os.path.basename(ota_csv)}) is only {slot_bytes} bytes — "
+                f"trim components (see `purrstrap build {device} --profile minimal`) "
+                f"or grow the partition table. Refusing to produce an image that "
+                f"cannot fit its own OTA slot.")
+        elif slot_bytes:
+            pct = actual_bytes * 100 // slot_bytes
+            info(f"  OTA slot fit: {actual_bytes} / {slot_bytes} bytes ({pct}%)")
+
+        # firmware.bin.sha256 — companion checksum for ota_mgr_apply_from_sd()
+        # (source/modules/ota_mgr/ota_mgr.h). Copy both files onto an SD card
+        # as /sdcard/ota/firmware.bin + /sdcard/ota/firmware.bin.sha256 (see
+        # OTA_MGR_SD_DEFAULT_PATH) to test an update with no HTTP server —
+        # every OTA-enabled build produces this pair with no extra step.
+        digest = hashlib.sha256()
+        with open(firmware_out, "rb") as fw:
+            for chunk in iter(lambda: fw.read(1 << 20), b""):
+                digest.update(chunk)
+        sha_path = firmware_out + ".sha256"
+        with open(sha_path, "w") as f:
+            f.write(f"{digest.hexdigest()}  {os.path.basename(firmware_out)}\n")
+        info(f"  {C_GRN}OK{C_RST}  {os.path.basename(sha_path)}")
+
+    return firmware_out
 
 def _bootloader_offset(chip):
     # Second-stage bootloader offset differs per chip: 0x1000 on the original
@@ -1126,23 +1585,47 @@ def _bootloader_offset(chip):
         return "0x0"
     return "0x1000"
 
-def _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin):
+def _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin, out_name=None):
     """
     Use esptool merge_bin to combine firmware + SPIFFS into one flashable image.
-    Output: out_dir/PURR_OS_<device>.bin
+    Output: out_dir/PURR_OS_<out_name or device>.bin
+
+    out_name matters when a build profile is active (cmd_build passes
+    "<device>_<profile>") — the merged binary must NOT share a filename with
+    the default build's, or a --profile minimal run and a plain run of the
+    same device silently overwrite each other's artifact. Exactly the
+    "looks fine, ships the wrong binary" shape PURR_OS_1.0_CHECKLIST.md
+    already flags against `purrstrap bake`'s own staleness gap.
     """
     spiffs_offset = cfg.get("device.spiffs_offset", "0x290000")
-    merged_out    = os.path.join(out_dir, f"PURR_OS_{device}.bin")
+    merged_out    = os.path.join(out_dir, f"PURR_OS_{out_name or device}.bin")
     bootloader    = os.path.join(out_dir, "bootloader.bin")
     partitions    = os.path.join(out_dir, "partition-table.bin")
 
     chip = cfg.get("device.chip", "esp32")
     bl_offset = _bootloader_offset(chip)
 
+    # NOT a fixed 0x10000 — an OTA-enabled device's app partition starts at
+    # 0x20000 (past otadata), see _first_app_partition_offset()'s own doc
+    # comment for why a hardcoded offset here silently writes the app image
+    # over otadata instead of into ota_0.
+    partitions_csv = _partitions_csv_path(cfg)
+    app_offset = hex(_first_app_partition_offset(partitions_csv))
+    otadata_offset = _partition_offset_by_name(partitions_csv, "otadata")
+    ota_data_bin = os.path.join(out_dir, "ota_data_initial.bin")
+
     parts = []
     if os.path.isfile(bootloader):   parts += [bl_offset,        bootloader]
     if os.path.isfile(partitions):   parts += ["0x8000",         partitions]
-    parts += ["0x10000", firmware_bin]
+    # otadata must be pre-initialized to "boot ota_0" — a blank/erased
+    # otadata region is not guaranteed to fall back the same way on every
+    # bootloader config, so this is written explicitly rather than left to
+    # chance. idf.py's own generated flash command does the same (confirmed
+    # against its actual output: "0x10000 ota_data_initial.bin 0x20000
+    # purr_os.bin" for this exact partition table).
+    if otadata_offset is not None and os.path.isfile(ota_data_bin):
+        parts += [hex(otadata_offset), ota_data_bin]
+    parts += [app_offset, firmware_bin]
     parts += [spiffs_offset, flash_bin]
 
     # Find esptool: prefer IDF venv python -m esptool, fall back to esptool.py in PATH
@@ -1157,7 +1640,7 @@ def _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin):
     rc = run_live(cmd)
     if rc == 0:
         size_kb = os.path.getsize(merged_out) // 1024
-        info(f"  {C_GRN}PURR_OS_{device}.bin{C_RST}  {size_kb} KB")
+        info(f"  {C_GRN}PURR_OS_{out_name or device}.bin{C_RST}  {size_kb} KB")
     else:
         warn(f"  merge_bin failed (rc={rc})")
     return merged_out if os.path.isfile(merged_out) else None
@@ -1193,16 +1676,37 @@ def _regenerate_components_manifest(cfg=None, device=None):
     modulestrap.generate_components_manifest(targets, cfg=cfg, device=device)
 
 def cmd_build(args):
-    device = args.device
-    cfg, pcat_path = resolve_device(device)
+    device  = args.device
+    profile = getattr(args, "profile", None)
+    cfg, pcat_path = resolve_device(device, profile=profile)
 
     chip    = cfg.get("device.chip", "esp32")
     name    = cfg.get("device.name", device)
     out_dir = os.path.join(OUTPUT_DIR, device)
+    # Only the merged artifact's filename changes under a profile — same
+    # out_dir, same CoreOS build_<device> dir, same as toggling [modules]/
+    # [apps] via `modulestrap enable/disable` and rebuilding, which already
+    # relies on CMake noticing components_manifest.cmake changed. A profile
+    # switch on a device already built the other way needs the same
+    # `purrstrap clean <device>` fresh start that pattern has always needed.
+    out_name = f"{device}_{profile}" if profile else device
 
     div()
-    info(f"building {name} ({chip})")
-    info(f"output → cattobaked/{device}/")
+    info(f"building {name} ({chip})" + (f"  [profile: {profile}]" if profile else ""))
+    info(f"output → cattobaked/{device}/" + (f"  (artifact: PURR_OS_{out_name}.bin)" if profile else ""))
+    if profile:
+        try:
+            modulestrap_dir = os.path.join(REPO_DIR, "modulestrap")
+            if modulestrap_dir not in sys.path:
+                sys.path.insert(0, modulestrap_dir)
+            import modulestrap
+            targets = modulestrap.find_modules()
+            base_cfg, _ = resolve_device(device)   # no profile — the comparison baseline
+            before, _ = modulestrap.select_components(base_cfg, targets)
+            after, _  = modulestrap.select_components(cfg, targets)
+            info(f"profile '{profile}': {len(before)} -> {len(after)} component(s)")
+        except Exception as e:
+            warn(f"could not compute profile component delta: {e}")
     div()
 
     os.makedirs(out_dir, exist_ok=True)
@@ -1223,7 +1727,7 @@ def cmd_build(args):
     _generate_sdkconfig(device, cfg)
 
     # Remove stale merged image so a failed build never leaves a flashable artifact
-    stale = os.path.join(out_dir, f"PURR_OS_{device}.bin")
+    stale = os.path.join(out_dir, f"PURR_OS_{out_name}.bin")
     if os.path.isfile(stale):
         os.remove(stale)
 
@@ -1245,7 +1749,7 @@ def cmd_build(args):
 
     # ── Merge final image ──────────────────────────────────────────────────────
     if firmware_bin and flash_bin:
-        _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin)
+        _merge_flash_image(device, cfg, out_dir, firmware_bin, flash_bin, out_name=out_name)
     elif not firmware_bin:
         warn("kernel spine not built — IDF unavailable or build failed")
         warn("SPIFFS flash.bin is ready; run IDF manually then merge with esptool merge_bin")
@@ -1254,6 +1758,7 @@ def cmd_build(args):
     meta = {
         **workspace,
         "pcat":         pcat_path,
+        "profile":      profile or "default",
         "flash_bin":    flash_bin or "not built",
         "firmware_bin": firmware_bin or "not built",
         "spiffs_kb":    spiffs_kb,
@@ -1267,9 +1772,19 @@ def cmd_build(args):
 def cmd_flash(args):
     cmd_build(args)
 
+    # Same out_name a profiled build actually writes (see cmd_build's own
+    # "Only the merged artifact's filename changes under a profile" comment)
+    # — found live: this used to always look for the bare PURR_OS_<device>.bin
+    # regardless of --profile, so `flash --profile <name>` built the right
+    # profile-suffixed artifact and then immediately reported "build did not
+    # produce a flashable image" because it was checking for the wrong
+    # filename, aborting before ever calling esptool.
+    profile = getattr(args, "profile", None)
+    out_name = f"{args.device}_{profile}" if profile else args.device
+
     # Abort if the build didn't produce a merged image
     out_dir    = os.path.join(OUTPUT_DIR, args.device)
-    merged_bin = os.path.join(out_dir, f"PURR_OS_{args.device}.bin")
+    merged_bin = os.path.join(out_dir, f"PURR_OS_{out_name}.bin")
     if not os.path.isfile(merged_bin):
         warn("build did not produce a flashable image — aborting flash")
         return
@@ -1323,6 +1838,23 @@ def cmd_flash(args):
         bl_offset = _bootloader_offset(chip)
         info(f"flashing bootloader+partition-table+firmware+SPIFFS (NVS untouched) ...")
         erase_flag = ["--erase-all"] if getattr(args, "erase", False) else []
+
+        # NOT a fixed 0x10000 for firmware — an OTA-enabled device's app
+        # partition starts at 0x20000 (past otadata); see
+        # _first_app_partition_offset()'s doc comment. otadata itself (when
+        # present) needs its own explicit ota_data_initial.bin write —
+        # idf.py's own generated flash command does the same (confirmed
+        # against real output: "0x10000 ota_data_initial.bin 0x20000
+        # purr_os.bin") — a blank/erased otadata region isn't something to
+        # gamble on the bootloader's fallback handling for.
+        partitions_csv = _partitions_csv_path(cfg_flash)
+        app_offset = hex(_first_app_partition_offset(partitions_csv))
+        otadata_offset = _partition_offset_by_name(partitions_csv, "otadata")
+        ota_data_bin = os.path.join(out_dir, "ota_data_initial.bin")
+        ota_data_part = []
+        if otadata_offset is not None and os.path.isfile(ota_data_bin):
+            ota_data_part = [hex(otadata_offset), ota_data_bin]
+
         cmd = _esptool + [
             "--chip", chip,
             "--port", esptool_port,
@@ -1336,7 +1868,8 @@ def cmd_flash(args):
             "--flash_freq", "80m",
             bl_offset, bootloader_bin,
             "0x8000", partition_bin,
-            "0x10000", firmware_bin,
+        ] + ota_data_part + [
+            app_offset, firmware_bin,
             spiffs_offset, flash_bin,
         ]
         run_live(cmd)
@@ -1421,11 +1954,25 @@ def cmd_bake(args):
     if not devices:
         die("no devices found in source/devices/")
 
+    requested = getattr(args, "device", None)
+    if requested:
+        known = {slug for slug, _, _ in devices}
+        unknown = [d for d in requested if d not in known]
+        if unknown:
+            die(f"unknown device(s) for --device: {', '.join(unknown)} — "
+                f"run 'purrstrap list' for valid slugs")
+        devices = [d for d in devices if d[0] in requested]
+
+    # argparse's choices=sorted(BUILD_PROFILES) on --profile already rejects
+    # an unknown name before cmd_bake ever runs.
+    profile = getattr(args, "profile", None)
+
     release_dir = os.path.join(RELEASES_DIR, f"v{PURROS_VERSION}")
     os.makedirs(release_dir, exist_ok=True)
 
     div()
-    info(f"baking PURR OS v{PURROS_VERSION} — {len(devices)} device(s)")
+    info(f"baking PURR OS v{PURROS_VERSION} — {len(devices)} device(s)"
+         + (f"  [profile: {profile}]" if profile else ""))
     info(f"output → releases/v{PURROS_VERSION}/")
     div()
 
@@ -1440,8 +1987,13 @@ def cmd_bake(args):
     for slug, name, chip in devices:
         div(slug)
 
-        # Reuse cmd_build logic
+        # Reuse cmd_build logic. NOTE: can't write `profile = profile` here —
+        # inside a class body that shadows the enclosing local with a
+        # not-yet-bound class attribute of the same name and raises
+        # NameError (same trap as `x = x` in a function); set it as a
+        # separate attribute assignment after the class exists instead.
         class _Args: device = slug
+        _Args.profile = profile
         try:
             cmd_build(_Args())
         except SystemExit as e:
@@ -1452,9 +2004,13 @@ def cmd_bake(args):
         dest_dir = os.path.join(release_dir, slug)
         os.makedirs(dest_dir, exist_ok=True)
 
-        # Copy artifacts
+        # Copy artifacts. The merged image's filename picks up the same
+        # _<profile> suffix cmd_build()'s own out_name does — copy it too,
+        # under its real name, so a profiled bake doesn't silently drop the
+        # one artifact most people actually want to flash.
+        out_name = f"{slug}_{profile}" if profile else slug
         copied = []
-        for fname in ("flash.bin", "build.json", "firmware.bin"):
+        for fname in ("flash.bin", "build.json", "firmware.bin", f"PURR_OS_{out_name}.bin"):
             src = os.path.join(out_dir, fname)
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(dest_dir, fname))
@@ -1491,7 +2047,7 @@ def cmd_bake(args):
 
     # Write manifest
     manifest_path = os.path.join(release_dir, "manifest.json")
-    with open(manifest_path, "w") as f:
+    with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
     div()
@@ -1508,9 +2064,9 @@ def cmd_bake(args):
     # from a GitHub Action on a release tag, not part of every routine
     # local bake.
     if getattr(args, "dp", False):
-        _bake_dp_release(devices, manifest)
+        _bake_dp_release(devices, manifest, profile=profile)
 
-def _bake_dp_release(devices, manifest):
+def _bake_dp_release(devices, manifest, profile=None):
     """
     Package a full developer-preview release into CatReleases/DP<N>/,
     matching the existing CatReleases/DP1..DP3 shape exactly: every
@@ -1537,30 +2093,59 @@ def _bake_dp_release(devices, manifest):
         out_dir  = os.path.join(OUTPUT_DIR, slug)
         dest_dir = os.path.join(dp_dir, slug)
         os.makedirs(dest_dir, exist_ok=True)
+        # Merged image's filename picks up the same _<profile> suffix
+        # cmd_build()'s own out_name applies — match it or a profiled bake
+        # silently ships every split image but skips the one merged file
+        # (cmd_build never writes the bare PURR_OS_<slug>.bin when a
+        # profile is set, so the old hardcoded name here would just miss).
+        out_name = f"{slug}_{profile}" if profile else slug
         for fname in ("bootloader.bin", "partition-table.bin", "firmware.bin",
-                      "flash.bin", f"PURR_OS_{slug}.bin", "build.json"):
+                      "flash.bin", f"PURR_OS_{out_name}.bin", "build.json"):
             src = os.path.join(out_dir, fname)
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(dest_dir, fname))
 
     dp_manifest_path = os.path.join(dp_dir, "manifest.json")
-    with open(dp_manifest_path, "w") as f:
+    with open(dp_manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
+    all_slugs = {slug for slug, _, _ in list_devices()}
+    scoped = len(devices) < len(all_slugs)
+    coverage_line = (
+        f"Scoped build — {len(devices)} of {len(all_slugs)} supported devices "
+        f"(--device filter applied). Every device folder"
+        if scoped else
+        f"Full-stack build of all {len(devices)} supported devices. Every device folder"
+    )
+    merged_name = "PURR_OS_<device>_" + profile + ".bin" if profile else "PURR_OS_<device>.bin"
+    profile_line = (
+        [f"Built with the **{profile}** profile — see `purrstrap profiles` for what it "
+         f"trims relative to each device's default full build.", ""]
+        if profile else []
+    )
     readme_lines = [
         f"# PURR OS — {dp_name} (Developer Preview {m.group(1)})",
         "",
-        f"Full-stack build of all {len(devices)} supported devices. Every device folder",
+        coverage_line,
         "has both split images and one pre-merged image, plus a `manifest.json`",
         "recording chip/name/copied-files for all of them in one place.",
         "",
+        *profile_line,
         "## Flashing the merged image (recommended)",
         "",
         "```bash",
-        "esptool.py -p <PORT> write_flash 0x0 PURR_OS_<device>.bin",
+        f"esptool.py -p <PORT> write_flash 0x0 {merged_name}",
         "```",
         "",
         "## Flashing split images",
+        "",
+        "0x10000 below is correct for most devices, but NOT for one built with",
+        "device.pcat `[device] ota = true` — its app partition starts later",
+        "(0x20000 on the 16 MB OTA table, past the otadata partition) and it",
+        "also needs ota_data_initial.bin written at 0x10000 first. Check that",
+        "device's own `partitions_*_ota.csv` (or just use the merged image",
+        "above, which already gets this right per-device) rather than assuming",
+        "this command as written.",
         "",
         "```bash",
         "esptool.py -p <PORT> write_flash \\",
@@ -1578,7 +2163,14 @@ def _bake_dp_release(devices, manifest):
     for slug, name, chip in devices:
         dev_status = manifest["devices"].get(slug, {}).get("status", "error")
         readme_lines.append(f"| {name} | {chip} | {dev_status} |")
-    with open(os.path.join(dp_dir, "README.md"), "w") as f:
+    # encoding="utf-8" explicit — without it, open()'s default on Windows is
+    # the locale codepage (often cp1252), not UTF-8, and this file's own em
+    # dashes come out as mojibake ("PURR OS  DP9") the moment anything
+    # UTF-8-aware (a browser, `cat` in a POSIX-locale shell) reads it back.
+    # Confirmed live: the very first DP9 README this function generated had
+    # exactly that corruption, pre-existing in this function before this
+    # comment — not introduced by the --device scoping above.
+    with open(os.path.join(dp_dir, "README.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(readme_lines) + "\n")
 
     zip_base = os.path.join(REPO_DIR, "CatReleases", dp_name)
@@ -2069,6 +2661,107 @@ def cmd_pkg_app_upgrade(args):
             continue
         cmd_pkg_app_install(argparse.Namespace(device=device, name=name, to="flash"))
 
+# ── Signing (source/modules/sig_mgr/) ───────────────────────────────────────
+#
+# Host-side half of sig_mgr's USER trust tier — see sig_mgr.h's own design
+# comment for the full model. Standard Ed25519 (Python's `cryptography`
+# package, RFC 8032) — verified on-device with source/lib/lib_ed25519, a
+# different but wire-compatible implementation; same split this project's
+# official/dev trust-root keys already use (generated here, verified there).
+#
+# The whole point of the USER tier is "sign your own driver, drop the
+# signature and your public key next to it on the SD card, done" — no
+# device-side enrollment step. `sign file` produces exactly that pair with
+# one command.
+
+def cmd_sign_keygen(args):
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        die("the 'cryptography' package is required for signing — pip install cryptography "
+            "in the IDF Python venv")
+
+    os.makedirs(args.out, exist_ok=True)
+    priv_path = os.path.join(args.out, f"{args.name}.priv")
+    pub_path  = os.path.join(args.out, f"{args.name}.pub")
+    if os.path.isfile(priv_path):
+        die(f"{priv_path} already exists — refusing to overwrite a key")
+
+    priv = Ed25519PrivateKey.generate()
+    pub  = priv.public_key()
+    priv_bytes = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    pub_bytes = pub.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    with open(priv_path, "wb") as f: f.write(priv_bytes)
+    with open(pub_path, "wb") as f: f.write(pub_bytes)
+
+    info(f"  {C_GRN}OK{C_RST}  {priv_path}  (keep this private — never copy it onto a device)")
+    info(f"  {C_GRN}OK{C_RST}  {pub_path}   (this is what travels with a signed file)")
+
+def cmd_sign_file(args):
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+    except ImportError:
+        die("the 'cryptography' package is required for signing — pip install cryptography "
+            "in the IDF Python venv")
+
+    if not os.path.isfile(args.path):
+        die(f"no such file: {args.path}")
+    if not os.path.isfile(args.privkey):
+        die(f"no such private key: {args.privkey}")
+
+    priv_bytes = open(args.privkey, "rb").read()
+    if len(priv_bytes) != 32:
+        die(f"{args.privkey} is {len(priv_bytes)} bytes, expected 32 (raw Ed25519 private key) — "
+            f"is this a `purrstrap sign keygen` output?")
+    priv = Ed25519PrivateKey.from_private_bytes(priv_bytes)
+
+    digest = hashlib.sha256()
+    with open(args.path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    signature = priv.sign(digest.digest())
+
+    sig_path = args.path + ".sig"
+    with open(sig_path, "wb") as f:
+        f.write(signature)
+    info(f"  {C_GRN}OK{C_RST}  {sig_path}  ({len(signature)} bytes)")
+
+    # Auto-place the matching public key alongside if one isn't already
+    # there — the two-file pair is what sig_mgr_classify() looks for; this
+    # is what makes `sign file` a one-command "ready to copy to SD" step
+    # rather than a second manual copy every time.
+    pub_path = args.path + ".pub"
+    if os.path.isfile(pub_path):
+        info(f"  {C_YLW}--{C_RST}  {pub_path} already exists — left as-is "
+             f"(delete it first if it's meant to match a different key)")
+    else:
+        pub_bytes = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+        with open(pub_path, "wb") as f:
+            f.write(pub_bytes)
+        info(f"  {C_GRN}OK{C_RST}  {pub_path}  (32 bytes)")
+
+    info(f"  copy {os.path.basename(args.path)}, {os.path.basename(sig_path)}, and "
+         f"{os.path.basename(pub_path)} together — sig_mgr_classify() needs all three "
+         f"co-located to verify as user-signed")
+
+def cmd_sign(args):
+    dispatch = {"keygen": cmd_sign_keygen, "file": cmd_sign_file}
+    if args.sign_cmd not in dispatch:
+        die("usage: purrstrap sign <keygen|file> ...")
+    return dispatch[args.sign_cmd](args)
+
 def cmd_pkg(args):
     dispatch = {
         "list": cmd_pkg_list, "add": cmd_pkg_add, "remove": cmd_pkg_remove,
@@ -2094,11 +2787,29 @@ def main():
 
     p_build = sub.add_parser("build",  help="Build firmware for a device")
     p_build.add_argument("device")
+    p_build.add_argument("--profile", default=None, choices=sorted(BUILD_PROFILES),
+                          help="Build profile — trims [flash]/[modules]/[apps] before "
+                               "compiling. See `purrstrap profiles`.")
 
     p_flash = sub.add_parser("flash",  help="Build + flash to device")
     p_flash.add_argument("device")
     p_flash.add_argument("-p", "--port", default=None)
     p_flash.add_argument("--erase", action="store_true", help="Erase flash before writing")
+    p_flash.add_argument("--profile", default=None, choices=sorted(BUILD_PROFILES),
+                          help="Build profile — see `purrstrap profiles`.")
+
+    sub.add_parser("profiles", help="List available build profiles")
+
+    p_sign = sub.add_parser("sign", help="Ed25519 artifact signing (source/modules/sig_mgr/)")
+    sign_sub = p_sign.add_subparsers(dest="sign_cmd")
+
+    p_sign_keygen = sign_sub.add_parser("keygen", help="Generate a new Ed25519 keypair")
+    p_sign_keygen.add_argument("name", help="Base name — writes <name>.priv and <name>.pub")
+    p_sign_keygen.add_argument("--out", default=".", help="Output directory (default: current dir)")
+
+    p_sign_file = sign_sub.add_parser("file", help="Sign a file — writes <path>.sig (+ <path>.pub if absent)")
+    p_sign_file.add_argument("path", help="File to sign (e.g. a .purr driver blob or app)")
+    p_sign_file.add_argument("privkey", help="Path to a <name>.priv file from `purrstrap sign keygen`")
 
     p_monitor = sub.add_parser("monitor", help="Open serial monitor for a device")
     p_monitor.add_argument("device")
@@ -2119,6 +2830,23 @@ def main():
                               "CatReleases/DP<N>/ (split+merged images, README, zip) — "
                               "opt-in, meant for a tagged-release GitHub Action, not "
                               "routine local bakes.")
+    p_bake.add_argument("--device", action="append", metavar="SLUG",
+                         help="Bake only this device (repeatable: --device tdeck_plus "
+                              "--device heltec). Default is every device in "
+                              "source/devices/ — 14 as of this writing, including "
+                              "several no session has touched/verified recently and "
+                              "two hardware-probe debug kernels (tdeck_plus_probe[_uart]) "
+                              "that aren't real end-user builds at all. A --dp package "
+                              "meant to represent 'what's actually been verified this "
+                              "cycle' should almost always scope this explicitly rather "
+                              "than bake the full, uncurated device list.")
+    p_bake.add_argument("--profile", default=None, choices=sorted(BUILD_PROFILES),
+                         help="Build every device with this profile instead of each "
+                              "device's default full build — see `purrstrap profiles`. "
+                              "Threaded straight through to cmd_build() per-device, same "
+                              "as `build <device> --profile <name>` would; the merged "
+                              "artifact and dp-package filenames pick up the "
+                              "_<profile> suffix cmd_build() already applies.")
     sub.add_parser("list",   help="List supported devices")
     sub.add_parser("status", help="Show workspace config")
     sub.add_parser("doctor", help="Check environment health")
@@ -2177,6 +2905,8 @@ def main():
         "status":  cmd_status,
         "doctor":  cmd_doctor,
         "pkg":     cmd_pkg,
+        "profiles": cmd_profiles,
+        "sign":     cmd_sign,
     }
     if args.cmd not in dispatch:
         parser.print_help()

@@ -242,24 +242,34 @@ bool mc_manager_is_alive(void) {
 uint32_t mc_manager_now_seconds(void) { return s_rtc.getCurrentTime(); }
 
 int mc_manager_init(void) {
-    // Mutually exclusive with meshtastic — one physical radio, one
-    // catcall_radio_t slot, two incompatible on-air presets.
+    // Mutually exclusive with meshtastic, reticulum, AND rnode — one
+    // physical radio, one catcall_radio_t slot, four incompatible on-air
+    // protocols.
     //
     // Preference check first: MSN's backend chooser (and Settings' mirrored
     // control) persist which protocol the user actually wants via
     // purr_kernel_mesh_backend_set(), then reboot — the preference is the
-    // authoritative source of truth, not [flash] load order.
+    // authoritative source of truth, not [flash] load order. != MESHCORE
+    // already covers reticulum and rnode too, no separate branch needed.
     if (purr_kernel_mesh_backend_get() != PURR_MESH_BACKEND_MESHCORE) {
-        ESP_LOGI(TAG, "declining to start — mesh backend preference is meshtastic");
+        ESP_LOGI(TAG, "declining to start — mesh backend preference is not meshcore");
         return PURR_MODULE_INIT_DECLINED;
     }
     // Secondary safety net, kept from before the preference existed: covers
-    // a manual Terminal `start meshcore` while meshtastic happens to already
-    // be running (preference and actually-loaded state can legitimately
-    // diverge until the next reboot). PURR_MODULE_INIT_DECLINED, not -1:
-    // this isn't a crash-loop symptom, see that constant's doc comment.
+    // a manual Terminal `start meshcore` while another backend happens to
+    // already be running (preference and actually-loaded state can
+    // legitimately diverge until the next reboot). PURR_MODULE_INIT_DECLINED,
+    // not -1: this isn't a crash-loop symptom, see that constant's doc comment.
     if (purr_kernel_get_module("meshtastic")) {
         ESP_LOGW(TAG, "refusing to start — meshtastic is active (stop it first)");
+        return PURR_MODULE_INIT_DECLINED;
+    }
+    if (purr_kernel_get_module("reticulum")) {
+        ESP_LOGW(TAG, "refusing to start — reticulum is active (stop it first)");
+        return PURR_MODULE_INIT_DECLINED;
+    }
+    if (purr_kernel_get_module("rnode")) {
+        ESP_LOGW(TAG, "refusing to start — rnode is active (stop it first)");
         return PURR_MODULE_INIT_DECLINED;
     }
 

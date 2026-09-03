@@ -1,0 +1,22 @@
+# modules/claw_loader/module.pcat
+# Claw Loader — loads a compiled-but-never-linked .claw object at runtime:
+# parses it (ELF32/Xtensa), relocates it, and maps it executable from a
+# dedicated flash partition. Promoted from a real-hardware R&D spike (three
+# rounds, all confirmed on tdeck_plus — self-contained relocation/execution,
+# calling back into host firmware through a runtime function pointer, and
+# on-device ELF parsing replacing a host-side extraction script) — see
+# claw_loader.h's own doc comment for the entry-point convention a loaded
+# module follows (claw_personal_init/claw_personal_deinit, resolved by name
+# instead of the linker-section placement a pre-linked .claw app uses).
+#
+# One loaded module at a time — same constraint the Lua VM (.meow/.hiss)
+# already has, for the same reason: nothing yet needs more.
+
+name            = "claw_loader"
+version         = "0.1.0"
+module_type     = "PURR_MOD_SYSTEM"
+kernel_min      = "0.11.1"
+kernel_max      = ""
+
+provides        = ["claw_dynamic_load"]
+required_catcalls = []

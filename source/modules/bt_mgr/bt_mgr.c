@@ -280,7 +280,46 @@ esp_err_t bt_mgr_ensure_active(void) {
 
 void bt_mgr_deinit(void) {
     bt_mgr_set_enabled(false);
-    if (s_host_ok) nimble_port_stop();
+    if (s_host_ok) {
+        // nimble_port_stop() alone only stops the host's run loop — it
+        // does NOT free the ~64-70KB the controller+host stack actually
+        // allocated (esp_bt_controller_init()/_enable() + esp_nimble_
+        // init(), both called from inside nimble_port_init()). Confirmed
+        // live via a real rnode_module.c offload/reload cycle test: the
+        // radio-companion stack still failed to reinit ("proximity_rpc:
+        // alloc failed... PSRAM and internal RAM both exhausted",
+        // "homebase: failed to create homebase task") even with
+        // nimble_port_stop() (and a 500ms settle pause) already in place
+        // — the exact same "stop() vs deinit(), memory stays allocated
+        // until deinit()" lesson this session already learned once for
+        // esp_wifi_stop()/_deinit(), recurring here for NimBLE.
+        // nimble_port_deinit() (a separate call — see nimble_port.h's own
+        // "Deinitialize controller and NimBLE host stack" doc comment) is
+        // the actual free. Calling it immediately after nimble_port_stop()
+        // returns, from THIS task rather than the NimBLE host task itself,
+        // is the exact pattern ESP-IDF's own blecent example uses for its
+        // "stack init and deinit procedure" (examples/bluetooth/nimble/
+        // blecent/main/main.c, stack_init_deinit()) — safe because
+        // nimble_port_stop() already blocks (via its own semaphore) until
+        // the host's stop procedure is fully serviced before returning, so
+        // there's nothing left in flight for deinit to race against.
+        int rc = nimble_port_stop();
+        if (rc == 0) {
+            esp_err_t derr = nimble_port_deinit();
+            if (derr != ESP_OK) {
+                ESP_LOGW(TAG, "nimble_port_deinit() -> %s (continuing anyway)", esp_err_to_name(derr));
+            }
+        } else {
+            ESP_LOGW(TAG, "nimble_port_stop() -> %d, skipping nimble_port_deinit() (BLE memory not reclaimed)", rc);
+        }
+    }
+    // s_host_ok must go back to false here — found live via the same
+    // offload/reload test: without this, bt_mgr_ensure_active()'s own
+    // "if (s_host_ok) return ESP_OK;" fast path permanently believes the
+    // host is still up after this function runs, so a LATER bt_mgr_
+    // ensure_active() call (RNode re-enabled, or any other BLE consumer)
+    // silently no-ops instead of actually restarting NimBLE.
+    s_host_ok = false;
     if (s_scan_done_sem) { vSemaphoreDelete(s_scan_done_sem); s_scan_done_sem = NULL; }
 }
 

@@ -35,6 +35,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_vram's own comment below
 
 #include "purr_kernel.h"
 #include "purr_module.h"
@@ -55,7 +56,15 @@ static const char *TAG = "magidos";
 // CGA text plane: char + attribute per cell, exactly the layout the emulator's
 // own video RAM uses, so handing the emulator's VRAM to the same renderer later
 // needs no translation.
-static uint8_t  s_vram[CGA_COLS * CGA_ROWS * 2];
+//
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — same call already made for
+// this app's own emulated 8086 memory (drv_8086.c's `mem[0x10FFF0]`, over
+// 250x bigger than this 4000-byte text plane), which redraws every frame
+// under speed_demon's own dedicated CPU/panel budget with no reported cost.
+// Real, confirmed via purr_os.map: a genuine link-time DRAM overflow once
+// the current app set was all compiled in together (see msn.c's matching
+// comment, 2026-09-01).
+static EXT_RAM_BSS_ATTR uint8_t  s_vram[CGA_COLS * CGA_ROWS * 2];
 static int      s_cx = 0, s_cy = 0;
 static uint8_t  s_attr = 0x07;          // light grey on black, DOS default
 

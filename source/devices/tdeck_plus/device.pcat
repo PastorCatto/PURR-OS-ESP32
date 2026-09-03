@@ -11,15 +11,24 @@ port        = "/dev/ttyACM0"
 psram       = true
 psram_mb    = 8
 
-spiffs_offset  = "0xD90000"
+# ota — dual-slot partition table (partitions_16mb_ota.csv) + bootloader
+# rollback. The 16 MB tier has plenty of headroom for it (see that CSV's own
+# header comment) — first device this landed on, see source/modules/ota_mgr/.
+# NOTE: this moves spiffs_offset below from the factory-only layout's
+# 0xD90000 to 0xD80000 — the OTA CSV's own header comment explains why an
+# equal-slot, 0x10000-aligned split can't land on the original offset.
+ota         = true
+
+spiffs_offset  = "0xD80000"
 
 # boot_settle_ms — pause between the P2 (UI) and P3 (radios, deferred apps)
 # module tiers. See purr_kernel.c's BOOT_SETTLE_MS for why it exists.
 #
-# 50 here because this profile has none of what the pause guards against: no
-# Nearby, MSN, mesh, BT or proximity stack to race the UI at P3. The kernel
-# default is 500; a full image should leave this unset and take it.
-boot_settle_ms = 50
+# Was 50 on the reasoning that this profile had none of what the pause
+# guards against — no Nearby, MSN, mesh or proximity stack to race the UI at
+# P3. That's no longer true: [apps]/[modules] below now enable all of those
+# for the "full build, all apps" pass. Left UNSET so the kernel takes its
+# own default of 500 instead, per this comment's own original warning.
 
 [drivers]
 display     = "st7789"
@@ -42,7 +51,17 @@ wifi        = true
 # gated on bt_mgr_host_ready()). Internal free RAM still runs tight (~62KB
 # -> ~26KB just from activating) — worth watching, not yet proven safe
 # under sustained mesh traffic + BLE together.
-bt          = false
+#
+# Tried turning this on for RNode mode under the full/default profile —
+# confirmed real: DRAM segment overflows by ~24.6KB at link time the
+# moment BT compiles in, on top of everything else in that profile.
+# RNode's own primary target stayed heltec (the actual RNode-shaped
+# hardware) — but this device now also acts as the remote CLIENT for
+# controlling RNode mode on another device (server_mgr.h's
+# SRVMGR_ACTION_MESH_STATUS/_SET), and can run RNode mode itself, both
+# under the trimmed "rnode_client" build profile instead of full/default
+# — see [modules]'s own "rnode"/"bt" comments.
+bt          = true
 # sx1262_rl — RadioLib-backed driver (source/drivers/radio/sx1262_rl),
 # swapped in for real Meshtastic node discovery instead of the hand-rolled
 # sx1262.c SPI driver (still present, unused by this device — see the
@@ -73,79 +92,216 @@ lora        = ""
 # The lesson worth keeping: a boot loop after a config change is not evidence
 # that the config change caused it. Check crash_guard strikes first, and
 # confirm by reverting.
-systemui_style = "android"
+#
+# systemui_style — "xp": a Windows XP-style taskbar (Start button + Start
+# Menu, one taskbar button per running app, clock tray) replaces the
+# phone-style status bar/nav bar pairing "android"/"ios" both use. Cheetah
+# (née Flow)'s BB10-era Active Frames work is paused; cheetah_home.c now
+# draws an XP desktop (favorites icons only — no paging or its own minimize
+# gesture, since the taskbar owns running-app switching/minimizing now).
+# See systemui_xp.c and CoreOS/main/Kconfig.projbuild's
+# PURR_SYSTEMUI_STYLE_XP entry.
+#
+# 2026-09-01: superseded. `ui` below switched from Cheetah to Mochi and this
+# key was left at "xp" — a leftover from the Cheetah era, contradicting the
+# "ios pairs with Mochi's springboard" note two paragraphs up. Mochi is
+# explicitly iOS-style (mochi.h's own header) and already suppresses
+# systemui's nav bar itself (mochi_springboard.c's host table,
+# .suppress_navbar = true) rather than relying on "android"'s bar, so "ios"
+# is the only style that actually matches what's compiled/active now.
+systemui_style = "ios"
 
 [modules]
-# ui — back to Cupcake. The MiniWin WinCE desktop was selected here for the
-# 4-window-split pass (commit 9ef61b97), but that rewrite is broken on
-# hardware and hasn't been fixed yet, so this device stays off it rather
-# than shipping a known-bad desktop. MiniWin's code is still compiled and
-# selectable — only this device's default moved back.
-# ui — Cupcake: the Android-style launcher. Swapped back from Mochi on
-# 2026-07-26 while the ST7789 display work was in flight. Mochi still builds
-# and carries all of that work (off-screen compose, async flush, the shadow
-# toggle); this is a one-word move either way.
+# ui — Mochi: an iOS-style springboard, purpose-built for this device (see
+# mochi.h's own top comment — "an iOS-style springboard for the T-Deck
+# Plus"). Real host of the shared systemui module (status bar, drag-down
+# panels, Recents, the real LVGL login/lock screen via purr_systemui_
+# show_login()/_show_relock() — see systemui.h), a proper purr_kernel_
+# boot_ready() wait, and real lifecycle/perf work already landed (game-
+# mode unload/reload, task-watchdog unsubscribe ordering, async-flush
+# draining before teardown) — a materially more mature starting point
+# than MiniWin/WinCE was before this session's own pass over it.
 #
-# Both backends now share this cycle's display work via
-# modules/common/purr_lv_flush.h — off-screen compose, async flush + double
-# buffering, and shadow suppression tied to the UI-effects toggle. It was
-# factored out precisely because it had landed in Mochi only.
-ui          = "cupcake"
+# MiniWin/WinCE history, kept for context: was this device's ui through a
+# whole pass this session — 4-window desktop rewrite genuinely fixed
+# (double-control-removal crash, a permanently-modal credential dialog
+# silently blocking every app window from ever fronting, wallpaper stealing
+# focus/hiding everything on a background tap, per-touch text-field focus
+# added to the vendored ui_text_box control, real user_mgr_verify() login/
+# lock). Stays compiled in and selectable — see miniwin_wince_desktop.c for
+# all of that. Cupcake/Cheetah history further back: was "flow" (built for
+# a since-paused BlackBerry 10-style Home Screen; renamed once its content
+# became an XP desktop instead), before that "cupcake", swapped to
+# "cheetah" (a Windows XP-style desktop, see source/modules/cheetah/) on
+# 2026-07-26 while the ST7789 display work was in flight. All three stay
+# compiled in and selectable, just no longer this device's default.
+ui          = "mochi"
 # systemui — the status bar, drag-down panels, Back/Home/Recents nav bar,
-# Recents carousel and lock screen, split out of Cupcake into their own
-# module (source/modules/systemui/). Cupcake hosts it; this entry is what
-# both statically registers it and sets CONFIG_PURR_SYSTEMUI. Drop this line
-# and Cupcake still boots as a bare launcher with no chrome.
+# Recents carousel and lock screen, hosted by Mochi (and Cupcake/Cheetah/
+# Tabby) — see mochi_springboard.c's own "hands the system UI its host
+# table" call. Re-added here: was dropped while ui was MiniWin (which has
+# its own equivalent chrome instead, see miniwin_wince_desktop.c), but
+# Mochi genuinely needs this — mochi_springboard_init() has nothing to
+# hand a host table to without it.
 systemui    = "systemui"
 app_manager = "app_manager"
-# mesh — re-enabled for active Meshtastic diagnosis (was off, gated behind
-# CONFIG_PURR_FEATURE_MESHTASTIC, see CoreOS/main/Kconfig.projbuild).
-# mesh        = "meshtastic"
-# meshcore — compiled in and statically registered alongside meshtastic
-# (separate [modules] key, both loaded into the static registry — see
-# purrstrap.py's free-form modules.* handling), but NOT the boot-time
-# default: meshtastic loads first and meshcore's own mutual-exclusion
-# guard (meshcore_module.cpp) refuses to activate while it's running.
-# Manually toggle via Terminal's `stop meshtastic` / `start meshcore`
-# until roadmap item 2 (the NVS-driven select-and-reboot switch) exists.
-# meshcore    = "meshcore"
+# mesh — OFF as of 2026-09-01: MSN (the meshtastic/meshcore-backed chat app)
+# is dropped from this device below, and reticulum_app is the real chat
+# surface now — deliberately NOT tied to MSN/meshtastic (see reticulum_app.c
+# and this device's own reticulum= line below). Blank rather than deleted,
+# same "documents the choice instead of just vanishing" convention as
+# radio.lora = "" elsewhere in this file.
+#
+# CONFIG_PURR_FEATURE_MESHTASTIC (CoreOS/main/Kconfig.projbuild) is only set
+# by purrstrap.py when this key is non-empty — see that function's own
+# `if cfg.get("modules.mesh", ""):` check. Blank here means the real radio/
+# BLE/task init in meshtastic_module.c's #ifdef branch never runs.
+#
+# meshtastic_module.c itself STILL compiles in regardless — it's an
+# unavoidable transitive REQUIRES of systemui and lua_runtime (this device's
+# own Mochi/moy dependencies: the lock screen's node-count line, Lua's
+# kitt.*/radio.* bindings — see meshtastic_module.c's own top comment and
+# purrstrap.py's apply_build_profile() doc comment, which explains why even
+# the "minimal" build profile can't drop it either). With this key blank,
+# that unavoidable component links in as its documented #else stub — every
+# mesh_manager_*() call becomes a real, linkable no-op (returns false/0) —
+# so nothing meshtastic actually runs, even though the object code is
+# present. diagnostics.c's Mesh tab will show "not ready"/"not alive"/0
+# nodes permanently as a result — correct, not a bug: that tab has always
+# been meshtastic-specific (see its own "meshtastic/meshcore are
+# deliberately filtered out of the health-list rows" comment).
+mesh        = ""
 lua         = "lua_runtime"
 wifi        = "wifi_mgr"
-# bt          = "bt_mgr"
-# proximity/pairing — NOT listed here anymore; purrstrap.py's
-# apply_radio_companion_defaults() adds them automatically to any device
-# with [radio] wifi = true (this one), see cyd/device.pcat's comment for
-# the full heuristic. msn/nearby above predate that mechanism (added
-# during the earlier MSN rewrite) and stay explicit.
-
+ota         = "ota_mgr"
+users       = "user_mgr"
+signing     = "sig_mgr"
+# reticulum — this device's real, only active mesh backend as of
+# 2026-09-01 (see mesh="" above). reticulum_app below is its actual chat
+# UI, through reticulum_api.h's plain-C bridge — genuinely further along
+# than the "Stage 1 compile-proof only... throwaway Identity selftest"
+# note this comment previously carried; that note described an earlier
+# point in the module's own history, not its current state. Deliberately
+# NOT wired into MSN (msn_backend_meshtastic.c/msn_backend_meshcore.c stay
+# exactly what their names say) — reticulum_app is its own separate app,
+# not a third MSN backend.
+reticulum   = "reticulum"
+# rnode — acts as the remote CLIENT for another device's RNode mode
+# (server_mgr.h's SRVMGR_ACTION_MESH_STATUS/_SET, see the plan doc) —
+# this device can ALSO run RNode mode itself, same mutual-exclusion as
+# every other mesh backend. Real PSRAM here (unlike heltec), so BT's own
+# host mbuf/event/ACL pools can offload there (CONFIG_BT_NIMBLE_MEM_
+# ALLOC_MODE_EXTERNAL=y below) rather than fighting internal DRAM the way
+# heltec has to. Use the "rnode_client" build profile
+# (purrstrap.py's BUILD_PROFILES) — the full/default profile's own DRAM
+# overflow with BT on (confirmed live: ~24.6KB over dram0_0_seg) was a
+# kitchen-sink-of-apps problem, not a BT-vs-PSRAM one; a genuinely
+# trimmed build doesn't hit it.
+rnode       = "rnode"
+bt          = "bt_mgr"
+# proximity/pairing — intended to be picked up automatically by purrstrap.py's
+# apply_radio_companion_defaults() for any device with [radio] wifi = true
+# (this one), see cyd/device.pcat's comment for the full heuristic. msn/
+# milkbar below predate that mechanism (added during the earlier MSN
+# rewrite) and stay explicit.
+#
+# BUT: apply_radio_companion_defaults() adds each of these via
+# cfg.setdefault(key, val) — a no-op when the key is already PRESENT in cfg,
+# even with an empty value. The six explicit `= ""` lines this section used
+# to have did exactly that: present-but-empty, so setdefault() silently left
+# them empty, and _device_referenced()/the glue-file generator both treat an
+# empty modules.* value as "not wanted" (same falsy-empty-string check
+# documented below for claw_loader, and the same class of bug — just an
+# older, previously-undiscovered instance of it). Confirmed live: zero
+# "loaded P#: pairing"-style line anywhere in a full boot log, on a build
+# that nonetheless links pairing_module.c in (pulled in transitively via
+# milkbar's own CMakeLists.txt REQUIRES) — the module was compiled the whole
+# time but never actually registered/initialized. cyd/device.pcat leaves
+# these keys out of its cfg ENTIRELY (not even as empty strings), which is
+# why setdefault() works correctly there.
+#
+# Fixed the same way claw_loader's own instance of this was fixed: name
+# each module after itself (matching signing = "sig_mgr"), a real non-empty
+# value setdefault() would have written anyway had the key been absent.
+#
+# msn_relay — OFF as of 2026-09-01, alongside msn itself below (see mesh=""
+# above for the full reasoning): it exists purely to answer OTHER devices'
+# MSN GET_HISTORY relay requests, which has no purpose once this device
+# doesn't run MSN. Blank rather than removed so apply_radio_companion_
+# defaults()'s cfg.setdefault("modules.msn_relay", "msn_relay") sees the
+# key already present and doesn't silently re-add it — same present-but-
+# empty convention as mesh= above, and the same falsy-empty check this
+# section's own big comment already documents for _device_referenced().
 msn_relay   = ""
-proximity   = ""
-proximity_rpc= ""
-pairing     = ""
-homebase    = ""
-app_manager_remote= ""
+proximity   = "proximity"
+proximity_rpc = "proximity_rpc"
+pairing     = "pairing"
+homebase    = "homebase"
+app_manager_remote = "app_manager_remote"
+# claw_loader — cross-device .claw loading (source/modules/claw_loader/),
+# EXPERIMENTAL for now: exercised by claw_loader_selftest.c
+# (kernel_tdeck_plus, CoreOS/main/CMakeLists.txt's own REQUIRES), not yet
+# used by app_manager or any real app. Value must be non-empty — modulestrap.
+# py's _device_referenced() does `key.startswith("modules.") and v`, so an
+# EMPTY string (the msn_relay/proximity/etc. convention just above) is
+# falsy and silently skipped; those five actually get pulled into the build
+# transitively (something else's CMakeLists.txt REQUIRES them), not via
+# this section at all — confirmed live ("Failed to resolve component
+# 'claw_loader'" persisted even after adding an empty-string entry here).
+# Naming it after itself, like signing = "sig_mgr" above, is what actually
+# reaches modulestrap's component-selection scan.
+claw_loader = "claw_loader"
 [ui]
 theme       = "wce"
 
 [apps]
+# Full build — every app this device has enabled, not just the trimmed
+# subset earlier passes shipped. bt stays OFF regardless (see [radio]'s own
+# documented crash history: "not yet proven safe under sustained mesh
+# traffic + BLE together") — that's a radio decision, not an apps one, and
+# these apps' UI still compiles/runs without it, just without a BLE backend.
 settings    = true
+oobe        = true
 terminal    = true
 fileman     = true
-hwtest      = false
-drivermgr   = false
+# msn — OFF as of 2026-09-01: this device's chat app is reticulum_app now
+# (see [modules] mesh="" above for the full reasoning), deliberately not
+# tied to MSN's meshtastic/meshcore backends. Explicit `false`, not a
+# deleted line — apply_radio_companion_defaults()'s PURR_WIN_UI_BACKENDS
+# block (mochi is a member) would otherwise cfg.setdefault it back to
+# true, since setdefault only no-ops when the key is already PRESENT.
 msn         = false
-services    = false
-taskmgr     = false
-nearby      = false
+# Merges what used to be five separate apps (drivermgr, hwtest, services,
+# meshdiag, taskmgr) — see source/apps/system/diagnostics/diagnostics.c's
+# file header for the mapping.
+diagnostics = true
 # MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
 # systemui, the mesh stack and the radios before it starts, and restores them
 # when it exits. The app calls nothing itself. See docs/15_SpeedDemon.md.
-magidos     = false
+magidos     = true
 
-milkbar     = false
-meshdiag    = false
+milkbar     = true
 doom        = true
 moy         = true
+# server_manager — reached only through app_manager.h's synthetic remote-mode
+# entry (see app_manager_launch_by_name("server_manager")), never a Start
+# Menu icon. Needs to be explicit here like milkbar/oobe above rather than
+# relying on apply_radio_companion_defaults()'s PURR_WIN_UI_BACKENDS
+# auto-add: stale note corrected 2026-09-02 — modules.ui is "mochi" now,
+# not "cheetah" as this comment used to say, and "mochi" IS in that set
+# (purrstrap.py's PURR_WIN_UI_BACKENDS), so the auto-add block DOES fire
+# for tdeck_plus today. It's just a no-op here regardless: cfg.setdefault()
+# only ever fills in an ABSENT key, and msn/milkbar/server_manager are all
+# already explicit below — msn/milkbar's own comment above already flags
+# they predate that mechanism and stay explicit for the same reason. Root-
+# caused after `apps.server_manager=true` silently never made
+# it into the component list despite being set the identical setdefault way
+# msn is.
+server_manager = true
+# Basic chat UI for the reticulum module (source/modules/reticulum) —
+# named reticulum_app, not reticulum, to avoid colliding with that
+# module's own PURR_MODULE_REGISTER name (see its own app.pcat comment).
+reticulum_app = true
 [flash]
 display/st7789    = 1
 touch/gt911       = 1
@@ -154,22 +310,37 @@ cardstack         = 2
 app_manager       = 2
 radio/sx1262_rl   = 2
 driver_manager    = 2
+# claw_loader — cross-device .claw loading (source/modules/claw_loader/),
+# EXPERIMENTAL for now: exercised by claw_loader_selftest.c
+# (kernel_tdeck_plus, CoreOS/main/CMakeLists.txt's own REQUIRES), not yet
+# used by app_manager or any real app.
+claw_loader       = 2
 wifi_mgr          = 2
+ota_mgr           = 2
+user_mgr          = 2
+sig_mgr           = 2
+reticulum         = 3
+rnode             = 3
 bt_mgr            = 2
 lua_runtime       = 2
-meshtastic        = 2
-meshcore          = 2
+# meshtastic/meshcore — no [flash] staging entry needed: [modules] mesh=""
+# above means neither is registered as an active module (meshtastic_
+# module.c still compiles in, just as an unavoidable REQUIRES-only stub —
+# see that key's own comment). meshcore was already never active here
+# (its [modules] line has been commented out this whole time), so this
+# was already an orphaned entry before 2026-09-01, not a new one.
 gps/generic_nmea  = 3
 battery/adc_battery = 3
 apps/settings     = 3
+apps/oobe         = 3
 apps/terminal     = 3
 apps/fileman      = 3
-apps/hwtest       = 3
-apps/drivermgr    = 3
-apps/msn          = 3
-apps/services     = 3
-apps/taskmgr      = 3
-apps/nearby       = 3
+apps/diagnostics  = 3
+# apps/msn — no entry needed: [apps] msn=false above.
+apps/magidos      = 3
+apps/milkbar      = 3
+apps/server_manager = 3
+apps/reticulum_app = 3
 
 [pins]
 display_cs    = 12

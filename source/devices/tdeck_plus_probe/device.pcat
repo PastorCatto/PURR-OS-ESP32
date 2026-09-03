@@ -1,0 +1,79 @@
+# devices/tdeck_plus_probe/device.pcat
+# T-Deck Plus — hardware probe / emulator ground-truth build
+#
+# Same board as tdeck_plus, own device slug (the tdeck_plus_test and
+# tdeck_plus_pounce precedent) so regenerating this never touches the real
+# device's configuration.
+#
+# This profile deliberately has NO display driver, NO UI backend, NO modules
+# and NO apps. It boots the PURR kernel far enough that the hardware is alive
+# and then hands the chip to a host over the native USB port, one register at a
+# time. See source/kernel/kernel_tdeck_plus_probe/ for what it serves and
+# PROTOCOL.md there for the wire format.
+#
+# Why it exists: the ESP32-S3 emulator work needs read-side ground truth. Every
+# register the firmware WRITES is already recoverable from an instrumented
+# driver; what the silicon RETURNS is not, and each unknown read is a coin flip
+# that shows up as a hang rather than an error when guessed wrong.
+#
+# [drivers] is empty on purpose. The probe drives SPI2 through raw register
+# access (purr_probe_spi.c) precisely so that no driver sits between the host
+# and the peripheral being characterised.
+
+[device]
+name        = "tdeck_plus_probe"
+chip        = "esp32s3"
+kernel_type = "native"
+flash_mb    = 16
+port        = "/dev/ttyACM0"
+psram       = true
+psram_mb    = 8
+
+spiffs_offset  = "0xD90000"
+
+# No module tiers to stagger — nothing loads after boot.
+boot_settle_ms = 0
+
+# No [drivers], no [modules], no [apps], no [flash] — see the header comment.
+# The kernel is the whole image.
+
+[pins]
+# Present so purrstrap's generated glue carries the real board pinout, and so a
+# host reading `regions`/`help` output can correlate a GPIO number with what it
+# is wired to. Nothing here is initialized at boot by this kernel.
+display_cs    = 12
+display_dc    = 11
+display_mosi  = 41
+display_sclk  = 40
+display_rst   = -1
+display_bl    = 42
+
+touch_sda     = 18
+touch_scl     = 8
+touch_int     = 16
+touch_rst     = -1
+
+trackball_up   = 3
+trackball_down = 15
+trackball_left = 1
+trackball_right= 2
+trackball_click= 0
+
+# LoRa, SD and the panel all share SPI2 on this board — the reason the probe
+# never mounts a filesystem (see kernel_tdp_probe_boot.c).
+lora_mosi     = 41
+lora_miso     = 38
+lora_sclk     = 40
+lora_cs       = 9
+lora_rst      = 17
+lora_busy     = 13
+lora_irq      = 45
+
+gps_tx        = 43
+gps_rx        = 44
+
+sd_cs         = 39
+sd_mosi       = 41
+sd_miso       = 38
+sd_sclk       = 40
+sd_enabled    = false

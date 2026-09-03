@@ -1,0 +1,67 @@
+# PURR OS — 16 MB flash partition table, OTA variant (dual app slot)
+# Opt in via device.pcat [device] ota = true — see purrstrap.py's
+# _generate_sdkconfig() for the flash_mb -> CSV selection.
+#
+# ota_0/ota_1 start at 0x20000 rather than immediately after otadata (0x12000)
+# because ESP-IDF's partition generator requires app-type partitions to begin
+# on a 0x10000-aligned offset — 0x12000 isn't one, 0x20000 is the next that
+# is. Slot SIZE has to be 0x10000-aligned too, not just the offsets — a
+# non-aligned size (0x6B8000, an earlier version of this file) makes the
+# SECOND slot's derived offset (start + size) land off-boundary even though
+# the first slot's own offset was fine; gen_esp32part.py catches this
+# ("Partition ota_1 invalid: Offset ... is not aligned to 0x10000") but only
+# at generate time, not by inspection — this comment exists so the next
+# person doing this arithmetic doesn't repeat it.
+#
+# SPIFFS offset: 0xD80000  size: 0x180000 (1.5 MB) — NOT the same offset as
+# partitions_16mb.csv's factory-only layout (0xD90000/0x270000): an exact
+# equal-size, 0x10000-aligned split of the two OTA slots doesn't land on that
+# offset (0xD90000 - 0x20000 isn't evenly divisible into two aligned halves).
+# Any device moving to this table must update its device.pcat spiffs_offset
+# to "0xD80000".
+#
+# Shrunk from 0x280000 (2.5 MB) to make room for app_cfg below, not because
+# it was running out — purrstrap's own spiffs image build defaults to a
+# fixed 512 KB (build_flash_image()'s spiffs_size_kb) regardless of the
+# partition's declared size, and every build this size has actually produced
+# has landed at exactly that. Shrunk again (0x180000 -> 0x170000, another
+# 64 KB) to make room for claw_slot below — still ~3x the measured 512 KB
+# usage, comfortable headroom for baked-in assets to grow into.
+#
+# app_cfg offset: 0xF00000  size: 0x100000 (1 MB) — LittleFS-mounted, the one
+# genuinely MUTABLE partition in an otherwise semi-immutable image: one
+# config file per app, holding its own user data. Everything else here is
+# either read-only at runtime (app code, baked-in assets) or NVS (kernel/
+# module settings, a different concern). See purr_kernel_app_config_read()/
+# _write() in purr_kernel.h. 1 MB is generous for text-sized per-app config
+# — sized for headroom, not because anything needs it yet.
+#
+# claw_slot offset: 0xEF0000  size: 0x10000 (64 KB) — the cross-device
+# .claw loading module's one flash slot (source/modules/claw_loader/,
+# claw_loader_load()/claw_loader_unload()). Only one loaded module at a
+# time, same "one at a time" constraint the Lua VM already has — a compiled,
+# relocatable blob gets esp_partition_write()'d here, then esp_partition_
+# mmap()'d with ESP_PARTITION_MMAP_INST (maps flash directly into
+# executable instruction address space) and jumped into, instead of ever
+# being copied into RAM (PSRAM has no MALLOC_CAP_EXEC region on this chip;
+# IRAM does but is small and already under pressure — both confirmed dead
+# ends before this partition existed, back when it was named claw_poc for
+# the R&D spike that proved the whole approach — see this module's git
+# history).
+#
+# SubType "spiffs" below is the partition table's own label, not what
+# actually mounts there — esp_vfs_littlefs_register() finds a partition by
+# NAME (partition_label), not by this CSV's subtype keyword, so labelling it
+# "spiffs" alongside the real SPIFFS partition above is just staying inside
+# gen_esp32part.py's well-known subtype list rather than risking an
+# unrecognized-subtype rejection at generate time.
+#
+# Name,     Type, SubType,  Offset,    Size
+nvs,        data, nvs,      0x9000,    0x6000
+phy_init,   data, phy,      0xF000,    0x1000
+otadata,    data, ota,      0x10000,   0x2000
+ota_0,      app,  ota_0,    0x20000,   0x6B0000
+ota_1,      app,  ota_1,    0x6D0000,  0x6B0000
+spiffs,     data, spiffs,   0xD80000,  0x170000
+claw_slot,  data, 0x40,     0xEF0000,  0x10000
+app_cfg,    data, spiffs,   0xF00000,  0x100000

@@ -4,6 +4,11 @@
 // Thin wrapper around esp_wifi_*/esp_event — esp_wifi_init()/esp_netif_init()
 // themselves already ran once at boot (kernel_tdp_boot.c), this module only
 // drives scan/connect/disconnect and tracks status for the Settings UI.
+//
+// Also starts SNTP (pool.ntp.org, hardcoded — no per-device server or
+// timezone configuration yet, tracked as follow-up UI work) on the first
+// successful connection each boot, feeding purr_kernel_time_set() with
+// PURR_TIME_SOURCE_NTP. See wifi_mgr.c's start_sntp_once()/on_sntp_synced().
 
 #include <stdint.h>
 #include <stdbool.h>

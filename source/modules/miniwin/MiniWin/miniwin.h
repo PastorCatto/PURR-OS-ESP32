@@ -609,6 +609,22 @@ typedef enum
 	 */
 	MW_TEXT_BOX_LINES_TO_SCROLL_MESSAGE,
 
+	/**
+	 * PURR OS addition (not upstream MiniWin) — sent by a text box control
+	 * to its own parent window on MW_TOUCH_DOWN_MESSAGE. Upstream ui_text_
+	 * box.c has no touch handling at all (it's a read-only scrollable
+	 * display widget upstream; source/modules/miniwin/miniwin_win.c's own
+	 * mw_ta_create() repurposes it as an editable field, see that file),
+	 * so with multiple sibling text boxes in one window there was no way
+	 * for the window to know WHICH one was actually tapped — every typed
+	 * character kept going to whichever one an app had explicitly focused
+	 * first, confirmed live as "only the first field ever takes text."
+	 *
+	 * message_data: The touched text box control's own mw_handle_t
+	 * message_pointer: Unused
+	 */
+	MW_TEXT_BOX_TOUCHED_MESSAGE,
+
 
 	/**
 	 * Set how many lines to scroll a tree through the tree's visible nodes

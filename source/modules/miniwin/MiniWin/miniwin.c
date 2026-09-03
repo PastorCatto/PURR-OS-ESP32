@@ -38,6 +38,14 @@ SOFTWARE.
 #include "hal/hal_touch.h"
 #include "ui/ui_common.h"
 #include "purr_kernel.h"
+// esp_attr.h — EXT_RAM_BSS_ATTR on mw_all_windows/mw_all_controls/mw_all_
+// timers below. The ONLY deviation from upstream in this vendored file —
+// see that attribute's own call-site comment for why. Compiles to nothing
+// (plain internal-DRAM .bss, upstream's original behavior) on any device
+// without CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY set — safe across
+// every device this codebase's own MiniWin builds target, PSRAM-less ones
+// included, with zero conditional compilation needed here.
+#include "esp_attr.h"
 
 /****************
 *** CONSTANTS ***
@@ -165,10 +173,27 @@ typedef struct
 *** LOCAL VARIABLES ***
 **********************/
 
-static window_t mw_all_windows[MW_MAX_WINDOW_COUNT];    	/**< Array of structures describing all the windows */
+// EXT_RAM_BSS_ATTR — PSRAM instead of internal DRAM for these three pools
+// (~4.4KB combined at this codebase's own MW_MAX_WINDOW_COUNT=20/
+// MW_MAX_CONTROL_COUNT=96/MW_MAX_TIMER_COUNT=8, see miniwin_config.h).
+// Confirmed real, measured internal-DRAM pressure on tdeck_plus (17KB
+// free with one app running, the kernel's own memory watchdog regularly
+// force-stopping apps to stay ahead of it) — moving these here plus the
+// per-widget instance-data pools in miniwin_win.c (same reasoning, see
+// that file's own comment) recovers ~20KB. Deliberately NOT applied to
+// miniwin_message_queue.c's own message_queue array — that one is
+// touched on every single touch/paint/control-interaction message,
+// drained up to 8x per 5ms task tick, genuinely hot enough that PSRAM's
+// per-access latency could be perceptible; these three are only walked
+// on touch/paint/window-close events, not a tight per-tick loop, so
+// PSRAM's own cache-line behavior on sequential/occasional scans makes
+// the cost negligible. Safe on every device MiniWin ships on — see this
+// file's own include-block comment on why EXT_RAM_BSS_ATTR alone (no
+// #ifdef needed here) already handles PSRAM-less devices correctly.
+static EXT_RAM_BSS_ATTR window_t mw_all_windows[MW_MAX_WINDOW_COUNT];    	/**< Array of structures describing all the windows */
 static uint8_t minimised_windows[MW_MAX_WINDOW_COUNT];		/**< window id's of currently minimised windows */
-static control_t mw_all_controls[MW_MAX_CONTROL_COUNT]; 	/**< Array of structures describing all the controls */
-static window_timer_t mw_all_timers[MW_MAX_TIMER_COUNT];   	/**< Array of structures describing containing information on all the timers */
+static EXT_RAM_BSS_ATTR control_t mw_all_controls[MW_MAX_CONTROL_COUNT]; 	/**< Array of structures describing all the controls */
+static EXT_RAM_BSS_ATTR window_timer_t mw_all_timers[MW_MAX_TIMER_COUNT];   	/**< Array of structures describing containing information on all the timers */
 static mw_handle_t window_with_focus_handle;				/**< The window at the front with focus receiving touch events within its rect */
 static int16_t vertical_edges[(MW_MAX_WINDOW_COUNT) * 2U];	/**< Scratch area to store array of vertical window edges, used in various places, for window analysis when repainting */
 static int16_t horizontal_edges[(MW_MAX_WINDOW_COUNT) * 2U];/**< Scratch area to store array of horizontal window edges, used in various places, for window analysis when repainting */

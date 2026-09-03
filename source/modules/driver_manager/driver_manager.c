@@ -3,9 +3,11 @@
 #include "driver_manager.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "esp_log.h"
+#include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_drivers's own comment below
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <stdio.h>
 
 static const char *TAG = "drv_mgr";
 
@@ -18,7 +20,13 @@ static const char *s_scan_paths[] = {
     NULL
 };
 
-static drv_entry_t s_drivers[MAX_DRIVERS];
+// EXT_RAM_BSS_ATTR (PSRAM, not internal DRAM) — a passive registry, scanned
+// late in boot (Phase 2 "SD extras", well after PSRAM init — see
+// kernel_tdp_boot.c), not touched by anything earlier. Same class MiniWin's
+// own control/list arrays already use this for — real, confirmed via
+// purr_os.map: a genuine link-time DRAM overflow once the current app set
+// was all compiled in together (see msn.c's matching comment, 2026-09-01).
+static EXT_RAM_BSS_ATTR drv_entry_t s_drivers[MAX_DRIVERS];
 static int         s_driver_count = 0;
 
 // ── Compat check ──────────────────────────────────────────────────────────────
@@ -84,6 +92,23 @@ static void load_driver(const char *path) {
     fclose(f);
     if (n < sizeof(hdr) || hdr.magic != PURR_MODULE_MAGIC) return;
 
+    // Signature classification — see sig_mgr.h for the tier model. Every
+    // driver in this tree is unsigned today and that is fine: this does
+    // NOT gate on tier, only on TAMPERED — a .sig + co-located .pub that
+    // fails to verify against this file's current content, meaning it
+    // changed after someone signed it. That is refused unconditionally,
+    // for a /flash/drivers entry as much as an /sdcard/drivers one — a
+    // tampered driver blob is worth refusing to init() regardless of
+    // where it came from. An unsigned driver keeps loading exactly as it
+    // always has; this only adds a hard stop for the one signal that
+    // means something is actively wrong, plus makes the trust tier
+    // visible via drv_entry_t.sig_tier for whatever reads it later.
+    sig_tier_t sig = sig_mgr_classify(path);
+    if (sig == SIG_TIER_TAMPERED) {
+        ESP_LOGE(TAG, "REFUSING driver at %s: signature present but INVALID (tampered)", path);
+        return;
+    }
+
     int existing = find_driver_slot_by_name(hdr.name);
     if (existing >= 0 && version_cmp(hdr.version, s_drivers[existing].version) <= 0) {
         ESP_LOGI(TAG, "driver '%s' v%s already loaded (have v%s) — skipping %s",
@@ -109,6 +134,7 @@ static void load_driver(const char *path) {
     strncpy(ent->version, hdr.version, sizeof(ent->version) - 1);
     ent->status = DRV_STATUS_OK;
     ent->fail_reason[0] = '\0';
+    ent->sig_tier = sig;
 
     // kernel_min check
     if (hdr.kernel_min[0] && version_cmp(KITT_VERSION, hdr.kernel_min) < 0) {
