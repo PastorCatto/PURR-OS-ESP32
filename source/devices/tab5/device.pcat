@@ -7,8 +7,12 @@
 # the P4 at all (disabled in IDF) — so proximity/pairing can never run here. When
 # esp-hosted lands, set wifi = true AND radio_companion = false together.
 #
-# Requires ESP-IDF 5.5.4 (esp32p4 target + esp_lcd_dpi/PPA) — other devices stay
-# on the pinned 5.3.5; point IDF_PATH at the 5.5.4 install to build this one.
+# Stale claim removed: this comment used to say "requires ESP-IDF 5.5.4"
+# (esp32p4 target + esp_lcd_dpi/PPA) — confirmed wrong, live: `purrstrap
+# build tab5` against the same pinned 5.3.5 every other device uses builds
+# clean (esp32p4 image generated, no errors, including this device's own
+# protected-process console). Whatever originally prompted that claim
+# either never applied or has since been resolved upstream in 5.3.5.
 
 [device]
 name        = "tab5"

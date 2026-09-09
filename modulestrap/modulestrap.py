@@ -406,7 +406,10 @@ def _device_referenced(cfg):
 #                    directly, nothing else's CMakeLists does), added
 #                    here up front this time instead of being discovered
 #                    the hard way a second time.
-CORE_COMPONENTS = {"boot_splash", "app_manager", "driver_manager", "purr_console", "purr_quirk"}
+#   purr_console_login — same exact shape and reason as purr_console/
+#                    purr_quirk above.
+CORE_COMPONENTS = {"boot_splash", "app_manager", "driver_manager", "purr_console", "purr_quirk",
+                    "purr_console_login"}
 
 
 def select_components(cfg, targets):

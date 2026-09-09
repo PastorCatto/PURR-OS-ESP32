@@ -37,6 +37,7 @@
 #include "../../drivers/radio/sx1262_rl/sx1262_rl.h"
 #include "../../modules/boot_splash/boot_splash.h"
 #include "../../modules/purr_console/purr_console.h"
+#include "../../modules/purr_console_login/purr_console_login.h"
 #include "../../modules/user_mgr/user_mgr.h"
 #include "../../modules/app_manager/app_manager.h"
 #include "../../modules/purr_quirk/purr_quirk.h"
@@ -427,87 +428,19 @@ static const purr_console_io_t s_console_io = {
 
 // ── Login gate + exec — registered with the shared console core ────────────
 //
-// This is the ONE place in this file that actually calls into user_mgr/
-// app_manager for console purposes — purr_console.c itself stays free of
-// both (see purr_console_login_fn/purr_console_exec_fn's own doc comments
-// for why), reaching them only through these two registered hooks.
-//
-// tdp_console_login() blocks (retrying on a wrong password, same as a
-// real getty/login never "failing" outward) until some account is
-// actually authenticated, then calls app_manager_notify_unlocked() — the
-// same call systemui_login.c/systemui_login_ios.c already make, just from
-// the console instead of a graphical login screen. This is what makes
-// app_manager's LOCAL app registry (app_manager_count()/get()) visible at
-// all when no systemui-family UI package ever runs: s_local_unlocked in
-// app_manager.c defaults closed, and until this session's own research
-// found it, the only two callers that ever opened it were inside that one
-// optional package.
-static void tdp_console_login(const purr_console_io_t *io)
-{
-    char username[USER_MGR_USERNAME_MAX];
-
-    for (;;) {
-        if (user_mgr_count() > 1) {
-            purr_console_println("Accounts:");
-            for (int i = 0; i < user_mgr_count(); i++) {
-                char name[USER_MGR_USERNAME_MAX];
-                if (user_mgr_at(i, name, sizeof(name))) {
-                    char line[USER_MGR_USERNAME_MAX + 4];
-                    snprintf(line, sizeof(line), "  %s", name);
-                    purr_console_println(line);
-                }
-            }
-            purr_console_print("login: ");
-            purr_console_read_line(io, username, sizeof(username));
-            if (!user_mgr_exists(username)) {
-                purr_console_println("no such account");
-                continue;
-            }
-        } else {
-            // Single-account device — same "don't make someone type a
-            // name that's the only possible answer" shortcut
-            // purr_systemui_boot_login_check() already takes.
-            const char *def = user_mgr_default_username();
-            strncpy(username, def ? def : "", sizeof(username) - 1);
-            username[sizeof(username) - 1] = '\0';
-        }
-
-        if (!user_mgr_has_password(username)) {
-            // No-password account — zero-friction auto-login, the exact
-            // contract user_mgr.h's own header comment documents (mirrors
-            // a real Unix account with an empty/locked shadow entry).
-            user_mgr_set_logged_in(username);
-            app_manager_notify_unlocked();
-            return;
-        }
-
-        purr_console_print("password: ");
-        char password[64];
-        purr_console_set_echo(false);
-        purr_console_read_line(io, password, sizeof(password));
-        purr_console_set_echo(true);
-        bool ok = user_mgr_verify(username, password);
-        // Same "don't keep a plaintext secret in RAM longer than it has
-        // to be" instinct systemui_login.c's own ctx->password memset
-        // already follows.
-        memset(password, 0, sizeof(password));
-        if (ok) {
-            user_mgr_set_logged_in(username);
-            app_manager_notify_unlocked();
-            return;
-        }
-        purr_console_println("Login incorrect");
-    }
-}
-
-static void tdp_console_exec(const char *args)
-{
-    if (!args || !*args) { purr_console_println("exec: missing app name"); return; }
-    int rc = app_manager_launch_by_name(args);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "exec %s: %s", args, rc == 0 ? "launched" : "failed");
-    purr_console_println(buf);
-}
+// Used to be this file's own tdp_console_login()/tdp_console_exec() — the
+// ONE place that called into user_mgr/app_manager for console purposes
+// (purr_console.c itself stays free of both; see purr_console_login_fn/
+// purr_console_exec_fn's own doc comments for why). Lifted verbatim into
+// source/modules/purr_console_login/ as this session's "unified console/
+// login boot head" phase spread purr_console to every real device's
+// kernel boot file — no point re-deriving the same user_mgr/app_manager
+// glue four more times. See that module's own header for the full
+// picture (login blocks, retrying on a wrong password, same as a real
+// getty/login never "failing" outward, until some account is actually
+// authenticated, then calls app_manager_notify_unlocked() — the same call
+// systemui_login.c/systemui_login_ios.c already make, just from the
+// console instead of a graphical login screen).
 
 static void serial_console_task(void *arg)
 {
@@ -528,8 +461,8 @@ static void serial_console_task(void *arg)
 
     purr_console_register_commands(s_tdp_console_cmds,
         sizeof(s_tdp_console_cmds) / sizeof(s_tdp_console_cmds[0]));
-    purr_console_set_login_fn(tdp_console_login);
-    purr_console_set_exec_fn(tdp_console_exec);
+    purr_console_set_login_fn(purr_console_login_default_login_fn);
+    purr_console_set_exec_fn(purr_console_login_default_exec_fn);
     purr_console_run(&s_console_io, true);   // never returns
 }
 
@@ -1126,7 +1059,19 @@ void app_main(void)
     ESP_LOGI(TAG, "boot complete — %u bytes free", (unsigned)purr_kernel_free_ram());
     purr_kernel_notify("PURR OS ready", "T-Deck Plus booted", "kernel");
 
-    xTaskCreate(serial_console_task, "serial_con", 4096, NULL, 1, NULL);
+    // Protected process, not a raw xTaskCreate(): the login/recovery
+    // console must never be silently strike-disabled the way a
+    // misbehaving P2/P3 module can be — see purr_kernel_start_protected()'s
+    // own doc comment.
+    static const purr_protected_process_t s_console_proc = {
+        .name       = "console",
+        .run        = serial_console_task,
+        .arg        = NULL,
+        .stack_size = 4096,
+        .priority   = 1,
+        .core_id    = -1,
+    };
+    purr_kernel_start_protected(&s_console_proc);
     purr_kernel_set_panic_console_cb(tdp_panic_console);
 
     while (1) {

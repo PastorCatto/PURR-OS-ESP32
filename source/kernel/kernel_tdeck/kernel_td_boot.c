@@ -24,6 +24,8 @@
 #include "../../drivers/display/st7789/st7789.h"
 #include "../../drivers/input/trackball/trackball.h"
 #include "../../drivers/input/bbq20/bbq20.h"
+#include "../../modules/purr_console/purr_console.h"
+#include "../../modules/purr_console_login/purr_console_login.h"
 
 static const char *TAG = "td_boot";
 
@@ -66,73 +68,47 @@ static void ensure_sd_dirs(void)
     }
 }
 
-// ── Serial console ────────────────────────────────────────────────────────────
-
-static void kb_test_loop(void)
+// ── UART0 binding for the shared console core ───────────────────────────────
+//
+// T-Deck (unlike its T-Deck Plus sibling) has no native USB-Serial-JTAG
+// peripheral broken out to its USB-C port — UART0 is the real, reachable
+// console transport here, matching this board's own original ad hoc
+// serial_console_task() this replaces.
+static int uart0_console_read_byte(uint32_t timeout_ms)
 {
-    const catcall_input_t *kbd = purr_kernel_input();
-    if (!kbd) {
-        printf("[KB TEST] no keyboard catcall — bbq20 not ready\r\n");
-        return;
-    }
-    printf("[KB TEST] press keys on the device keyboard. type 'q' here to exit.\r\n");
-    fflush(stdout);
-    for (;;) {
-        uint8_t c = 0;
-        if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(0)) > 0) {
-            if (c == 'q' || c == 3) break;
-        }
-        input_event_t ev;
-        while (kbd->poll_event(&ev)) {
-            if (ev.type == INPUT_EVENT_KEY_DOWN && ev.keycode) {
-                uint16_t k = ev.keycode;
-                if (k >= 0x20 && k <= 0x7E)
-                    printf("[KB] '%c' (0x%02X)\r\n", (char)k, k);
-                else
-                    printf("[KB] 0x%02X\r\n", k);
-                fflush(stdout);
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    printf("[KB TEST] done.\r\n");
+    uint8_t c = 0;
+    if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(timeout_ms)) > 0) return c;
+    return -1;
 }
+
+static void uart0_console_write(const void *data, size_t len)
+{
+    uart_write_bytes(UART_NUM_0, (const char *)data, len);
+}
+
+static void uart0_console_flush(void)
+{
+    uart_wait_tx_done(UART_NUM_0, portMAX_DELAY);
+}
+
+static const purr_console_io_t s_console_io = {
+    .read_byte = uart0_console_read_byte,
+    .write     = uart0_console_write,
+    .flush     = uart0_console_flush,
+};
 
 static void serial_console_task(void *arg)
 {
+    (void)arg;
     esp_err_t ret = uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        vTaskDelete(NULL);
+        ESP_LOGE(TAG, "uart_driver_install failed: %s — console unavailable", esp_err_to_name(ret));
         return;
     }
 
-    char line[32];
-    int  len = 0;
-    printf("\r\nPURR OS console (td) — commands: kb\r\n> ");
-    fflush(stdout);
-
-    for (;;) {
-        uint8_t c = 0;
-        if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(50)) <= 0) continue;
-
-        if (c == '\r' || c == '\n') {
-            printf("\r\n");
-            line[len] = '\0';
-            len = 0;
-            if (strcmp(line, "kb") == 0)       kb_test_loop();
-            else if (line[0] != '\0')           printf("unknown: %s\r\n", line);
-            printf("> ");
-            fflush(stdout);
-        } else if ((c == 0x7F || c == '\b') && len > 0) {
-            len--;
-            printf("\b \b");
-            fflush(stdout);
-        } else if (len < (int)sizeof(line) - 1 && c >= 0x20) {
-            line[len++] = (char)c;
-            putchar(c);
-            fflush(stdout);
-        }
-    }
+    purr_console_set_login_fn(purr_console_login_default_login_fn);
+    purr_console_set_exec_fn(purr_console_login_default_exec_fn);
+    purr_console_run(&s_console_io, true);   // never returns
 }
 
 void app_main(void)
@@ -180,7 +156,19 @@ void app_main(void)
 
     ESP_LOGI(TAG, "boot complete — %u bytes free", (unsigned)purr_kernel_free_ram());
 
-    xTaskCreate(serial_console_task, "serial_con", 4096, NULL, 1, NULL);
+    // Protected process, not a raw xTaskCreate(): see
+    // purr_kernel_start_protected()'s own doc comment on why the login/
+    // recovery console must never be silently strike-disabled the way a
+    // misbehaving P2/P3 module can be.
+    static const purr_protected_process_t s_console_proc = {
+        .name       = "console",
+        .run        = serial_console_task,
+        .arg        = NULL,
+        .stack_size = 4096,
+        .priority   = 1,
+        .core_id    = -1,
+    };
+    purr_kernel_start_protected(&s_console_proc);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));

@@ -24,6 +24,7 @@
 #include "esp_spiffs.h"
 #include "esp_heap_caps.h"
 #include "nvs_flash.h"
+#include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <sys/stat.h>
@@ -31,6 +32,8 @@
 #include <stdio.h>
 
 #include "../../drivers/display/m5tab5_bsp/m5tab5_bsp.h"
+#include "../../modules/purr_console/purr_console.h"
+#include "../../modules/purr_console_login/purr_console_login.h"
 
 static const char *TAG = "tab5_boot";
 
@@ -69,6 +72,53 @@ static void ensure_sd_dirs(void)
         struct stat st;
         if (stat(dirs[i], &st) != 0) mkdir(dirs[i], 0755);
     }
+}
+
+// ── UART0 binding for the shared console core ───────────────────────────────
+//
+// This device had NO console/login of any kind before this — a real gap
+// against "shell reachable when things go wrong" (see purr_kernel_start_
+// protected()'s own doc comment). UART0, not USB-Serial-JTAG: no hardware
+// in hand to confirm which peripheral this board's own USB-C port actually
+// reaches (the discovery that mattered for T-Deck Plus — see that kernel's
+// own usbjtag_console_read_byte() comment), so this uses the same
+// conservative, universally-reachable default every other migrated kernel
+// besides T-Deck Plus uses.
+static int uart0_console_read_byte(uint32_t timeout_ms)
+{
+    uint8_t c = 0;
+    if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(timeout_ms)) > 0) return c;
+    return -1;
+}
+
+static void uart0_console_write(const void *data, size_t len)
+{
+    uart_write_bytes(UART_NUM_0, (const char *)data, len);
+}
+
+static void uart0_console_flush(void)
+{
+    uart_wait_tx_done(UART_NUM_0, portMAX_DELAY);
+}
+
+static const purr_console_io_t s_console_io = {
+    .read_byte = uart0_console_read_byte,
+    .write     = uart0_console_write,
+    .flush     = uart0_console_flush,
+};
+
+static void serial_console_task(void *arg)
+{
+    (void)arg;
+    esp_err_t ret = uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "uart_driver_install failed: %s — console unavailable", esp_err_to_name(ret));
+        return;
+    }
+
+    purr_console_set_login_fn(purr_console_login_default_login_fn);
+    purr_console_set_exec_fn(purr_console_login_default_exec_fn);
+    purr_console_run(&s_console_io, true);   // never returns
 }
 
 // ── app_main ──────────────────────────────────────────────────────────────
@@ -147,6 +197,23 @@ void app_main(void)
 
     ESP_LOGI(TAG, "boot complete — %u bytes free", (unsigned)purr_kernel_free_ram());
     purr_kernel_notify("PURR OS ready", "M5Stack Tab5 booted", "kernel");
+
+    // Protected process, not a raw xTaskCreate(): see
+    // purr_kernel_start_protected()'s own doc comment on why the login/
+    // recovery console must never be silently strike-disabled the way a
+    // misbehaving P2/P3 module can be. This is also this device's FIRST
+    // console/login of any kind — previously app_manager's local app
+    // registry (s_local_unlocked, defaults closed) had no caller on this
+    // device that ever opened it at all.
+    static const purr_protected_process_t s_console_proc = {
+        .name       = "console",
+        .run        = serial_console_task,
+        .arg        = NULL,
+        .stack_size = 4096,
+        .priority   = 1,
+        .core_id    = -1,
+    };
+    purr_kernel_start_protected(&s_console_proc);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));

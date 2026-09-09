@@ -2154,6 +2154,85 @@ void purr_kernel_watch_end(void)
     s_ui_last_heartbeat_ms = purr_kernel_uptime_ms();
 }
 
+// ── Protected processes ──────────────────────────────────────────────────────
+//
+// See purr_kernel.h's own doc comment for the full picture. Deliberately a
+// thin wrapper, not a registry with lifecycle/dependency semantics like the
+// P0-P3 static-module system — a protected process is just "start this task,
+// and if it ever returns, that's fatal, not a silent skip."
+
+#define PURR_PROTECTED_MAX 4   // console today; headroom for a future watchdog-style task
+
+static const char *s_protected_names[PURR_PROTECTED_MAX];
+static int          s_protected_count = 0;
+
+typedef struct {
+    void (*run)(void *arg);
+    void  *arg;
+    char   name[32];
+} purr_protected_trampoline_ctx_t;
+
+static void protected_trampoline(void *pv)
+{
+    purr_protected_trampoline_ctx_t *ctx = (purr_protected_trampoline_ctx_t *)pv;
+    ctx->run(ctx->arg);
+
+    // A well-behaved protected process's run() never returns — see this
+    // primitive's own header comment on why there is no strike-and-disable
+    // fallback available at this tier. free(ctx) is intentionally skipped:
+    // purr_kernel_panic() below never returns either, so leaking the small
+    // trampoline context on the way into a panic is harmless and simpler
+    // than reasoning about whether it's still safe to touch the heap here.
+    ESP_LOGE(TAG, "protected process '%s' returned unexpectedly — this tier has no "
+                  "fallback, treating it as fatal", ctx->name);
+    purr_kernel_panic("protected process exited");
+}
+
+void purr_kernel_start_protected(const purr_protected_process_t *proc)
+{
+    if (!proc || !proc->name || !proc->run) {
+        ESP_LOGE(TAG, "start_protected: invalid process descriptor");
+        return;
+    }
+
+    purr_protected_trampoline_ctx_t *ctx =
+        heap_caps_malloc(sizeof(*ctx), MALLOC_CAP_INTERNAL);
+    if (!ctx) {
+        ESP_LOGE(TAG, "start_protected: alloc failed for '%s'", proc->name);
+        return;
+    }
+    ctx->run = proc->run;
+    ctx->arg = proc->arg;
+    snprintf(ctx->name, sizeof(ctx->name), "%s", proc->name);
+
+    BaseType_t core = (proc->core_id == 0 || proc->core_id == 1) ? proc->core_id : tskNO_AFFINITY;
+    TaskHandle_t task = NULL;
+    BaseType_t ok = xTaskCreatePinnedToCore(protected_trampoline, proc->name,
+                                             proc->stack_size, ctx, proc->priority,
+                                             &task, core);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "start_protected: task create failed for '%s'", proc->name);
+        free(ctx);
+        return;
+    }
+
+    if (s_protected_count < PURR_PROTECTED_MAX) {
+        s_protected_names[s_protected_count++] = proc->name;
+    }
+    ESP_LOGI(TAG, "protected process started: %s", proc->name);
+}
+
+int purr_kernel_protected_count(void)
+{
+    return s_protected_count;
+}
+
+const char *purr_kernel_protected_name_at(int i)
+{
+    if (i < 0 || i >= s_protected_count) return NULL;
+    return s_protected_names[i];
+}
+
 static void health_watchdog_task(void *arg)
 {
     (void)arg;

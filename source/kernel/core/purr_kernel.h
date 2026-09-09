@@ -195,6 +195,46 @@ void purr_kernel_watch_begin(const char *owner, uint32_t interval_ms, int missed
 void purr_kernel_watch_beat(void);
 void purr_kernel_watch_end(void);
 
+// ── Protected processes ──────────────────────────────────────────────────────
+//
+// A protected process is a named, supervised task that lives OUTSIDE the
+// P0-P3 static-module registry entirely — no purr_module_header_t, no
+// PURR_MODULE_REGISTER, no crash-guard strike tracking, no dependency
+// gate, not enumerable via purr_kernel_get_module(). purr_crash_guard and
+// speed_demon are today's only precedent for "runs outside P0-P3", and
+// both are plain function calls, not long-running tasks — this fills the
+// gap for a supervised task that must never be silently strike-disabled
+// the way a misbehaving P2/P3 module can be (a disabled login shell would
+// mean a permanently locked-out device, which is categorically worse than
+// a disabled P3 app).
+//
+// First (and, for now, only) consumer: the login/recovery console
+// (source/modules/purr_console/) — replacing the ad hoc, unsupervised
+// xTaskCreate(serial_console_task, ...) call every kernel_*_boot.c file
+// used to hand-roll on its own.
+typedef struct {
+    const char *name;          // for logs and purr_kernel_protected_name_at()
+    void (*run)(void *arg);    // runs "forever" — see the return contract below
+    void       *arg;
+    uint32_t    stack_size;    // bytes, not words (matches xTaskCreate's own unit)
+    int         priority;      // FreeRTOS task priority
+    int         core_id;       // 0 or 1, or -1 for no affinity (tskNO_AFFINITY)
+} purr_protected_process_t;
+
+// Launches `proc` as its own task. There is deliberately no P2/P3-style
+// "silently disable and move on" fallback available at this tier: if
+// proc->run ever RETURNS, that is treated as a fatal condition — logged
+// at ERROR, then purr_kernel_panic() — the same "no silent skip"
+// philosophy P1/REQUIRED modules already use, not P2/P3's strike-and-
+// disable one. A well-behaved protected process's run() never returns.
+void purr_kernel_start_protected(const purr_protected_process_t *proc);
+
+// Diagnostics only — lets a `modules`-style command list protected
+// processes distinctly from the P1-P3 module list. Index is registration
+// order; out of range returns NULL.
+int         purr_kernel_protected_count(void);
+const char *purr_kernel_protected_name_at(int i);
+
 // ── Kernel log tail ───────────────────────────────────────────────────────────
 // Captures every ESP_LOG* call system-wide into a small in-RAM scrollback
 // buffer — call purr_kernel_klog_init() once, early in boot, then any
