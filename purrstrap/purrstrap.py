@@ -873,76 +873,247 @@ def _pack_quirk_package(device_name, blocks):
     return header + block_table + payloads
 
 
-def _generate_quirk_package(device, cfg):
-    """Builds this device's .purr v2 quirk package from known-good,
-    currently-hardcoded values for the handful of drivers converted so far
-    (st7789, gt911, adc_battery, sx1262_rl, sx1262, ssd1306, ili9341 — see
-    docs/17-equivalent design notes and each driver's own
-    purr_quirk_get_block() call for the full picture). Only tdeck_plus
-    emits a package today since it's the only device with real hardware
-    to verify against; the other three drivers (sx1262, ssd1306, ili9341)
-    have the loader-side capability now but no device generates a block
-    for them yet — a future device just needs an entry added below.
-    Returns the packed bytes, or None if this device has nothing to emit
-    yet (every driver falls back to its own compiled-in default in that
-    case — this is not an error).
+# ── Quirk block registry ──────────────────────────────────────────────────────
+#
+# One entry per named .purr v2 quirk block a driver in this tree knows how
+# to read via purr_quirk_get_block() — see each driver's own "Layout for a
+# ... quirk block" comment for the struct this must match byte-for-byte.
+# This registry is the SINGLE SOURCE OF TRUTH purrstrap uses to both (a)
+# pack a device.pcat [quirks.<block>] section into the binary block a
+# driver expects, and (b) drive `purrstrap quirks <device>`'s interactive
+# picker — adding a block here is the only purrstrap-side step needed for
+# a newly-converted driver; no other function needs to change.
+#
+# driver_slot: (device.pcat [drivers] category, driver slug) — used only to
+# decide which blocks `purrstrap quirks` OFFERS for a given device (a
+# device that selects [drivers] touch = "gt911" gets offered "gt911.pins").
+# It does NOT gate _generate_quirk_package() itself: a block already
+# present in device.pcat is always packed and shipped regardless of the
+# device's current [drivers] selection, since a stale block for a driver
+# no longer selected is harmless (nothing calls purr_quirk_get_block()
+# with that name any more).
+#
+# fields: ordered (name, kind, default) triples. Order matters — it's the
+# struct.pack() argument order, which must match the C struct's field
+# order exactly. `default` is the driver's own generic compiled-in
+# default (its #define/static initializer), NOT any one device's proven
+# values — those belong in that device's own device.pcat, same as
+# tdeck_plus's four blocks illustrate.
+#
+# kind is one of:
+#   "i32"    → signed 32-bit int,       parsed via int(x, 0) (accepts 0x../-1)
+#   "u16"    → unsigned 16-bit int,     same parsing, packed as 'H'
+#   "hex8"   → unsigned 8-bit int,      same parsing, DISPLAYED as 0xNN
+#   "f32"    → 32-bit float
+#   "bool"   → true/false (also accepts 1/0/yes/no/on/off)
+#   "strNN"  → fixed-width string, NUL-padded/truncated to NN bytes
+QUIRK_BLOCK_SPECS = {
+    "st7789.panel_profile": {
+        "driver_slot": ("display", "st7789"),
+        "pack": "<40sHHHHBBB",
+        "pad": 1,   # trailing compiler padding — see st7789_panel_profile_t
+        "fields": [
+            ("name",           "str40", "default (320x240 landscape)"),
+            ("width",          "u16",   320),
+            ("height",         "u16",   240),
+            ("col_off",        "u16",   0),
+            ("row_off",        "u16",   0),
+            ("madctl_normal",  "hex8",  0x70),
+            ("madctl_rotated", "hex8",  0x00),
+            ("bgr",            "bool",  False),
+        ],
+    },
+    "gt911.pins": {
+        "driver_slot": ("touch", "gt911"),
+        "pack": "<iiiii",
+        "pad": 0,
+        "fields": [
+            ("sda",      "i32", 18),
+            ("scl",      "i32", 8),
+            ("int_pin",  "i32", 16),
+            ("rst_pin",  "i32", 38),
+            ("i2c_port", "i32", 0),
+        ],
+    },
+    "adc_battery.config": {
+        "driver_slot": ("battery", "adc_battery"),
+        "pack": "<iifi",
+        "pad": 0,
+        "fields": [
+            ("channel",    "i32", 3),
+            ("ctrl_pin",   "i32", -1),
+            ("multiplier", "f32", 2.11),
+            ("atten",      "i32", 3),
+        ],
+    },
+    "sx1262_rl.pins": {
+        "driver_slot": ("radio", "sx1262_rl"),
+        "pack": "<iiiiiii",
+        "pad": 0,
+        "fields": [
+            ("mosi", "i32", 10), ("miso", "i32", 11), ("sclk", "i32", 9),
+            ("cs",   "i32", 8),  ("rst",  "i32", 12), ("busy", "i32", 13),
+            ("irq",  "i32", 14),
+        ],
+    },
+    "sx1262.pins": {
+        "driver_slot": ("radio", "sx1262"),
+        "pack": "<iiiiiii",
+        "pad": 0,
+        "fields": [
+            ("mosi", "i32", 10), ("miso", "i32", 11), ("sclk", "i32", 9),
+            ("cs",   "i32", 8),  ("rst",  "i32", 12), ("busy", "i32", 13),
+            ("irq",  "i32", 14),
+        ],
+    },
+    "ssd1306.pins": {
+        "driver_slot": ("display", "ssd1306"),
+        "pack": "<iiiii",
+        "pad": 0,
+        "fields": [
+            ("sda",  "i32",  17), ("scl", "i32", 18), ("rst", "i32", 21),
+            ("addr", "hex8", 0x3C), ("port", "i32", 0),
+        ],
+    },
+    "ili9341.pins": {
+        "driver_slot": ("display", "ili9341"),
+        "pack": "<iiiiiii",
+        "pad": 0,
+        "fields": [
+            ("cs", "i32", 15), ("dc", "i32", 2), ("mosi", "i32", 13),
+            ("miso", "i32", 12), ("sclk", "i32", 14), ("rst", "i32", -1),
+            ("bl", "i32", 21),
+        ],
+    },
+}
 
-    Deliberately NOT sourced from device.pcat's own [pins] section for
-    display/touch: confirmed live, tdeck_plus's device.pcat declares
-    touch_rst = -1, but kernel_tdp_boot.c's own real, working
-    gt911_configure() call passes rst_pin=17 — the two have drifted apart
-    (pins.* here are only ever applied via _generate_glue() for a GENERIC-
-    kernel device; a specialized kernel like this one hardcodes its own
-    literals directly in C and never reads them). Rather than propagate
-    that discrepancy into a shipped quirk package, this generates the
-    PROVEN values a real boot already uses — see the block-by-block
-    comments below. Reconciling device.pcat itself is a separate,
-    deliberate decision this function does not make on its own.
+
+def _quirk_relevant_blocks(cfg):
+    """Blocks whose driver_slot matches this device's current [drivers]
+    selection, in QUIRK_BLOCK_SPECS's own definition order."""
+    out = []
+    for name, spec in QUIRK_BLOCK_SPECS.items():
+        category, slug = spec["driver_slot"]
+        if (cfg.get(f"drivers.{category}", "") or "").strip().strip('"') == slug:
+            out.append(name)
+    return out
+
+
+def _quirk_block_configured(block_name, cfg):
+    """True if device.pcat has a [quirks.<block_name>] section with at
+    least one key set — a bare/empty section is treated the same as no
+    section at all (nothing to pack, no reason to emit a block)."""
+    prefix = f"quirks.{block_name}."
+    return any(k.startswith(prefix) for k in cfg)
+
+
+def _quirk_parse_field_value(kind, raw):
+    """Parse a raw device.pcat string into the Python value _quirk_pack_
+    block() expects for this field kind. Raises ValueError on anything
+    that doesn't fit — callers decide whether that's fatal or falls back
+    to a default."""
+    raw = str(raw).strip()
+    if kind == "bool":
+        low = raw.lower()
+        if low in ("true", "1", "yes", "on"):  return True
+        if low in ("false", "0", "no", "off"): return False
+        raise ValueError(f"'{raw}' is not true/false")
+    if kind in ("i32", "u16", "hex8"):
+        return int(raw, 0)   # base 0 accepts "0x70", "-1", "320" alike
+    if kind == "f32":
+        return float(raw)
+    if kind.startswith("str"):
+        return raw
+    raise ValueError(f"unknown quirk field kind '{kind}'")
+
+
+def _quirk_format_field_value(kind, value):
+    """Inverse of _quirk_parse_field_value() — how a value is DISPLAYED
+    and stored back into device.pcat."""
+    if kind == "bool":
+        return "true" if value else "false"
+    if kind == "hex8":
+        return f"0x{int(value) & 0xFF:02X}"
+    if kind in ("i32", "u16"):
+        return str(int(value))
+    if kind == "f32":
+        return f"{float(value):g}"
+    return str(value)
+
+
+def _quirk_block_values_from_cfg(block_name, cfg):
+    """Resolve every field of `block_name` to a concrete Python value:
+    device.pcat's own [quirks.<block_name>] setting if present and valid,
+    else this registry's own default. A field with an invalid value in
+    device.pcat warns and falls back rather than failing the whole build
+    over one bad field."""
+    spec = QUIRK_BLOCK_SPECS[block_name]
+    values = {}
+    for fname, kind, default in spec["fields"]:
+        raw = cfg.get(f"quirks.{block_name}.{fname}")
+        if raw is None:
+            values[fname] = default
+            continue
+        try:
+            values[fname] = _quirk_parse_field_value(kind, raw)
+        except ValueError as e:
+            warn(f"[quirks.{block_name}] {fname} = \"{raw}\" invalid ({e}) — "
+                 f"using default {_quirk_format_field_value(kind, default)}")
+            values[fname] = default
+    return values
+
+
+def _quirk_pack_block(spec, values):
+    """values: {field_name: python_value} (already resolved, e.g. by
+    _quirk_block_values_from_cfg()). Returns the packed block payload
+    bytes, matching the driver's own C struct exactly."""
+    args = []
+    for fname, kind, _default in spec["fields"]:
+        v = values[fname]
+        if kind.startswith("str"):
+            n = int(kind[3:])
+            args.append(str(v).encode("utf-8")[:n])
+        elif kind == "bool":
+            args.append(1 if v else 0)
+        elif kind == "f32":
+            args.append(float(v))
+        else:   # i32, u16, hex8 — all plain ints at the struct.pack layer
+            args.append(int(v))
+    payload = struct.pack(spec["pack"], *args)
+    payload += b"\x00" * spec.get("pad", 0)
+    return payload
+
+
+def _generate_quirk_package(device, cfg):
+    """Builds this device's .purr v2 quirk package from its device.pcat's
+    own [quirks.<block>] sections — see QUIRK_BLOCK_SPECS above and
+    `purrstrap quirks <device>` (cmd_quirks()) for the interactive way to
+    populate those sections. Returns the packed bytes, or None if this
+    device's device.pcat has no [quirks.*] sections at all yet (every
+    driver falls back to its own compiled-in default in that case — this
+    is not an error, and is still the default state for every device that
+    hasn't run `purrstrap quirks` yet).
+
+    A block is emitted only if device.pcat actually configured it —
+    NOT one entry per QUIRK_BLOCK_SPECS registration, and NOT filtered by
+    [drivers] selection either (a stale block for a driver a device no
+    longer selects is harmless: purr_quirk_get_block() is a name lookup
+    the now-absent driver simply never calls). Each field falls back to
+    its own registry default when device.pcat sets the block's section
+    but omits that particular field, so a partial override (e.g. only
+    correcting one pin) doesn't require restating every other field.
     """
     blocks = []
-
-    if device == "tdeck_plus":
-        # st7789.panel_profile — matches s_panel_profiles[0] (the default
-        # 320x240 landscape profile) in st7789.c byte-for-byte: loading
-        # this package should change NOTHING about how the display
-        # behaves, proving the load path works before it's ever used to
-        # actually change anything.
-        # Layout: char name[40]; u16 width,height,col_off,row_off;
-        #         u8 madctl_normal, madctl_rotated; u8 bgr (bool);
-        #         + 1 pad byte to a multiple of 2 (matches this struct's
-        #         own actual compiled size — confirmed against the real
-        #         sizeof() via this package's own boot-time size check,
-        #         st7789.c's "wrong size — ignoring" warning path).
-        profile = struct.pack("<40sHHHHBBB",
-                               b"default (320x240 landscape) [quirk]",
-                               320, 240, 0, 0,
-                               0x70,  # MADCTL_LANDSCAPE
-                               0x00,  # MADCTL_PORTRAIT
-                               0)     # bgr = false
-        profile += b"\x00" * 1   # trailing struct padding to reach 52 bytes
-        blocks.append(("st7789.panel_profile", profile))
-
-        # gt911.pins — matches kernel_tdp_boot.c's own real
-        # gt911_configure(18, 8, -1, 17, 0) call exactly (sda, scl, int_pin,
-        # rst_pin, i2c_port) — NOT device.pcat's touch_rst=-1 (see this
-        # function's own doc comment on why).
-        blocks.append(("gt911.pins", struct.pack("<iiiii", 18, 8, -1, 17, 0)))
-
-        # adc_battery.config — matches this driver's own compiled-in
-        # defaults (BATTERY_ADC_CHANNEL=3, no ctrl pin, x2.11, DB_12
-        # attenuation=3) exactly — tdeck_plus never calls
-        # adc_battery_configure() today at all, so this reproduces "no
-        # override" behavior through the new data path instead of through
-        # simply never calling it.
-        blocks.append(("adc_battery.config", struct.pack("<iifi", 3, -1, 2.11, 3)))
-
-        # sx1262_rl.pins — matches kernel_tdp_boot.c's own real
-        # sx1262_rl_configure(TDP_LORA_MOSI, TDP_LORA_MISO, TDP_LORA_SCLK,
-        # TDP_LORA_CS, TDP_LORA_RST, TDP_LORA_BUSY, TDP_LORA_IRQ) call
-        # exactly (see that file's #define block) — reproduces "no
-        # override" behavior through the new data path, same as the
-        # other three blocks above.
-        blocks.append(("sx1262_rl.pins", struct.pack("<iiiiiii", 41, 38, 40, 9, 17, 13, 45)))
+    for block_name, spec in QUIRK_BLOCK_SPECS.items():
+        if not _quirk_block_configured(block_name, cfg):
+            continue
+        values = _quirk_block_values_from_cfg(block_name, cfg)
+        try:
+            payload = _quirk_pack_block(spec, values)
+        except (ValueError, struct.error) as e:
+            die(f"{device}: quirk block '{block_name}' failed to pack ({e}) — "
+                f"check [quirks.{block_name}] in device.pcat")
+        blocks.append((block_name, payload))
 
     if not blocks:
         return None
@@ -2666,6 +2837,39 @@ def _pcat_remove(pcat_path, section, key):
     with open(pcat_path, "w") as f:
         f.writelines(lines)
 
+def _pcat_lines_remove_section(lines, section):
+    """Return a new line list with the entire [section] block (header +
+    every line up to the next [section] or EOF) removed. No-op if the
+    section doesn't exist. Used by `purrstrap quirks` to clear a block
+    back to "not configured" in one step, rather than removing each field
+    key individually."""
+    header = f"[{section}]"
+    out = []
+    i = 0
+    in_section = False
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if stripped == header:
+            in_section = True
+            i += 1
+            continue
+        if in_section and stripped.startswith("["):
+            in_section = False
+        if in_section:
+            i += 1
+            continue
+        out.append(line)
+        i += 1
+    return out
+
+def _pcat_remove_section(pcat_path, section):
+    with open(pcat_path) as f:
+        lines = f.readlines()
+    lines = _pcat_lines_remove_section(lines, section)
+    with open(pcat_path, "w") as f:
+        f.writelines(lines)
+
 # ── installed.json — per-device record of static selections + app files ─────
 
 INSTALLED_SCHEMA = 1
@@ -3095,6 +3299,94 @@ def cmd_pkg(args):
         die("usage: purrstrap pkg <list|add|remove|upgrade|verify> <device> [name]")
     return dispatch[args.pkg_cmd](args)
 
+# ── quirks — interactive .purr v2 quirk-package editor ───────────────────────
+#
+# Walks a device through QUIRK_BLOCK_SPECS's known blocks, filtered to the
+# ones its current [drivers] selection actually uses, and lets it pick
+# which to configure and what values to set — writing straight into
+# device.pcat's [quirks.<block>] sections, which _generate_quirk_package()
+# (see its own doc comment) reads at build time. No block is emitted for a
+# device until this command (or a hand-edit) actually adds one — an
+# untouched device.pcat behaves exactly as before this system existed.
+
+def _quirk_print_block_summary(cfg, relevant):
+    print(f"{C_BOLD}{'#':<3}{'block':<26}{'driver':<14}{'status'}{C_RST}")
+    for i, name in enumerate(relevant, 1):
+        spec = QUIRK_BLOCK_SPECS[name]
+        configured = _quirk_block_configured(name, cfg)
+        status = f"{C_GRN}configured{C_RST}" if configured else f"{C_GRY}not set — driver uses its own default{C_RST}"
+        print(f"  {i:<3}{name:<26}{spec['driver_slot'][1]:<14}{status}")
+    print()
+
+def _quirk_edit_block_interactive(pcat_path, block_name, cfg):
+    spec = QUIRK_BLOCK_SPECS[block_name]
+    current = _quirk_block_values_from_cfg(block_name, cfg)
+    print(f"\n{C_CYN}{block_name}{C_RST} — Enter keeps the shown value.")
+    for fname, kind, _default in spec["fields"]:
+        cur = current[fname]
+        shown = _quirk_format_field_value(kind, cur)
+        raw = input(f"  {fname} [{shown}]: ").strip()
+        value = cur
+        if raw != "":
+            try:
+                value = _quirk_parse_field_value(kind, raw)
+            except ValueError as e:
+                warn(f"  invalid value ({e}) — keeping {shown}")
+                value = cur
+        _pcat_set(pcat_path, f"quirks.{block_name}", fname, _quirk_format_field_value(kind, value))
+    info(f"  saved [quirks.{block_name}] to {os.path.relpath(pcat_path, REPO_DIR)}")
+
+def cmd_quirks(args):
+    device = args.device
+    cfg, pcat_path = resolve_device(device)
+    div(f"quirks — {device}")
+    print("Per-driver .purr v2 quirk overrides baked into this device's next build.")
+    print("These override the driver's own compiled-in defaults at boot — nothing")
+    print("here takes effect until you rebuild/reflash.\n")
+
+    relevant = _quirk_relevant_blocks(cfg)
+    if not relevant:
+        warn("no quirk-capable drivers selected in this device's [drivers] section — nothing to configure")
+        div()
+        return
+
+    while True:
+        _quirk_print_block_summary(cfg, relevant)
+        try:
+            choice = input("Pick a block by number to edit, 'd <#>' to clear it, or Enter to finish: ").strip()
+        except EOFError:
+            print()
+            break
+        if not choice:
+            break
+        if choice.lower().startswith("d "):
+            rest = choice[2:].strip()
+            try:
+                idx = int(rest) - 1
+                if not (0 <= idx < len(relevant)):
+                    raise ValueError
+            except ValueError:
+                warn(f"'{rest}' is not a listed block number")
+                continue
+            name = relevant[idx]
+            _pcat_remove_section(pcat_path, f"quirks.{name}")
+            cfg, _ = resolve_device(device)
+            info(f"cleared [quirks.{name}] — {QUIRK_BLOCK_SPECS[name]['driver_slot'][1]} will use its own compiled-in default")
+            continue
+        try:
+            idx = int(choice) - 1
+            if not (0 <= idx < len(relevant)):
+                raise ValueError
+        except ValueError:
+            warn(f"'{choice}' is not a listed block number")
+            continue
+        name = relevant[idx]
+        _quirk_edit_block_interactive(pcat_path, name, cfg)
+        cfg, _ = resolve_device(device)
+
+    div()
+    info(f"done — run 'purrstrap build {device}' (or flash) to bake this into the next image.")
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -3167,6 +3459,9 @@ def main():
     sub.add_parser("status", help="Show workspace config")
     sub.add_parser("doctor", help="Check environment health")
 
+    p_quirks = sub.add_parser("quirks", help="Interactively edit a device's .purr v2 quirk-package overrides")
+    p_quirks.add_argument("device")
+
     # ── pkg — local package manager (v1, no network) ─────────────────────────
     p_pkg = sub.add_parser("pkg", help="Local package manager (static selection + .meow/.hiss hot-load)")
     pkg_sub = p_pkg.add_subparsers(dest="pkg_cmd")
@@ -3223,6 +3518,7 @@ def main():
         "pkg":     cmd_pkg,
         "profiles": cmd_profiles,
         "sign":     cmd_sign,
+        "quirks":   cmd_quirks,
     }
     if args.cmd not in dispatch:
         parser.print_help()

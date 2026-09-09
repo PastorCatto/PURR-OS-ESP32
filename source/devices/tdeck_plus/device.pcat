@@ -405,3 +405,59 @@ sd_mosi       = 41
 sd_miso       = 38
 sd_sclk       = 40
 sd_enabled    = true
+
+# ── [quirks.*] — .purr v2 device quirk package (see source/modules/
+# purr_quirk/ and purrstrap.py's QUIRK_BLOCK_SPECS) ──────────────────────────
+#
+# Migrated here from a hardcoded Python function in purrstrap.py's
+# _generate_quirk_package() (see git history) once that generator became
+# config-driven — edit these with `purrstrap quirks tdeck_plus` rather
+# than by hand where practical. Every value below is a PROVEN one this
+# device's own specialized kernel_tdp_boot.c already hardcodes and calls
+# directly (gt911_configure()/sx1262_rl_configure()) or a driver's own
+# compiled-in default (adc_battery, st7789) — loading this package changes
+# NOTHING about real boot behavior; it only proves the override path
+# itself works, same as when these blocks were first introduced.
+#
+# Deliberately NOT sourced from [pins] above for touch: touch_rst = -1
+# there has drifted from kernel_tdp_boot.c's own real, working
+# gt911_configure() call, which passes rst_pin=17 — [pins] only applies
+# via _generate_glue() for a GENERIC-kernel device, and this device's
+# specialized kernel never reads it. These [quirks.gt911.pins] values are
+# the ones a real boot already exercises, not [pins]'s stale copy.
+[quirks.st7789.panel_profile]
+name           = "default (320x240 landscape) [quirk]"
+width          = "320"
+height         = "240"
+col_off        = "0"
+row_off        = "0"
+madctl_normal  = "0x70"
+madctl_rotated = "0x00"
+bgr            = "false"
+
+[quirks.gt911.pins]
+sda      = "18"
+scl      = "8"
+int_pin  = "-1"
+rst_pin  = "17"
+i2c_port = "0"
+
+[quirks.adc_battery.config]
+channel    = "3"
+ctrl_pin   = "-1"
+multiplier = "2.11"
+atten      = "3"
+
+# Matches [pins]'s lora_* values above exactly (this block predates that
+# section being reliable, back when it still described a nonexistent
+# second SPI bus — see [pins]'s own comment) — kept as its own explicit
+# block rather than re-deriving from [pins] so a future [pins] edit can't
+# silently change what ships in the quirk package too.
+[quirks.sx1262_rl.pins]
+mosi = "41"
+miso = "38"
+sclk = "40"
+cs   = "9"
+rst  = "17"
+busy = "13"
+irq  = "45"
