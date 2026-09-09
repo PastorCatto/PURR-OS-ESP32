@@ -220,6 +220,22 @@ void purr_kernel_set_panic_usb_share_cb(void (*cb)(void)) {
     s_panic_usb_share_cb = cb;
 }
 
+// Same registration shape as the USB-share callback just above, for the
+// same reason: purr_kernel.c must not #include purr_console.h (the kernel
+// spine sits below the console core in this codebase's layering, not
+// above it) to offer a recoverable panic a live shell instead of only the
+// touch-button hold screen. Bare void(void) — whatever this points to
+// (a specialized kernel boot's own function) owns its own
+// purr_console_io_t and NEVER returns once called; see panic_render()'s
+// own call site below for the one hard rule its implementation must
+// follow (kill any already-running console task on the same peripheral
+// FIRST, or the two race over it).
+static void (*s_panic_console_cb)(void) = NULL;
+
+void purr_kernel_set_panic_console_cb(void (*cb)(void)) {
+    s_panic_console_cb = cb;
+}
+
 // ── UI thread safety ──────────────────────────────────────────────────────────
 //
 // LVGL (and any other catcall_ui_t backend) is not safe to call from two
@@ -585,6 +601,24 @@ static void __attribute__((noreturn)) panic_render(panic_kind_t kind, const char
                            (int)((reset_w - 8) / PANIC_CHAR_W));
     }
 
+    // Hand control to a live shell instead of the touch-only hold loop
+    // below, when a specialized kernel boot has registered one — see
+    // purr_kernel_set_panic_console_cb()'s own doc comment for the hard
+    // rule any registered implementation must follow (tear down an
+    // already-running normal-boot console session on the same peripheral
+    // first, so the two can never race over it). The screen and buttons
+    // just drawn stay up regardless — this only changes how the panic is
+    // dismissed/investigated, not what's on screen; someone without a
+    // cable plugged in still sees exactly what they always would.
+    //
+    // Not marked noreturn (it's a plain function pointer, not a real
+    // noreturn-qualified type) even though the real implementation always
+    // is one — the touch-polling loop below is the fallback if it ever
+    // somehow returns anyway, not a code path expected to run in practice.
+    if (s_panic_console_cb) {
+        s_panic_console_cb();
+    }
+
     const catcall_touch_t *touch = s_touch;
     uint32_t hold_start_ms = 0;
     bool holding_reset = false;
@@ -710,6 +744,30 @@ static int load_one_static(const purr_module_header_t *hdr, bool recovering)
         ESP_LOGE(TAG, "ABI mismatch: '%s' (module=%d kernel=%d)",
                  hdr->name, hdr->abi_version, PURR_MODULE_ABI_VERSION);
         return -1;
+    }
+
+    // Dependency gate (purr_module_header_t::depends, ABI v3+) — every
+    // named slot must already be a LOADED module (purr_kernel_get_module()
+    // only returns non-NULL for one that's actually up, not merely
+    // registered) before this one's own init() may run. Same early-return
+    // shape as the magic/ABI checks just above, so the caller
+    // (purr_kernel_load_static_modules()) treats a missing dependency
+    // exactly like any other pre-init validation failure: REQUIRED panics,
+    // IMPORTANT/OPTIONAL logs and moves on. This is a load-time GATE, not
+    // a solver — it catches an ordering mistake (two same-priority-tier
+    // modules with a dependency edge between them, sorted the wrong way)
+    // instead of silently letting the dependent one run against a kernel
+    // function table that isn't backed by anything yet; it does not
+    // reorder s_static_reg[] to fix the ordering itself.
+    for (int i = 0; i < PURR_MODULE_MAX_DEPS; i++) {
+        const char *dep = hdr->depends[i];
+        if (!dep[0]) continue;
+        if (!purr_kernel_get_module(dep)) {
+            ESP_LOGE(TAG, "'%s' requires '%s', which is not loaded (wrong priority order, "
+                          "or '%s' is missing from this device's device.pcat)",
+                     hdr->name, dep, dep);
+            return -1;
+        }
     }
 
     // Apps are registered in the module table for the app_manager to discover,
@@ -927,9 +985,35 @@ int purr_kernel_load_static_modules(void)
 }
 
 // ── File-based loader (SD card extras) ───────────────────────────────────────
+//
+// STATUS (2026-09): this loader cannot actually load an independently
+// compiled .purr file. peek_module_header() below fread()s a
+// purr_module_header_t straight off disk — including its raw init()/
+// deinit() FUNCTION POINTERS — and this function then calls hdr.init()
+// through whatever bytes happened to be at that file offset. That is only
+// a valid, callable address if the file is a byte-exact dump of THIS
+// firmware build's own address space; it is not a real loader, and never
+// was. There are no .purr files anywhere in this tree, on any device, so
+// this has always been a silent no-op in practice rather than a crash —
+// but it would not do anything safe the moment a real one existed. Kept
+// (not deleted) because purr_kernel.h exports this and every kernel_*_
+// boot.c still calls purr_kernel_scan_modules() at Phase 2 — removing it
+// outright is a six-file boot-sequence change, tracked separately. See
+// source/modules/claw_loader/ for the loader that IS proven on real
+// hardware (a genuine ELF32/Xtensa relocation, not a raw struct read) —
+// that is the mechanism a real loadable-module pass should build on.
 
 int purr_kernel_load_module(const char *path)
 {
+    static bool s_warned_once = false;
+    if (!s_warned_once) {
+        s_warned_once = true;
+        ESP_LOGW(TAG, ".purr file-based loading cannot load an "
+                       "independently compiled module (see this "
+                       "function's own top comment) — use claw_loader "
+                       "for real out-of-tree code");
+    }
+
     purr_module_header_t hdr;
     if (!peek_module_header(path, &hdr)) {
         ESP_LOGE(TAG, "cannot read/validate header: %s", path);
@@ -1083,7 +1167,13 @@ int purr_kernel_scan_modules(const char *flash_dir, const char *sd_fallback_dir)
     count = collect_dir_recursive(flash_dir, entries, MAX_SCAN_ENTRIES, 0);
 
     if (count == 0) {
-        ESP_LOGW(TAG, "scan: no .purr files found in %s", flash_dir);
+        // Expected on every device today — see purr_kernel_load_module()'s
+        // own top comment: this scan path cannot load a real out-of-tree
+        // module anyway, so an empty directory here is not a
+        // misconfiguration to chase.
+        ESP_LOGI(TAG, "scan: no .purr files found in %s (expected — flash/SD "
+                      "module loading is not a supported path yet, see "
+                      "docs/10_ModuleLoading.md)", flash_dir);
     }
 
     // Sort by priority — REQUIRED (1) loaded before IMPORTANT (2) before OPTIONAL (3)

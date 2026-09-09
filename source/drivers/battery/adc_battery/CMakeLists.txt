@@ -5,5 +5,6 @@ idf_component_register(
         .
         ../../../kernel/core
         ../../../kernel/catcalls
-    REQUIRES esp_common driver freertos esp_adc
+        ../../../modules/purr_quirk
+    REQUIRES esp_common driver freertos esp_adc purr_quirk
 )

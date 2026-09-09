@@ -46,17 +46,43 @@ typedef struct {
     // header doesn't need to pull in esp_partition.h — it's a typedef over
     // uint32_t upstream, passed back to esp_partition_munmap() unchanged.
     uint32_t mmap_handle;
+    // Which of the claw_slot partition's CLAW_MAX_SLOTS sub-regions this
+    // module occupies — set by claw_loader_load(), read back by
+    // claw_loader_unload() to free the right one. Not meant to be read or
+    // set by the caller directly; exposed only because this struct is
+    // caller-owned (stack or static storage, no heap allocation of its
+    // own) rather than an opaque handle.
+    int      slot;
 } claw_loaded_module_t;
+
+// Number of independent modules that can be loaded at once — see
+// claw_loader.c's own comment on the partition-size tradeoff this number
+// represents. Callers that want to know how many are free right now
+// (rather than just trying and handling failure) can use
+// claw_loader_slots_free() below.
+#define CLAW_MAX_SLOTS 2
 
 // Parses, relocates, and flash-maps `obj_bytes` (obj_len bytes — a
 // standalone `xtensa-esp32s3-elf-gcc -c` compile, never linked), then
 // resolves claw_personal_init/claw_personal_deinit within it. `out` is
 // zeroed then filled; on failure (parse error, missing entry point, object
-// too big for the loader's flash slot) returns false with nothing to free.
+// too big for the loader's flash slot, or every slot already occupied —
+// see CLAW_MAX_SLOTS above) returns false with nothing to free.
+//
+// Auto-allocates the first free slot rather than taking one as a
+// parameter — every existing caller (app_manager.c, claw_loader_selftest.c)
+// already treats this as "load me a module" with no slot concept at all,
+// and this keeps it that way; claw_loader_unload() reads which slot it got
+// back out of `out` itself, so nothing else needs to track slot numbers.
 //
 // Does NOT call init() — that's the caller's decision, same as app_manager
 // deciding when to call a pre-linked module's own .init.
 bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_module_t *out);
+
+// How many of CLAW_MAX_SLOTS are currently free — for a caller that wants
+// to know before trying (e.g. a future UI showing "1 of 2 loader slots in
+// use") rather than only finding out via a failed claw_loader_load().
+int claw_loader_slots_free(void);
 
 // Frees every resource claw_loader_load() allocated (RAM copies, the flash
 // mapping) and zeroes `m`. Does NOT call deinit() — same reasoning as

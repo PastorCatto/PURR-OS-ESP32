@@ -19,8 +19,26 @@
 
 #include "../../../kernel/core/purr_module.h"
 #include "../../../kernel/core/purr_kernel.h"
+#include "purr_quirk.h"
 
 static const char *TAG = "adc_battery";
+
+// Layout for a "adc_battery.config" .purr v2 quirk block — see
+// purr_quirk_pkg.h. Deliberately plain int/float fields, matching
+// adc_battery_configure()'s own parameter list exactly (channel/ctrl_pin
+// as int rather than the enum types the driver uses internally, same
+// reasoning that function's own signature already follows: a stable,
+// simple wire shape rather than exposing enum layout details a future
+// ESP-IDF version could change). A generator producing this block must
+// match this exact layout (struct packing/alignment on this toolchain);
+// see purrstrap.py's own quirk-package generator for the Python-side
+// struct.pack() that has to stay byte-for-byte in sync with it.
+typedef struct {
+    int32_t channel;
+    int32_t ctrl_pin;
+    float   multiplier;
+    int32_t atten;
+} adc_battery_quirk_t;
 
 // GPIO4 / ADC1_CHANNEL_3, x2.11 — confirmed against Meshtastic's own
 // T-Deck variant.h (`#define BATTERY_PIN 4`, `ADC1_GPIO4_CHANNEL`). This
@@ -181,6 +199,28 @@ static void battery_poll_task(void *arg)
 
 static int module_init(void)
 {
+    // Checked BEFORE anything below reads s_channel/s_atten (both set by
+    // adc_battery_configure(), called here if a matching quirk block is
+    // loaded) — same precedence purrstrap's own generated
+    // adc_battery_configure() call already has today (also runs before
+    // this init(), via purr_device_init()), so a loaded .purr quirk
+    // package is simply the more specific, more current override: this
+    // runs LAST, whichever mechanism configured the device before it.
+    // Self-contained — no boot.c or generated-glue change needed for a
+    // device to pick this up; every device with no quirk package for
+    // this driver behaves exactly as before.
+    size_t qsz = 0;
+    const void *qblk = purr_quirk_get_block("adc_battery.config", &qsz);
+    if (qblk && qsz == sizeof(adc_battery_quirk_t)) {
+        const adc_battery_quirk_t *q = (const adc_battery_quirk_t *)qblk;
+        ESP_LOGI(TAG, "applying loaded quirk package: channel=%d ctrl_pin=%d multiplier=%.3f atten=%d",
+                 (int)q->channel, (int)q->ctrl_pin, q->multiplier, (int)q->atten);
+        adc_battery_configure(q->channel, q->ctrl_pin, q->multiplier, q->atten);
+    } else if (qblk) {
+        ESP_LOGW(TAG, "quirk block 'adc_battery.config' has wrong size (%u, expected %u) — ignoring",
+                 (unsigned)qsz, (unsigned)sizeof(adc_battery_quirk_t));
+    }
+
     adc_oneshot_unit_init_cfg_t unit_cfg = { .unit_id = ADC_UNIT_1 };
     if (adc_oneshot_new_unit(&unit_cfg, &s_adc) != ESP_OK) {
         ESP_LOGE(TAG, "adc_oneshot_new_unit failed");

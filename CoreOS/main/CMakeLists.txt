@@ -167,6 +167,30 @@ idf_component_register(
         # this is no longer needed for verification.
         app_manager
         user_mgr
+        # purr_console — one command table + one line-editing/dispatch loop
+        # (source/modules/purr_console/), replacing this device's own
+        # serial_console_task()'s ad hoc if/else chain. Named purr_console,
+        # not console: ESP-IDF ships its own built-in "console" component
+        # (esp_console_*), and a same-named component here silently lost
+        # that collision — confirmed live on the first real build, see
+        # purr_console.c's own top comment. Same "compiled everywhere, only
+        # called where a boot.c actually reaches for it" shape as
+        # claw_loader/app_manager/user_mgr just above: Phase 1 of the
+        # modular-core/Unix-boot plan wires this into kernel_tdp_boot.c
+        # (kernel_tdeck_plus) only — every other device links the component
+        # with nothing calling into it yet.
+        purr_console
+        # purr_quirk — loads a .purr v2 device quirk-data package
+        # (source/modules/purr_quirk/): pin assignments and driver-specific
+        # config, swappable without a firmware rebuild, the way
+        # postmarketOS bundles a per-device package alongside a shared,
+        # generic base OS. Same "compiled everywhere, only called where a
+        # boot.c reaches for it" shape as purr_console right above it —
+        # deliberately added to this REQUIRES list and to modulestrap.py's
+        # CORE_COMPONENTS together, up front, rather than discovering the
+        # missing half the hard way a second time (see purr_console's own
+        # history right above).
+        purr_quirk
         fatfs
         sdmmc
         # esp_app_format — for esp_app_get_description() in purr_crash_guard.c,

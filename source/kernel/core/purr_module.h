@@ -25,7 +25,17 @@
 #include <stdint.h>
 
 #define PURR_MODULE_MAGIC       0x50555252u   // 'PURR'
-#define PURR_MODULE_ABI_VERSION 2
+#define PURR_MODULE_ABI_VERSION 3
+
+// Maximum other modules a single module can name as a hard dependency in
+// its own `depends` field below. 4 covers every real fan-out seen in this
+// tree so far (app_manager's own CMakeLists PRIV_REQUIRES speed_demon,
+// user_mgr, sig_mgr, claw_loader — the largest today) with one slot of
+// headroom. Fixed-size, matching every other string field in this header
+// (name/version/kernel_min/kernel_max) — this header is read as a raw
+// struct off flash for a loaded module (see claw_elf.h), so it can't hold
+// a variable-length list the way a heap-allocated config could.
+#define PURR_MODULE_MAX_DEPS 4
 
 // Module types
 #define PURR_MOD_DRIVER   0x01
@@ -83,6 +93,26 @@ typedef struct {
     char     kernel_max[12];    // max KITT version, empty = no ceiling
     uint32_t provided_catcalls; // bitmask of CATCALL_FLAG_* this module provides
     uint32_t required_catcalls; // bitmask of CATCALL_FLAG_* this module needs
+
+    // Other modules this one needs ALREADY LOADED before its own init()
+    // may run — by name (purr_kernel_get_module()'s own lookup key), same
+    // as kernel_min/kernel_max are checked by name/version rather than by
+    // pointer. Empty string ("") in a slot means unused; slots need not be
+    // contiguous from index 0. This is deliberately narrower than a real
+    // dependency-resolution system: it is a LOAD-TIME GATE ("refuse to
+    // init if X isn't already up"), not a solver that reorders anything
+    // to satisfy it — a module still has to be started after its own
+    // dependencies by whoever is starting it (device.pcat's [modules]
+    // priority ordering, for a static module; the caller's own sequencing,
+    // for a loaded one). See claw_loader.c's check_dependencies() for the
+    // one real consumer today.
+    //
+    // ABI v2 -> v3: additive at the end of the struct, so a v2 header
+    // (shorter) read as v3 would leave these slots as whatever bytes
+    // followed it in memory — which is exactly why abi_version is checked
+    // BEFORE anything past it is trusted (see purr_kernel_load_module()'s
+    // own check, and claw_loader's mirror of it).
+    char     depends[PURR_MODULE_MAX_DEPS][32];
 
     // Lifecycle — called by kernel module loader
     int  (*init)(void);         // 0 = success

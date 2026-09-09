@@ -17,13 +17,16 @@ static const char *TAG = "claw_loader";
 // CLAW_SEC_EXTERN/claw_import_t: this list IS the capability boundary for
 // loaded code. A module can call a named host function only if it's listed
 // here; anything else in the firmware is unreachable by name to it,
-// deliberately. Starts with exactly one entry — enough to prove the
-// mechanism on real hardware — grown as real personal-space modules need
-// more.
-static const claw_import_t s_imports[] = {
-    { "purr_kernel_uptime_ms", (uint32_t)&purr_kernel_uptime_ms },
-};
-#define CLAW_IMPORT_COUNT (sizeof(s_imports) / sizeof(s_imports[0]))
+// deliberately.
+//
+// Generated (by purrstrap's _generate_claw_imports(), see purrstrap.py)
+// from purr_kernel.h's own public function surface, not hand-maintained —
+// used to be a single hand-written entry here, which was a generation gap
+// against an ABI that was already fully designed, not a real ceiling on
+// what a loaded module should be able to reach. Regenerated on every
+// `purrstrap build`/`purrstrap generate`; do not hand-edit the generated
+// file. s_imports[]/CLAW_IMPORT_COUNT come from it.
+#include "claw_imports_generated.h"
 
 // "claw_slot" — promoted from the R&D spike's "claw_poc" partition once
 // three real-hardware rounds confirmed the approach (see
@@ -34,9 +37,47 @@ static const claw_import_t s_imports[] = {
 #define CLAW_SLOT_PARTITION_NAME "claw_slot"
 #define CLAW_SLOT_SUBTYPE        0x40
 
+// ── Slot table ───────────────────────────────────────────────────────────
+//
+// The claw_slot partition (64 KB total — see partitions_16mb_ota.csv's own
+// sizing comment, already shrunk twice to make room for neighbors) is
+// divided into CLAW_MAX_SLOTS equal, independently mmap'd/erased/written
+// sub-regions, instead of one module owning the whole partition at offset
+// 0 the way this file used to. CLAW_MAX_SLOTS (claw_loader.h) is
+// deliberately small — 2, not more — for two reasons: the partition is
+// already tight, and 64 KB / 2 = 32 KB divides evenly by the flash
+// erase-sector size with no rounding, which a larger N either shrinks
+// further into (risking "text too big" on a real app with no proven need
+// to justify it) or, worse, stops dividing evenly, needing per-slot
+// erase-length rounding logic to get right instead of falling out of the
+// arithmetic for free. Growing this later means either accepting smaller
+// slots or growing the claw_slot partition itself — a
+// partitions_16mb_ota.csv change, deliberately NOT made in this pass:
+// every device's OTA budget is sized against that table, and there is no
+// real-hardware .claw size data yet to justify the tradeoff.
+static bool s_slot_used[CLAW_MAX_SLOTS];
+
+static int find_free_slot(void)
+{
+    for (int i = 0; i < CLAW_MAX_SLOTS; i++) {
+        if (!s_slot_used[i]) return i;
+    }
+    return -1;
+}
+
+int claw_loader_slots_free(void)
+{
+    int n = 0;
+    for (int i = 0; i < CLAW_MAX_SLOTS; i++) {
+        if (!s_slot_used[i]) n++;
+    }
+    return n;
+}
+
 bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_module_t *out)
 {
     memset(out, 0, sizeof(*out));
+    out->slot = -1;
 
     claw_module_t m;
     if (!claw_elf_load(obj_bytes, obj_len, "claw_personal_init",
@@ -59,12 +100,29 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
         claw_elf_free(&m);
         return false;
     }
-    if (m.text_size > part->size) {
-        ESP_LOGE(TAG, "text (%u B) too big for %s partition (%u B)",
-                 (unsigned)m.text_size, CLAW_SLOT_PARTITION_NAME, (unsigned)part->size);
+
+    int slot = find_free_slot();
+    if (slot < 0) {
+        ESP_LOGE(TAG, "no free slot (%d of %d already loaded)", CLAW_MAX_SLOTS, CLAW_MAX_SLOTS);
         claw_elf_free(&m);
         return false;
     }
+    uint32_t slot_size   = (uint32_t)(part->size / CLAW_MAX_SLOTS);
+    uint32_t slot_offset = (uint32_t)slot * slot_size;
+
+    if (m.text_size > slot_size) {
+        ESP_LOGE(TAG, "text (%u B) too big for one %s slot (%u B of %u total / %d slots)",
+                 (unsigned)m.text_size, CLAW_SLOT_PARTITION_NAME,
+                 (unsigned)slot_size, (unsigned)part->size, CLAW_MAX_SLOTS);
+        claw_elf_free(&m);
+        return false;
+    }
+    // s_slot_used[] is claimed here, before any further step that can
+    // still fail below — every failure path from here on is the shared
+    // `fail:` label, which releases it again. Claiming late (only on
+    // success) would let two concurrent loads both pick the same "free"
+    // slot in between.
+    s_slot_used[slot] = true;
 
     if (m.rodata_size) {
         out->rodata_ram = heap_caps_malloc(m.rodata_size, MALLOC_CAP_8BIT);
@@ -93,7 +151,7 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
         // range reliably returns the same address.)
         const void *probe_ptr = NULL;
         esp_partition_mmap_handle_t probe_handle = 0;
-        esp_err_t err = esp_partition_mmap(part, 0, m.text_size, ESP_PARTITION_MMAP_INST,
+        esp_err_t err = esp_partition_mmap(part, slot_offset, m.text_size, ESP_PARTITION_MMAP_INST,
                                             &probe_ptr, &probe_handle);
         if (err != ESP_OK) { ESP_LOGE(TAG, "probe mmap failed: %s", esp_err_to_name(err)); goto fail; }
         uint32_t probe_base = (uint32_t)probe_ptr;
@@ -121,15 +179,29 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
             memcpy(buf + p->text_off, &target_addr, sizeof(target_addr));
         }
 
-        esp_err_t erase_err = esp_partition_erase_range(part, 0, part->erase_size);
+        // Erase exactly enough sectors to cover m.text_size, rounded up to
+        // the flash's own erase granularity and bounded to this slot's own
+        // region — NOT part->erase_size unconditionally the way this used
+        // to read. That was harmless for the ~1.6KB test payloads this was
+        // ever exercised with (well under one erase sector), but wrong in
+        // general: a text segment bigger than one erase_size unit would
+        // get only its first sector erased, and writing over the
+        // un-erased remainder can only clear bits, silently corrupting
+        // the tail of the write. In the multi-slot world getting this
+        // bound wrong is worse than silent corruption of your own module —
+        // erase_len is clamped to slot_size so a miscalculation here can
+        // never reach into a NEIGHBORING slot's still-loaded code.
+        uint32_t erase_len = ((m.text_size + part->erase_size - 1) / part->erase_size) * part->erase_size;
+        if (erase_len > slot_size) erase_len = slot_size;
+        esp_err_t erase_err = esp_partition_erase_range(part, slot_offset, erase_len);
         if (erase_err != ESP_OK) { ESP_LOGE(TAG, "erase failed: %s", esp_err_to_name(erase_err)); heap_caps_free(buf); goto fail; }
-        esp_err_t write_err = esp_partition_write(part, 0, buf, m.text_size);
+        esp_err_t write_err = esp_partition_write(part, slot_offset, buf, m.text_size);
         heap_caps_free(buf);
         if (write_err != ESP_OK) { ESP_LOGE(TAG, "write failed: %s", esp_err_to_name(write_err)); goto fail; }
 
         const void *exec_ptr = NULL;
         esp_partition_mmap_handle_t exec_handle = 0;
-        err = esp_partition_mmap(part, 0, m.text_size, ESP_PARTITION_MMAP_INST,
+        err = esp_partition_mmap(part, slot_offset, m.text_size, ESP_PARTITION_MMAP_INST,
                                   &exec_ptr, &exec_handle);
         if (err != ESP_OK) { ESP_LOGE(TAG, "exec mmap failed: %s", esp_err_to_name(err)); goto fail; }
         if (probe_base != (uint32_t)exec_ptr) {
@@ -142,16 +214,19 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
         }
 
         out->mmap_handle = (uint32_t)exec_handle;
+        out->slot   = slot;
         out->init   = (claw_init_fn)((uint32_t)exec_ptr + m.entry_off);
         out->deinit = (claw_deinit_fn)((uint32_t)exec_ptr + deinit_off);
     }
 
-    ESP_LOGI(TAG, "loaded: init=%p deinit=%p", (void *)out->init, (void *)out->deinit);
+    ESP_LOGI(TAG, "loaded into slot %d/%d: init=%p deinit=%p",
+             slot, CLAW_MAX_SLOTS, (void *)out->init, (void *)out->deinit);
     claw_elf_free(&m);
     return true;
 
 fail:
     claw_elf_free(&m);
+    if (slot >= 0) s_slot_used[slot] = false;
     if (out->rodata_ram) heap_caps_free(out->rodata_ram);
     if (out->data_ram)   heap_caps_free(out->data_ram);
     if (out->bss_ram)    heap_caps_free(out->bss_ram);
@@ -161,7 +236,16 @@ fail:
 
 void claw_loader_unload(claw_loaded_module_t *m)
 {
-    if (m->mmap_handle) esp_partition_munmap((esp_partition_mmap_handle_t)m->mmap_handle);
+    // Same "was this ever really loaded" guard claw_loader_load()'s own
+    // fail path uses (mmap_handle is 0 for a zeroed/never-loaded struct) —
+    // gates releasing the slot too, so calling this on a struct that was
+    // never successfully loaded can't accidentally free a slot some OTHER
+    // module is actually using (a zeroed struct's `slot` field is 0, not a
+    // sentinel, so this check matters, not just the mmap_handle one).
+    if (m->mmap_handle) {
+        esp_partition_munmap((esp_partition_mmap_handle_t)m->mmap_handle);
+        if (m->slot >= 0 && m->slot < CLAW_MAX_SLOTS) s_slot_used[m->slot] = false;
+    }
     if (m->rodata_ram) heap_caps_free(m->rodata_ram);
     if (m->data_ram)   heap_caps_free(m->data_ram);
     if (m->bss_ram)    heap_caps_free(m->bss_ram);

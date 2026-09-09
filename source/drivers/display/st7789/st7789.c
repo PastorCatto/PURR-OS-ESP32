@@ -24,10 +24,12 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"   // Step 0 instrumentation — see DP8_CHECKLIST.md
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "../../kernel/core/purr_module.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/catcalls/catcall_display.h"
+#include "purr_quirk.h"
 
 // ── Default pin assignments (T-Deck) ─────────────────────────────────────────
 #ifndef CONFIG_DRV_DISPLAY_CS_PIN
@@ -102,6 +104,77 @@ static uint32_t s_spi_freq_hz = ST7789_CLK_HZ;
 
 static const char *TAG = "drv:st7789";
 
+// ── Panel profiles ───────────────────────────────────────────────────────────
+//
+// Everything that used to be two separate in-driver branches — one for
+// geometry (width/height/col_off/row_off, in st7789_init()) and a second,
+// physically distant one for MADCTL (down by the panel init sequence) —
+// both keyed off the same `ws169` bool, collapsed into one data lookup used
+// at both sites. This is the pattern docs/17_Modular_Core.md's driver-quirk
+// section names directly: "every new panel variant costs a flag plus a
+// branch inside the shared driver... doesn't scale past a handful of
+// quirks." Two panels is exactly a handful, and this proves the shape
+// before a third one needs it, rather than after.
+//
+// Indexed by ST7789_FLAG_WS169's bit today (a plain 2-entry array, not a
+// bitmask-keyed table) — exactly one flag bit selects between exactly two
+// known panels right now. A real profile registry (more than this one
+// flag, more than two panels) is the natural next step once a second real
+// quirk shows up needing it, not invented ahead of that need.
+typedef struct {
+    // Fixed-size, NOT const char* — this struct is read verbatim off disk
+    // as a .purr v2 quirk block (see purr_quirk_get_block()'s call site
+    // below): a pointer field would hold whatever raw bytes happened to
+    // be at that file offset, not a valid address, and dereferencing it
+    // would be a real crash. Same reasoning purr_module_header_t::name[32]
+    // and every other serializable name field in this codebase already
+    // follows — this one was the exception, caught before it shipped.
+    char        name[40];
+    uint16_t    width;
+    uint16_t    height;
+    uint16_t    col_off;
+    uint16_t    row_off;
+    uint8_t     madctl_normal;   // MADCTL when the caller's rotation == 0
+    uint8_t     madctl_rotated;  // MADCTL when the caller's rotation != 0
+    // Panel is physically wired BGR. ORed with the device-wide
+    // CONFIG_PURR_DISPLAY_ST7789_BGR_ORDER Kconfig flag below, not a
+    // replacement for it — that flag is a real, already-shipping
+    // per-device setting (device.pcat-driven) and neither of the two
+    // profiles here needs it forced on, but a future panel profile could
+    // set this directly instead of needing its own new Kconfig symbol.
+    bool        bgr;
+} st7789_panel_profile_t;
+
+static const st7789_panel_profile_t s_panel_profiles[2] = {
+    // [0] default — T-Deck-family 320x240 landscape (MV|MX|MY)
+    {
+        .name           = "default (320x240 landscape)",
+        .width          = ST7789_WIDTH,
+        .height         = ST7789_HEIGHT,
+        .col_off        = 0,
+        .row_off        = 0,
+        .madctl_normal  = MADCTL_LANDSCAPE,
+        .madctl_rotated = MADCTL_PORTRAIT,
+        .bgr            = false,
+    },
+    // [1] Waveshare 1.69" — 240x280 portrait, GRAM row offset 20 in a
+    // 240x320 controller. Ignores the caller's rotation entirely, same as
+    // this driver's behavior before this table existed — madctl_normal
+    // and madctl_rotated are deliberately identical here, not an
+    // oversight, so st7789_init()'s single rotation-selects-between-the-
+    // two-fields logic reproduces that unchanged.
+    {
+        .name           = "waveshare169 (240x280 portrait)",
+        .width          = ST7789_WS169_W,
+        .height         = ST7789_WS169_H,
+        .col_off        = 0,
+        .row_off        = 20,
+        .madctl_normal  = MADCTL_PORTRAIT,
+        .madctl_rotated = MADCTL_PORTRAIT,
+        .bgr            = false,
+    },
+};
+
 // ── Driver state ──────────────────────────────────────────────────────────────
 
 typedef struct {
@@ -134,6 +207,37 @@ static uint16_t            s_row_off  = 0;
 
 // Row buffer — 320 px × 2 bytes
 static uint16_t s_row_buf[ST7789_WIDTH];
+
+// ── Cross-task bus-ownership semaphore ──────────────────────────────────────
+//
+// async_wait_idle()'s own doc comment (way below, next to fill_rect) already
+// documents the class of bug this exists to actually fix, not just
+// mitigate: "ESP-IDF's bus lock is held per DEVICE, not per task... its
+// acquire was a no-op." A plain boolean (s_async_active), polled with a
+// timeout, narrows that race but does not close it — confirmed live: a
+// purr_kernel_panic_ex() call fired from the CONSOLE task while the render
+// task's own async flush was still genuinely in flight reliably hit exactly
+// the failure mode this comment already predicted (spi_device_release_bus()
+// asserting "lock that hasn't been acquired"), because s_async_active flips
+// false BEFORE the async completion task's own spi_device_release_bus()
+// call actually runs (see that ordering's own comment above
+// async_completion_task()) — a real, non-empty window where async_wait_
+// idle()'s poll can observe "idle" and let a second caller proceed while
+// the bus is still, physically, not released yet.
+//
+// A real FreeRTOS binary semaphore (not xSemaphoreCreateMutex() — this one
+// is deliberately taken by push_pixels_async() on the caller's task and
+// given back by async_completion_task() on a DIFFERENT task once the whole
+// async cycle truly finishes, a hand-off a real mutex's owner-tracking
+// would reject) brackets the FULL spi_device_acquire_bus()...release_bus()
+// window for every path — sync and async alike — so a second caller can no
+// longer observe "idle" a moment before the real release happens; it is
+// only ever handed the semaphore after that release has actually returned.
+// Declared here (not down in the async-state cluster it conceptually
+// belongs with) because st7789_init() — defined before that cluster in this
+// file — is what creates and seeds it. Seeded "available" exactly once,
+// right after creation, in st7789_init() itself.
+static SemaphoreHandle_t s_async_bus_sem = NULL;
 
 // ── Perf mode: optional PSRAM bulk-transfer buffer ──────────────────────
 // See st7789_set_perf_mode()'s doc comment in st7789.h. NULL unless/until
@@ -505,6 +609,24 @@ static esp_err_t st7789_init(const display_config_t *cfg)
 {
     if (s_ready) return ESP_OK;
 
+    // See s_async_bus_sem's own comment for what this closes. Binary, not
+    // a real mutex — deliberately hands off across tasks (taken by
+    // push_pixels_async()'s caller, given back by async_completion_task()).
+    // Created unconditionally, whether or not perf/async mode ever
+    // actually engages, so async_wait_idle() always has it to take —
+    // xSemaphoreCreateBinary() starts EMPTY, so it must be given once here
+    // to seed the "available" state before any caller ever takes it.
+    if (!s_async_bus_sem) {
+        s_async_bus_sem = xSemaphoreCreateBinary();
+        if (s_async_bus_sem) {
+            xSemaphoreGive(s_async_bus_sem);
+        } else {
+            ESP_LOGE(TAG, "s_async_bus_sem alloc failed — async/sync draw calls from "
+                          "different tasks are unprotected against the bus-lock race "
+                          "async_wait_idle() exists to close");
+        }
+    }
+
     bool ws169 = false;
     uint8_t rotation = 0;
 
@@ -514,18 +636,39 @@ static esp_err_t st7789_init(const display_config_t *cfg)
         ws169    = (cfg->flags & ST7789_FLAG_WS169) != 0;
     }
 
-    // Set panel geometry
-    if (ws169) {
-        s_width   = ST7789_WS169_W;
-        s_height  = ST7789_WS169_H;
-        s_col_off = 0;
-        s_row_off = 20;  // 240×280 GRAM sits at row offset 20 in a 240×320 controller
-    } else {
-        s_width   = ST7789_WIDTH;
-        s_height  = ST7789_HEIGHT;
-        s_col_off = 0;
-        s_row_off = 0;
+    // Panel profile lookup — see s_panel_profiles[]'s own comment. Kept
+    // alive as a local for the whole function (not just this block): the
+    // MADCTL selection further down, in st7789_init_regs()'s caller, reads
+    // the same profile instead of re-deriving `ws169` a second time.
+    //
+    // A loaded .purr v2 quirk package's "st7789.panel_profile" block, if
+    // present and correctly sized, overrides the compiled-in table
+    // entirely rather than picking between its two entries — this is the
+    // point of the quirk-package mechanism: a THIRD panel this driver was
+    // never compiled with a profile for becomes expressible as loadable
+    // data instead of a new #define + a new s_panel_profiles[] entry.
+    // st7789_panel_profile_t stays file-private (never exposed in
+    // st7789.h) — the quirk block's byte layout is what a generator has
+    // to match, not a public struct.
+    const st7789_panel_profile_t *profile = &s_panel_profiles[ws169 ? 1 : 0];
+    {
+        size_t qsz = 0;
+        const void *qblk = purr_quirk_get_block("st7789.panel_profile", &qsz);
+        if (qblk && qsz == sizeof(st7789_panel_profile_t)) {
+            profile = (const st7789_panel_profile_t *)qblk;
+            ESP_LOGI(TAG, "using loaded quirk package's panel profile '%s' instead of compiled-in default",
+                     ((const st7789_panel_profile_t *)qblk)->name);
+        } else if (qblk) {
+            ESP_LOGW(TAG, "quirk block 'st7789.panel_profile' has wrong size (%u, expected %u) — ignoring",
+                     (unsigned)qsz, (unsigned)sizeof(st7789_panel_profile_t));
+        }
     }
+
+    // Set panel geometry
+    s_width   = profile->width;
+    s_height  = profile->height;
+    s_col_off = profile->col_off;
+    s_row_off = profile->row_off;
 
     // DC pin
     gpio_config_t dc_cfg = {
@@ -614,12 +757,13 @@ static esp_err_t st7789_init(const display_config_t *cfg)
         }
     }
 
-    // Panel init sequence
-    uint8_t madctl = ws169 ? MADCTL_PORTRAIT
-                            : ((rotation == 0) ? MADCTL_LANDSCAPE : MADCTL_PORTRAIT);
+    // Panel init sequence — same profile picked at the top of this
+    // function, not `ws169` re-branched a second time.
+    uint8_t madctl = (rotation == 0) ? profile->madctl_normal : profile->madctl_rotated;
 #ifdef CONFIG_PURR_DISPLAY_ST7789_BGR_ORDER
     madctl |= 0x08;   // panel is physically wired BGR — see Kconfig help text
 #endif
+    if (profile->bgr) madctl |= 0x08;
     st7789_init_regs(madctl);
 
     // Clear GRAM before display on.
@@ -656,8 +800,7 @@ static esp_err_t st7789_init(const display_config_t *cfg)
         bl_set(255);
     }
 
-    ESP_LOGI(TAG, "ST7789 ready %dx%d%s", s_width, s_height,
-             ws169 ? " (ws169)" : "");
+    ESP_LOGI(TAG, "ST7789 ready %dx%d [%s]", s_width, s_height, profile->name);
     return ESP_OK;
 }
 
@@ -772,7 +915,7 @@ static esp_err_t st7789_push_pixels_inner(int x, int y, int w, int h, const uint
 static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *data);
 static void      async_arm(size_t max_px);
 // Defined next to fill_rect, which shares the same hazard.
-static void      async_wait_idle(void);
+static bool      async_wait_idle(void);
 
 static uint16_t *s_async_buf     = NULL;   // internal DMA staging, split in two
 static size_t    s_async_buf_px  = 0;      // total capacity, in pixels
@@ -873,6 +1016,12 @@ static void async_completion_task(void *arg)
         // buffer still marked in flight.
         s_async_active = false;
         spi_device_release_bus(s_spi);
+        // Given back only AFTER the real release above returns — this is
+        // the actual fix async_wait_idle() needs: a caller on another task
+        // taking s_async_bus_sem is now only ever handed it once the bus
+        // is genuinely free, never a moment before, the way polling
+        // s_async_active alone could observe.
+        if (s_async_bus_sem) xSemaphoreGive(s_async_bus_sem);
 
         if (s_done_cb) s_done_cb(s_done_user);
     }
@@ -911,6 +1060,13 @@ static esp_err_t st7789_push_pixels_async(int x, int y, int w, int h, int stride
         return e;
     }
 
+    // Take s_async_bus_sem BEFORE touching the bus — see its own comment.
+    // Not given back in this function: it stays held for the whole async
+    // cycle this call kicks off, across the task boundary, until
+    // async_completion_task() gives it back right after its own
+    // spi_device_release_bus() call actually returns.
+    if (s_async_bus_sem) xSemaphoreTake(s_async_bus_sem, portMAX_DELAY);
+
     s_tx_row    = data;
     s_tx_left   = px;
     s_tx_cols   = cols;
@@ -934,6 +1090,10 @@ static esp_err_t st7789_push_pixels_async(int x, int y, int w, int h, int stride
     if (s_inflight == 0) {            // nothing queued at all - unwind cleanly
         s_async_active = false;
         spi_device_release_bus(s_spi);
+        // async_completion_task() never runs in this early-bailout path,
+        // so it never gives s_async_bus_sem back — this is the one other
+        // place that must, symmetric with the take just above.
+        if (s_async_bus_sem) xSemaphoreGive(s_async_bus_sem);
         if (s_done_cb) s_done_cb(s_done_user);
         return ESP_FAIL;
     }
@@ -1040,12 +1200,20 @@ static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *
     // Reached from push_pixels_async()'s own fallback as well, which is correct:
     // that path is taken precisely because a transfer is already in flight, and
     // waiting for it is what makes the two safe to interleave.
-    async_wait_idle();
+    //
+    // async_wait_idle() both waits AND takes s_async_bus_sem on success —
+    // given back unconditionally below once st7789_push_pixels_inner()
+    // returns, whether or not it actually reached the bus itself (its own
+    // early "not ready" return, before ever acquiring, is still a case
+    // where giving the semaphore straight back is exactly correct — this
+    // caller decided not to touch the bus after all).
+    if (!async_wait_idle()) return ESP_ERR_TIMEOUT;
 
     uint32_t  t0     = s_perf_trans_ctr;
     int64_t   start  = esp_timer_get_time();
 
     esp_err_t ret    = st7789_push_pixels_inner(x, y, w, h, data);
+    if (s_async_bus_sem) xSemaphoreGive(s_async_bus_sem);
 
     uint32_t  us     = (uint32_t)(esp_timer_get_time() - start);
     s_perf_flushes++;
@@ -1072,34 +1240,59 @@ static esp_err_t st7789_push_pixels(int x, int y, int w, int h, const uint16_t *
     return ret;
 }
 
-// Wait for any in-flight asynchronous transfer to finish before touching the bus
-// synchronously. EVERY synchronous entry point must call this first.
+// Wait for any in-flight asynchronous transfer to finish, and TAKE
+// ownership of the bus on the caller's behalf, before it touches the bus
+// synchronously. EVERY synchronous entry point must call this first, and —
+// new since the s_async_bus_sem rewrite below — must give the semaphore
+// back itself once its own acquire/draw/release_bus sequence is done, ONLY
+// if this returned true.
 //
-// Not defensive coding — this fixes a real, reproducible crash:
+// Not defensive coding — this exists to actually fix a real, reproducible
+// crash, first found here:
 //
 //   magidos_task -> purr_speed_demon_enter -> purr_splash_show
 //                -> st7789_fill_rect -> spi_device_release_bus -> assert
 //
-// ESP-IDF's bus lock is held per DEVICE, not per task. The async path acquires
-// the bus on the render task and returns with it still held, so a second task
-// calling fill_rect() found the lock already owned by this same device: its
-// acquire was a no-op, and its release then dropped the bus out from under a
-// transfer that was still running. The completion task released it again, and
-// spi_device_release_bus() asserted on a lock nobody held.
+// and reproduced AGAIN, differently, on real hardware while verifying the
+// modular-core/Unix-boot plan's recoverable-panic-console work: a
+// deliberate purr_kernel_panic_ex() call from the CONSOLE task, fired
+// while mochi's own render task had a real async flush in flight, hit the
+// exact same assert twice (once mid-app, once with nothing else running) —
+// proof this file's ORIGINAL fix (a plain s_async_active boolean, polled
+// with a bounded timeout, "proceeding anyway" if still active after 400ms)
+// narrowed the race without closing it. s_async_active is deliberately set
+// false BEFORE spi_device_release_bus() actually runs (see that ordering's
+// own comment in async_completion_task() — a real, separate invariant
+// about the shared staging buffer, not a mistake) — which means there is a
+// genuine window where polling s_async_active alone can observe "idle" a
+// moment before the bus is actually free. ESP-IDF's own bus lock is held
+// per DEVICE, not per task, so a second caller's spi_device_acquire_bus()
+// landing in that window does not reliably block the way a normal
+// per-task mutex would; its release then contends with the real owner's
+// own release, which is what "lock that hasn't been acquired" actually
+// means when it fires.
 //
-// It presented as roughly a 90% failure rate entering speed demon, because whether
-// the splash's fill_rect lands inside a transfer window is pure timing.
+// s_async_bus_sem (see its own comment) is a real cross-task semaphore
+// that closes this: TAKING it here can only succeed once
+// async_completion_task() (or push_pixels_async()'s own early-bailout
+// path) has ALREADY called the real spi_device_release_bus(), never a
+// moment before — there is no "observed idle but not actually free" state
+// left to race against.
 //
-// Bounded: a wedged transfer must not hang a caller forever. Proceeding after
-// the timeout is no worse than the crash this replaces.
-static void async_wait_idle(void)
+// Bounded, still: a wedged transfer must not hang a caller forever. But
+// unlike before, a timeout now means "skip this draw" (return false),
+// never "proceed anyway" — that fallback is exactly what the two crashes
+// above came from, and is no longer an acceptable trade now that it has a
+// confirmed, reproducible failure mode instead of a theoretical one.
+static bool async_wait_idle(void)
 {
-    for (int i = 0; i < 400 && s_async_active; i++) {
-        vTaskDelay(pdMS_TO_TICKS(1));
+    if (!s_async_bus_sem) return true;   // alloc failed at init — nothing to protect with
+    if (xSemaphoreTake(s_async_bus_sem, pdMS_TO_TICKS(400)) != pdTRUE) {
+        ESP_LOGW(TAG, "async transfer still active after 400ms — skipping this draw "
+                      "(used to proceed anyway; that is the exact crash this now avoids)");
+        return false;
     }
-    if (s_async_active) {
-        ESP_LOGW(TAG, "async transfer still active after 400ms — proceeding anyway");
-    }
+    return true;   // caller now holds s_async_bus_sem — MUST give it back when done
 }
 
 // See st7789_push_pixels()'s doc comment — same reasoning applies here.
@@ -1107,7 +1300,10 @@ static esp_err_t st7789_fill_rect(int x, int y, int w, int h, uint16_t color)
 {
     if (!s_ready || w <= 0 || h <= 0) return ESP_ERR_INVALID_STATE;
 
-    async_wait_idle();
+    // See async_wait_idle()'s own doc comment: this both waits AND takes
+    // s_async_bus_sem on success — must be given back below before every
+    // return past this point.
+    if (!async_wait_idle()) return ESP_ERR_TIMEOUT;
 
     int cols = (w <= ST7789_WIDTH) ? w : ST7789_WIDTH;
     uint16_t swapped = (uint16_t)((color >> 8) | (color << 8));
@@ -1121,6 +1317,7 @@ static esp_err_t st7789_fill_rect(int x, int y, int w, int h, uint16_t color)
         spi_write_data(s_row_buf, (size_t)(cols * 2));
     }
     spi_device_release_bus(s_spi);
+    if (s_async_bus_sem) xSemaphoreGive(s_async_bus_sem);
     return ESP_OK;
 }
 

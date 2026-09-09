@@ -26,6 +26,7 @@ extern "C" {
 #include "../../../kernel/core/purr_module.h"
 #include "../../../kernel/core/purr_kernel.h"
 #include "../../../kernel/catcalls/catcall_radio.h"
+#include "purr_quirk.h"
 #include "sx1262_rl.h"
 }
 
@@ -58,8 +59,41 @@ static int s_pin_irq  = SX1262_RL_DEFAULT_IRQ;
 static spi_host_device_t s_spi_host = SPI2_HOST;
 #define SX1262_RL_SPI_FREQ (8 * 1000 * 1000)  // 8 MHz, matches sx1262.c
 
+// Layout for a "sx1262_rl.pins" .purr v2 quirk block — see purr_quirk_pkg.h.
+// Plain int32_t fields matching sx1262_rl_configure()'s own parameter list —
+// deliberately a SEPARATE block name from sx1262.c's "sx1262.pins" even
+// though the layout is identical, since a device could in principle
+// (never does today) select either driver and the two should never be
+// confused for one another.
+typedef struct {
+    int32_t mosi;
+    int32_t miso;
+    int32_t sclk;
+    int32_t cs;
+    int32_t rst;
+    int32_t busy;
+    int32_t irq;
+} sx1262_rl_pin_quirk_t;
+
 extern "C" void sx1262_rl_configure(int mosi, int miso, int sclk, int cs, int rst, int busy, int irq)
 {
+    // A loaded .purr v2 quirk package's "sx1262_rl.pins" block, if present
+    // and correctly sized, overrides the CALLER's own values — same
+    // precedence gt911_configure()/adc_battery's own quirk checks already use.
+    size_t qsz = 0;
+    const void *qblk = purr_quirk_get_block("sx1262_rl.pins", &qsz);
+    if (qblk && qsz == sizeof(sx1262_rl_pin_quirk_t)) {
+        const sx1262_rl_pin_quirk_t *q = (const sx1262_rl_pin_quirk_t *)qblk;
+        mosi = q->mosi; miso = q->miso; sclk = q->sclk;
+        cs = q->cs; rst = q->rst; busy = q->busy; irq = q->irq;
+        ESP_LOGI(TAG, "using loaded quirk package's pin assignment instead of caller's "
+                      "(mosi=%d miso=%d sclk=%d cs=%d rst=%d busy=%d irq=%d)",
+                 mosi, miso, sclk, cs, rst, busy, irq);
+    } else if (qblk) {
+        ESP_LOGW(TAG, "quirk block 'sx1262_rl.pins' has wrong size (%u, expected %u) — ignoring",
+                 (unsigned)qsz, (unsigned)sizeof(sx1262_rl_pin_quirk_t));
+    }
+
     s_pin_mosi = mosi;
     s_pin_miso = miso;
     s_pin_sclk = sclk;

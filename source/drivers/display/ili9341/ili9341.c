@@ -22,6 +22,7 @@
 #include "../../kernel/core/purr_module.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/catcalls/catcall_display.h"
+#include "purr_quirk.h"
 
 // ── Default pin assignments (CYD / ESP32-2432S028R) ──────────────────────────
 #ifndef CONFIG_DRV_DISPLAY_CS_PIN
@@ -113,11 +114,40 @@ static bool                s_ready = false;
 // Row buffer (320 px × 2 bytes) — reused for fill_rect to avoid heap pressure.
 static uint16_t s_row_buf[ILI9341_WIDTH];
 
+// Layout for a "ili9341.pins" .purr v2 quirk block — see purr_quirk_pkg.h.
+// Plain int32_t fields matching ili9341_configure()'s own parameter list.
+typedef struct {
+    int32_t cs;
+    int32_t dc;
+    int32_t mosi;
+    int32_t miso;
+    int32_t sclk;
+    int32_t rst;
+    int32_t bl;
+} ili9341_pin_quirk_t;
+
 // ── Public configure API ──────────────────────────────────────────────────────
 
 void ili9341_configure(int cs, int dc, int mosi, int miso,
                        int sclk, int rst, int bl)
 {
+    // A loaded .purr v2 quirk package's "ili9341.pins" block, if present
+    // and correctly sized, overrides the CALLER's own values — same
+    // precedence gt911_configure()/adc_battery's own quirk checks already use.
+    size_t qsz = 0;
+    const void *qblk = purr_quirk_get_block("ili9341.pins", &qsz);
+    if (qblk && qsz == sizeof(ili9341_pin_quirk_t)) {
+        const ili9341_pin_quirk_t *q = (const ili9341_pin_quirk_t *)qblk;
+        cs = q->cs; dc = q->dc; mosi = q->mosi; miso = q->miso;
+        sclk = q->sclk; rst = q->rst; bl = q->bl;
+        ESP_LOGI(TAG, "using loaded quirk package's pin assignment instead of caller's "
+                      "(cs=%d dc=%d mosi=%d miso=%d sclk=%d rst=%d bl=%d)",
+                 cs, dc, mosi, miso, sclk, rst, bl);
+    } else if (qblk) {
+        ESP_LOGW(TAG, "quirk block 'ili9341.pins' has wrong size (%u, expected %u) — ignoring",
+                 (unsigned)qsz, (unsigned)sizeof(ili9341_pin_quirk_t));
+    }
+
     s_pins.cs_pin   = cs;
     s_pins.dc_pin   = dc;
     s_pins.mosi_pin = mosi;

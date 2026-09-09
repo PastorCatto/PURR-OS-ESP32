@@ -156,7 +156,7 @@ Every `.purr` binary exports one symbol: `purr_module` of type `purr_module_head
 ```c
 typedef struct {
     uint32_t magic;             // 0x50555252 ('PURR') — must match
-    uint8_t  abi_version;       // must match PURR_MODULE_ABI_VERSION (2)
+    uint8_t  abi_version;       // must match PURR_MODULE_ABI_VERSION (3)
     uint8_t  module_type;       // PURR_MOD_DRIVER / SYSTEM / UI / APP
     char     name[32];          // human-readable name
     char     version[12];       // semver string "0.1.0"
@@ -164,10 +164,17 @@ typedef struct {
     char     kernel_max[12];    // maximum KITT version supported ("" = no ceiling)
     uint32_t provided_catcalls; // bitmask of CATCALL_FLAG_* this module registers
     uint32_t required_catcalls; // bitmask of CATCALL_FLAG_* this module needs at load time
+    char     depends[4][32];    // v3+: names of other modules that must already be
+                                 // loaded before this one's init() may run — a
+                                 // load-time gate, not a dependency solver (see
+                                 // purr_module.h's own doc comment on the field)
     int    (*init)(void);       // called at load — return 0 for success
     void   (*deinit)(void);     // called if module is unloaded
 } purr_module_header_t;
 ```
+
+(Simplified for readability — see `purr_module.h` itself for the exact byte
+layout, including `load_priority`/`speed_demon` fields omitted here.)
 
 ### Module types
 

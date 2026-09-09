@@ -1,9 +1,27 @@
 # 10 — Module Loading, Priority, and SD Fallback
 
-> **Accurate as of v1.0.0-dp8.** Read the section immediately below before the
+> **Accurate as of v1.0.0-dp9.** Read the section immediately below before the
 > rest of this document — the primary loading mechanism is **static
-> registration**, not the `.purr` file scanning that much of this document
-> describes. The `.purr` path still exists, but it is the secondary route.
+> registration**. The `.purr` file scanning this document also describes is
+> not a working secondary route, and should not be relied on as one: its
+> loader (`purr_kernel_load_module()`/`peek_module_header()` in
+> `purr_kernel.c`) `fread()`s a `purr_module_header_t` — including its raw
+> `init()`/`deinit()` function pointers — directly off disk. That can only
+> produce a valid, callable address if the file is a byte-exact dump of the
+> exact firmware build reading it; it cannot load an independently compiled
+> object, and never could. There are no `.purr` files anywhere in this tree
+> on any device, on any build. The functions are kept (six `kernel_*_boot.c`
+> files still call `purr_kernel_scan_modules()` at boot, and removing that
+> is its own tracked boot-sequence change) but they should be read as
+> historical/aspirational, not as a real extension point. `source/modules/
+> driver_manager/` — the module this scan was originally built to feed — is
+> in the same state; see its own top-of-file comment.
+>
+> The real loadable-module mechanism, proven on real hardware, is
+> `source/modules/claw_loader/` (`claw_elf.c`'s genuine ELF32/Xtensa
+> relocation). It's scoped to one loaded personal-app slot today; extending
+> it to drivers/system modules is the intended direction, not building out
+> the `.purr` scan further.
 
 This document covers how PURR OS loads kernel modules at boot: static
 registration, the priority system, SD fallback, the panic screen, and the SD
@@ -52,8 +70,9 @@ Two consequences worth knowing:
   device.
 
 `.purr` scanning still runs afterwards for `/sdcard/modules` and
-`/sdcard/drivers`, so an SD card can add extras — but nothing in a normal build
-arrives that way.
+`/sdcard/drivers`, but — see the banner at the top of this document — it
+cannot actually load a real out-of-tree module, so an SD card cannot add
+extras this way today. Nothing in a normal build arrives via this path.
 
 ---
 
@@ -191,6 +210,13 @@ The `boot.c` `ensure_sd_dirs()` call creates any missing directories when the SD
 
 ## Kernel Panic Screen
 
+> **Caveat:** the "or SD" half of "fails to load from both flash and SD"
+> below describes the intended design, not working behavior — see the
+> banner at the top of this document. `modulestrap` does produce real,
+> independently compiled `.purr` blobs (`cattobaked/modules/*.purr`), but
+> `purr_kernel_load_module()` cannot actually load one back at runtime.
+> Today, a P1 module missing from flash panics; SD is not a real fallback.
+
 `purr_kernel_panic(const char *reason)` is called when a P1 module fails to load from both flash and SD. It:
 
 1. Logs `KERNEL PANIC` + reason to serial (always — serial works even with no display)
@@ -219,7 +245,11 @@ A module not listed in `[flash]` won't be in the SPIFFS image. If it's P1 and mi
 3. Run `purrstrap build <device>` — modulestrap builds the blob, it gets staged into SPIFFS, flash.bin is produced
 4. Flash with `purrstrap flash <device>`
 
-If you want it on SD as fallback only (e.g. for dev/testing), skip step 3-4 and manually copy the `.purr` file to `/sdcard/drivers/<type>/` on the card.
+If you want it on SD as fallback only (e.g. for dev/testing) — **this does
+not currently work.** `modulestrap` will happily compile the `.purr` blob
+and it can be copied to `/sdcard/drivers/<type>/`, but
+`purr_kernel_load_module()` cannot load it back (see the banner at the top
+of this document). Ship it in `[flash]` for now.
 
 ---
 

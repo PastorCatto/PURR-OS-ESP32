@@ -24,7 +24,7 @@ extern "C" {
 // dp7 for a whole dp8 cycle, so the About page reported the wrong version
 // while every baked artifact said otherwise) — bump BOTH, or better, make
 // purrstrap generate this header the way it already generates sdkconfig.
-#define PURR_KERNEL_VERSION  "1.0.0-dp9"
+#define PURR_KERNEL_VERSION  "1.0.0-dp10"
 #define KITT_VERSION         "1.0.0"
 
 // ── Module loader ─────────────────────────────────────────────────────────────
@@ -676,6 +676,33 @@ void __attribute__((noreturn)) purr_kernel_panic_ui_disabled(const char *entity_
 // purr_kernel_set_window_created_cb() above. NULL (never registered) is a
 // silent no-op — devices without USB MSC support just don't get this.
 void purr_kernel_set_panic_usb_share_cb(void (*cb)(void));
+
+// Optional hook a specialized kernel boot registers so a recoverable panic
+// (purr_kernel_panic_ex()'s RECOVERABLE/UI_DISABLED branches — the ones
+// that park interactively rather than auto-rebooting) drops into a live
+// shell instead of only the touch-button hold screen, once the screen and
+// buttons are already drawn. Same registration shape as
+// purr_kernel_set_panic_usb_share_cb() just above, and for the identical
+// reason: purr_kernel.c (the kernel spine) must not depend on
+// purr_console.h (layered above it in this codebase) to offer this.
+//
+// The registered function owns its own purr_console_io_t and calls
+// purr_console_run(io, /*with_login=*/false) itself — false because this
+// path must never depend on user_mgr/app_manager being in a working
+// state, the same reasoning purr_console_run()'s own with_login parameter
+// documents. It NEVER returns once called (purr_console_run() doesn't),
+// which is what lets it stand in for the touch-polling loop entirely
+// rather than needing a separate task.
+//
+// Hard rule for any implementation: if a normal-boot console session is
+// already running on the SAME underlying peripheral (UART/USB), it MUST
+// be torn down (e.g. vTaskDelete() on its task handle) before this
+// function starts reading from that peripheral itself — panic_render()
+// does not stop other tasks, so an already-running console task stays
+// live and would otherwise race this one over the same input stream. NULL
+// (never registered) is a silent no-op — the existing touch-only hold
+// screen, unchanged.
+void purr_kernel_set_panic_console_cb(void (*cb)(void));
 
 #ifdef __cplusplus
 }

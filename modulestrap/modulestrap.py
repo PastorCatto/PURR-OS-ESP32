@@ -384,7 +384,29 @@ def _device_referenced(cfg):
 #   driver_manager — _generate_glue() appends it unconditionally ("driver_manager
 #                    is always included if present"), whether or not any
 #                    device.pcat mentions it. Missing this was caught by heltec.
-CORE_COMPONENTS = {"boot_splash", "app_manager", "driver_manager"}
+#   purr_console   — CoreOS/main/CMakeLists.txt REQUIREs it directly (same
+#                    unconditional shape as boot_splash above), but unlike
+#                    claw_loader/app_manager/user_mgr sitting right next to it
+#                    in that REQUIRES list, nothing else's own CMakeLists
+#                    REQUIRES purr_console — so the transitive walk below
+#                    never reaches it from any device.pcat-named module, and
+#                    without this entry CMake fails at configure time with
+#                    "Failed to resolve component 'purr_console'". Confirmed
+#                    live: the first real build of this component silently
+#                    compiled NOTHING for it instead — the bare name
+#                    "console" happened to resolve to ESP-IDF's own built-in
+#                    console component instead of failing, masking the
+#                    missing-from-the-manifest problem entirely until the
+#                    final link step. Renaming to purr_console (see that
+#                    module's own top comment) turned a silent no-op into
+#                    this loud, correct configure-time failure — which is
+#                    what led here.
+#   purr_quirk     — same exact shape and reason as purr_console just
+#                    above (CoreOS/main/CMakeLists.txt REQUIREs it
+#                    directly, nothing else's CMakeLists does), added
+#                    here up front this time instead of being discovered
+#                    the hard way a second time.
+CORE_COMPONENTS = {"boot_splash", "app_manager", "driver_manager", "purr_console", "purr_quirk"}
 
 
 def select_components(cfg, targets):

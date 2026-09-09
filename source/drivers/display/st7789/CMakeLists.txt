@@ -6,7 +6,8 @@ idf_component_register(
         .
         ../../../kernel/core
         ../../../kernel/catcalls
+        ../../../modules/purr_quirk
     # esp_timer: Step 0 perf instrumentation (DP8_CHECKLIST.md). Remove
     # alongside the counters in st7789.c once Steps 1-2 are measured.
-    REQUIRES esp_common driver freertos nvs_flash esp_timer
+    REQUIRES esp_common driver freertos nvs_flash esp_timer purr_quirk
 )

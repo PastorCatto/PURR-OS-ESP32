@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 
@@ -73,7 +74,7 @@ C_YLW  = "\033[93m"
 C_CYN  = "\033[96m"
 C_WHT  = "\033[97m"
 
-PURROS_VERSION = "1.0.0-dp9"
+PURROS_VERSION = "1.0.0-dp10"
 KITT_VERSION   = "1.0.0"
 
 def info(msg):        print(f"{C_GRN}[purrstrap]{C_RST} {msg}")
@@ -811,6 +812,143 @@ def _find_purr_blob(slug):
             return p
     return None
 
+# ── .purr v2 device quirk-package generation ─────────────────────────────────
+#
+# See source/modules/purr_quirk/purr_quirk_pkg.h for the exact binary format
+# this produces, and its own comment for why abi_version/block_count are
+# full uint32_t fields rather than the narrower widths their value ranges
+# would need: it makes the C struct's layout padding-free by construction,
+# so this format string can match it exactly with no separate reasoning
+# about compiler alignment rules to get right (or silently wrong) twice.
+#
+# NOT the Gen-1 .purr code-loading format — see that header's own top
+# comment. This produces DATA ONLY: pin assignments and small config
+# structs a generic, already-compiled-in driver reads and applies itself
+# (st7789.c/gt911.c/adc_battery.c's own purr_quirk_get_block() calls) —
+# nothing here is ever executed.
+_QUIRK_MAGIC       = 0x51525550  # 'PURQ'
+_QUIRK_ABI_VERSION = 1
+_QUIRK_MAX_BLOCKS  = 16
+_QUIRK_NAME_MAX    = 24
+_QUIRK_DEVICE_NAME_MAX = 32
+_QUIRK_BLOCK_FMT   = "<24sII"                          # purr_quirk_block_t
+_QUIRK_HEADER_FMT  = f"<II{_QUIRK_DEVICE_NAME_MAX}sI"  # magic, abi_version, device_name, block_count
+
+def _pack_quirk_package(device_name, blocks):
+    """blocks: ordered list of (name, payload_bytes) pairs. Returns the
+    full binary .purr v2 file content, matching purr_quirk_pkg_header_t's
+    C layout exactly. Raises ValueError on anything that wouldn't fit the
+    fixed-size format (too many blocks, a name too long)."""
+    if len(blocks) > _QUIRK_MAX_BLOCKS:
+        raise ValueError(f"quirk package for {device_name}: {len(blocks)} blocks > "
+                          f"PURR_QUIRK_MAX_BLOCKS ({_QUIRK_MAX_BLOCKS})")
+    for name, _ in blocks:
+        if len(name.encode()) >= _QUIRK_NAME_MAX:
+            raise ValueError(f"quirk block name '{name}' too long for "
+                              f"PURR_QUIRK_NAME_MAX ({_QUIRK_NAME_MAX})")
+
+    header_size = struct.calcsize(_QUIRK_HEADER_FMT)
+    block_table_size = struct.calcsize(_QUIRK_BLOCK_FMT) * _QUIRK_MAX_BLOCKS
+    payload_start = header_size + block_table_size
+
+    block_entries = []   # (name, offset, size) for the table
+    payloads = b""
+    offset = payload_start
+    for name, payload in blocks:
+        block_entries.append((name, offset, len(payload)))
+        payloads += payload
+        offset += len(payload)
+
+    block_table = b""
+    for name, off, size in block_entries:
+        block_table += struct.pack(_QUIRK_BLOCK_FMT, name.encode(), off, size)
+    # Unused slots (size == 0, purr_quirk_get_block() skips them) — pad the
+    # fixed-size table out to PURR_QUIRK_MAX_BLOCKS entries.
+    block_table += b"\x00" * (block_table_size - len(block_table))
+
+    header = struct.pack(_QUIRK_HEADER_FMT,
+                          _QUIRK_MAGIC, _QUIRK_ABI_VERSION,
+                          device_name.encode(), len(blocks))
+
+    return header + block_table + payloads
+
+
+def _generate_quirk_package(device, cfg):
+    """Builds this device's .purr v2 quirk package from known-good,
+    currently-hardcoded values for the handful of drivers converted so far
+    (st7789, gt911, adc_battery, sx1262_rl, sx1262, ssd1306, ili9341 — see
+    docs/17-equivalent design notes and each driver's own
+    purr_quirk_get_block() call for the full picture). Only tdeck_plus
+    emits a package today since it's the only device with real hardware
+    to verify against; the other three drivers (sx1262, ssd1306, ili9341)
+    have the loader-side capability now but no device generates a block
+    for them yet — a future device just needs an entry added below.
+    Returns the packed bytes, or None if this device has nothing to emit
+    yet (every driver falls back to its own compiled-in default in that
+    case — this is not an error).
+
+    Deliberately NOT sourced from device.pcat's own [pins] section for
+    display/touch: confirmed live, tdeck_plus's device.pcat declares
+    touch_rst = -1, but kernel_tdp_boot.c's own real, working
+    gt911_configure() call passes rst_pin=17 — the two have drifted apart
+    (pins.* here are only ever applied via _generate_glue() for a GENERIC-
+    kernel device; a specialized kernel like this one hardcodes its own
+    literals directly in C and never reads them). Rather than propagate
+    that discrepancy into a shipped quirk package, this generates the
+    PROVEN values a real boot already uses — see the block-by-block
+    comments below. Reconciling device.pcat itself is a separate,
+    deliberate decision this function does not make on its own.
+    """
+    blocks = []
+
+    if device == "tdeck_plus":
+        # st7789.panel_profile — matches s_panel_profiles[0] (the default
+        # 320x240 landscape profile) in st7789.c byte-for-byte: loading
+        # this package should change NOTHING about how the display
+        # behaves, proving the load path works before it's ever used to
+        # actually change anything.
+        # Layout: char name[40]; u16 width,height,col_off,row_off;
+        #         u8 madctl_normal, madctl_rotated; u8 bgr (bool);
+        #         + 1 pad byte to a multiple of 2 (matches this struct's
+        #         own actual compiled size — confirmed against the real
+        #         sizeof() via this package's own boot-time size check,
+        #         st7789.c's "wrong size — ignoring" warning path).
+        profile = struct.pack("<40sHHHHBBB",
+                               b"default (320x240 landscape) [quirk]",
+                               320, 240, 0, 0,
+                               0x70,  # MADCTL_LANDSCAPE
+                               0x00,  # MADCTL_PORTRAIT
+                               0)     # bgr = false
+        profile += b"\x00" * 1   # trailing struct padding to reach 52 bytes
+        blocks.append(("st7789.panel_profile", profile))
+
+        # gt911.pins — matches kernel_tdp_boot.c's own real
+        # gt911_configure(18, 8, -1, 17, 0) call exactly (sda, scl, int_pin,
+        # rst_pin, i2c_port) — NOT device.pcat's touch_rst=-1 (see this
+        # function's own doc comment on why).
+        blocks.append(("gt911.pins", struct.pack("<iiiii", 18, 8, -1, 17, 0)))
+
+        # adc_battery.config — matches this driver's own compiled-in
+        # defaults (BATTERY_ADC_CHANNEL=3, no ctrl pin, x2.11, DB_12
+        # attenuation=3) exactly — tdeck_plus never calls
+        # adc_battery_configure() today at all, so this reproduces "no
+        # override" behavior through the new data path instead of through
+        # simply never calling it.
+        blocks.append(("adc_battery.config", struct.pack("<iifi", 3, -1, 2.11, 3)))
+
+        # sx1262_rl.pins — matches kernel_tdp_boot.c's own real
+        # sx1262_rl_configure(TDP_LORA_MOSI, TDP_LORA_MISO, TDP_LORA_SCLK,
+        # TDP_LORA_CS, TDP_LORA_RST, TDP_LORA_BUSY, TDP_LORA_IRQ) call
+        # exactly (see that file's #define block) — reproduces "no
+        # override" behavior through the new data path, same as the
+        # other three blocks above.
+        blocks.append(("sx1262_rl.pins", struct.pack("<iiiiiii", 41, 38, 40, 9, 17, 13, 45)))
+
+    if not blocks:
+        return None
+    return _pack_quirk_package(device, blocks)
+
+
 # ── SPIFFS staging + image generation ────────────────────────────────────────
 
 def build_flash_image(device, pcat_cfg, out_dir, spiffs_size_kb=512):
@@ -868,6 +1006,23 @@ def build_flash_image(device, pcat_cfg, out_dir, spiffs_size_kb=512):
     if staged_wallpapers:
         info(f"staged {staged_wallpapers} wallpaper(s) into spiffs_staging/wallpapers/")
 
+    # Device quirk package (.purr v2) — see _generate_quirk_package()'s own
+    # doc comment. Not part of the [flash] manifest system either, same
+    # reasoning as wallpapers above: it's generated data, not a
+    # module/driver/app entry. Mounted at /flash/quirks/device.purr;
+    # kernel_tdp_boot.c's own purr_quirk_load() call is what actually reads
+    # it back at boot (with an /sdcard copy able to override it later in
+    # that same boot, once SD is mounted — see that call site's comment).
+    quirk_pkg = _generate_quirk_package(device, pcat_cfg)
+    if quirk_pkg is not None:
+        quirks_dst = os.path.join(staging_dir, "quirks")
+        os.makedirs(quirks_dst, exist_ok=True)
+        quirk_path = os.path.join(quirks_dst, "device.purr")
+        with open(quirk_path, "wb") as f:
+            f.write(quirk_pkg)
+        print(f"  {C_GRN}[OK]{C_RST}  quirks/device.purr{'':<15}  {len(quirk_pkg)} bytes")
+        info("staged device quirk package into spiffs_staging/quirks/")
+
     staged = 0
 
     for slug, priority in sorted(flash_entries, key=lambda x: x[1]):
@@ -923,6 +1078,160 @@ def build_flash_image(device, pcat_cfg, out_dir, spiffs_size_kb=512):
 
 # ── Glue layer generation ─────────────────────────────────────────────────────
 #
+# ── claw_loader import-table generation ─────────────────────────────────────
+#
+# claw_loader.c's s_imports[] — the symbol-resolution table a loaded .claw
+# object's external calls are checked against, and the real capability
+# boundary for loaded code (see claw_elf.h's own header comment) — used to
+# be a single hand-maintained entry (purr_kernel_uptime_ms) even though the
+# ABI it should expose already exists, fully designed and versioned:
+# purr_kernel.h's own public function surface. That was a generation gap,
+# not a design gap. This walks purr_kernel.h the same way _generate_glue()
+# below already walks device.pcat, and emits the array mechanically instead
+# of by hand.
+#
+# Catcall headers (catcall_display.h etc.) are deliberately NOT scanned:
+# they declare typedef'd STRUCTS of function-pointer members (a driver/UI
+# backend PROVIDES one of these to the kernel via purr_kernel_register_*),
+# not standalone functions a loaded object could call by name — there is
+# nothing there for a symbol-resolution table to resolve.
+#
+# Device-independent — the kernel's function surface doesn't vary per
+# device — so this writes into source/modules/claw_loader/ itself (next to
+# claw_loader.c) rather than a per-device cattobaked/<device>/glue/ output
+# dir. That means claw_loader.c's `#include "claw_imports_generated.h"`
+# resolves via the compiler's own same-directory quoted-include rule, with
+# no CMakeLists.txt INCLUDE_DIRS change needed anywhere.
+
+_FN_STMT_SKIP_KEYWORDS = ("typedef",)
+
+
+def _trailing_call_name(stmt):
+    """A function declaration statement always ends '...NAME(args)' right up
+    to the terminating ';' (already stripped by the caller) — but the FIRST
+    '(' in the statement is not reliably the function's own: a GCC
+    attribute like 'void __attribute__((noreturn)) purr_kernel_panic(...)'
+    puts a parenthesized group before the real name. Scan backward from the
+    final ')' instead, balance-counting to find ITS matching '(', then take
+    the identifier immediately before that — robust to any number of
+    parenthesized qualifiers earlier in the statement. Returns None if the
+    statement doesn't end in a balanced '(...)' (i.e. isn't a plain call/
+    declaration shape at all)."""
+    s = stmt.rstrip()
+    if not s.endswith(')'):
+        return None
+    depth = 0
+    open_idx = None
+    for i in range(len(s) - 1, -1, -1):
+        c = s[i]
+        if c == ')':
+            depth += 1
+        elif c == '(':
+            depth -= 1
+            if depth == 0:
+                open_idx = i
+                break
+    if open_idx is None:
+        return None
+    j = open_idx - 1
+    while j >= 0 and s[j] in ' \t\r\n':
+        j -= 1
+    end = j + 1
+    while j >= 0 and (s[j].isalnum() or s[j] == '_'):
+        j -= 1
+    name = s[j + 1:end]
+    return name or None
+
+
+def _extract_public_functions(header_path):
+    """Best-effort scan of a C header for top-level function DECLARATIONS —
+    not typedefs, not macros, not struct/enum bodies. Regex/string-based,
+    matching this file's own existing tooling style (_generate_glue() below
+    parses device.pcat the same way, not with a real config-file parser) —
+    good enough for a header this codebase already keeps hand-formatted and
+    comment-heavy but structurally simple (one declaration per statement,
+    no function-pointer-returning functions, no macro-generated
+    declarations). Returns a sorted, de-duplicated list of function names."""
+    with open(header_path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    # Strip comments before anything else so neither form can smuggle a
+    # stray ';' or '(' into the statement split below.
+    text = re.sub(r'/\*.*?\*/', ' ', text, flags=re.DOTALL)
+    text = re.sub(r'//[^\n]*', ' ', text)
+    # Drop preprocessor directives (#define/#ifdef/#include/#pragma/...) —
+    # this header has none spanning multiple lines via trailing '\', so a
+    # simple per-line strip is enough.
+    text = re.sub(r'^\s*#.*$', '', text, flags=re.MULTILINE)
+    # extern "C" { ... } wrapper: neither the opening nor the closing brace
+    # is followed/preceded by a ';' of its own, so left alone they merge
+    # into whatever statement comes right after/before them — the opening
+    # one in particular makes the very next real declaration look (to the
+    # '{' in stmt check below) like it's inside a struct/enum body, which
+    # silently dropped purr_kernel_register_module_static() (line 34, the
+    # first declaration right after this header's own `extern "C" {`)
+    # during initial testing. Strip both explicitly; this header has
+    # exactly one such wrapper.
+    text = re.sub(r'extern\s+"C"\s*\{', ' ', text)
+    text = re.sub(r'^\s*\}\s*$', ' ', text, flags=re.MULTILINE)
+
+    names = []
+    for stmt in text.split(';'):
+        stmt = stmt.strip()
+        if not stmt or '{' in stmt or '}' in stmt:
+            continue
+        if any(kw in stmt for kw in _FN_STMT_SKIP_KEYWORDS):
+            continue
+        if '(' not in stmt or ')' not in stmt:
+            continue
+        name = _trailing_call_name(stmt)
+        if name:
+            names.append(name)
+    return sorted(set(names))
+
+
+def _generate_claw_imports():
+    """Regenerate source/modules/claw_loader/claw_imports_generated.h from
+    purr_kernel.h's public function surface. Safe to call unconditionally
+    on every build/generate — deterministic given the same header, and
+    device-independent."""
+    kernel_header = os.path.join(KERNEL_DIR, "core", "purr_kernel.h")
+    out_path = os.path.join(SOURCE_DIR, "modules", "claw_loader", "claw_imports_generated.h")
+
+    names = _extract_public_functions(kernel_header)
+
+    lines = [
+        "// claw_imports_generated.h — auto-generated by purrstrap from purr_kernel.h.",
+        "// Do not edit — regenerated on every purrstrap build/generate.",
+        "//",
+        "// claw_loader's symbol-resolution table: the exact set of functions a",
+        "// loaded .claw object can call by name (see claw_elf.h's own header",
+        "// comment on why this list — not linkage — is the real capability",
+        "// boundary for loaded code). Generated from purr_kernel.h's own public",
+        "// function surface rather than hand-maintained, so it can never drift",
+        "// behind the ABI purr_kernel.h already defines and versions.",
+        "",
+        '#include "claw_elf.h"     // claw_import_t',
+        '#include "purr_kernel.h"',
+        "",
+        "static const claw_import_t s_imports[] = {",
+    ]
+    for name in names:
+        lines.append(f'    {{ "{name}", (uint32_t)&{name} }},')
+    lines += [
+        "};",
+        "#define CLAW_IMPORT_COUNT (sizeof(s_imports) / sizeof(s_imports[0]))",
+        "",
+    ]
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w") as f:
+        f.write("\n".join(lines))
+
+    info(f"  claw import table -> {os.path.relpath(out_path, REPO_DIR)} ({len(names)} symbols)")
+    return out_path
+
+
 # Generates purr_device_glue.c for the target device — a thin C file that
 # #includes the right driver headers and provides a purr_device_init() that
 # configures pin numbers from device.pcat before calling purr_kernel_scan_modules().
@@ -1340,6 +1649,12 @@ def cmd_generate(args):
         if args.check and not ok:
             drift += 1
 
+    # Device-independent, so generated once per invocation rather than once
+    # per device above. --check stays read-only (matches _generate_sdkconfig's
+    # own check-mode contract), so this only writes on a real `generate`.
+    if not args.check:
+        _generate_claw_imports()
+
     if args.check:
         if drift:
             die(f"{drift} of {len(targets)} device(s) have sdkconfig drift — "
@@ -1725,6 +2040,7 @@ def cmd_build(args):
     # ── Generate device glue layer ─────────────────────────────────────────────
     _generate_glue(device, cfg, out_dir)
     _generate_sdkconfig(device, cfg)
+    _generate_claw_imports()   # device-independent — see its own doc comment
 
     # Remove stale merged image so a failed build never leaves a flashable artifact
     stale = os.path.join(out_dir, f"PURR_OS_{out_name}.bin")

@@ -21,9 +21,23 @@
 #include "../../../kernel/core/purr_module.h"
 #include "../../../kernel/core/purr_kernel.h"
 #include "../../../kernel/catcalls/catcall_radio.h"
+#include "purr_quirk.h"
 #include "sx1262.h"
 
 static const char *TAG = "sx1262";
+
+// Layout for a "sx1262.pins" .purr v2 quirk block — see purr_quirk_pkg.h.
+// Plain int32_t fields matching sx1262_configure()'s own parameter list —
+// same convention as gt911_pin_quirk_t/adc_battery_quirk_t.
+typedef struct {
+    int32_t mosi;
+    int32_t miso;
+    int32_t sclk;
+    int32_t cs;
+    int32_t rst;
+    int32_t busy;
+    int32_t irq;
+} sx1262_pin_quirk_t;
 
 // ── Pin config ────────────────────────────────────────────────────────────────
 // Defaults match Heltec's wiring. Real per-device pins (e.g. T-Deck Plus,
@@ -49,6 +63,23 @@ static int s_pin_irq  = SX1262_DEFAULT_IRQ;
 
 void sx1262_configure(int mosi, int miso, int sclk, int cs, int rst, int busy, int irq)
 {
+    // A loaded .purr v2 quirk package's "sx1262.pins" block, if present and
+    // correctly sized, overrides the CALLER's own values — same precedence
+    // gt911_configure()/adc_battery's own quirk checks already use.
+    size_t qsz = 0;
+    const void *qblk = purr_quirk_get_block("sx1262.pins", &qsz);
+    if (qblk && qsz == sizeof(sx1262_pin_quirk_t)) {
+        const sx1262_pin_quirk_t *q = (const sx1262_pin_quirk_t *)qblk;
+        mosi = q->mosi; miso = q->miso; sclk = q->sclk;
+        cs = q->cs; rst = q->rst; busy = q->busy; irq = q->irq;
+        ESP_LOGI(TAG, "using loaded quirk package's pin assignment instead of caller's "
+                      "(mosi=%d miso=%d sclk=%d cs=%d rst=%d busy=%d irq=%d)",
+                 mosi, miso, sclk, cs, rst, busy, irq);
+    } else if (qblk) {
+        ESP_LOGW(TAG, "quirk block 'sx1262.pins' has wrong size (%u, expected %u) — ignoring",
+                 (unsigned)qsz, (unsigned)sizeof(sx1262_pin_quirk_t));
+    }
+
     s_pin_mosi = mosi;
     s_pin_miso = miso;
     s_pin_sclk = sclk;

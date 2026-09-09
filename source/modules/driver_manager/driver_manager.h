@@ -1,12 +1,15 @@
 #pragma once
 // driver_manager.h — PURR OS driver manager public API
 //
-// The driver manager is a .purr system module that:
-//   - Scans configured paths for .purr driver modules
-//   - Validates kernel_min/max and chip compatibility
-//   - Runs required_catcalls compat check when kernel > kernel_max
-//   - Calls each driver's init() and registers its catcalls
-//   - Tracks per-driver status badges for the UI
+// STATUS (2026-09): the flash/SD .purr scan this module was designed
+// around is disabled — see driver_manager.c's own top comment for why it
+// could never have worked for a real out-of-tree driver in the first
+// place. Every driver on every current device loads via static
+// registration from device.pcat instead. This header's types
+// (drv_entry_t, drv_status_t) and API are kept as the shape a future
+// loadable-driver mechanism (built on claw_loader, not this scan) should
+// grow back into — driver_manager_get_count()/get_entry() currently
+// always report empty, which is honest, not a bug.
 
 #include <stdint.h>
 #include <stdbool.h>

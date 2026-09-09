@@ -37,8 +37,20 @@
 #include "../../kernel/catcalls/catcall_touch.h"
 #include "../../kernel/core/purr_module.h"
 #include "../../kernel/core/purr_kernel.h"
+#include "purr_quirk.h"
 
 static const char *TAG = "gt911";
+
+// Layout for a "gt911.pins" .purr v2 quirk block — see purr_quirk_pkg.h.
+// Plain int32_t fields matching gt911_configure()'s own parameter list —
+// a generator producing this block must match this exact layout.
+typedef struct {
+    int32_t sda;
+    int32_t scl;
+    int32_t int_pin;
+    int32_t rst_pin;
+    int32_t i2c_port;
+} gt911_pin_quirk_t;
 
 // ── Forward declarations ──────────────────────────────────────────────────────
 
@@ -487,6 +499,25 @@ static const catcall_touch_t s_catcall = {
 
 void gt911_configure(int sda, int scl, int int_pin, int rst_pin, int i2c_port)
 {
+    // A loaded .purr v2 quirk package's "gt911.pins" block, if present and
+    // correctly sized, overrides the CALLER's own values — self-contained,
+    // no change needed at any kernel_*_boot.c call site (every one of them
+    // currently passes hardcoded literals; a quirk package is simply the
+    // more specific, more current override, same precedence
+    // adc_battery_configure()'s own quirk check already uses).
+    size_t qsz = 0;
+    const void *qblk = purr_quirk_get_block("gt911.pins", &qsz);
+    if (qblk && qsz == sizeof(gt911_pin_quirk_t)) {
+        const gt911_pin_quirk_t *q = (const gt911_pin_quirk_t *)qblk;
+        sda = q->sda; scl = q->scl; int_pin = q->int_pin;
+        rst_pin = q->rst_pin; i2c_port = q->i2c_port;
+        ESP_LOGI(TAG, "using loaded quirk package's pin assignment instead of caller's "
+                      "(sda=%d scl=%d int=%d rst=%d port=%d)", sda, scl, int_pin, rst_pin, i2c_port);
+    } else if (qblk) {
+        ESP_LOGW(TAG, "quirk block 'gt911.pins' has wrong size (%u, expected %u) — ignoring",
+                 (unsigned)qsz, (unsigned)sizeof(gt911_pin_quirk_t));
+    }
+
     s_cfg_sda      = sda;
     s_cfg_scl      = scl;
     s_cfg_int      = int_pin;

@@ -1,0 +1,28 @@
+# modules/purr_console/module.pcat
+# Console — one command table + one line-editing/dispatch loop
+# (purr_console_run()/purr_console_register_commands()), bound to whichever
+# raw byte transport a caller provides. Phase 1c of the modular-core/
+# Unix-boot plan: replaces the four disconnected command interfaces that
+# existed before it (each kernel_*_boot.c's own serial_console_task(),
+# terminal.c's purr_win-dependent command set, blackpurr_shell.c's
+# catcall_ui-bypassing launcher, and purr_probe_cmd.c's more mature but
+# hardware-probe-only protocol).
+#
+# Named purr_console, not console: ESP-IDF ships its own built-in
+# component literally called "console" — a plain "console" here silently
+# lost that name collision (this module never got compiled at all, despite
+# nothing saying so until the final link step), confirmed live on the
+# first real hardware build. See purr_console.c's own top comment.
+#
+# Not a PURR_MODULE_REGISTER() module — like claw_loader, this is a plain
+# library a kernel boot calls directly, not something device.pcat toggles
+# under [modules]. No lifecycle to declare here.
+
+name            = "purr_console"
+version         = "0.1.0"
+module_type     = "PURR_MOD_SYSTEM"
+kernel_min      = "1.0.0-dp9"
+kernel_max      = ""
+
+provides        = ["command_shell"]
+required_catcalls = []

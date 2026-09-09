@@ -22,6 +22,7 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <sys/stat.h>
@@ -35,6 +36,10 @@
 #include "../../drivers/input/bbq20/bbq20.h"
 #include "../../drivers/radio/sx1262_rl/sx1262_rl.h"
 #include "../../modules/boot_splash/boot_splash.h"
+#include "../../modules/purr_console/purr_console.h"
+#include "../../modules/user_mgr/user_mgr.h"
+#include "../../modules/app_manager/app_manager.h"
+#include "../../modules/purr_quirk/purr_quirk.h"
 #include "driver/i2c_master.h"
 #include "esp_rom_sys.h"
 // usb_msc.h — pinned/dormant (source/modules/usb_msc/DISABLED.md), its own
@@ -277,6 +282,11 @@ static void ensure_sd_dirs(void)
                                    // aren't known at boot so only this top level
                                    // is ensured here, claw_loader_personal_add()
                                    // creates its own per-username subdir lazily
+        "/sdcard/quirks",         // .purr v2 device quirk packages — see
+                                   // source/modules/purr_quirk/ and this
+                                   // function's own caller, right after the
+                                   // purr_quirk_load("/sdcard/quirks/device.purr")
+                                   // call this directory exists for
         NULL
     };
     for (int i = 0; dirs[i]; i++) {
@@ -286,41 +296,20 @@ static void ensure_sd_dirs(void)
 }
 
 // ── Serial console ────────────────────────────────────────────────────────────
-// Always-on task on UART0. Type 'kb' to echo BBQ20 keypresses to serial.
-// Lets you confirm keyboard hardware works independent of the UI.
+// Always-on task on UART0. Phase 1c of the modular-core/Unix-boot plan:
+// this used to be its own ad hoc if/else chain with exactly two commands
+// (kb/scan) and its own hand-rolled line editing, duplicated near-
+// identically across every kernel_*_boot.c. Now it's a thin UART binding
+// (read_byte/write/flush below) handed to source/modules/purr_console/'s shared
+// command table + REPL loop — kb (BBQ20 keypress echo) is one of that
+// module's own built-ins now; scan (an I2C bus sweep) stays here and is
+// registered via purr_console_register_commands() because it needs this
+// board's own SDA=18/SCL=8 pins, which the shared, device-agnostic console
+// module has no business knowing.
 
-static void kb_test_loop(void)
+static void i2c_scan_cmd(const char *args)
 {
-    const catcall_input_t *kbd = purr_kernel_input();
-    if (!kbd) {
-        printf("[KB TEST] no keyboard catcall — bbq20 not ready\r\n");
-        return;
-    }
-    printf("[KB TEST] press keys on the device keyboard. type 'q' here to exit.\r\n");
-    fflush(stdout);
-    for (;;) {
-        uint8_t c = 0;
-        if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(0)) > 0) {
-            if (c == 'q' || c == 3) break;
-        }
-        input_event_t ev;
-        while (kbd->poll_event(&ev)) {
-            if (ev.type == INPUT_EVENT_KEY_DOWN && ev.keycode) {
-                uint16_t k = ev.keycode;
-                if (k >= 0x20 && k <= 0x7E)
-                    printf("[KB] '%c' (0x%02X)\r\n", (char)k, k);
-                else
-                    printf("[KB] 0x%02X\r\n", k);
-                fflush(stdout);
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    printf("[KB TEST] done.\r\n");
-}
-
-static void i2c_scan_cmd(void)
-{
+    (void)args;
     i2c_master_bus_handle_t bus = NULL;
     bool created = false;
     esp_err_t r = i2c_master_get_bus_handle(I2C_NUM_0, &bus);
@@ -334,12 +323,12 @@ static void i2c_scan_cmd(void)
             .flags.enable_internal_pullup = true,
         };
         if (i2c_new_master_bus(&cfg, &bus) != ESP_OK) {
-            printf("[SCAN] failed to acquire I2C bus\r\n");
+            purr_console_println("[SCAN] failed to acquire I2C bus");
             return;
         }
         created = true;
     }
-    printf("[SCAN] full I2C sweep SDA=18 SCL=8:\r\n");
+    purr_console_println("[SCAN] full I2C sweep SDA=18 SCL=8:");
     int found = 0;
     for (uint8_t addr = 0x03; addr <= 0x77; addr++) {
         esp_err_t res = i2c_master_probe(bus, addr, pdMS_TO_TICKS(10));
@@ -348,51 +337,239 @@ static void i2c_scan_cmd(void)
             if (addr == 0x5D) name = " (GT911 primary)";
             else if (addr == 0x14) name = " (GT911 alt)";
             else if (addr == 0x55) name = " (BBQ20 keyboard)";
-            printf("[SCAN]   0x%02X ACK%s\r\n", addr, name);
+            char line[48];
+            snprintf(line, sizeof(line), "[SCAN]   0x%02X ACK%s", addr, name);
+            purr_console_println(line);
             found++;
         }
     }
-    if (found == 0) printf("[SCAN]   no devices found\r\n");
-    printf("[SCAN] done (%d device(s))\r\n", found);
+    if (found == 0) purr_console_println("[SCAN]   no devices found");
+    char summary[32];
+    snprintf(summary, sizeof(summary), "[SCAN] done (%d device(s))", found);
+    purr_console_println(summary);
     if (created) i2c_del_master_bus(bus);
+}
+
+// Deliberate, controlled trigger for purr_kernel_panic_ex()'s recoverable
+// path — added to verify tdp_panic_console() (this file's own
+// purr_kernel_set_panic_console_cb() registration).
+//
+// History worth keeping: this command originally reliably CRASHED the
+// device (twice, reproduced with and without an app open) — running it
+// while the UI is actively rendering hit a genuine, previously-unknown
+// cross-task race in st7789.c: purr_kernel_panic_ex() does not stop any
+// other task, so mochi's own render task kept flushing frames via the
+// async SPI path on core 1 while panic_render()'s first disp->fill_rect()
+// call concurrently touched the exact same SPI bus lock from this
+// command's own (different) task. Both crashes hit an assert inside the
+// SPI driver itself (spi_bus_lock_acquire_end/spi_device_release_bus,
+// "lock that hasn't been acquired") and hard-rebooted the device before
+// purr_kernel_panic_ex() ever reached tdp_panic_console() below. Root-
+// caused and fixed at the source (st7789.c's s_async_bus_sem — a real
+// cross-task semaphore replacing the plain-boolean poll async_wait_idle()
+// used to do) rather than by avoiding triggering it here. Kept registered
+// as a real, permanent diagnostic command now that the underlying bug is
+// fixed, not just as a one-off test.
+static void cmd_panic_test(const char *args) {
+    (void)args;
+    purr_console_println("Triggering a deliberate recoverable panic...");
+    purr_kernel_panic_ex("deliberate test panic from console command", /*recoverable=*/true, "console-test");
+}
+
+static const purr_console_cmd_t s_tdp_console_cmds[] = {
+    { "scan",       i2c_scan_cmd,    "full I2C bus sweep (SDA=18 SCL=8)" },
+    { "panic-test", cmd_panic_test,  "trigger a deliberate recoverable panic (test)" },
+};
+
+// ── USB-Serial-JTAG binding for the shared console core ─────────────────────
+//
+// NOT UART0, and this was found live, on real hardware, not assumed: the
+// original version of this code (and this driver's own first pass at
+// porting it) bound to UART0, matching every other kernel_*_boot.c's
+// serial_console_task() before it. But T-Deck Plus's actual USB-C port
+// enumerates as the S3's native USB-Serial-JTAG peripheral (confirmed via
+// `lsusb`: "Espressif USB JTAG/serial debug unit", VID:PID 303a:1001) —
+// electrically separate hardware from UART0, which isn't broken out to
+// this connector at all. Tested directly: ESP_LOG boot output DID appear
+// over the USB-C cable (CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG
+// mirrors output there), but typing into that same connection reached
+// nothing — a UART0-bound console is running, just permanently
+// unreachable via the only cable this board actually uses. Binding here
+// instead makes it reachable over the same connection used to flash it,
+// which is the entire point of a boot-time console.
+static int usbjtag_console_read_byte(uint32_t timeout_ms)
+{
+    uint8_t c = 0;
+    if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(timeout_ms)) > 0) return c;
+    return -1;
+}
+
+static void usbjtag_console_write(const void *data, size_t len)
+{
+    usb_serial_jtag_write_bytes(data, len, portMAX_DELAY);
+}
+
+static void usbjtag_console_flush(void)
+{
+    // No blocking "wait for TX to actually drain" primitive in this
+    // driver's API (unlike uart_wait_tx_done()) — usb_serial_jtag_write_
+    // bytes() above already blocks until accepted into the TX buffer,
+    // which is the same guarantee this console core's other callers
+    // (e.g. the `reboot` command, flushing its "Rebooting..." message
+    // before resetting) actually need.
+}
+
+static const purr_console_io_t s_console_io = {
+    .read_byte = usbjtag_console_read_byte,
+    .write     = usbjtag_console_write,
+    .flush     = usbjtag_console_flush,
+};
+
+// ── Login gate + exec — registered with the shared console core ────────────
+//
+// This is the ONE place in this file that actually calls into user_mgr/
+// app_manager for console purposes — purr_console.c itself stays free of
+// both (see purr_console_login_fn/purr_console_exec_fn's own doc comments
+// for why), reaching them only through these two registered hooks.
+//
+// tdp_console_login() blocks (retrying on a wrong password, same as a
+// real getty/login never "failing" outward) until some account is
+// actually authenticated, then calls app_manager_notify_unlocked() — the
+// same call systemui_login.c/systemui_login_ios.c already make, just from
+// the console instead of a graphical login screen. This is what makes
+// app_manager's LOCAL app registry (app_manager_count()/get()) visible at
+// all when no systemui-family UI package ever runs: s_local_unlocked in
+// app_manager.c defaults closed, and until this session's own research
+// found it, the only two callers that ever opened it were inside that one
+// optional package.
+static void tdp_console_login(const purr_console_io_t *io)
+{
+    char username[USER_MGR_USERNAME_MAX];
+
+    for (;;) {
+        if (user_mgr_count() > 1) {
+            purr_console_println("Accounts:");
+            for (int i = 0; i < user_mgr_count(); i++) {
+                char name[USER_MGR_USERNAME_MAX];
+                if (user_mgr_at(i, name, sizeof(name))) {
+                    char line[USER_MGR_USERNAME_MAX + 4];
+                    snprintf(line, sizeof(line), "  %s", name);
+                    purr_console_println(line);
+                }
+            }
+            purr_console_print("login: ");
+            purr_console_read_line(io, username, sizeof(username));
+            if (!user_mgr_exists(username)) {
+                purr_console_println("no such account");
+                continue;
+            }
+        } else {
+            // Single-account device — same "don't make someone type a
+            // name that's the only possible answer" shortcut
+            // purr_systemui_boot_login_check() already takes.
+            const char *def = user_mgr_default_username();
+            strncpy(username, def ? def : "", sizeof(username) - 1);
+            username[sizeof(username) - 1] = '\0';
+        }
+
+        if (!user_mgr_has_password(username)) {
+            // No-password account — zero-friction auto-login, the exact
+            // contract user_mgr.h's own header comment documents (mirrors
+            // a real Unix account with an empty/locked shadow entry).
+            user_mgr_set_logged_in(username);
+            app_manager_notify_unlocked();
+            return;
+        }
+
+        purr_console_print("password: ");
+        char password[64];
+        purr_console_set_echo(false);
+        purr_console_read_line(io, password, sizeof(password));
+        purr_console_set_echo(true);
+        bool ok = user_mgr_verify(username, password);
+        // Same "don't keep a plaintext secret in RAM longer than it has
+        // to be" instinct systemui_login.c's own ctx->password memset
+        // already follows.
+        memset(password, 0, sizeof(password));
+        if (ok) {
+            user_mgr_set_logged_in(username);
+            app_manager_notify_unlocked();
+            return;
+        }
+        purr_console_println("Login incorrect");
+    }
+}
+
+static void tdp_console_exec(const char *args)
+{
+    if (!args || !*args) { purr_console_println("exec: missing app name"); return; }
+    int rc = app_manager_launch_by_name(args);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "exec %s: %s", args, rc == 0 ? "launched" : "failed");
+    purr_console_println(buf);
 }
 
 static void serial_console_task(void *arg)
 {
-    esp_err_t ret = uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    (void)arg;
+    // CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG already uses this same
+    // peripheral for output-only ESP_LOG mirroring, through a lighter
+    // internal path than this driver — confirmed live on real hardware,
+    // not assumed: this console's own banner/prompt and every ESP_LOG
+    // line (including ones firing mid-command, e.g. heapwatch) interleave
+    // correctly with no conflict, no dropped output, no hang.
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    esp_err_t ret = usb_serial_jtag_driver_install(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "usb_serial_jtag_driver_install failed: %s — console unavailable", esp_err_to_name(ret));
         vTaskDelete(NULL);
         return;
     }
 
-    char line[32];
-    int  len = 0;
-    printf("\r\nPURR OS console (tdp) — commands: kb, scan\r\n> ");
-    fflush(stdout);
+    purr_console_register_commands(s_tdp_console_cmds,
+        sizeof(s_tdp_console_cmds) / sizeof(s_tdp_console_cmds[0]));
+    purr_console_set_login_fn(tdp_console_login);
+    purr_console_set_exec_fn(tdp_console_exec);
+    purr_console_run(&s_console_io, true);   // never returns
+}
 
-    for (;;) {
-        uint8_t c = 0;
-        if (uart_read_bytes(UART_NUM_0, &c, 1, pdMS_TO_TICKS(50)) <= 0) continue;
+// Registered with purr_kernel_set_panic_console_cb() — called from inside
+// panic_render()'s recoverable/UI_DISABLED branches, in whatever task
+// detected the failure (a crash-guard watchdog task, typically), NOT the
+// console task itself. purr_kernel_panic_ex() only blocks the task that
+// called it; every other task, including the normal console task above,
+// keeps running completely unaware anything went wrong — so without
+// stopping it first, that still-running console task and this function's
+// own purr_console_run() call would both read from the exact same
+// USB-Serial-JTAG peripheral at once.
+//
+// HISTORY, kept because it is the actual reason this looks the way it
+// does: the first version of this function called vTaskDelete() on the
+// old console task's handle instead of the request-stop dance below.
+// Confirmed live, hard, on real hardware: the old task can be ANYWHERE at
+// the instant of a panic, including mid-call inside usb_serial_jtag_
+// write_bytes() itself, and killing it there left that driver's internal
+// locking stuck — every subsequent call into it, including this
+// function's own first banner print, then silently blocked forever. The
+// device was not crashed (heapwatch and everything else kept running
+// normally) — only the console was ever reachable again, and it wasn't,
+// requiring a fresh flash to recover. purr_console_request_stop() (see
+// its own doc comment) exists specifically to avoid this: it only ever
+// stops the old loop between io->read_byte() calls, a point the driver is
+// always left clean at.
+static void tdp_panic_console(void)
+{
+    purr_console_request_stop();
+    // Comfortably longer than one read_byte(50) poll interval, so the old
+    // loop has definitely reached its own safe checkpoint and parked
+    // before this function starts using the same peripheral itself.
+    vTaskDelay(pdMS_TO_TICKS(200));
 
-        if (c == '\r' || c == '\n') {
-            printf("\r\n");
-            line[len] = '\0';
-            len = 0;
-            if (strcmp(line, "kb") == 0)       kb_test_loop();
-            else if (strcmp(line, "scan") == 0) i2c_scan_cmd();
-            else if (line[0] != '\0')           printf("unknown: %s\r\n", line);
-            printf("> ");
-            fflush(stdout);
-        } else if ((c == 0x7F || c == '\b') && len > 0) {
-            len--;
-            printf("\b \b");
-            fflush(stdout);
-        } else if (len < (int)sizeof(line) - 1 && c >= 0x20) {
-            line[len++] = (char)c;
-            putchar(c);
-            fflush(stdout);
-        }
-    }
+    // with_login=false — see purr_console_run()'s own doc comment: this
+    // path must never depend on user_mgr/app_manager being in a working
+    // state, since it exists specifically for when something else in the
+    // system already isn't.
+    purr_console_run(&s_console_io, false);   // never returns
 }
 
 // ── Recovery-boot bounded bring-up ───────────────────────────────────────
@@ -452,6 +629,20 @@ void app_main(void)
 
     mount_flash_vfs();
     mount_app_config_vfs();
+
+    // Device quirk package — see source/modules/purr_quirk/. Must load
+    // before ANY of st7789_configure()/gt911_configure()/adc_battery's own
+    // module_init() run (all further down this function, or via the
+    // static module loader later), since each of those checks for a
+    // matching quirk block itself. /flash first (this device's own SPIFFS,
+    // just mounted above), /sdcard as a fallback for a swap-without-
+    // reflashing workflow, once ensure_sd_dirs() below has actually
+    // mounted it — see the second purr_quirk_load() call further down,
+    // right after that mount. Loading none here is not an error: every
+    // driver checking purr_quirk_get_block() falls back to its own
+    // compiled-in defaults when nothing is loaded, so a device that never
+    // ships a .purr file behaves exactly as it always has.
+    purr_quirk_load("/flash/quirks/device.purr");
 
     // WiFi station mode: bring up esp_netif/esp_event/esp_wifi once here —
     // not started/connected yet, just initialized so wifi_mgr.c (a
@@ -533,6 +724,17 @@ void app_main(void)
         mount_sd_vfs();
     }
     ensure_sd_dirs();
+
+    // Re-check for a quirk package on the SD card now that it's mounted —
+    // deliberately AFTER the /flash load earlier in this function, so an
+    // SD card's copy OVERRIDES the one baked into this build's own SPIFFS
+    // image (purr_quirk_load() replaces whatever was previously loaded).
+    // This is the actual "swap the device package without reflashing"
+    // capability: st7789_configure()/gt911_configure() and adc_battery's
+    // own module_init() all run AFTER this point, so whichever package won
+    // here is what they'll all see. Not present on the card is the normal
+    // case and not an error — see the /flash load's own comment.
+    purr_quirk_load("/sdcard/quirks/device.purr");
 
     // Composite USB CDC+MSC — PAUSED. Confirmed live: with
     // CONFIG_TINYUSB_CDC_ENABLED + the console switched off USB-Serial-JTAG
@@ -925,6 +1127,7 @@ void app_main(void)
     purr_kernel_notify("PURR OS ready", "T-Deck Plus booted", "kernel");
 
     xTaskCreate(serial_console_task, "serial_con", 4096, NULL, 1, NULL);
+    purr_kernel_set_panic_console_cb(tdp_panic_console);
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));

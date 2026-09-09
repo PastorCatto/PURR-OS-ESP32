@@ -30,6 +30,7 @@
 #include "../../kernel/core/purr_module.h"
 #include "../../kernel/core/purr_kernel.h"
 #include "../../kernel/catcalls/catcall_display.h"
+#include "purr_quirk.h"
 
 // ── Default pin assignments (Heltec WiFi LoRa 32) ────────────────────────────
 #ifndef CONFIG_SSD1306_SDA_PIN
@@ -113,10 +114,39 @@ static ssd1306_config_t s_cfg = {
 static bool    s_ready = false;
 static uint8_t s_fb[SSD1306_FB_SIZE];   // 128×8 pages = 1024 bytes
 
+// Layout for a "ssd1306.pins" .purr v2 quirk block — see purr_quirk_pkg.h.
+// All fields widened to int32_t (including i2c_addr, a uint8_t in the
+// caller's own signature) so every field lands on a natural 4-byte
+// boundary with zero implicit padding — same convention purr_quirk_pkg_
+// header_t's own doc comment explains.
+typedef struct {
+    int32_t sda;
+    int32_t scl;
+    int32_t rst;
+    int32_t addr;
+    int32_t port;
+} ssd1306_pin_quirk_t;
+
 // ── Public configure API ──────────────────────────────────────────────────────
 
 void ssd1306_configure(int sda, int scl, int rst, uint8_t addr, int port)
 {
+    // A loaded .purr v2 quirk package's "ssd1306.pins" block, if present
+    // and correctly sized, overrides the CALLER's own values — same
+    // precedence gt911_configure()/adc_battery's own quirk checks already use.
+    size_t qsz = 0;
+    const void *qblk = purr_quirk_get_block("ssd1306.pins", &qsz);
+    if (qblk && qsz == sizeof(ssd1306_pin_quirk_t)) {
+        const ssd1306_pin_quirk_t *q = (const ssd1306_pin_quirk_t *)qblk;
+        sda = q->sda; scl = q->scl; rst = q->rst;
+        addr = (uint8_t)q->addr; port = q->port;
+        ESP_LOGI(TAG, "using loaded quirk package's pin assignment instead of caller's "
+                      "(sda=%d scl=%d rst=%d addr=0x%02X port=%d)", sda, scl, rst, addr, port);
+    } else if (qblk) {
+        ESP_LOGW(TAG, "quirk block 'ssd1306.pins' has wrong size (%u, expected %u) — ignoring",
+                 (unsigned)qsz, (unsigned)sizeof(ssd1306_pin_quirk_t));
+    }
+
     s_cfg.sda_pin  = sda;
     s_cfg.scl_pin  = scl;
     s_cfg.rst_pin  = rst;

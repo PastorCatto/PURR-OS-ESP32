@@ -1,6 +1,13 @@
 # modules/driver_manager/module.pcat
-# Driver Manager — scans for .purr driver modules, validates them, loads them,
-# runs compat checks, and exposes driver status to the UI.
+#
+# STATUS (2026-09): the flash/SD .purr scan + validate + compat-check
+# pipeline this module was designed around is disabled — see
+# driver_manager.c's own top comment for why it could never load a real
+# out-of-tree object in the first place. Every driver on every device
+# loads via static registration from device.pcat instead. This module
+# stays registered (kept for the drv_entry_t/drv_status_t API shape a
+# real loadable-driver mechanism, built on claw_loader, should grow back
+# into) but currently exposes an always-empty registry to the UI.
 
 name            = "driver_manager"
 version         = "0.1.0"
@@ -8,13 +15,11 @@ module_type     = "PURR_MOD_SYSTEM"
 kernel_min      = "0.9.0"
 kernel_max      = ""
 
-provides        = ["driver_registry", "compat_check"]
+provides        = ["driver_registry"]
 required_catcalls = []   # no catcall deps — it manages catcall registration
 
-# Driver manager scans these paths for .purr driver modules at boot:
-scan_paths      = ["/flash/drivers", "/sdcard/drivers"]
-
-# Runtime status badges exposed to UI:
+# Runtime status badges exposed to UI (kept for API-shape continuity;
+# always empty today — see this file's own top comment):
 #   [OK]     — within kernel_min/max, all catcalls validated
 #   [COMPAT] — beyond kernel_max, all required_catcalls still present
 #   [FAIL]   — required_catcall missing, driver did not load

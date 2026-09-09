@@ -25,7 +25,8 @@ idf_component_register(
         ../../../lib/lib_radiolib
         ../../../kernel/core
         ../../../kernel/catcalls
-    REQUIRES esp_common driver freertos nvs_flash esp_timer
+        ../../../modules/purr_quirk
+    REQUIRES esp_common driver freertos nvs_flash esp_timer purr_quirk
 )
 
 # Suppress warnings from upstream RadioLib sources (not our code to fix).

@@ -21,6 +21,24 @@ ota         = true
 
 spiffs_offset  = "0xD80000"
 
+# spiffs_kb — MUST match this device's actual SPIFFS partition size
+# (partitions_16mb_ota.csv: 0x170000 = 1,507,328 bytes = 1472 KB exactly).
+# Confirmed live as a real, previously-undiscovered bug: without this key,
+# build_flash_image() falls back to a hardcoded 512 KB default (that
+# function's own docstring already flagged this exact gap: "regardless of
+# the partition's declared size"), so purrstrap had been generating a
+# SPIFFS image roughly a third the size of the real partition for this
+# device's entire history. esp_vfs_spiffs_register() mounts using the
+# PARTITION's real size, not the image's — so SPIFFS saw a partition far
+# larger than what was actually written, read mostly-erased flash beyond
+# the undersized image as "this filesystem looks uninitialized", and
+# ended up reporting a genuinely empty filesystem (flash VFS: 0 KB used)
+# despite wallpapers/apps/quirk packages all being correctly staged and
+# present in the smaller image that WAS written. /flash reads have most
+# likely never actually worked on this device — masked because tdeck_plus
+# always has a real SD card, so nothing durably depended on /flash.
+spiffs_kb      = "1472"
+
 # boot_settle_ms — pause between the P2 (UI) and P3 (radios, deferred apps)
 # module tiers. See purr_kernel.c's BOOT_SETTLE_MS for why it exists.
 #
