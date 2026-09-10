@@ -10,6 +10,7 @@
 #include "purr_kernel.h"
 #include "claw_elf.h"
 #include "claw_loader.h"
+#include "app_manager.h"   // app_manager_mark_scan_dirty() — see personal_add/remove's own call sites
 
 static const char *TAG = "claw_loader";
 
@@ -329,6 +330,12 @@ bool claw_loader_personal_add(const char *username, const char *appname,
     }
 
     ESP_LOGI(TAG, "personal: added %s/%s.claw (%u B)", username, appname, (unsigned)obj_len);
+    // A newly-added personal app changes what app_manager_scan_cached()'s
+    // next call would find — see that function's own doc comment (app_
+    // manager.h) on why this is the one place that needs to say so
+    // explicitly, for every caller of THIS function (server_mgr's app
+    // push, app_manager_remote's download) for free.
+    app_manager_mark_scan_dirty();
     return true;
 }
 
@@ -397,6 +404,7 @@ bool claw_loader_personal_remove(const char *username, const char *appname)
         return false;
     }
     ESP_LOGI(TAG, "personal: removed %s/%s.claw", username, appname);
+    app_manager_mark_scan_dirty();   // see claw_loader_personal_add()'s own call site
     return true;
 }
 

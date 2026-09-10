@@ -176,8 +176,13 @@ void app_main(void)
     // app_manager's own init() scans for apps before P3 system apps have
     // registered, so its first scan always finds 0 — re-scan now that
     // every priority tier above has loaded.
-    extern int app_manager_scan(void);
-    app_manager_scan();
+    // Cached wrapper (app_manager.h) — same include_sd=true behavior as
+    // app_manager_scan(), but skips the filesystem/personal-space walk
+    // when a valid same-firmware cache exists and nothing's been flagged
+    // dirty since it was written. Tab5 has no "recovering" boot concept
+    // of its own here (unlike T-Deck Plus), so this always requests SD.
+    extern int app_manager_scan_cached(bool include_sd);
+    app_manager_scan_cached(true);
     purr_kernel_set_boot_ready(true);
 
     // ── Phase 2: SD extras ───────────────────────────────────────────────

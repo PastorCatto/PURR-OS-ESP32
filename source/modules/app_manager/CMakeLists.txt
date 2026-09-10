@@ -23,7 +23,10 @@ idf_component_register(
     # claw_loader — same PRIVATE treatment, same reason: claw_loader.h is
     # included only by app_manager.c (launch_personal()'s personal-app
     # load/unload calls), not by app_manager.h.
+    # esp_app_format — PRIVATE: only app_manager.c includes esp_app_desc.h
+    # (the scan-cache's firmware-SHA staleness check, esp_app_get_description()
+    # ->app_elf_sha256 — same pattern purr_crash_guard.c already uses).
     PRIV_INCLUDE_DIRS ../speed_demon ../user_mgr ../sig_mgr ../claw_loader
     REQUIRES esp_common driver freertos nvs_flash
-    PRIV_REQUIRES speed_demon user_mgr sig_mgr claw_loader
+    PRIV_REQUIRES speed_demon user_mgr sig_mgr claw_loader esp_app_format
 )

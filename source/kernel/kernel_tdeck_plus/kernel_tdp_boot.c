@@ -948,8 +948,15 @@ void app_main(void)
     // run, so re-reading the NVS flag here would incorrectly say "not
     // recovering" even on a boot that very much still is. See
     // app_manager_scan_ex()'s comment for why SD gets skipped specifically.
-    extern int app_manager_scan_ex(bool include_sd);
-    app_manager_scan_ex(!recovering);
+    // Uses the cached wrapper (app_manager.h) instead of calling
+    // app_manager_scan_ex() directly — pre-linked apps are re-derived fresh
+    // every boot regardless (they're 100% deterministic per firmware), but
+    // the filesystem/personal-space walk is skipped whenever a valid cache
+    // exists for this exact firmware build and nothing has been flagged
+    // dirty (claw_loader_personal_add/remove, or a future "installed an
+    // app" call) since the last real scan.
+    extern int app_manager_scan_cached(bool include_sd);
+    app_manager_scan_cached(!recovering);
 
     // claw_loader_selftest_run()/run2()/run3() calls removed — all THREE
     // PASSED on real hardware. run(): resolving BOTH claw_personal_init and

@@ -128,6 +128,30 @@ int  app_manager_scan(void);
 // See app_manager_scan_ex()'s definition comment for the full story.
 int  app_manager_scan_ex(bool include_sd);
 
+// The scan a kernel_*_boot.c's own post-boot "registry is complete now"
+// re-scan step should call INSTEAD of app_manager_scan_ex()/
+// app_manager_scan() — same signature and result shape, but skips the
+// real filesystem walk (opendir()/readdir() over every scan path) when a
+// persisted cache from THIS exact firmware build says nothing has changed
+// since the last boot. See app_manager_scan_cached()'s own definition
+// comment in app_manager.c for the full "what gets cached and why" story.
+int  app_manager_scan_cached(bool include_sd);
+
+// Marks the persisted scan cache stale — the next app_manager_scan_
+// cached() call will do a real filesystem walk instead of trusting the
+// cache, then re-persist a fresh one. Call this from anywhere that
+// changes what a scan would find OUTSIDE of app_manager's own normal
+// boot-time call: already wired into claw_loader_personal_add()/
+// claw_loader_personal_remove() (source/modules/claw_loader/claw_loader.c)
+// so every existing installer (server_mgr's app push, app_manager_
+// remote's download) covers this for free; call it directly from
+// anything else that stages/removes a .meow/.hiss/.paws/.claw/.kitten
+// file straight onto flash/SD without going through claw_loader's own
+// API (fileman, a future driver/UI package installer). Safe and cheap to
+// call even when nothing actually changed — the only cost is one real
+// scan on the next boot instead of a cache hit.
+void app_manager_mark_scan_dirty(void);
+
 // Launch an app by index or by path. Returns 0 on success.
 int  app_manager_launch_idx(int idx);
 int  app_manager_launch_path(const char *path);

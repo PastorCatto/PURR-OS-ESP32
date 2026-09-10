@@ -11,6 +11,8 @@
 #include "../../kernel/catcalls/purr_win.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_app_desc.h"
+#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -861,6 +863,98 @@ static int launch_personal(app_entry_t *app, int idx)
     return 0;
 }
 
+// ── Scan result cache — "first boot / recheck needed" persistence ──────────
+//
+// The pre-linked-module loop in app_manager_scan_ex() below is 100%
+// deterministic for a given firmware build — purr_kernel_module_at() walks
+// a static table nothing outside a reflash can change, so there is
+// nothing to cache there. Only the filesystem-scanned (scan_dir() over
+// s_scan_paths) and personal-space entries can actually differ between
+// two boots of the SAME firmware — someone copied a .meow onto SD,
+// installed/removed a personal .claw app — so those are what this caches:
+// a persisted {name, path, tier} list, restored straight into s_apps on a
+// cache hit without a single opendir()/readdir() call.
+//
+// Same NVS blob + firmware-SHA-keyed "is this stale" pattern purr_crash_
+// guard.c's reset_strikes_if_new_firmware() already established for its
+// own strike-reset-on-new-firmware logic — reused here rather than
+// inventing a second convention for the same idea. A new firmware build
+// could add/remove a pre-linked app or change scan_dir()'s own extension
+// list, so any firmware change is treated as "recheck needed" the same
+// way crash_guard treats it as "forget old strikes" — not because apps
+// are related to crash strikes, but because "which build wrote this
+// cache" is the same trust question in both places.
+#define APP_SCAN_CACHE_NVS_NS "purr_apps"
+#define APP_SCAN_CACHE_MAX    MAX_APPS
+
+typedef struct {
+    char    name[48];
+    char    path[256];
+    uint8_t tier;
+} cached_scan_entry_t;
+
+static bool scan_cache_is_valid(void)
+{
+    const esp_app_desc_t *desc = esp_app_get_description();
+    if (!desc) return false;
+
+    nvs_handle_t h;
+    if (nvs_open(APP_SCAN_CACHE_NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+
+    uint8_t dirty = 1;   // missing key (first boot ever) stays 1 = dirty
+    nvs_get_u8(h, "dirty", &dirty);
+
+    uint8_t stored_sha[32];
+    size_t  sha_len = sizeof(stored_sha);
+    bool same_fw = (nvs_get_blob(h, "fwid", stored_sha, &sha_len) == ESP_OK) &&
+                   sha_len == sizeof(stored_sha) &&
+                   memcmp(stored_sha, desc->app_elf_sha256, sizeof(stored_sha)) == 0;
+
+    nvs_close(h);
+    return !dirty && same_fw;
+}
+
+static int scan_cache_load(cached_scan_entry_t *out, int max)
+{
+    nvs_handle_t h;
+    if (nvs_open(APP_SCAN_CACHE_NVS_NS, NVS_READONLY, &h) != ESP_OK) return 0;
+
+    uint8_t count = 0;
+    nvs_get_u8(h, "count", &count);
+    if (count > max) count = (uint8_t)max;
+
+    size_t need = (size_t)count * sizeof(cached_scan_entry_t);
+    size_t got  = need;
+    if (need > 0 && (nvs_get_blob(h, "table", out, &got) != ESP_OK || got != need)) count = 0;
+
+    nvs_close(h);
+    return count;
+}
+
+static void scan_cache_save(const cached_scan_entry_t *entries, int count)
+{
+    const esp_app_desc_t *desc = esp_app_get_description();
+    nvs_handle_t h;
+    if (nvs_open(APP_SCAN_CACHE_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+
+    nvs_set_u8(h, "dirty", 0);
+    nvs_set_u8(h, "count", (uint8_t)count);
+    if (count > 0) nvs_set_blob(h, "table", entries, (size_t)count * sizeof(cached_scan_entry_t));
+    if (desc) nvs_set_blob(h, "fwid", desc->app_elf_sha256, sizeof(desc->app_elf_sha256));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+void app_manager_mark_scan_dirty(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(APP_SCAN_CACHE_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "dirty", 1);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "app scan cache marked dirty — next boot's scan will re-check the filesystem");
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 int app_manager_scan_ex(bool include_sd)
@@ -966,6 +1060,89 @@ int app_manager_scan_ex(bool include_sd)
 int app_manager_scan(void)
 {
     return app_manager_scan_ex(true);
+}
+
+// The "final, authoritative" scan a kernel_*_boot.c's own post-boot
+// re-scan step should call instead of app_manager_scan_ex()/
+// app_manager_scan() directly (app_manager_init()'s own preliminary scan
+// stays exactly what it already was — known-incomplete by design, see
+// that function's own comment — caching it would be wrong regardless of
+// anything else here).
+//
+// Cache hit: re-derives pre-linked apps FRESH (cheap — see this file's
+// own scan-cache doc comment on why that part is never cached) then
+// restores the cached filesystem/personal-space {name, path, tier}
+// entries straight into s_apps, skipping every opendir()/readdir() call.
+// Cache miss (first boot, dirty flag set, or firmware changed since the
+// cache was written): behaves exactly like app_manager_scan_ex(), then
+// persists the result for next boot.
+int app_manager_scan_cached(bool include_sd)
+{
+    // A recovering boot's include_sd=false scan deliberately skips SD/
+    // personal apps (see app_manager_scan_ex()'s own comment) — never
+    // trust the cache for that narrower picture, and never persist ITS
+    // result either, or every later boot would believe SD/personal apps
+    // don't exist until something happens to mark the cache dirty again.
+    if (!include_sd || !scan_cache_is_valid()) {
+        int n = app_manager_scan_ex(include_sd);
+        if (include_sd) {
+            cached_scan_entry_t *cache = heap_caps_malloc(
+                APP_SCAN_CACHE_MAX * sizeof(cached_scan_entry_t), MALLOC_CAP_8BIT);
+            if (cache) {
+                int cn = 0;
+                for (int i = 0; i < s_app_count && cn < APP_SCAN_CACHE_MAX; i++) {
+                    if (strncmp(s_apps[i].path, "prelinked:/", 11) == 0) continue;
+                    strncpy(cache[cn].name, s_apps[i].name, sizeof(cache[cn].name) - 1);
+                    cache[cn].name[sizeof(cache[cn].name) - 1] = '\0';
+                    strncpy(cache[cn].path, s_apps[i].path, sizeof(cache[cn].path) - 1);
+                    cache[cn].path[sizeof(cache[cn].path) - 1] = '\0';
+                    cache[cn].tier = (uint8_t)s_apps[i].tier;
+                    cn++;
+                }
+                scan_cache_save(cache, cn);
+                heap_caps_free(cache);
+            }
+        }
+        return n;
+    }
+
+    if (!s_apps || !s_ctxs) {
+        ESP_LOGW(TAG, "cached scan skipped — app_manager not initialised (s_apps/s_ctxs NULL)");
+        return 0;
+    }
+
+    s_app_count = 0;
+    int n = purr_kernel_module_count();
+    for (int i = 0; i < n && s_app_count < MAX_APPS; i++) {
+        const purr_module_header_t *hdr = purr_kernel_module_at(i);
+        if (!hdr || hdr->module_type != PURR_MOD_APP) continue;
+        app_entry_t *app = &s_apps[s_app_count];
+        memset(app, 0, sizeof(*app));
+        strncpy(app->name, hdr->name, sizeof(app->name) - 1);
+        snprintf(app->path, sizeof(app->path), "prelinked:/%s", hdr->name);
+        app->tier        = APP_TIER_CLAW;
+        app->state       = APP_STATE_IDLE;
+        app->speed_demon = (hdr->speed_demon != 0);
+        app->placement   = declared_placement_for(app->name);
+        s_app_count++;
+    }
+
+    cached_scan_entry_t *cache = heap_caps_malloc(
+        APP_SCAN_CACHE_MAX * sizeof(cached_scan_entry_t), MALLOC_CAP_8BIT);
+    int cached_count = cache ? scan_cache_load(cache, APP_SCAN_CACHE_MAX) : 0;
+    for (int i = 0; i < cached_count && s_app_count < MAX_APPS; i++) {
+        app_entry_t *app = &s_apps[s_app_count++];
+        memset(app, 0, sizeof(*app));
+        strncpy(app->name, cache[i].name, sizeof(app->name) - 1);
+        strncpy(app->path, cache[i].path, sizeof(app->path) - 1);
+        app->tier      = (app_tier_t)cache[i].tier;
+        app->state     = APP_STATE_IDLE;
+        app->placement = declared_placement_for(app->name);
+    }
+    if (cache) heap_caps_free(cache);
+
+    ESP_LOGI(TAG, "scan (cached): %d apps found — filesystem walk skipped", s_app_count);
+    return s_app_count;
 }
 
 // ── Server Manager synthetic entry ──────────────────────────────────────
