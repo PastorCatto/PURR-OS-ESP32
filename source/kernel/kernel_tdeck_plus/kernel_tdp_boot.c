@@ -1004,6 +1004,36 @@ void app_main(void)
     extern void claw_loader_selftest_run4(void);
     (void)claw_loader_selftest_run4;
 
+    // claw_loader_selftest_run5() call removed — PASSED on real hardware,
+    // and along the way found and fixed a real bug in claw_elf.c itself
+    // (see that file's own comment on the local-section relocation
+    // branch): the toolchain embeds a local relocation's real target
+    // offset as pre-existing bytes at the relocation site, not in
+    // r_addend (always 0) — silently correct for every offset-0 target
+    // (all guest3/4/5 and this object's own win_create field ever
+    // exercised), silently WRONG for anything at a nonzero offset
+    // (s_registered, at .bss+0xb0, corrupted s_ui.name at .bss+0 the
+    // moment `s_registered = 1;` ran). Confirmed via direct objdump -d/
+    // readelf -r inspection, not guessed, before fixing it.
+    //
+    // run5(): a loaded .claw object built a real catcall_ui_t AT RUNTIME
+    // (field-by-field assignment — a `static const` initializer would
+    // have failed differently, see guest_ui_o_bytes's own comment on why),
+    // called purr_kernel_register_ui() (reachable via purr_kernel.h's
+    // existing import-table entry), then drove its own just-registered
+    // struct directly (win_create -> win_show -> canvas_rect), reaching
+    // all the way through to a real catcall_display_t and moving real
+    // pixels: "claw_personal_init() = 0 (expect 0), purr_kernel_ui()
+    // after = 0x3fceb524 (name='guest_ui')" — SELFTEST PASS on the boot
+    // log; the white ~60x60 square this should have drawn on the physical
+    // screen was not independently confirmed by eye before this call was
+    // disabled — re-enable to check that specifically if it matters later.
+    // Either way this answers the loginUI/systemUI-launcher plan's biggest
+    // open question ("has anything UI-shaped ever loaded via claw_loader
+    // at all") — yes, proven live, registration and call chain both real.
+    extern void claw_loader_selftest_run5(void);
+    (void)claw_loader_selftest_run5;
+
     // pairing_selftest_ecdh() call removed — PASSED on real hardware:
     // "selftest: keygen A=1 B=1", "shared secrets match = 1", "pairing
     // code A=5629 B=5629 match=1", "SELFTEST PASS". Confirms the ECDH math

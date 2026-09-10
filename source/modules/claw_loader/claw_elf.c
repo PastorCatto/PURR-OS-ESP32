@@ -300,18 +300,36 @@ bool claw_elf_load(const uint8_t *data, size_t len, const char *entry_symbol,
                 }
                 kind = CLAW_SEC_EXTERN;
                 target_off = resolved + (uint32_t)rel.r_addend;   // fully resolved already — loader adds base 0 for this kind
-            } else if ((int)sym.st_shndx == text_idx) {
-                kind = CLAW_SEC_TEXT;
-                target_off = sym.st_value + (uint32_t)rel.r_addend;
-            } else if (have_rodata && (int)sym.st_shndx == rodata_idx) {
-                kind = CLAW_SEC_RODATA;
-                target_off = sym.st_value + (uint32_t)rel.r_addend;
-            } else if (have_data && (int)sym.st_shndx == data_idx) {
-                kind = CLAW_SEC_DATA;
-                target_off = sym.st_value + (uint32_t)rel.r_addend;
-            } else if (have_bss && (int)sym.st_shndx == bss_idx) {
-                kind = CLAW_SEC_BSS;
-                target_off = sym.st_value + (uint32_t)rel.r_addend;
+            } else if ((int)sym.st_shndx == text_idx || (have_rodata && (int)sym.st_shndx == rodata_idx) ||
+                       (have_data && (int)sym.st_shndx == data_idx) || (have_bss && (int)sym.st_shndx == bss_idx)) {
+                // LOAD-BEARING, found via real-hardware debugging (a loaded
+                // catcall_ui_t proof object corrupting its own struct — see
+                // git history for the full story): this toolchain's
+                // xtensa-esp-elf-gcc emits .rela.text with r_addend == 0
+                // for EVERY local-symbol R_XTENSA_32 entry, even when the
+                // relocation target is at a nonzero offset within its
+                // section (e.g. the second .bss variable in a translation
+                // unit). The real offset is instead left embedded as the
+                // PRE-RELOCATION VALUE already sitting in the object's own
+                // .text bytes at the relocation site — confirmed by direct
+                // objdump -d: a literal-pool slot's raw content was 0xb0
+                // (a second .bss symbol's real offset) while readelf -r
+                // reported that same relocation's addend as "+0". Every
+                // previous guest object (guest3/4/5) only ever relocated
+                // against offset-0 targets (the first/only symbol in its
+                // section), so this was invisible until a struct with a
+                // SECOND .bss variable at a nonzero offset exposed it —
+                // silently corrupting that variable's write target instead
+                // of failing loudly. rel.r_addend is therefore ignored for
+                // all four local-section kinds below; the embedded value
+                // already at the relocation site is the real offset.
+                uint32_t embedded = 0;
+                if (!read_at(data, len, text_sh.sh_offset + rel.r_offset, sizeof(embedded), &embedded)) goto fail;
+                target_off = sym.st_value + embedded;
+                kind = ((int)sym.st_shndx == text_idx) ? CLAW_SEC_TEXT
+                     : (have_rodata && (int)sym.st_shndx == rodata_idx) ? CLAW_SEC_RODATA
+                     : (have_data && (int)sym.st_shndx == data_idx) ? CLAW_SEC_DATA
+                     : CLAW_SEC_BSS;
             } else {
                 ESP_LOGE(TAG, "relocation at .text+%u targets an unsupported section (shndx=%u) — "
                               "only .text/.rodata/.data/.bss/external are handled", (unsigned)rel.r_offset, sym.st_shndx);
