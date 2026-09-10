@@ -68,12 +68,15 @@ lora        = ""
 # NOT hardware-verified — no Tab5 on the bench. It builds; whether the Android-
 # style UI is usable on a 1280x720 P4 panel is the question a1b3e8af was
 # actually asking, and it still needs someone with the board.
-# ui/lua/systemui — DESELECTED for the console-only test phase of the
-# protected-processes/Unix-boot rewrite: Cupcake/systemui moved to
-# archive/ui_backends_v1/ (see that folder's own README.md), and
-# lua_runtime's Lua window-API bindings call purr_win_* unconditionally,
-# which nothing provides any more with every UI backend archived.
-#ui          = "cupcake"
+# ui/lua/systemui — console-only for the protected-processes/Unix-boot
+# rewrite: Cupcake/systemui moved to archive/ui_backends_v1/ (see that
+# folder's own README.md), and lua_runtime's Lua window-API bindings call
+# purr_win_* unconditionally, which nothing provides any more with every
+# UI backend archived. ui = "none" is now an explicit flag (not a
+# comment) — see purrstrap.py's UI_NO_STATIC_MODULE_VALUES — meaning
+# loginUI ships its framebuffer renderer here (Tab5 has no ESP-NOW radio,
+# unrelated to this — see pairing/app_manager_remote's own P4 exclusion).
+ui          = "none"
 app_manager = "app_manager"
 #lua         = "lua_runtime"
 # systemui — Cupcake's window model has no per-window title bar or close

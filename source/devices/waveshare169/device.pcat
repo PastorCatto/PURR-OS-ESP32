@@ -24,7 +24,12 @@ bt          = false
 lora        = ""
 
 [modules]
-ui          = "miniwin"
+# ui — console-only for the protected-processes/Unix-boot rewrite, same
+# flip as cyd/device.pcat's matching comment — "none" is an explicit flag
+# (not a comment), meaning loginUI ships its framebuffer renderer here.
+# Was "miniwin" (archived, no longer in the live tree) — compile-only
+# verified, no Waveshare 1.69" on the bench for this change specifically.
+ui          = "none"
 app_manager = "app_manager"
 lua         = "lua_runtime"
 wifi        = "wifi_mgr"
@@ -34,10 +39,13 @@ theme       = "wce"
 
 [apps]
 # 1.69" is below medium threshold — still no full-size apps (terminal/
-# fileman/calculator), but settings/diagnostics are the new stripped-down
-# baseline across every non-T-Deck device.
-settings    = true
-diagnostics = true
+# fileman/calculator).
+# settings/diagnostics — DESELECTED alongside the ui flip above, same
+# reasoning as cyd/device.pcat's matching comment (both call purr_win_*,
+# and settings.c's own CMakeLists.txt hardcodes REQUIRES on archived
+# miniwin/cupcake/systemui — a real link failure with ui = "none").
+#settings    = true
+#diagnostics = true
 
 [flash]
 display/st7789   = 1

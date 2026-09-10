@@ -27,20 +27,26 @@ bt          = false
 lora        = ""
 
 [modules]
-ui          = "miniwin"
+# ui — console-only for the protected-processes/Unix-boot rewrite:
+# MiniWin moved to archive/ui_backends_v1/ (see that folder's own
+# README.md). "none" is an explicit flag (not a comment) — see
+# purrstrap.py's UI_NO_STATIC_MODULE_VALUES — meaning loginUI
+# (source/apps/system/login_ui/) ships its framebuffer renderer here.
+# This was previously left as "miniwin" (a module that no longer exists
+# in the live tree) — an out-of-scope, broken build until this flip;
+# not hardware-verified this pass (compile-only, no CYD on the bench for
+# this change specifically).
+ui          = "none"
 app_manager = "app_manager"
 lua         = "lua_runtime"
 wifi        = "wifi_mgr"
 # proximity/pairing/msn/nearby are NOT listed here — purrstrap.py's
-# apply_radio_companion_defaults() adds them automatically to any device
-# with [radio] wifi = true (proximity/pairing) whose [modules] ui is a
-# purr_win-capable backend (msn/nearby on top — miniwin qualifies). No LoRa
-# on this board at all, so meshtastic/meshcore stay out of [modules] as
-# before — MSN is only useful once this device is paired with a radio
-# companion (msn_backend_remote, Phase C, not built yet); until then its
-# chooser just shows both backends as permanently "not ready", which is
-# correct given there's no local radio. Set radio_companion = false here to
-# opt this device out if that's ever undesirable.
+# apply_radio_companion_defaults() adds proximity/pairing automatically
+# to any device with [radio] wifi = true regardless of ui; msn/nearby
+# specifically need a purr_win-capable UI (PURR_WIN_UI_BACKENDS), which
+# "none" no longer is — those two stay off until this device gets a real
+# UI again. Set radio_companion = false here to opt out of even the
+# radio-only modules if that's ever undesirable.
 
 [ui]
 theme       = "wce"
@@ -48,13 +54,16 @@ theme       = "wce"
 [apps]
 # Stripped-down minimal profile — terminal/fileman/taskmgr/calculator still
 # dropped (PSRAM-less, tightly DRAM-budgeted board, see the [radio] comment
-# above). msn/nearby come from apply_radio_companion_defaults() (see
-# [modules]'s comment) — no on-screen keyboard exists for miniwin yet
-# (kb_show/kb_hide are no-ops, unlike cupcake's free LVGL one), so MSN's
-# compose box isn't actually typeable via touch here yet; deliberately left
-# as-is for now rather than blocked on that.
-settings    = true
-diagnostics = true
+# above). msn no longer auto-adds either, now that ui = "none" isn't a
+# purr_win-capable backend (see [modules]'s comment).
+# settings/diagnostics — DESELECTED alongside the ui flip above: both call
+# purr_win_* directly (settings.c's own CMakeLists.txt hardcodes REQUIRES
+# miniwin/cupcake/systemui — a real link failure with those archived;
+# diagnostics.c compiles clean but has nothing to render through either),
+# same "console-only, no UI to run against" reasoning tdeck_plus/tdeck/tab5
+# already applied to these two apps.
+#settings    = true
+#diagnostics = true
 
 [flash]
 # Priority 1 — required, kernel panics without these

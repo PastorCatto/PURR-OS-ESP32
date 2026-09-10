@@ -153,12 +153,15 @@ systemui_style = "ios"
 # "cheetah" (a Windows XP-style desktop, see source/modules/cheetah/) on
 # 2026-07-26 while the ST7789 display work was in flight. All three stay
 # compiled in and selectable, just no longer this device's default.
-# ui/systemui — DESELECTED for the console-only test phase of the
-# protected-processes/Unix-boot rewrite: every UI backend (Mochi included)
-# moved to archive/ui_backends_v1/ (see that folder's own README.md).
-# Re-enable once Phase 3's new UI lands and systemui is rebuilt as a
-# protected process rather than restoring these values as-is.
-#ui          = "mochi"
+# ui/systemui — console-only for the protected-processes/Unix-boot
+# rewrite: every static UI backend (Mochi included) moved to
+# archive/ui_backends_v1/ (see that folder's own README.md). ui = "none"
+# is now an explicit flag (not a comment) — see purrstrap.py's
+# UI_NO_STATIC_MODULE_VALUES — meaning loginUI (source/apps/system/
+# login_ui/) ships its framebuffer renderer here. Flip to "lvgl" once this
+# device's login screen should render via LVGL instead (still no static
+# systemui/shell module — that's a separate, later rebuild).
+ui          = "none"
 #systemui    = "systemui"
 app_manager = "app_manager"
 # mesh — OFF as of 2026-09-01: MSN (the meshtastic/meshcore-backed chat app)

@@ -46,6 +46,14 @@ bt          = true
 lora        = "sx1262_rl"
 
 [modules]
+# ui — reviewed during the fleet-wide ui-flag normalization pass (every
+# other device's [modules] ui got an explicit "none"/"lvgl" flag, see
+# purrstrap.py's UI_NO_STATIC_MODULE_VALUES) and deliberately LEFT AS-IS:
+# unlike miniwin/cupcake/mochi/etc., oled_ui was never archived — it's
+# live code, and this device's own pairing-server confirm screen
+# (oled_ui_module.c, see [modules] server's comment below) genuinely
+# depends on it. Flipping to "none" here would be a functional
+# regression, not a fix.
 ui          = "oled_ui"
 app_manager = "app_manager"
 # mesh — OFF as of 2026-09-02, mirroring tdeck_plus/device.pcat's own
@@ -169,19 +177,32 @@ style       = "full"
 # 128x64 OLED, no touch, no purr_win UI backend on this device (ui =
 # "oled_ui" above, a raw-framebuffer text UI, not LVGL) — none of these
 # will do anything useful if actually LAUNCHED here (they all call
-# purr_win_create(), with nothing to create a window against). Enabled
-# anyway so app_manager's registry lists them for REMOTEAPPS_ACTION_LIST
-# (server_mgr/app_manager_remote — a connected client's own remote-mode
-# desktop sees them), and to actually exercise that listing pipeline with
-# real data for the first time. Whether a client can successfully LAUNCH
-# one against a headless server like this is the real, still-open
-# question the Server Manager plan's own "Files served, not run locally"
-# section already flagged — not attempted or solved here.
-settings    = true
+# purr_win_create(), with nothing to create a window against).
+#
+# settings/terminal/fileman/calculator — DISABLED as of this pass (were
+# previously enabled purely so app_manager's registry would list them for
+# REMOTEAPPS_ACTION_LIST — a connected client's remote-mode desktop —
+# never to be run locally, see the comment history on this block). Real
+# blocker: settings.c genuinely #includes systemui.h and calls
+# purr_systemui_fx_refresh() — a real dependency on the now-archived
+# systemui module (archive/ui_backends_v1/), not just a stale REQUIRES
+# line, so it no longer compiles at all.
+#
+# Not restored as static stubs — app_manager_scan_cached() (source/
+# modules/app_manager/app_manager.c) now re-scans for real on every boot
+# and whenever app_manager_mark_scan_dirty() fires (an app installed or
+# removed, see claw_loader_personal_add()/_remove()'s own call sites), so
+# what a remote client's listing shows should come from what's ACTUALLY
+# present (pre-linked + personal/system claw packages), not four
+# statically-compiled stand-ins that exist only to pad the list. A
+# headless device like this one legitimately has an empty/sparse listing
+# until something real is pushed to it — that's correct, not a gap to
+# paper over with fake entries.
+settings    = false
 about       = false
-terminal    = true
-fileman     = true
-calculator  = true
+terminal    = false
+fileman     = false
+calculator  = false
 
 [flash]
 display/ssd1306      = 1

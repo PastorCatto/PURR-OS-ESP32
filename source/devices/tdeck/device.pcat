@@ -25,10 +25,12 @@ bt          = true
 lora        = "sx1262"
 
 [modules]
-# ui — DESELECTED for the console-only test phase of the protected-
-# processes/Unix-boot rewrite: MiniWin moved to archive/ui_backends_v1/
-# (see that folder's own README.md). Re-enable once Phase 3's new UI lands.
-#ui          = "miniwin"
+# ui — console-only for the protected-processes/Unix-boot rewrite:
+# MiniWin moved to archive/ui_backends_v1/ (see that folder's own
+# README.md). ui = "none" is now an explicit flag (not a comment) — see
+# purrstrap.py's UI_NO_STATIC_MODULE_VALUES — meaning loginUI ships its
+# framebuffer renderer here.
+ui          = "none"
 app_manager = "app_manager"
 
 [ui]

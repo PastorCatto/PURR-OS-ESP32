@@ -26,7 +26,12 @@ bt          = false
 lora        = ""
 
 [modules]
-ui          = "miniwin"
+# ui — console-only for the protected-processes/Unix-boot rewrite, same
+# flip as cyd/device.pcat's matching comment — "none" is an explicit flag
+# (not a comment), meaning loginUI ships its framebuffer renderer here.
+# Was "miniwin" (archived, no longer in the live tree) — compile-only
+# verified, no JC3248W535 on the bench for this change specifically.
+ui          = "none"
 app_manager = "app_manager"
 lua         = "lua_runtime"
 wifi        = "wifi_mgr"
@@ -35,8 +40,12 @@ wifi        = "wifi_mgr"
 theme       = "wce"
 
 [apps]
-settings    = true
-diagnostics = true
+# settings/diagnostics — DESELECTED alongside the ui flip above, same
+# reasoning as cyd/device.pcat's matching comment (both call purr_win_*,
+# and settings.c's own CMakeLists.txt hardcodes REQUIRES on archived
+# miniwin/cupcake/systemui — a real link failure with ui = "none").
+#settings    = true
+#diagnostics = true
 
 [flash]
 display/axs15231b  = 1

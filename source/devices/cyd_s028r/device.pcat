@@ -24,19 +24,30 @@ bt          = false
 lora        = ""
 
 [modules]
-ui          = "miniwin"
+# ui — console-only for the protected-processes/Unix-boot rewrite, same
+# flip as cyd/device.pcat's matching comment — "none" is an explicit flag
+# (not a comment), meaning loginUI ships its framebuffer renderer here.
+# Was "miniwin" (archived, no longer in the live tree) — compile-only
+# verified, no CYD S028R on the bench for this change specifically.
+ui          = "none"
 app_manager = "app_manager"
 lua         = "lua_runtime"
 wifi        = "wifi_mgr"
-# proximity/pairing/msn/nearby — auto-added by purrstrap.py's
-# apply_radio_companion_defaults(), see cyd/device.pcat's matching comment.
+# proximity/pairing — auto-added by purrstrap.py's
+# apply_radio_companion_defaults() regardless of ui; msn/nearby specifically
+# need a purr_win-capable UI, which "none" no longer is — see cyd/
+# device.pcat's matching comment.
 
 [ui]
 theme       = "wce"
 
 [apps]
-settings    = true
-diagnostics = true
+# settings/diagnostics — DESELECTED alongside the ui flip above, same
+# reasoning as cyd/device.pcat's matching comment (both call purr_win_*,
+# and settings.c's own CMakeLists.txt hardcodes REQUIRES on archived
+# miniwin/cupcake/systemui — a real link failure with ui = "none").
+#settings    = true
+#diagnostics = true
 
 [flash]
 display/ili9341  = 1

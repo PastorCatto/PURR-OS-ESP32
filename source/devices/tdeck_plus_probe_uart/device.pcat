@@ -34,8 +34,13 @@ spiffs_offset  = "0xD90000"
 # No module tiers to stagger — nothing loads after boot.
 boot_settle_ms = 0
 
-# No [drivers], no [modules], no [apps], no [flash] — see the header comment.
-# The kernel is the whole image.
+# No [drivers], no [apps], no [flash] — see the header comment. The kernel
+# is the whole image, but purrstrap.py's _sdkconfig_lines() now requires
+# every device to state [modules] ui explicitly (see UI_NO_STATIC_MODULE_
+# VALUES) — "none" here means exactly what it always has: no UI backend
+# at all, not even loginUI (this kernel never reaches app_manager/login).
+[modules]
+ui = "none"
 
 [pins]
 # Present so purrstrap's generated glue carries the real board pinout, and so a

@@ -1,6 +1,10 @@
 # devices/tdeck_plus_test/device.pcat
 # T-Deck Plus — input test mode
-# Boots straight into touch/trackball/keyboard visualizer. No apps or modules loaded.
+# Boots straight into touch/trackball/keyboard visualizer. No real apps or
+# modules loaded — [modules] ui = "none" below exists only because
+# purrstrap.py's _sdkconfig_lines() now requires every device to state it
+# explicitly (see UI_NO_STATIC_MODULE_VALUES), not because this profile
+# does anything with a UI backend.
 
 [device]
 name        = "tdeck_plus_test"
@@ -15,6 +19,9 @@ spiffs_offset  = "0xD90000"
 
 [drivers]
 display     = "st7789"
+
+[modules]
+ui = "none"
 
 [flash]
 display/st7789 = 1

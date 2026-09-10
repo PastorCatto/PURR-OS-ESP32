@@ -1593,6 +1593,12 @@ def _generate_glue(device, cfg, out_dir):
     CONTROL_FLAG_MODULE_KEYS = ("modules.radio_companion", "modules.server")
     for raw_key, raw_val in sorted(cfg.items()):
         if raw_key.startswith("modules.") and raw_val and raw_key not in CONTROL_FLAG_MODULE_KEYS:
+            # modules.ui = "none"/"lvgl" names no static module (see
+            # UI_NO_STATIC_MODULE_VALUES's own comment) — everything else
+            # under [modules] (a real UI_BACKEND_MAP name included) still
+            # names a real purr_module_<name> to register as before.
+            if raw_key == "modules.ui" and raw_val in UI_NO_STATIC_MODULE_VALUES:
+                continue
             module_ids.append(to_sym(raw_val))
     # driver_manager is always included if present
     if to_sym("driver_manager") not in module_ids:
@@ -1699,6 +1705,16 @@ UI_BACKEND_MAP = {
     "nougat":    "NOUGAT",
 }
 
+# device.pcat's [modules] ui — two new, explicit sentinel values, distinct
+# from the archived-backend names above, that name no static UI module at
+# all: "none" (no graphical shell, no LVGL — loginUI ships in framebuffer
+# mode, see source/apps/system/login_ui/) and "lvgl" (still no *static*
+# shell module — those all live in archive/ui_backends_v1/ now — but tells
+# the sysclaw packaging step to build loginUI's LVGL renderer instead of
+# framebuffer). Every device.pcat states one of these two, or a real
+# UI_BACKEND_MAP name, explicitly now — "ui" is never absent/commented out.
+UI_NO_STATIC_MODULE_VALUES = ("none", "lvgl")
+
 def _pcat_bool(cfg, key):
     return cfg.get(key, "false").strip().lower() in ("true", "1", "yes")
 
@@ -1771,14 +1787,21 @@ def _sdkconfig_lines(device, cfg):
         lines.append("CONFIG_ARDUINO_SERIAL_EVENT_TASK_RUNNING_CORE=1")
 
     ui = cfg.get("modules.ui", "")
-    if ui:
+    if not ui:
+        die(f"{device}: device.pcat [modules] ui is missing — every device now states one "
+            f"explicitly: \"none\", \"lvgl\", or a real UI_BACKEND_MAP name "
+            f"({', '.join(sorted(UI_BACKEND_MAP))})")
+    if ui not in UI_NO_STATIC_MODULE_VALUES:
         mapped = UI_BACKEND_MAP.get(ui)
         if not mapped:
             die(f"{device}: device.pcat [modules] ui = \"{ui}\" has no entry in UI_BACKEND_MAP "
-                f"(valid: {', '.join(sorted(UI_BACKEND_MAP))})")
+                f"(valid: \"none\", \"lvgl\", {', '.join(sorted(UI_BACKEND_MAP))})")
         lines.append("")
         lines.append("# PURR OS UI Backend")
         lines.append(f"CONFIG_PURR_UI_BACKEND_{mapped}=y")
+    # ui = "none"/"lvgl": no static UI module, no CONFIG_PURR_UI_BACKEND_* —
+    # see UI_NO_STATIC_MODULE_VALUES's own comment. loginUI's sysclaw build
+    # step reads this same cfg value directly to pick its renderer.
 
     # [modules] bt/mesh presence -> the Kconfig gates that actually compile
     # bt_mgr.c/meshtastic's mesh_router.c+mesh_radio.c in. Mirrors the ui
@@ -1935,7 +1958,12 @@ def _build_kernel_spine(device, cfg, out_dir):
     # hardcode `REQUIRES miniwin` for every device — including boards that have
     # no miniwin in their build at all once selection is on.
     _ui = (cfg.get("modules.ui", "") or "").strip().strip('"')
-    if _ui and _ui not in _drv:
+    # "none"/"lvgl" name no static module at all (UI_NO_STATIC_MODULE_VALUES)
+    # — only a real archived-backend name is a linkable component main.c
+    # could possibly reference. Before ui was a required, always-present
+    # flag this branch never saw "none" (an empty/absent ui was already
+    # falsy and skipped); it needs the same exclusion "" always had.
+    if _ui and _ui not in UI_NO_STATIC_MODULE_VALUES and _ui not in _drv:
         _drv.append(_ui)
     env["PURR_DRIVER_REQUIRES"] = " ".join(_drv)
 
