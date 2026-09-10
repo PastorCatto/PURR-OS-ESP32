@@ -189,6 +189,13 @@ idf_component_register(
         # app_manager (see purr_console.h's own purr_console_login_fn doc
         # comment) — this module exists purely to pull those two in.
         purr_console_login
+        # purr_fbtty — a purr_console_io_t binding that draws to the
+        # physical display and reads from the physical keyboard
+        # (source/modules/purr_fbtty/) — the on-device standalone console,
+        # not a serial-only debug shell. Same "compiled everywhere, only
+        # called where a boot.c actually reaches for it" shape as
+        # purr_console/purr_console_login above.
+        purr_fbtty
         # purr_quirk — loads a .purr v2 device quirk-data package
         # (source/modules/purr_quirk/): pin assignments and driver-specific
         # config, swappable without a firmware rebuild, the way

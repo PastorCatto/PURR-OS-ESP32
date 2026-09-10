@@ -38,6 +38,7 @@
 #include "../../modules/boot_splash/boot_splash.h"
 #include "../../modules/purr_console/purr_console.h"
 #include "../../modules/purr_console_login/purr_console_login.h"
+#include "../../modules/purr_fbtty/purr_fbtty.h"
 #include "../../modules/user_mgr/user_mgr.h"
 #include "../../modules/app_manager/app_manager.h"
 #include "../../modules/purr_quirk/purr_quirk.h"
@@ -450,12 +451,21 @@ static void serial_console_task(void *arg)
     // internal path than this driver — confirmed live on real hardware,
     // not assumed: this console's own banner/prompt and every ESP_LOG
     // line (including ones firing mid-command, e.g. heapwatch) interleave
-    // correctly with no conflict, no dropped output, no hang.
+    // correctly with no conflict, no dropped output, no hang. Still
+    // installed unconditionally here even though the interactive session
+    // below now prefers the on-device screen+keyboard — tdp_panic_console()
+    // (this file's own recoverable-panic path) uses this same peripheral,
+    // and it must already be live by the time a panic could ever reach it.
     usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
     esp_err_t ret = usb_serial_jtag_driver_install(&cfg);
     if (ret != ESP_OK) {
+        // A protected process returning IS the failure signal (see
+        // purr_kernel_start_protected()'s own doc comment) — no
+        // vTaskDelete(NULL) here any more. The earlier version of this
+        // function self-deleted on this exact path, which would have
+        // silently defeated that primitive's whole "no silent skip"
+        // point the moment it was actually needed.
         ESP_LOGE(TAG, "usb_serial_jtag_driver_install failed: %s — console unavailable", esp_err_to_name(ret));
-        vTaskDelete(NULL);
         return;
     }
 
@@ -463,7 +473,20 @@ static void serial_console_task(void *arg)
         sizeof(s_tdp_console_cmds) / sizeof(s_tdp_console_cmds[0]));
     purr_console_set_login_fn(purr_console_login_default_login_fn);
     purr_console_set_exec_fn(purr_console_login_default_exec_fn);
-    purr_console_run(&s_console_io, true);   // never returns
+
+    // The actual point of "console mode": type on the device's own
+    // keyboard, read its own screen — no cable to another machine
+    // required. Falls back to USB-Serial-JTAG only if no display ever
+    // registered (should not happen on this device — display is baked in
+    // at Phase 0, before this task ever starts — but this task returning
+    // outright over a display driver problem would be a strictly worse
+    // failure than "console reachable over the cable instead").
+    if (purr_fbtty_init()) {
+        purr_console_run(&purr_fbtty_io, true);   // never returns
+    } else {
+        ESP_LOGW(TAG, "purr_fbtty_init failed (no display?) — falling back to USB-Serial-JTAG");
+        purr_console_run(&s_console_io, true);    // never returns
+    }
 }
 
 // Registered with purr_kernel_set_panic_console_cb() — called from inside
@@ -1055,7 +1078,17 @@ void app_main(void)
         ESP_LOGW(TAG, "app_manager not loaded");
     }
 
-    boot_splash_advance();   // final step — UI backend's own first paint supersedes this shortly after
+    boot_splash_advance();   // final step — normally a UI backend's first paint supersedes this shortly after
+    // Console-only test phase (archive/ui_backends_v1/README.md): no UI
+    // backend exists right now to ever paint over the splash, so without
+    // this it sits on screen forever — indistinguishable from a real hang
+    // to anyone looking at the physical display, even though boot
+    // completed. Confirmed live: exactly this was reported as "the boot
+    // screen hangs" on real hardware before this line existed. Brief and
+    // soon superseded for real — purr_fbtty_init() (below, inside the
+    // console's own protected process) clears this and starts drawing
+    // the actual login prompt within a couple hundred ms.
+    purr_splash_status("Loading console...");
     ESP_LOGI(TAG, "boot complete — %u bytes free", (unsigned)purr_kernel_free_ram());
     purr_kernel_notify("PURR OS ready", "T-Deck Plus booted", "kernel");
 

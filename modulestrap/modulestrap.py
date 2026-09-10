@@ -408,8 +408,10 @@ def _device_referenced(cfg):
 #                    the hard way a second time.
 #   purr_console_login — same exact shape and reason as purr_console/
 #                    purr_quirk above.
+#   purr_fbtty      — same exact shape and reason as purr_console/
+#                    purr_quirk above.
 CORE_COMPONENTS = {"boot_splash", "app_manager", "driver_manager", "purr_console", "purr_quirk",
-                    "purr_console_login"}
+                    "purr_console_login", "purr_fbtty"}
 
 
 def select_components(cfg, targets):

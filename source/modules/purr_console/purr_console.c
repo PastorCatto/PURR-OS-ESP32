@@ -433,6 +433,12 @@ void purr_console_run(const purr_console_io_t *io, bool with_login) {
                                 // even if a PREVIOUS one on this io was
                                 // stopped via purr_console_request_stop()
 
+    // Debian-style banner, shown BEFORE the login prompt (like /etc/issue
+    // ahead of getty's own "login:") — only for a real login session, not
+    // the panic-recovery path (with_login=false), which has no "welcome"
+    // moment to speak of.
+    if (with_login) purr_console_print("\r\nWelcome to PURR OS\r\n\r\n");
+
     // See purr_console_run()'s own doc comment in the header: with_login
     // is what guarantees a panic-context caller (with_login=false, always)
     // never reaches a login_fn a normal boot registered earlier, even

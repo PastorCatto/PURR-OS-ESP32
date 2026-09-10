@@ -10,29 +10,14 @@ void purr_console_login_default_login_fn(const purr_console_io_t *io)
     char username[USER_MGR_USERNAME_MAX];
 
     for (;;) {
-        if (user_mgr_count() > 1) {
-            purr_console_println("Accounts:");
-            for (int i = 0; i < user_mgr_count(); i++) {
-                char name[USER_MGR_USERNAME_MAX];
-                if (user_mgr_at(i, name, sizeof(name))) {
-                    char line[USER_MGR_USERNAME_MAX + 4];
-                    snprintf(line, sizeof(line), "  %s", name);
-                    purr_console_println(line);
-                }
-            }
-            purr_console_print("login: ");
-            purr_console_read_line(io, username, sizeof(username));
-            if (!user_mgr_exists(username)) {
-                purr_console_println("no such account");
-                continue;
-            }
-        } else {
-            // Single-account device — same "don't make someone type a
-            // name that's the only possible answer" shortcut
-            // purr_systemui_boot_login_check() already takes.
-            const char *def = user_mgr_default_username();
-            strncpy(username, def ? def : "", sizeof(username) - 1);
-            username[sizeof(username) - 1] = '\0';
+        // Real getty(8)/login(1) shape — always ask, never list valid
+        // accounts or shortcut a single-account device to auto-fill a
+        // name. "login:" then, only if that account has one, "password:".
+        purr_console_print("login: ");
+        purr_console_read_line(io, username, sizeof(username));
+        if (!user_mgr_exists(username)) {
+            purr_console_println("no such account");
+            continue;
         }
 
         if (!user_mgr_has_password(username)) {
