@@ -26,6 +26,7 @@
 #include "../../drivers/input/bbq20/bbq20.h"
 #include "../../modules/purr_console/purr_console.h"
 #include "../../modules/purr_console_login/purr_console_login.h"
+#include "../../modules/purr_fbtty/purr_fbtty.h"
 
 static const char *TAG = "td_boot";
 
@@ -108,7 +109,18 @@ static void serial_console_task(void *arg)
 
     purr_console_set_login_fn(purr_console_login_default_login_fn);
     purr_console_set_exec_fn(purr_console_login_default_exec_fn);
-    purr_console_run(&s_console_io, true);   // never returns
+
+    // Real "console mode" — the same bbq20 keyboard + ST7789 screen T-Deck
+    // Plus proved this on: type on the device's own keyboard, read its
+    // own screen, no cable required. Falls back to UART0 only if no
+    // display ever registered (shouldn't happen — display is baked in at
+    // Phase 0, before this task starts).
+    if (purr_fbtty_init()) {
+        purr_console_run(&purr_fbtty_io, true);   // never returns
+    } else {
+        ESP_LOGW(TAG, "purr_fbtty_init failed (no display?) — falling back to UART0");
+        purr_console_run(&s_console_io, true);    // never returns
+    }
 }
 
 void app_main(void)
