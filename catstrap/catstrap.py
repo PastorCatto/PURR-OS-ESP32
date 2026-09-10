@@ -531,6 +531,40 @@ def _build_sysclaw_variant(name, app_dir, c_files, variant, define, out_path):
     info(f"    [{variant}] .text={text_size} B (of {SYSCLAW_SLOT_SIZE} B slot) → {os.path.relpath(out_path, REPO_DIR)}")
     return True
 
+def _stage_sysclaw_assets(name, app_dir):
+    """Copies app_dir/assets/ (if present) verbatim into
+    cattobaked/apps/<name>.assets/ — a plain directory of files, no
+    container/pack format invented for it. These are NOT compiled or
+    relocated at all — they never go near claw_elf.c — a package that
+    wants to split "main program" from "assets" (icons, a background
+    image, a bigger font bitmap, anything not worth bloating .text with as
+    a compiled-in byte array) ships them as ordinary files instead, staged
+    by purrstrap into a TOP-LEVEL /flash/assets/<name>/<file> — not
+    nested under system/<name>.assets/ as this originally staged them;
+    see purrstrap.py's _stage_sysclaw_packages() "Assets" block for the
+    real, hardware-found SPIFFS_OBJ_NAME_LEN reason the nested form had
+    to go — and reads them back at runtime with plain fopen()/fread() —
+    see _CLAW_IMPORT_LIBC_ESSENTIALS's stdio entries.
+
+    Returns the list of relative file paths staged (empty if no assets/
+    directory exists — most sysclaw packages have no assets at all, and
+    that's the common case, not an error)."""
+    assets_src = os.path.join(app_dir, "assets")
+    if not os.path.isdir(assets_src):
+        return []
+
+    assets_dst = os.path.join(OUT_APPS, f"{name}.assets")
+    if os.path.isdir(assets_dst):
+        shutil.rmtree(assets_dst)
+    shutil.copytree(assets_src, assets_dst)
+
+    staged = []
+    for root, _dirs, files in os.walk(assets_dst):
+        for fname in files:
+            rel = os.path.relpath(os.path.join(root, fname), assets_dst)
+            staged.append(rel)
+    return sorted(staged)
+
 def _build_sysclaw(name, app_dir, cfg):
     """Builds BOTH render-backend variants unconditionally — framebuffer
     (LOGIN_UI_BACKEND_FB) and LVGL (LOGIN_UI_BACKEND_LVGL) — into
@@ -538,7 +572,10 @@ def _build_sysclaw(name, app_dir, cfg):
     SELECTION happens later, in purrstrap.py's build_flash_image() (reads
     the target device's own [modules] ui flag — "none" stages the fb
     variant, anything else stages lvgl) — catstrap itself builds generically
-    for every device, same as every other tier here."""
+    for every device, same as every other tier here.
+
+    Also stages app_dir/assets/ (if present) — see _stage_sysclaw_assets()'s
+    own comment for why this is a plain file copy, not a compile step."""
     c_files = sorted(f for f in os.listdir(app_dir)
                       if f.endswith(".c") and os.path.isfile(os.path.join(app_dir, f)))
     if not c_files:
@@ -551,12 +588,15 @@ def _build_sysclaw(name, app_dir, cfg):
                                       os.path.join(OUT_APPS, f"{name}_fb.claw"))
     ok_lvgl = _build_sysclaw_variant(name, app_dir, c_files, "lvgl", "LOGIN_UI_BACKEND_LVGL",
                                       os.path.join(OUT_APPS, f"{name}_lvgl.claw"))
+    assets = _stage_sysclaw_assets(name, app_dir)
+    if assets:
+        info(f"    assets: {', '.join(assets)} → cattobaked/apps/{name}.assets/")
 
     version = cfg.get("version", "0.1.0")
     with open(os.path.join(OUT_APPS, f"{name}.sysclaw.meta.json"), "w") as f:
         json.dump({
             "name": name, "tier": "sysclaw", "version": version,
-            "sources": c_files, "built_at": datetime.datetime.now().isoformat(),
+            "sources": c_files, "assets": assets, "built_at": datetime.datetime.now().isoformat(),
             "variants": {"fb": ok_fb, "lvgl": ok_lvgl},
         }, f, indent=2)
 

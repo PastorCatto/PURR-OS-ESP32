@@ -167,9 +167,10 @@ static void clear_row(int py, int w)
 }
 
 #define ROW_TITLE  1
-#define ROW_USER   3
-#define ROW_PASS   4
-#define ROW_STATUS 6
+#define ROW_MOTD   2
+#define ROW_USER   4
+#define ROW_PASS   5
+#define ROW_STATUS 7
 
 static void redraw(const login_core_t *lc)
 {
@@ -226,9 +227,18 @@ bool login_render_init(void)
     return true;
 }
 
+// Drawn once, the first call only — lc->motd never changes after
+// login_ui_main.c's own load_motd() runs, unlike username/password/state
+// which redraw() below repaints on every call.
+static bool s_motd_drawn = false;
+
 void login_render_draw(const login_core_t *lc)
 {
     if (!s_disp) return;
+    if (!s_motd_drawn && lc->motd[0]) {
+        draw_str(FONT_W, ROW_MOTD * FONT_H, lc->motd, FG_COLOR);
+        s_motd_drawn = true;
+    }
     redraw(lc);
 }
 

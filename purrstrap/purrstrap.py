@@ -1179,6 +1179,44 @@ def _stage_sysclaw_packages(pcat_cfg, staging_dir):
         size = os.path.getsize(dst)
         print(f"  {C_GRN}[OK]{C_RST}  system/{name}.claw{'':<{max(1, 18 - len(name))}} [{chosen}]  {size} B")
         staged += 1
+
+        # Assets — a plain directory of files (catstrap.py's own
+        # _stage_sysclaw_assets(), never compiled/relocated) mirrored to
+        # a TOP-LEVEL /flash/assets/<name>/<file> — NOT nested under
+        # system/<name>.assets/ as this originally staged them. Real,
+        # hardware-found reason for the change, not a style preference:
+        # SPIFFS_OBJ_NAME_LEN defaults to 32 bytes INCLUDING the null
+        # terminator (Kconfig's own comment: usable string length is
+        # SPIFFS_OBJ_NAME_LEN - 1 = 31 chars), and spiffsgen.py's own
+        # length check (`len(img_path) > obj_name_len`) has an off-by-one
+        # that lets a path exactly AT 32 characters slip through
+        # unerrored while still overflowing the real on-disk field —
+        # "/system/login_ui.assets/motd.txt" is exactly 32 characters
+        # (confirmed: img_path = '/' + relpath(...), spiffsgen.py's own
+        # create_file()) and landed silently corrupted, so fopen() on the
+        # exact intended path returned NULL at runtime with no error
+        # anywhere in the build. "/assets/login_ui/motd.txt" is 25 —
+        # comfortably under, and shorter for every future sysclaw package
+        # too, not just this one. Same top-level-directory precedent
+        # wallpapers/quirks already use just above in this same function.
+        # Same variant regardless of fb/lvgl — assets are backend-
+        # agnostic; a renderer that doesn't use a given file simply never
+        # opens it.
+        asset_files = meta.get("assets", [])
+        if asset_files:
+            assets_src = os.path.join(OUTPUT_DIR, "apps", f"{name}.assets")
+            assets_dst = os.path.join(staging_dir, "assets", name)
+            if os.path.isdir(assets_src):
+                if os.path.isdir(assets_dst):
+                    shutil.rmtree(assets_dst)
+                shutil.copytree(assets_src, assets_dst)
+                total_bytes = sum(os.path.getsize(os.path.join(assets_dst, f)) for f in asset_files
+                                  if os.path.isfile(os.path.join(assets_dst, f)))
+                print(f"  {C_GRN}[OK]{C_RST}  assets/{name}/{'':<{max(1, 14 - len(name))}} "
+                      f"{len(asset_files)} file(s)  {total_bytes} B")
+            else:
+                warn(f"sysclaw package '{name}': assets listed in meta.json but "
+                     f"{os.path.relpath(assets_src, REPO_DIR)} is missing")
     if staged:
         info(f"staged {staged} system claw package(s) into spiffs_staging/system/")
 
@@ -1480,6 +1518,15 @@ _CLAW_IMPORT_LIBC_ESSENTIALS = [
     "memset", "memcpy", "memcmp", "memmove",
     "strlen", "strcpy", "strncpy", "strcmp", "strncmp", "strcat", "strncat", "strchr", "strrchr",
     "snprintf",
+    # File I/O — for a sysclaw package reading its own staged assets
+    # (see catstrap.py's _stage_sysclaw_assets()/purrstrap.py's own
+    # _stage_sysclaw_packages() "Assets" block: a package can split
+    # "main program" from "assets" — icons, a background image, a bigger
+    # font bitmap — shipped as plain files at a predictable /flash/
+    # system/<name>.assets/<file> path rather than bloating .text as a
+    # compiled-in byte array) and read it back the same way any other
+    # file-reading code in this tree already does, no new kernel API.
+    "fopen", "fclose", "fread", "fseek", "ftell",
 ]
 
 def _generate_claw_imports():

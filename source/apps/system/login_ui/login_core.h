@@ -20,6 +20,8 @@ typedef enum {
     LOGIN_STATE_SUCCESS,    // logged in — app_manager_notify_unlocked() already fired
 } login_state_t;
 
+#define LOGIN_MOTD_MAX 64
+
 typedef struct {
     login_state_t state;
     char username[LOGIN_USERNAME_MAX];
@@ -27,6 +29,12 @@ typedef struct {
     int  u_len;
     int  p_len;
     const char *error_msg;   // valid only while state == LOGIN_STATE_ERROR
+    // Set by login_ui_main.c before the render loop starts (read from this
+    // package's own staged assets — see catstrap.py's _stage_sysclaw_
+    // assets() / this package's assets/motd.txt), never by login_core.c
+    // itself. Empty string if no assets were found — a render backend
+    // must treat that as "nothing to show", not an error.
+    char motd[LOGIN_MOTD_MAX];
 } login_core_t;
 
 // Zeroes `lc`, sets state to LOGIN_STATE_USERNAME, and seeds the username
