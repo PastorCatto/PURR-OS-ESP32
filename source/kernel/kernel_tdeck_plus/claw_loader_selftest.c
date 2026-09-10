@@ -371,7 +371,7 @@ static const uint8_t guest4_o_bytes[] = {
 void claw_loader_selftest_run(void)
 {
     claw_loaded_module_t m;
-    if (!claw_loader_load(guest3_o_bytes, sizeof(guest3_o_bytes), &m)) {
+    if (!claw_loader_load(guest3_o_bytes, sizeof(guest3_o_bytes), CLAW_POOL_DYNAMIC, &m)) {
         ESP_LOGE(TAG, "load failed");
         return;
     }
@@ -397,7 +397,7 @@ void claw_loader_selftest_run(void)
 void claw_loader_selftest_run2(void)
 {
     claw_loaded_module_t m;
-    if (!claw_loader_load(guest4_o_bytes, sizeof(guest4_o_bytes), &m)) {
+    if (!claw_loader_load(guest4_o_bytes, sizeof(guest4_o_bytes), CLAW_POOL_DYNAMIC, &m)) {
         ESP_LOGE(TAG, "run2: load failed");
         return;
     }
@@ -973,6 +973,18 @@ void claw_loader_selftest_run4(void)
         bool added = claw_loader_personal_add(user, app, guest5_o_bytes, sizeof(guest5_o_bytes));
         ESP_LOGI(TAG, "run4: personal_add = %d", added);
 
+        // app_manager_notify_unlocked()/_notify_locked() are explicitly a
+        // login-UI responsibility (app_manager.h's own doc comment) —
+        // app_manager_get() returns NULL for every index until something
+        // calls this. This selftest runs during boot, before any login UI
+        // (console or otherwise) has run, so the registry is legitimately
+        // still locked here — call it directly, same as a real login flow
+        // would, purely so this test can see its own throwaway app.
+        // Added when this test was re-run after the claw_pool_t refactor
+        // and found FAILing on a registry check that predates the
+        // unlock-gating feature; not a claw_loader/pool bug.
+        app_manager_notify_unlocked();
+
         int found_count = app_manager_scan();
         ESP_LOGI(TAG, "run4: app_manager_scan() = %d apps total", found_count);
 
@@ -1012,12 +1024,16 @@ void claw_loader_selftest_run4(void)
 
     // Clean up: remove the throwaway account (also logs it out per
     // user_mgr_remove()'s own contract), then restore whatever was logged
-    // in before, if anything.
+    // in before, if anything. Also re-lock the registry this test unlocked
+    // above — whatever real login flow runs after this selftest (console
+    // or loginUI) should be the thing that unlocks it for real, not find
+    // it already unlocked by a boot-time test.
     user_mgr_remove(user);
     if (was_logged_in && prev_user[0]) {
         bool restored = user_mgr_set_logged_in(prev_user);
         ESP_LOGI(TAG, "run4: restored previous session '%s' = %d", prev_user, restored);
     }
+    app_manager_notify_locked();
 
     ESP_LOGI(TAG, "run4: %s", pass ? "SELFTEST PASS" : "SELFTEST FAIL");
 }
@@ -1037,7 +1053,7 @@ void claw_loader_selftest_run5(void)
     ESP_LOGI(TAG, "run5: purr_kernel_ui() before load = %p (expect NULL or a previously registered backend)", (void *)before);
 
     claw_loaded_module_t m;
-    if (!claw_loader_load(guest_ui_o_bytes, sizeof(guest_ui_o_bytes), &m)) {
+    if (!claw_loader_load(guest_ui_o_bytes, sizeof(guest_ui_o_bytes), CLAW_POOL_DYNAMIC, &m)) {
         ESP_LOGE(TAG, "run5: load failed");
         return;
     }

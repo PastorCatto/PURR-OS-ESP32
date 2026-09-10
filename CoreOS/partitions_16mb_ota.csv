@@ -28,26 +28,37 @@
 # 64 KB) to make room for claw_slot below — still ~3x the measured 512 KB
 # usage, comfortable headroom for baked-in assets to grow into.
 #
-# app_cfg offset: 0xF00000  size: 0x100000 (1 MB) — LittleFS-mounted, the one
-# genuinely MUTABLE partition in an otherwise semi-immutable image: one
+# app_cfg offset: 0xF40000  size: 0xC0000 (768 KB) — LittleFS-mounted, the
+# one genuinely MUTABLE partition in an otherwise semi-immutable image: one
 # config file per app, holding its own user data. Everything else here is
 # either read-only at runtime (app code, baked-in assets) or NVS (kernel/
 # module settings, a different concern). See purr_kernel_app_config_read()/
-# _write() in purr_kernel.h. 1 MB is generous for text-sized per-app config
-# — sized for headroom, not because anything needs it yet.
+# _write() in purr_kernel.h. Shrunk from 1 MB to make room for sys_claw
+# below — still enormous headroom for text-sized per-app config (measured
+# usage per this file's own prior history: a handful of ~30-byte files).
 #
 # claw_slot offset: 0xEF0000  size: 0x10000 (64 KB) — the cross-device
-# .claw loading module's one flash slot (source/modules/claw_loader/,
-# claw_loader_load()/claw_loader_unload()). Only one loaded module at a
-# time, same "one at a time" constraint the Lua VM already has — a compiled,
-# relocatable blob gets esp_partition_write()'d here, then esp_partition_
-# mmap()'d with ESP_PARTITION_MMAP_INST (maps flash directly into
-# executable instruction address space) and jumped into, instead of ever
-# being copied into RAM (PSRAM has no MALLOC_CAP_EXEC region on this chip;
-# IRAM does but is small and already under pressure — both confirmed dead
-# ends before this partition existed, back when it was named claw_poc for
-# the R&D spike that proved the whole approach — see this module's git
-# history).
+# .claw loading module's DYNAMIC/personal pool (source/modules/claw_loader/,
+# CLAW_POOL_DYNAMIC — user-pushed personal apps, claw_loader_selftest.c's
+# proof objects). Only one loaded module per pool at a time, same "one at a
+# time" constraint the Lua VM already has — a compiled, relocatable blob
+# gets esp_partition_write()'d here, then esp_partition_mmap()'d with
+# ESP_PARTITION_MMAP_INST (maps flash directly into executable instruction
+# address space) and jumped into, instead of ever being copied into RAM
+# (PSRAM has no MALLOC_CAP_EXEC region on this chip; IRAM does but is small
+# and already under pressure — both confirmed dead ends before this
+# partition existed, back when it was named claw_poc for the R&D spike
+# that proved the whole approach — see this module's git history).
+#
+# sys_claw offset: 0xF00000  size: 0x40000 (256 KB: 2×128KB slots) — a
+# SEPARATE, bigger pool (CLAW_POOL_SYSTEM) for core/system-owned packages
+# (loginUI, later systemui_launcher) — see source/apps/system/login_ui/.
+# Distinct from claw_slot above because a real UI screen doesn't fit in a
+# 32KB personal-app slot, and because these ship through the same app
+# download/transfer system already proven for personal apps (server_mgr's
+# push, app_manager_remote's download — both already handle files up to
+# 2MB) rather than a bespoke mechanism, decoupling "how big a package can
+# be transferred" from "how big a slot loads it" was the whole point.
 #
 # SubType "spiffs" below is the partition table's own label, not what
 # actually mounts there — esp_vfs_littlefs_register() finds a partition by
@@ -64,4 +75,5 @@ ota_0,      app,  ota_0,    0x20000,   0x6B0000
 ota_1,      app,  ota_1,    0x6D0000,  0x6B0000
 spiffs,     data, spiffs,   0xD80000,  0x170000
 claw_slot,  data, 0x40,     0xEF0000,  0x10000
-app_cfg,    data, spiffs,   0xF00000,  0x100000
+sys_claw,   data, 0x41,     0xF00000,  0x40000
+app_cfg,    data, spiffs,   0xF40000,  0xC0000

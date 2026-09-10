@@ -35,49 +35,77 @@ static const char *TAG = "claw_loader";
 // story). Same name change reasoning as everywhere else in this codebase
 // that graduates scratch work: the partition's JOB didn't change, only
 // whether it's still "may be abandoned" scratch.
+//
+// "sys_claw" — the second, bigger pool added alongside it (see
+// partitions_16mb_ota.csv's own comment on THIS partition): core/system
+// packages need real room for a UI screen, not a 32KB personal-app slot.
 #define CLAW_SLOT_PARTITION_NAME "claw_slot"
 #define CLAW_SLOT_SUBTYPE        0x40
+#define SYS_CLAW_PARTITION_NAME  "sys_claw"
+#define SYS_CLAW_SUBTYPE         0x41
 
 // ── Slot table ───────────────────────────────────────────────────────────
 //
-// The claw_slot partition (64 KB total — see partitions_16mb_ota.csv's own
-// sizing comment, already shrunk twice to make room for neighbors) is
-// divided into CLAW_MAX_SLOTS equal, independently mmap'd/erased/written
-// sub-regions, instead of one module owning the whole partition at offset
-// 0 the way this file used to. CLAW_MAX_SLOTS (claw_loader.h) is
-// deliberately small — 2, not more — for two reasons: the partition is
-// already tight, and 64 KB / 2 = 32 KB divides evenly by the flash
-// erase-sector size with no rounding, which a larger N either shrinks
-// further into (risking "text too big" on a real app with no proven need
-// to justify it) or, worse, stops dividing evenly, needing per-slot
-// erase-length rounding logic to get right instead of falling out of the
-// arithmetic for free. Growing this later means either accepting smaller
-// slots or growing the claw_slot partition itself — a
-// partitions_16mb_ota.csv change, deliberately NOT made in this pass:
-// every device's OTA budget is sized against that table, and there is no
-// real-hardware .claw size data yet to justify the tradeoff.
-static bool s_slot_used[CLAW_MAX_SLOTS];
+// Each pool's partition (see claw_pool_t's own comment in claw_loader.h for
+// the two pools' sizes) is divided into CLAW_MAX_SLOTS equal, independently
+// mmap'd/erased/written sub-regions, instead of one module owning the whole
+// partition at offset 0 the way this file used to. CLAW_MAX_SLOTS is
+// deliberately small — 2, not more — for two reasons: both partitions are
+// already sized against real-hardware needs (claw_slot: nothing loaded
+// there has ever needed more than a couple KB; sys_claw: loginUI's own
+// size budget), and both divide evenly by the flash erase-sector size with
+// no rounding, which a larger N either shrinks further into or, worse,
+// stops dividing evenly, needing per-slot erase-length rounding logic to
+// get right instead of falling out of the arithmetic for free. Growing
+// this later means either accepting smaller slots or growing the relevant
+// partition itself — a partitions_16mb_ota.csv change, deliberately NOT
+// made in this pass beyond adding sys_claw itself.
+//
+// One s_slot_used[] array PER POOL — a system-package load must never
+// contend with (or accidentally free) a personal app's slot, and vice
+// versa, so these are kept completely independent rather than sharing one
+// array indexed some other way.
+static bool s_slot_used_dynamic[CLAW_MAX_SLOTS];
+static bool s_slot_used_system[CLAW_MAX_SLOTS];
 
-static int find_free_slot(void)
+static bool *slot_table_for(claw_pool_t pool)
 {
+    return (pool == CLAW_POOL_SYSTEM) ? s_slot_used_system : s_slot_used_dynamic;
+}
+
+static const char *partition_name_for(claw_pool_t pool)
+{
+    return (pool == CLAW_POOL_SYSTEM) ? SYS_CLAW_PARTITION_NAME : CLAW_SLOT_PARTITION_NAME;
+}
+
+static uint8_t subtype_for(claw_pool_t pool)
+{
+    return (pool == CLAW_POOL_SYSTEM) ? SYS_CLAW_SUBTYPE : CLAW_SLOT_SUBTYPE;
+}
+
+static int find_free_slot(claw_pool_t pool)
+{
+    bool *used = slot_table_for(pool);
     for (int i = 0; i < CLAW_MAX_SLOTS; i++) {
-        if (!s_slot_used[i]) return i;
+        if (!used[i]) return i;
     }
     return -1;
 }
 
-int claw_loader_slots_free(void)
+int claw_loader_slots_free(claw_pool_t pool)
 {
+    bool *used = slot_table_for(pool);
     int n = 0;
     for (int i = 0; i < CLAW_MAX_SLOTS; i++) {
-        if (!s_slot_used[i]) n++;
+        if (!used[i]) n++;
     }
     return n;
 }
 
-bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_module_t *out)
+bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_pool_t pool, claw_loaded_module_t *out)
 {
     memset(out, 0, sizeof(*out));
+    out->pool = pool;
     out->slot = -1;
 
     claw_module_t m;
@@ -94,17 +122,18 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
         return false;
     }
 
+    const char *part_name = partition_name_for(pool);
     const esp_partition_t *part =
-        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, CLAW_SLOT_SUBTYPE, CLAW_SLOT_PARTITION_NAME);
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, subtype_for(pool), part_name);
     if (!part) {
-        ESP_LOGE(TAG, "%s partition not found — check partitions_16mb_ota.csv", CLAW_SLOT_PARTITION_NAME);
+        ESP_LOGE(TAG, "%s partition not found — check partitions_16mb_ota.csv", part_name);
         claw_elf_free(&m);
         return false;
     }
 
-    int slot = find_free_slot();
+    int slot = find_free_slot(pool);
     if (slot < 0) {
-        ESP_LOGE(TAG, "no free slot (%d of %d already loaded)", CLAW_MAX_SLOTS, CLAW_MAX_SLOTS);
+        ESP_LOGE(TAG, "no free slot in %s (%d of %d already loaded)", part_name, CLAW_MAX_SLOTS, CLAW_MAX_SLOTS);
         claw_elf_free(&m);
         return false;
     }
@@ -113,17 +142,17 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
 
     if (m.text_size > slot_size) {
         ESP_LOGE(TAG, "text (%u B) too big for one %s slot (%u B of %u total / %d slots)",
-                 (unsigned)m.text_size, CLAW_SLOT_PARTITION_NAME,
+                 (unsigned)m.text_size, part_name,
                  (unsigned)slot_size, (unsigned)part->size, CLAW_MAX_SLOTS);
         claw_elf_free(&m);
         return false;
     }
-    // s_slot_used[] is claimed here, before any further step that can
-    // still fail below — every failure path from here on is the shared
+    // slot_table_for(pool)[] is claimed here, before any further step that
+    // can still fail below — every failure path from here on is the shared
     // `fail:` label, which releases it again. Claiming late (only on
     // success) would let two concurrent loads both pick the same "free"
     // slot in between.
-    s_slot_used[slot] = true;
+    slot_table_for(pool)[slot] = true;
 
     if (m.rodata_size) {
         out->rodata_ram = heap_caps_malloc(m.rodata_size, MALLOC_CAP_8BIT);
@@ -227,7 +256,7 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_loaded_modu
 
 fail:
     claw_elf_free(&m);
-    if (slot >= 0) s_slot_used[slot] = false;
+    if (slot >= 0) slot_table_for(pool)[slot] = false;
     if (out->rodata_ram) heap_caps_free(out->rodata_ram);
     if (out->data_ram)   heap_caps_free(out->data_ram);
     if (out->bss_ram)    heap_caps_free(out->bss_ram);
@@ -243,9 +272,11 @@ void claw_loader_unload(claw_loaded_module_t *m)
     // never successfully loaded can't accidentally free a slot some OTHER
     // module is actually using (a zeroed struct's `slot` field is 0, not a
     // sentinel, so this check matters, not just the mmap_handle one).
+    // m->pool is whichever pool claw_loader_load() recorded it under —
+    // releases the SAME pool's slot table it was claimed from.
     if (m->mmap_handle) {
         esp_partition_munmap((esp_partition_mmap_handle_t)m->mmap_handle);
-        if (m->slot >= 0 && m->slot < CLAW_MAX_SLOTS) s_slot_used[m->slot] = false;
+        if (m->slot >= 0 && m->slot < CLAW_MAX_SLOTS) slot_table_for(m->pool)[m->slot] = false;
     }
     if (m->rodata_ram) heap_caps_free(m->rodata_ram);
     if (m->data_ram)   heap_caps_free(m->data_ram);
@@ -448,10 +479,107 @@ bool claw_loader_personal_load(const char *username, const char *appname, claw_l
         return false;
     }
 
-    bool ok = claw_loader_load(buf, (size_t)fsize, out);
+    bool ok = claw_loader_load(buf, (size_t)fsize, CLAW_POOL_DYNAMIC, out);
     heap_caps_free(buf);
     if (!ok) {
         ESP_LOGE(TAG, "personal: claw_loader_load failed for %s/%s", username, appname);
+    }
+    return ok;
+}
+
+// ── System-space storage ─────────────────────────────────────────────────
+// See claw_loader.h's own header comment on this section for the design —
+// same shape as the personal-space functions just above, minus the
+// per-username directory level: one shared root, <root>/<name>.claw.
+
+static const char *system_root(void)
+{
+    if (purr_kernel_sd_available())    return "/sdcard/system";
+    if (purr_kernel_flash_available()) return "/flash/system";
+    return NULL;
+}
+
+const char *claw_loader_system_root(void) { return system_root(); }
+
+static void system_file_path(const char *root, const char *name, char *out, size_t out_sz)
+{
+    snprintf(out, out_sz, "%s/%s.claw", root, name);
+}
+
+bool claw_loader_system_install(const char *name, const uint8_t *obj_bytes, size_t obj_len)
+{
+    const char *root = system_root();
+    if (!root) return false;
+
+    struct stat st;
+    if (stat(root, &st) != 0) {
+        if (mkdir(root, 0755) != 0) {
+            ESP_LOGE(TAG, "mkdir %s failed", root);
+            return false;
+        }
+    }
+
+    char file_path[300];
+    system_file_path(root, name, file_path, sizeof(file_path));
+    FILE *f = fopen(file_path, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "fopen %s failed", file_path);
+        return false;
+    }
+    size_t written = fwrite(obj_bytes, 1, obj_len, f);
+    fclose(f);
+    if (written != obj_len) {
+        ESP_LOGE(TAG, "short write to %s (%u of %u bytes) — removing partial file",
+                 file_path, (unsigned)written, (unsigned)obj_len);
+        remove(file_path);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "system: installed %s.claw (%u B)", name, (unsigned)obj_len);
+    return true;
+}
+
+bool claw_loader_system_load(const char *name, claw_loaded_module_t *out)
+{
+    const char *root = system_root();
+    if (!root) return false;
+
+    char file_path[300];
+    system_file_path(root, name, file_path, sizeof(file_path));
+    FILE *f = fopen(file_path, "rb");
+    if (!f) {
+        ESP_LOGE(TAG, "system: fopen %s failed", file_path);
+        return false;
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (fsize <= 0) {
+        ESP_LOGE(TAG, "system: %s is empty or ftell failed", file_path);
+        fclose(f);
+        return false;
+    }
+
+    // Same "short-lived staging buffer, not PSRAM-capped" reasoning as
+    // claw_loader_personal_load()'s own read buffer.
+    uint8_t *buf = heap_caps_malloc((size_t)fsize, MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGE(TAG, "system: alloc failed (%ld B) for %s", fsize, file_path);
+        fclose(f);
+        return false;
+    }
+    size_t read_n = fread(buf, 1, (size_t)fsize, f);
+    fclose(f);
+    if (read_n != (size_t)fsize) {
+        ESP_LOGE(TAG, "system: short read of %s (%u of %ld bytes)", file_path, (unsigned)read_n, fsize);
+        heap_caps_free(buf);
+        return false;
+    }
+
+    bool ok = claw_loader_load(buf, (size_t)fsize, CLAW_POOL_SYSTEM, out);
+    heap_caps_free(buf);
+    if (!ok) {
+        ESP_LOGE(TAG, "system: claw_loader_load failed for %s", name);
     }
     return ok;
 }

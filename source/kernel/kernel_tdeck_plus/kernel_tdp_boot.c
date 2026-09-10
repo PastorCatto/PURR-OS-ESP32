@@ -1002,6 +1002,17 @@ void app_main(void)
     // See claw_loader_selftest.c's own header comment for the full story
     // and each guest object's exact source. No reason to keep re-running
     // these on every boot now that all four are confirmed.
+    //
+    // Re-verified live after claw_loader.c's claw_pool_t refactor (adding
+    // CLAW_POOL_SYSTEM/sys_claw alongside the original CLAW_POOL_DYNAMIC/
+    // claw_slot) — temporarily re-enabled run()/run4(), rebuilt, reflashed:
+    // both still PASS (run(): "loaded into slot 0/2 ... SELFTEST PASS";
+    // run4(): full app_manager launch/stop lifecycle, "SELFTEST PASS").
+    // run4() itself needed one real fix along the way, unrelated to the
+    // pool refactor: it never called app_manager_notify_unlocked() before
+    // checking the registry, so app_manager_get() correctly returned NULL
+    // for everything (the registry-lock feature postdates when this test
+    // was last actually run) — fixed in claw_loader_selftest.c itself.
     extern void claw_loader_selftest_run(void);
     (void)claw_loader_selftest_run;
     extern void claw_loader_selftest_run2(void);
