@@ -1,5 +1,12 @@
 # PURR OS — System Modules
 
+> **UI backends archived.** `mochi`, `cupcake`, `cardstack`, `kittenui`,
+> `lvgldebug`, `tabby`, `cheetah`, `nougat`, `pounce`, `blackpurr`,
+> `miniwin`, and `systemui` have moved to `archive/ui_backends_v1/` for the
+> protected-processes/Unix-boot rewrite's console-only test phase — see
+> that folder's own `README.md`. Everything below describing them
+> describes their last state before the move, not the current tree.
+
 > **Accurate as of v1.0.0-dp8.** The index below is complete — all 27 modules
 > in `source/modules/` are listed. Sections further down cover a subset in
 > depth; anything without a section is documented by its own `module.pcat` and

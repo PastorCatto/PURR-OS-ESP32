@@ -153,15 +153,13 @@ systemui_style = "ios"
 # "cheetah" (a Windows XP-style desktop, see source/modules/cheetah/) on
 # 2026-07-26 while the ST7789 display work was in flight. All three stay
 # compiled in and selectable, just no longer this device's default.
-ui          = "mochi"
-# systemui — the status bar, drag-down panels, Back/Home/Recents nav bar,
-# Recents carousel and lock screen, hosted by Mochi (and Cupcake/Cheetah/
-# Tabby) — see mochi_springboard.c's own "hands the system UI its host
-# table" call. Re-added here: was dropped while ui was MiniWin (which has
-# its own equivalent chrome instead, see miniwin_wince_desktop.c), but
-# Mochi genuinely needs this — mochi_springboard_init() has nothing to
-# hand a host table to without it.
-systemui    = "systemui"
+# ui/systemui — DESELECTED for the console-only test phase of the
+# protected-processes/Unix-boot rewrite: every UI backend (Mochi included)
+# moved to archive/ui_backends_v1/ (see that folder's own README.md).
+# Re-enable once Phase 3's new UI lands and systemui is rebuilt as a
+# protected process rather than restoring these values as-is.
+#ui          = "mochi"
+#systemui    = "systemui"
 app_manager = "app_manager"
 # mesh — OFF as of 2026-09-01: MSN (the meshtastic/meshcore-backed chat app)
 # is dropped from this device below, and reticulum_app is the real chat
@@ -189,7 +187,12 @@ app_manager = "app_manager"
 # been meshtastic-specific (see its own "meshtastic/meshcore are
 # deliberately filtered out of the health-list rows" comment).
 mesh        = ""
-lua         = "lua_runtime"
+# lua — DESELECTED alongside ui/systemui above: lua_runtime.c's Lua
+# window-API bindings call purr_win_* unconditionally, and with every UI
+# backend archived nothing provides those symbols any more (see
+# archive/ui_backends_v1/README.md — this would otherwise fail the whole
+# firmware's link, not just Lua scripting).
+#lua         = "lua_runtime"
 wifi        = "wifi_mgr"
 ota         = "ota_mgr"
 users       = "user_mgr"
@@ -278,10 +281,15 @@ theme       = "wce"
 # documented crash history: "not yet proven safe under sustained mesh
 # traffic + BLE together") — that's a radio decision, not an apps one, and
 # these apps' UI still compiles/runs without it, just without a BLE backend.
-settings    = true
-oobe        = true
-terminal    = true
-fileman     = true
+# settings/oobe/terminal/fileman/diagnostics/milkbar/server_manager/
+# reticulum_app — DESELECTED for the console-only test phase: all call
+# purr_win_* directly, and every UI backend is archived (see
+# archive/ui_backends_v1/README.md). doom/moy/magidos stay — they bypass
+# purr_win entirely via speed_demon's raw hardware handoff.
+#settings    = true
+#oobe        = true
+#terminal    = true
+#fileman     = true
 # msn — OFF as of 2026-09-01: this device's chat app is reticulum_app now
 # (see [modules] mesh="" above for the full reasoning), deliberately not
 # tied to MSN's meshtastic/meshcore backends. Explicit `false`, not a
@@ -292,13 +300,13 @@ msn         = false
 # Merges what used to be five separate apps (drivermgr, hwtest, services,
 # meshdiag, taskmgr) — see source/apps/system/diagnostics/diagnostics.c's
 # file header for the mapping.
-diagnostics = true
+#diagnostics = true
 # MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
 # systemui, the mesh stack and the radios before it starts, and restores them
 # when it exits. The app calls nothing itself. See docs/15_SpeedDemon.md.
 magidos     = true
 
-milkbar     = true
+#milkbar     = true
 doom        = true
 moy         = true
 # server_manager — reached only through app_manager.h's synthetic remote-mode
@@ -315,11 +323,11 @@ moy         = true
 # caused after `apps.server_manager=true` silently never made
 # it into the component list despite being set the identical setdefault way
 # msn is.
-server_manager = true
+#server_manager = true
 # Basic chat UI for the reticulum module (source/modules/reticulum) —
 # named reticulum_app, not reticulum, to avoid colliding with that
 # module's own PURR_MODULE_REGISTER name (see its own app.pcat comment).
-reticulum_app = true
+#reticulum_app = true
 [flash]
 display/st7789    = 1
 touch/gt911       = 1

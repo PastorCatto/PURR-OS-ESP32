@@ -12,14 +12,11 @@ if(NOT PURR_DEVICE)
 endif()
 set(GLUE_DIR ${CMAKE_SOURCE_DIR}/../cattobaked/${PURR_DEVICE}/glue)
 
-# Guard: the WinCE shell is baked directly into a kernel's boot.c/.cpp (no
-# catcall_ui_t wrapper) and only steps aside correctly when MiniWin is the
-# selected UI backend (see miniwin_module.c's own CONFIG_PURR_UI_WINCE_SHELL
-# check). Enabling WinCE without MiniWin would produce a kernel where no UI
-# system ever starts — fail the build instead of shipping a blank screen.
-if(CONFIG_PURR_UI_WINCE_SHELL AND NOT CONFIG_PURR_UI_BACKEND_MINIWIN)
-    message(FATAL_ERROR "CONFIG_PURR_UI_WINCE_SHELL requires CONFIG_PURR_UI_BACKEND_MINIWIN — check sdkconfig_${PURR_DEVICE} (generated) and sdkconfig_${PURR_DEVICE}.overrides")
-endif()
+# The WinCE-shell/MiniWin cross-check that used to live here is gone along
+# with MiniWin itself — see archive/ui_backends_v1/README.md for the full
+# "console-only test state" story. Both CONFIG_PURR_UI_WINCE_SHELL and
+# CONFIG_PURR_UI_BACKEND_MINIWIN are dead Kconfig symbols now; nothing
+# needs guarding against a combination that can't be selected any more.
 
 # Check for a specialized kernel folder — kernel_<device>/
 set(SPEC_KERNEL_DIR ${CMAKE_SOURCE_DIR}/../source/kernel/kernel_${PURR_DEVICE})

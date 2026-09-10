@@ -25,18 +25,24 @@ bt          = true
 lora        = "sx1262"
 
 [modules]
-ui          = "miniwin"
+# ui — DESELECTED for the console-only test phase of the protected-
+# processes/Unix-boot rewrite: MiniWin moved to archive/ui_backends_v1/
+# (see that folder's own README.md). Re-enable once Phase 3's new UI lands.
+#ui          = "miniwin"
 app_manager = "app_manager"
 
 [ui]
 theme       = "wce"
 
 [apps]
-settings    = true
+# settings/terminal/fileman/diagnostics — DESELECTED alongside ui above:
+# all call purr_win_* directly, and with no UI backend selected nothing
+# provides those symbols any more (see archive/ui_backends_v1/README.md).
+#settings    = true
 # about — folded into Settings' own About tab, see cyd/device.pcat's comment
-terminal    = true
-fileman     = true
-diagnostics = true
+#terminal    = true
+#fileman     = true
+#diagnostics = true
 
 [flash]
 display/st7789   = 1

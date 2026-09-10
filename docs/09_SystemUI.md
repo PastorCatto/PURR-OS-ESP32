@@ -1,5 +1,12 @@
 # 09 — System UI
 
+> **Archived.** `systemui` (and every UI backend it was hosted by) has
+> moved to `archive/ui_backends_v1/` for the protected-processes/Unix-boot
+> rewrite's console-only test phase — see that folder's own `README.md`.
+> Phase 3 of that rewrite rebuilds systemui as a `purr_kernel_start_
+> protected()` process rather than restoring this module as-is; everything
+> below describes its last state before the move.
+
 > **Accurate as of v1.0.0-dp8.** Verified against `source/modules/systemui/`.
 
 The system UI is the persistent chrome that draws *above* every app window:

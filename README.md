@@ -1,5 +1,13 @@
 # PURR OS — v1.0.0-DeveloperPreview8
 
+> **UI backends archived.** Every UI backend named below (`mochi`,
+> `cupcake`, `miniwin`, `cardstack`, `kittenui`, `tabby`, `nougat`,
+> `pounce`, `blackpurr`, `lvgldebug`) plus `systemui` has moved to
+> `archive/ui_backends_v1/` for the protected-processes/Unix-boot
+> rewrite's console-only test phase — see that folder's own `README.md`.
+> T-Deck, T-Deck Plus, and Tab5 currently boot to a console/login shell
+> only; a new UI is a separate, later phase.
+
 > **Docs current as of Developer Preview 8.** Documentation was deliberately left to drift
 > through the Developer Preview cycle while the focus was stability; it has now been brought
 > back in line with the code ahead of a 1.0 RC. Every version number, module,

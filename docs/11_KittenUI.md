@@ -1,5 +1,9 @@
 # 11 — KittenUI
 
+> **Archived.** Moved to `archive/ui_backends_v1/` alongside every other UI
+> backend for the protected-processes/Unix-boot rewrite's console-only
+> test phase — see that folder's own `README.md`.
+
 KittenUI is PURR OS's small-screen UI module, built on LVGL. It replaces MiniWin on all displays ≤ 320×240. Larger displays (480×320+) continue to use MiniWin. The heltec's 128×64 OLED uses a separate text-mode `oled_ui` module.
 
 ---
