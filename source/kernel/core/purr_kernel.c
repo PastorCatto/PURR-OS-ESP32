@@ -1387,6 +1387,10 @@ uint64_t purr_kernel_uptime_ms(void) {
     return (uint64_t)(esp_timer_get_time() / 1000LL);
 }
 
+void purr_kernel_delay_ms(uint32_t ms) {
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}
+
 static bool s_sd_available    = false;
 static bool s_flash_available = false;
 static bool s_wifi_connected  = false;

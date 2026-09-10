@@ -36,6 +36,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 os.system("")
 
@@ -91,11 +92,12 @@ MAGICMAC_DIR = os.path.join(SOURCE_DIR, "apps", "exclusive", "magicmac")
 MAGIDOS_DIR  = os.path.join(SOURCE_DIR, "apps", "exclusive", "magidos")
 
 TIER_COLORS = {
-    "meow":   C_GRN,
-    "hiss":   C_RED,
-    "paws":   C_CYN,
-    "claw":   C_MGN,
-    "kitten": C_YLW,
+    "meow":    C_GRN,
+    "hiss":    C_RED,
+    "paws":    C_CYN,
+    "claw":    C_MGN,
+    "kitten":  C_YLW,
+    "sysclaw": C_WHT,
 }
 
 SDK_VERSION = "0.1.0"
@@ -354,6 +356,214 @@ def cmd_validate(args):
         else:
             info(f"    signature: {sig}")
 
+# ── sysclaw — real offline-compiled, claw_loader-loadable packages ──────────
+#
+# Unlike the "claw" tier (a naming-only misnomer — idf_component_register(),
+# statically linked into firmware.bin, nothing to do with claw_loader at
+# all, see build_app()'s own comment on it), "sysclaw" produces an actual
+# standalone Xtensa ELF32 relocatable object — the same shape claw_loader.c
+# parses/relocates/flash-maps at runtime (source/modules/claw_loader/
+# claw_elf.c), loaded via CLAW_POOL_SYSTEM (claw_loader_load_system(),
+# 128KB/slot — see partitions_16mb_ota.csv's own sys_claw comment).
+#
+# Compiled with the exact restricted flags every claw_loader_selftest.c
+# guest object documents using (-mtext-section-literals -mlongcalls -O0
+# -c, no target-cpu flag, no LTO) — this is deliberately NOT a normal IDF
+# component build. A sysclaw app's sources must not #include real ESP-IDF/
+# kernel headers (their macros/attributes aren't safe in this standalone
+# compile context, and even a "clean" header pulls in far more than one
+# translation unit needs) — they hand-declare minimal local mirrors of any
+# struct they touch and extern-declare any host function they call, same
+# convention guest_ui_o_bytes established in claw_loader_selftest.c.
+#
+# Multiple .c files are compiled independently then combined into ONE
+# relocatable object via `ld -r` (partial linking) — claw_elf.c has only
+# ever parsed a single translation unit's own compile output before now;
+# `-r` produces the same ELF32 relocatable *type*, just with the sources'
+# sections/relocations merged, which is what actually lets a package like
+# loginUI be split across login_core.c/login_render_fb.c/etc. instead of
+# one giant file.
+
+def _find_xtensa_tool(tool_suffix):
+    """Locate an xtensa-esp32s3-elf-<tool_suffix> binary. Checks PATH first
+    (already set up when catstrap runs as a purrstrap subprocess — see
+    purrstrap.py's own _idf_toolchain_bin_dirs()), then falls back to
+    globbing the standard ~/.espressif install layout directly, so a bare
+    `catstrap build` (no purrstrap wrapping this process, no IDF env
+    sourced) still finds it rather than failing with a confusing
+    "xtensa-esp32s3-elf-gcc not found"."""
+    import glob as _glob
+    name = f"xtensa-esp32s3-elf-{tool_suffix}"
+    found = shutil.which(name)
+    if found:
+        return found
+    for root in (os.path.expanduser("~/.espressif"),
+                 os.path.expandvars(r"%USERPROFILE%\.espressif") if os.name == "nt" else "",
+                 "C:\\Espressif\\tools" if os.name == "nt" else ""):
+        if not root:
+            continue
+        pattern = os.path.join(root, "tools", "xtensa-esp-elf", "*", "xtensa-esp-elf", "bin", name)
+        matches = sorted(_glob.glob(pattern))
+        if matches:
+            return matches[-1]
+    return None
+
+def _sysclaw_text_size(obj_path, readelf):
+    """.text section size in bytes, via `readelf -S` — the exact number
+    claw_loader_load() checks against the target pool's per-slot size
+    before ever trying to write it to flash (claw_loader.c: "text (%u B)
+    too big for one %s slot")."""
+    result = subprocess.run([readelf, "-S", "-W", obj_path], capture_output=True, text=True)
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if ".text" in parts:
+            idx = parts.index(".text")
+            # readelf -W section header row: [Nr] Name Type Addr Off Size ...
+            # Size is two fields after Type — same fixed layout every ELF32
+            # object produces, not something worth a fragile regex over.
+            try:
+                return int(parts[idx + 4], 16)
+            except (IndexError, ValueError):
+                pass
+    return None
+
+def _sysclaw_undefined_symbols(obj_path, readelf):
+    """Every UND (undefined) symbol name the object references, via
+    `readelf -s` — the exact set claw_elf.c's resolve_import() must find
+    in claw_imports_generated.h's s_imports[] at LOAD time. Checked here
+    at BUILD time instead so a missing import fails loudly with a symbol
+    name, not a boot-time 'ELF parse failed' with none."""
+    result = subprocess.run([readelf, "-s", "-W", obj_path], capture_output=True, text=True)
+    names = []
+    for line in result.stdout.splitlines():
+        # Only GLOBAL/WEAK + UND rows are real external references needing
+        # resolution — a LOCAL UND row (readelf's own index-0 placeholder
+        # entry, always present, empty Name field) would otherwise put the
+        # literal string "UND" itself into this list, since parts[-1] falls
+        # back to the Ndx column when Name is blank.
+        if " UND " not in line or "GLOBAL" not in line:
+            continue
+        parts = line.split()
+        if parts and parts[-1] and parts[-1] != "UND":
+            names.append(parts[-1])
+    return names
+
+def _sysclaw_known_imports():
+    """Parses claw_imports_generated.h's own s_imports[] table for the
+    exact set of names a loaded object can call — same file claw_loader.c
+    includes at runtime, so this can never drift behind what the real
+    import table actually contains."""
+    import re as _re
+    path = os.path.join(SOURCE_DIR, "modules", "claw_loader", "claw_imports_generated.h")
+    try:
+        with open(path) as f:
+            text = f.read()
+    except FileNotFoundError:
+        return set()
+    return set(_re.findall(r'\{\s*"([A-Za-z_][A-Za-z0-9_]*)"', text))
+
+# Per-slot size CLAW_POOL_SYSTEM actually offers (see claw_loader.h's
+# CLAW_MAX_SLOTS and partitions_16mb_ota.csv's sys_claw row: 256KB / 2).
+# Duplicated here rather than parsed out of either file — both are small,
+# stable numbers with a comment pointing back at the real source of truth
+# on both sides, same as claw_loader_selftest.c's own "32KB slot" comments
+# already do for CLAW_POOL_DYNAMIC.
+SYSCLAW_SLOT_SIZE = 128 * 1024
+
+def _build_sysclaw_variant(name, app_dir, c_files, variant, define, out_path):
+    """Compiles every c_files entry with `-D<define>` (files not relevant
+    to this variant guard their own body with #ifdef and compile to an
+    empty TU — see login_ui_main.c's own convention), combines the results
+    with `ld -r`, validates size + imports, and writes out_path."""
+    gcc = _find_xtensa_tool("gcc")
+    ld  = _find_xtensa_tool("ld")
+    readelf = _find_xtensa_tool("readelf")
+    if not gcc or not ld or not readelf:
+        die(f"    sysclaw build needs xtensa-esp32s3-elf-{{gcc,ld,readelf}} — "
+            f"none found on PATH or under ~/.espressif (source the IDF export.sh, "
+            f"or run this via `purrstrap build <device>` which sets that up)")
+
+    with tempfile.TemporaryDirectory(prefix=f"catstrap_sysclaw_{name}_") as tmp:
+        objs = []
+        for c in c_files:
+            obj = os.path.join(tmp, c.replace(".c", ".o").replace(".cpp", ".o"))
+            cmd = [gcc, "-mtext-section-literals", "-mlongcalls", "-O0",
+                   f"-D{define}", "-I", app_dir, "-c", os.path.join(app_dir, c), "-o", obj]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                warn(f"    [{variant}] compile failed: {c}")
+                print(result.stderr, file=sys.stderr)
+                return False
+            objs.append(obj)
+
+        combined = os.path.join(tmp, f"{name}_{variant}_combined.o")
+        result = subprocess.run([ld, "-r", "-o", combined] + objs, capture_output=True, text=True)
+        if result.returncode != 0:
+            warn(f"    [{variant}] partial link (ld -r) failed")
+            print(result.stderr, file=sys.stderr)
+            return False
+
+        text_size = _sysclaw_text_size(combined, readelf)
+        if text_size is None:
+            warn(f"    [{variant}] couldn't read .text size from {combined} — readelf output unexpected")
+            return False
+        if text_size > SYSCLAW_SLOT_SIZE:
+            warn(f"    [{variant}] .text is {text_size} B — over the {SYSCLAW_SLOT_SIZE} B "
+                 f"CLAW_POOL_SYSTEM per-slot ceiling (partitions_16mb_ota.csv's sys_claw row)")
+            return False
+
+        known = _sysclaw_known_imports()
+        undefined = set(_sysclaw_undefined_symbols(combined, readelf))
+        # claw_personal_init/claw_personal_deinit are the two entry points
+        # claw_elf_load() looks up BY NAME after relocation, not real
+        # imports needing an address up front — never flagged as missing.
+        undefined -= {"claw_personal_init", "claw_personal_deinit"}
+        unresolved = sorted(undefined - known)
+        if unresolved:
+            warn(f"    [{variant}] references symbol(s) not in claw_imports_generated.h: "
+                 f"{', '.join(unresolved)}")
+            warn(f"    (extend purrstrap.py's _generate_claw_imports() header list, or the "
+                 f"curated LVGL entry list, then regenerate before rebuilding this package)")
+            return False
+
+        shutil.copy2(combined, out_path)
+
+    info(f"    [{variant}] .text={text_size} B (of {SYSCLAW_SLOT_SIZE} B slot) → {os.path.relpath(out_path, REPO_DIR)}")
+    return True
+
+def _build_sysclaw(name, app_dir, cfg):
+    """Builds BOTH render-backend variants unconditionally — framebuffer
+    (LOGIN_UI_BACKEND_FB) and LVGL (LOGIN_UI_BACKEND_LVGL) — into
+    cattobaked/apps/<name>_fb.claw and <name>_lvgl.claw. Per-device backend
+    SELECTION happens later, in purrstrap.py's build_flash_image() (reads
+    the target device's own [modules] ui flag — "none" stages the fb
+    variant, anything else stages lvgl) — catstrap itself builds generically
+    for every device, same as every other tier here."""
+    c_files = sorted(f for f in os.listdir(app_dir)
+                      if f.endswith(".c") and os.path.isfile(os.path.join(app_dir, f)))
+    if not c_files:
+        warn(f"    no C source found — skipping")
+        return False
+    info(f"    sources: {', '.join(c_files)}")
+
+    os.makedirs(OUT_APPS, exist_ok=True)
+    ok_fb   = _build_sysclaw_variant(name, app_dir, c_files, "fb",   "LOGIN_UI_BACKEND_FB",
+                                      os.path.join(OUT_APPS, f"{name}_fb.claw"))
+    ok_lvgl = _build_sysclaw_variant(name, app_dir, c_files, "lvgl", "LOGIN_UI_BACKEND_LVGL",
+                                      os.path.join(OUT_APPS, f"{name}_lvgl.claw"))
+
+    version = cfg.get("version", "0.1.0")
+    with open(os.path.join(OUT_APPS, f"{name}.sysclaw.meta.json"), "w") as f:
+        json.dump({
+            "name": name, "tier": "sysclaw", "version": version,
+            "sources": c_files, "built_at": datetime.datetime.now().isoformat(),
+            "variants": {"fb": ok_fb, "lvgl": ok_lvgl},
+        }, f, indent=2)
+
+    if ok_fb:
+        info(f"    registered — included in next purrstrap build")
+    return ok_fb   # lvgl is best-effort/optional this pass; fb is the baseline every device needs
+
 # ── Build ─────────────────────────────────────────────────────────────────────
 
 def build_app(name, app_dir, pcat_path, tier):
@@ -367,6 +577,14 @@ def build_app(name, app_dir, pcat_path, tier):
     out_path = os.path.join(OUT_APPS, out_name)
 
     info(f"  {color}{name}{C_RST}  [{tier}]  v{version}  →  {os.path.relpath(out_path, REPO_DIR)}")
+
+    if tier == "sysclaw":
+        # Real offline-compiled, claw_loader-loadable package — see this
+        # tier's own top comment (just above _find_xtensa_tool()) for why
+        # this is a completely different code path from every tier below,
+        # including "claw" (a same-named but unrelated, statically-linked
+        # IDF component convention).
+        return _build_sysclaw(name, app_dir, cfg)
 
     if tier in ("meow", "hiss", "kitten"):
         # Package the Lua script directly — no compilation. .hiss and

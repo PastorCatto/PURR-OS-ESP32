@@ -41,6 +41,7 @@
 #include "../../modules/purr_fbtty/purr_fbtty.h"
 #include "../../modules/user_mgr/user_mgr.h"
 #include "../../modules/app_manager/app_manager.h"
+#include "../../modules/claw_loader/claw_loader.h"
 #include "../../modules/purr_quirk/purr_quirk.h"
 #include "driver/i2c_master.h"
 #include "esp_rom_sys.h"
@@ -474,6 +475,30 @@ static void serial_console_task(void *arg)
     purr_console_set_login_fn(purr_console_login_default_login_fn);
     purr_console_set_exec_fn(purr_console_login_default_exec_fn);
 
+    // loginUI (source/apps/system/login_ui/) — a real .claw package,
+    // loaded via CLAW_POOL_SYSTEM, not statically linked. Tried first,
+    // from this same protected-process task: claw_personal_init() blocks
+    // internally (its own render+input loop) until a real login succeeds,
+    // so by the time this call returns, someone is genuinely authenticated
+    // — app_manager_notify_unlocked() already fired (login_core.c's own
+    // contract). On success, the console shell below starts with
+    // with_login=false — skip re-prompting, the point of running loginUI
+    // at all was to not need the text prompt. On ANY failure (missing/
+    // corrupt staged package, no display, etc.) fall through to today's
+    // full console login exactly as before — never a silent hang, and
+    // never a boot that depends on loginUI having worked.
+    bool logged_in_via_ui = false;
+    claw_loaded_module_t login_ui_mod;
+    if (claw_loader_system_load("login_ui", &login_ui_mod)) {
+        int rc = login_ui_mod.init();
+        ESP_LOGI(TAG, "login_ui: init() = %d", rc);
+        login_ui_mod.deinit();
+        claw_loader_unload(&login_ui_mod);
+        logged_in_via_ui = (rc == 0);
+    } else {
+        ESP_LOGW(TAG, "login_ui: claw_loader_system_load failed — falling back to console login");
+    }
+
     // The actual point of "console mode": type on the device's own
     // keyboard, read its own screen — no cable to another machine
     // required. Falls back to USB-Serial-JTAG only if no display ever
@@ -482,10 +507,10 @@ static void serial_console_task(void *arg)
     // outright over a display driver problem would be a strictly worse
     // failure than "console reachable over the cable instead").
     if (purr_fbtty_init()) {
-        purr_console_run(&purr_fbtty_io, true);   // never returns
+        purr_console_run(&purr_fbtty_io, !logged_in_via_ui);   // never returns
     } else {
         ESP_LOGW(TAG, "purr_fbtty_init failed (no display?) — falling back to USB-Serial-JTAG");
-        purr_console_run(&s_console_io, true);    // never returns
+        purr_console_run(&s_console_io, !logged_in_via_ui);    // never returns
     }
 }
 

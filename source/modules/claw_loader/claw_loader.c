@@ -488,18 +488,45 @@ bool claw_loader_personal_load(const char *username, const char *appname, claw_l
 }
 
 // ── System-space storage ─────────────────────────────────────────────────
-// See claw_loader.h's own header comment on this section for the design —
-// same shape as the personal-space functions just above, minus the
-// per-username directory level: one shared root, <root>/<name>.claw.
+// See claw_loader.h's own header comment on this section for the design.
+//
+// NOT personal_root()'s SD-preferred/flash-fallback logic, deliberately —
+// that ordering exists purely for STORAGE CAPACITY (SD has more room than
+// a device's own SPIFFS partition), which doesn't apply here: a system
+// package ships baked into /flash's SPIFFS image at build time
+// (purrstrap.py's _stage_sysclaw_packages()), guaranteed present the
+// moment the device is flashed. /sdcard/system is instead an OPTIONAL
+// OVERRIDE location — same "/sdcard copy overrides the shipped default"
+// precedent purr_quirk_load() already established for device.purr — so a
+// later manual/pushed update (over the existing app transfer system, see
+// this header's own top comment) never has to touch the read-mostly
+// SPIFFS image at all. claw_loader_system_load() checks the override
+// first, the shipped default second; claw_loader_system_install() only
+// ever writes the override location, never /flash.
+//
+// Confirmed live the ordering matters, not just in theory: the very first
+// hardware test of this (T-Deck Plus, real SD card mounted) failed with
+// "fopen /sdcard/system/login_ui.claw failed" using personal_root()'s
+// SD-preferred logic, because purrstrap only ever staged the package into
+// /flash — there was never going to be anything at the SD path at all on
+// a fresh device.
 
-static const char *system_root(void)
+static const char *system_override_root(void)
 {
-    if (purr_kernel_sd_available())    return "/sdcard/system";
-    if (purr_kernel_flash_available()) return "/flash/system";
-    return NULL;
+    return purr_kernel_sd_available() ? "/sdcard/system" : NULL;
 }
 
-const char *claw_loader_system_root(void) { return system_root(); }
+static const char *system_default_root(void)
+{
+    return purr_kernel_flash_available() ? "/flash/system" : NULL;
+}
+
+// Public accessor documents the override location specifically — the one
+// a caller might need to stage an update INTO (claw_loader_personal_add()'s
+// own claw_loader_personal_root() plays the equivalent role for personal
+// apps); the shipped-default location is purrstrap's own concern, not
+// runtime code's.
+const char *claw_loader_system_root(void) { return system_override_root(); }
 
 static void system_file_path(const char *root, const char *name, char *out, size_t out_sz)
 {
@@ -508,7 +535,7 @@ static void system_file_path(const char *root, const char *name, char *out, size
 
 bool claw_loader_system_install(const char *name, const uint8_t *obj_bytes, size_t obj_len)
 {
-    const char *root = system_root();
+    const char *root = system_override_root();
     if (!root) return false;
 
     struct stat st;
@@ -535,22 +562,15 @@ bool claw_loader_system_install(const char *name, const uint8_t *obj_bytes, size
         return false;
     }
 
-    ESP_LOGI(TAG, "system: installed %s.claw (%u B)", name, (unsigned)obj_len);
+    ESP_LOGI(TAG, "system: installed override %s.claw (%u B)", name, (unsigned)obj_len);
     return true;
 }
 
-bool claw_loader_system_load(const char *name, claw_loaded_module_t *out)
+static bool try_load_system_file(const char *file_path, claw_loaded_module_t *out)
 {
-    const char *root = system_root();
-    if (!root) return false;
-
-    char file_path[300];
-    system_file_path(root, name, file_path, sizeof(file_path));
     FILE *f = fopen(file_path, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "system: fopen %s failed", file_path);
-        return false;
-    }
+    if (!f) return false;   // not present here — caller tries the next candidate, not an error
+
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -579,9 +599,32 @@ bool claw_loader_system_load(const char *name, claw_loaded_module_t *out)
     bool ok = claw_loader_load(buf, (size_t)fsize, CLAW_POOL_SYSTEM, out);
     heap_caps_free(buf);
     if (!ok) {
-        ESP_LOGE(TAG, "system: claw_loader_load failed for %s", name);
+        ESP_LOGE(TAG, "system: claw_loader_load failed for %s", file_path);
     }
     return ok;
+}
+
+bool claw_loader_system_load(const char *name, claw_loaded_module_t *out)
+{
+    char file_path[300];
+
+    const char *override_root = system_override_root();
+    if (override_root) {
+        system_file_path(override_root, name, file_path, sizeof(file_path));
+        if (try_load_system_file(file_path, out)) {
+            ESP_LOGI(TAG, "system: loaded %s.claw from override (%s)", name, override_root);
+            return true;
+        }
+    }
+
+    const char *default_root = system_default_root();
+    if (default_root) {
+        system_file_path(default_root, name, file_path, sizeof(file_path));
+        if (try_load_system_file(file_path, out)) return true;
+    }
+
+    ESP_LOGE(TAG, "system: %s.claw not found in override or shipped-default location", name);
+    return false;
 }
 
 // ── Module lifecycle ────────────────────────────────────────────────────────

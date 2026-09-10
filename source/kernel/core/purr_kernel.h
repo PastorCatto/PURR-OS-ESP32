@@ -250,6 +250,15 @@ size_t purr_kernel_klog_tail(char *out, size_t out_size);
 
 uint32_t purr_kernel_free_ram(void);
 uint64_t purr_kernel_uptime_ms(void);
+// A thin vTaskDelay(pdMS_TO_TICKS(ms)) wrapper — exists so a loaded .claw
+// object (source/modules/claw_loader/) can yield/sleep without needing raw
+// FreeRTOS symbols in its import table (claw_imports_generated.h) at all.
+// login_ui's render loop (source/apps/system/login_ui/login_ui_main.c) is
+// the first real consumer: it polls input in a blocking loop inside
+// claw_personal_init() and needs SOME way to give up the CPU between
+// polls, or an idle wait busy-spins and risks tripping the task watchdog.
+void     purr_kernel_delay_ms(uint32_t ms);
+bool     purr_kernel_sd_available(void);
 bool     purr_kernel_sd_available(void);
 // True once boot.c's mount_flash_vfs() has successfully mounted /flash
 // (SPIFFS) — mirrors purr_kernel_sd_available() exactly, same reason:

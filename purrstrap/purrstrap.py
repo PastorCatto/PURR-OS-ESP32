@@ -1122,6 +1122,66 @@ def _generate_quirk_package(device, cfg):
 
 # ── SPIFFS staging + image generation ────────────────────────────────────────
 
+def _stage_sysclaw_packages(pcat_cfg, staging_dir):
+    """Stages every catstrap "sysclaw" package's device-appropriate render
+    variant into spiffs_staging/system/<name>.claw — see this function's
+    own call site for the full picture. Discovers packages from
+    cattobaked/apps/*.sysclaw.meta.json (catstrap's own build record for
+    this tier), not by re-scanning source/apps/ — this runs after catstrap
+    build all has already produced (or failed to produce) each variant,
+    and the meta.json is catstrap's own account of which succeeded."""
+    import glob as _glob
+    metas = sorted(_glob.glob(os.path.join(OUTPUT_DIR, "apps", "*.sysclaw.meta.json")))
+    if not metas:
+        return
+
+    # ui == "lvgl" explicitly wants the LVGL renderer; ui == "none" (or
+    # absent) wants framebuffer; a real UI_BACKEND_MAP name (a device not
+    # yet part of this rewrite) has no opinion of its own here —
+    # framebuffer is the safe default until that device gets its own
+    # loginUI decision made.
+    ui = pcat_cfg.get("modules.ui", "")
+    variant = "lvgl" if ui == "lvgl" else "fb"
+
+    system_dst = os.path.join(staging_dir, "system")
+    staged = 0
+    for meta_path in metas:
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue
+        name = meta.get("name")
+        if not name:
+            continue
+        variants_ok = meta.get("variants", {})
+        chosen = variant
+        if not variants_ok.get(chosen):
+            # Fall back to whichever variant actually built rather than
+            # shipping a device with no loginUI at all — fb is the
+            # baseline every device's sysclaw build always attempts.
+            fallback = "fb" if variants_ok.get("fb") else ("lvgl" if variants_ok.get("lvgl") else None)
+            if fallback is None:
+                warn(f"sysclaw package '{name}': neither variant built successfully — not staged")
+                continue
+            if fallback != chosen:
+                warn(f"sysclaw package '{name}': wanted '{chosen}' but it didn't build — "
+                     f"staging '{fallback}' instead")
+            chosen = fallback
+
+        src = os.path.join(OUTPUT_DIR, "apps", f"{name}_{chosen}.claw")
+        if not os.path.isfile(src):
+            warn(f"sysclaw package '{name}': {os.path.relpath(src, REPO_DIR)} missing despite meta.json saying it built")
+            continue
+        os.makedirs(system_dst, exist_ok=True)
+        dst = os.path.join(system_dst, f"{name}.claw")
+        shutil.copy2(src, dst)
+        size = os.path.getsize(dst)
+        print(f"  {C_GRN}[OK]{C_RST}  system/{name}.claw{'':<{max(1, 18 - len(name))}} [{chosen}]  {size} B")
+        staged += 1
+    if staged:
+        info(f"staged {staged} system claw package(s) into spiffs_staging/system/")
+
 def build_flash_image(device, pcat_cfg, out_dir, spiffs_size_kb=512):
     """
     Stage userland app files into a SPIFFS image (flash.bin).
@@ -1193,6 +1253,19 @@ def build_flash_image(device, pcat_cfg, out_dir, spiffs_size_kb=512):
             f.write(quirk_pkg)
         print(f"  {C_GRN}[OK]{C_RST}  quirks/device.purr{'':<15}  {len(quirk_pkg)} bytes")
         info("staged device quirk package into spiffs_staging/quirks/")
+
+    # System claw packages (CLAW_POOL_SYSTEM, source/apps/system/login_ui/)
+    # — catstrap's "sysclaw" tier builds BOTH render-backend variants
+    # unconditionally (cattobaked/apps/<name>_fb.claw / _lvgl.claw); THIS
+    # step is where per-device selection actually happens, same as the
+    # UI_NO_STATIC_MODULE_VALUES flag it reads: ui = "none" (no static UI
+    # module — see that constant's own comment) stages the framebuffer
+    # variant, any other ui value (a real UI_BACKEND_MAP name, or "lvgl")
+    # stages the LVGL one. Mounted at /flash/system/<name>.claw at
+    # runtime — claw_loader_system_load() reads it from there, same
+    # unconditional "shipped with the firmware, no first-boot transfer
+    # needed" pattern as wallpapers/quirks just above.
+    _stage_sysclaw_packages(pcat_cfg, staging_dir)
 
     staged = 0
 
@@ -1391,6 +1464,24 @@ _CLAW_IMPORT_HEADERS = [
     ("modules/app_manager",   "app_manager.h"),
 ]
 
+# A handful of libc essentials, hand-curated rather than header-scanned —
+# string.h isn't one of this codebase's own headers, so _extract_public_
+# functions() has nothing to walk for it, but a loaded object doing
+# perfectly ordinary things (zeroing a struct, comparing strings) still
+# needs the compiler-emitted calls to memset()/strcmp()/etc. to resolve to
+# SOMETHING. These are real symbols already linked into every firmware
+# build (newlib) — this just makes their addresses reachable by name the
+# same way every purr_kernel.h function already is. Found live: login_ui's
+# login_core.c's memset(lc, 0, sizeof(*lc)) failed catstrap's own sysclaw
+# import-resolution check ("references symbol(s) not in claw_imports_
+# generated.h: memset") before this list existed — the very first sysclaw
+# package to actually need one of these.
+_CLAW_IMPORT_LIBC_ESSENTIALS = [
+    "memset", "memcpy", "memcmp", "memmove",
+    "strlen", "strcpy", "strncpy", "strcmp", "strncmp", "strcat", "strncat", "strchr", "strrchr",
+    "snprintf",
+]
+
 def _generate_claw_imports():
     """Regenerate source/modules/claw_loader/claw_imports_generated.h from
     the public function surface of every header in _CLAW_IMPORT_HEADERS.
@@ -1411,10 +1502,12 @@ def _generate_claw_imports():
         names.update(_extract_public_functions(header_path))
         include_lines.append(f'#include "{filename}"')
     names = sorted(names)
+    libc_names = sorted(_CLAW_IMPORT_LIBC_ESSENTIALS)
 
     lines = [
         "// claw_imports_generated.h — auto-generated by purrstrap from",
-        "// " + ", ".join(f for _, f in _CLAW_IMPORT_HEADERS) + ".",
+        "// " + ", ".join(f for _, f in _CLAW_IMPORT_HEADERS) + ",",
+        "// plus a hand-curated libc essentials list (_CLAW_IMPORT_LIBC_ESSENTIALS).",
         "// Do not edit — regenerated on every purrstrap build/generate.",
         "//",
         "// claw_loader's symbol-resolution table: the exact set of functions a",
@@ -1425,10 +1518,14 @@ def _generate_claw_imports():
         "// behind the ABI those headers already define and version.",
         "",
         '#include "claw_elf.h"     // claw_import_t',
+        "#include <string.h>       // libc essentials — see _CLAW_IMPORT_LIBC_ESSENTIALS's own comment",
+        "#include <stdio.h>        // snprintf",
     ] + include_lines + [
         "",
         "static const claw_import_t s_imports[] = {",
     ]
+    for name in libc_names:
+        lines.append(f'    {{ "{name}", (uint32_t)&{name} }},')
     for name in names:
         lines.append(f'    {{ "{name}", (uint32_t)&{name} }},')
     lines += [
@@ -1441,7 +1538,7 @@ def _generate_claw_imports():
     with open(out_path, "w") as f:
         f.write("\n".join(lines))
 
-    info(f"  claw import table -> {os.path.relpath(out_path, REPO_DIR)} ({len(names)} symbols)")
+    info(f"  claw import table -> {os.path.relpath(out_path, REPO_DIR)} ({len(names) + len(libc_names)} symbols)")
     return out_path
 
 

@@ -187,27 +187,38 @@ bool claw_loader_personal_load(const char *username, const char *appname,
                                 claw_loaded_module_t *out);
 
 // ── System-space storage (CLAW_POOL_SYSTEM) ──────────────────────────────
-// Core/system-owned packages — no per-username directory, one fixed root
-// shared by the whole device: <root>/<name>.claw, SD-preferred/flash-
-// fallback exactly like personal_root() above. A fresh device already has
-// its packages here at first boot — purrstrap stages them straight into
-// SPIFFS at build time (see build_flash_image()'s own comment) — so
+// Core/system-owned packages — no per-username directory, one fixed name:
+// <name>.claw. NOT personal_root()'s SD-preferred/flash-fallback ordering
+// — a system package ships baked into /flash's SPIFFS image at build time
+// (purrstrap stages it there — see build_flash_image()'s own comment), so
+// /flash/system/<name>.claw is the guaranteed-present shipped default;
+// /sdcard/system/<name>.claw is instead an OPTIONAL OVERRIDE, checked
+// first, same "/sdcard copy overrides the shipped default" precedent
+// purr_quirk_load() already established for device.purr. Confirmed this
+// ordering matters on real hardware, not just in theory — see claw_
+// loader.c's own comment on this section for the exact failure it fixed.
 // claw_loader_system_install() below exists for the SAME reason
 // claw_loader_personal_add() does: a later push over the existing app
 // download/transfer system (server_mgr's push, app_manager_remote's
-// download) lands here through the identical write-a-file convention,
-// no new transport code needed to ship an updated package post-manufacture.
+// download) lands here through the identical write-a-file convention, no
+// new transport code needed — it always writes the OVERRIDE location,
+// never touching the shipped-default SPIFFS image at runtime.
 
-// The SD-preferred/flash-fallback root itself ("/sdcard/system" or
-// "/flash/system"), or NULL if neither is available.
+// The override root ("/sdcard/system"), or NULL if SD isn't available —
+// for a caller staging an update INTO it (mirrors claw_loader_personal_
+// root()'s role for personal apps). The shipped-default location
+// ("/flash/system") is purrstrap's own concern at build time, not
+// something runtime code needs to know the path of.
 const char *claw_loader_system_root(void);
 
-// Ensures <root>/ exists, writes obj_bytes to <name>.claw inside it
-// (overwriting any existing file of that name).
+// Ensures the override root exists, writes obj_bytes to <name>.claw
+// inside it (overwriting any existing file of that name). Never touches
+// the shipped-default /flash/system location.
 bool claw_loader_system_install(const char *name, const uint8_t *obj_bytes, size_t obj_len);
 
-// Reads <name>.claw fully into a temporary buffer and calls
-// claw_loader_load(..., CLAW_POOL_SYSTEM, out) on it — same fixed import
+// Checks the override location first, the shipped-default location
+// second; reads whichever is found fully into a temporary buffer and
+// calls claw_loader_load(..., CLAW_POOL_SYSTEM, out) on it — same fixed import
 // table every other loaded module gets. The temporary read buffer is freed
 // before this returns; `out`'s own allocations follow claw_loader_load()'s
 // normal ownership rules, freed via claw_loader_unload(). Returns false if
