@@ -444,6 +444,82 @@ static const purr_console_io_t s_console_io = {
 // systemui_login.c/systemui_login_ios.c already make, just from the
 // console instead of a graphical login screen).
 
+#ifdef CONFIG_PURR_LOGIN_UI_LVGL
+// loginUI's LVGL backend (source/apps/system/login_ui/login_render_lvgl.c)
+// only ever creates WIDGETS on the default screen — it never sets up the
+// display driver itself (a loaded module can't safely hand-mirror
+// lv_disp_drv_t/lv_color_t the way it hand-mirrors catcall_display_t; see
+// that file's own top comment). This is the "normal, fully-header-
+// included code" half of that split: real lv_conf.h/lvgl.h, no struct-
+// mirroring risk at all.
+//
+// Deliberately NOT purr_lv_flush.h's full async/compose/shadow-theme
+// machinery every archived UI backend's own *_hal.c used (mochi_hal.c,
+// cupcake_hal.c, ...) — that exists to make a CONTINUOUSLY-RENDERED,
+// performance-sensitive UI fast. A login screen redraws a handful of
+// times total, for one boot, then hands off — synchronous push_pixels()
+// straight from flush_cb is the actually-basic version of "make this
+// work", not a corner cut. Re-visit only if a real, measured need shows
+// up, same discipline as every other perf claim in this codebase.
+#include "lvgl.h"
+
+#define LOGIN_LVGL_BUF_LINES 40   // a modest slice of the screen — this UI redraws rarely, no reason to size for throughput
+
+static lv_disp_draw_buf_t s_login_lv_draw_buf;
+static lv_disp_drv_t      s_login_lv_disp_drv;
+
+static void login_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
+{
+    const catcall_display_t *disp = purr_kernel_display();
+    if (disp && disp->push_pixels) {
+        int w = area->x2 - area->x1 + 1;
+        int h = area->y2 - area->y1 + 1;
+        // LV_COLOR_DEPTH is 16 in this project's lv_conf.h (confirmed, not
+        // assumed) — lv_color_t is a plain RGB565 word here, the exact
+        // shape catcall_display_t::push_pixels() already expects.
+        disp->push_pixels(area->x1, area->y1, w, h, (const uint16_t *)color_p);
+    }
+    lv_disp_flush_ready(drv);
+}
+
+// Returns false (no ESP_LOG here on purpose — the only caller already
+// logs its own outcome) if no display is registered or the draw buffer
+// allocation fails; loginUI's own claw_personal_init() falls through to
+// login_render_init() returning false in that case, same "fails cleanly,
+// falls back to the console" contract as every other loginUI failure
+// path already has.
+static bool login_lvgl_display_init(void)
+{
+    const catcall_display_t *disp = purr_kernel_display();
+    if (!disp) return false;
+
+    display_info_t info = {0};
+    if (disp->get_info) disp->get_info(&info);
+    uint16_t w = info.width  ? info.width  : 320;
+    uint16_t h = info.height ? info.height : 240;
+
+    lv_init();
+
+    size_t buf_px = (size_t)w * LOGIN_LVGL_BUF_LINES;
+    lv_color_t *buf1 = heap_caps_malloc(sizeof(lv_color_t) * buf_px, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    if (!buf1) {
+        ESP_LOGE(TAG, "login_ui lvgl: draw buffer alloc failed (%u px)", (unsigned)buf_px);
+        return false;
+    }
+
+    lv_disp_draw_buf_init(&s_login_lv_draw_buf, buf1, NULL, buf_px);
+    lv_disp_drv_init(&s_login_lv_disp_drv);
+    s_login_lv_disp_drv.hor_res  = (lv_coord_t)w;
+    s_login_lv_disp_drv.ver_res  = (lv_coord_t)h;
+    s_login_lv_disp_drv.flush_cb = login_lvgl_flush_cb;
+    s_login_lv_disp_drv.draw_buf = &s_login_lv_draw_buf;
+    lv_disp_drv_register(&s_login_lv_disp_drv);
+
+    ESP_LOGI(TAG, "login_ui lvgl: display driver ready (%ux%u, %d-line buffer)", w, h, LOGIN_LVGL_BUF_LINES);
+    return true;
+}
+#endif // CONFIG_PURR_LOGIN_UI_LVGL
+
 static void serial_console_task(void *arg)
 {
     (void)arg;
@@ -488,6 +564,16 @@ static void serial_console_task(void *arg)
     // full console login exactly as before — never a silent hang, and
     // never a boot that depends on loginUI having worked.
     bool logged_in_via_ui = false;
+#ifdef CONFIG_PURR_LOGIN_UI_LVGL
+    // Set up BEFORE the load, not inside it — the LVGL-backed variant's
+    // own login_render_init() only ever calls lv_disp_get_default(), it
+    // never registers a display driver itself (see login_lvgl_display_
+    // init()'s own top comment on why that split exists). A display-init
+    // failure here just means login_render_init() sees no default display
+    // and returns false — same clean "fall back to console" path every
+    // other loginUI failure already has, not a special case.
+    login_lvgl_display_init();
+#endif
     claw_loaded_module_t login_ui_mod;
     if (claw_loader_system_load("login_ui", &login_ui_mod)) {
         int rc = login_ui_mod.init();
@@ -1169,11 +1255,24 @@ void app_main(void)
     // console must never be silently strike-disabled the way a
     // misbehaving P2/P3 module can be — see purr_kernel_start_protected()'s
     // own doc comment.
+    //
+    // 8192, not 4096 — this same task now also runs loginUI's LVGL backend
+    // (login_render_lvgl.c, when CONFIG_PURR_LOGIN_UI_LVGL) via login_
+    // lvgl_display_init()/lv_timer_handler(), and 4096 silently wasn't
+    // enough: confirmed live, purr_kernel_input_count() (a genuinely
+    // simple function) started reporting 0 from inside the loaded module
+    // even though the kernel log showed 2 real inputs registered moments
+    // earlier — corruption from a near-full stack, not a relocation or
+    // import-table bug, matched against the archived mochi_module.c's own
+    // LVGL render task, which already needed 8192 for the same reason
+    // (MOCHI_STACK_SIZE). The plain framebuffer backend never needed more
+    // than 4096 on its own; this is strictly for the LVGL path sharing
+    // this task now.
     static const purr_protected_process_t s_console_proc = {
         .name       = "console",
         .run        = serial_console_task,
         .arg        = NULL,
-        .stack_size = 4096,
+        .stack_size = 8192,
         .priority   = 1,
         .core_id    = -1,
     };

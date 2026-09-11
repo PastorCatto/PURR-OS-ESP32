@@ -7,6 +7,15 @@
 # to require unconditionally (no esp32p4/Tab5 carve-out, unlike pairing/
 # app_manager_remote — see that same comment for why those two are NOT
 # here yet).
+#
+# lvgl__lvgl — claw_imports_generated.h's own _CLAW_IMPORT_LVGL_ESSENTIALS
+# (hand-curated, not header-scanned — LVGL isn't one of this codebase's
+# own headers) needs "lvgl.h" for real (uint32_t)&lv_obj_create-style
+# address-of expressions to resolve against. LVGL is already statically
+# linked into every device's firmware (unused since the UI archive — see
+# archive/ui_backends_v1/README.md), so this adds no new footprint, just
+# makes its existing addresses reachable by name to a loaded object the
+# same way purr_kernel.h's own functions already are.
 idf_component_register(
     SRCS
         claw_elf.c
@@ -23,4 +32,5 @@ idf_component_register(
         esp_partition
         user_mgr
         app_manager
+        lvgl__lvgl
 )

@@ -134,6 +134,24 @@ const catcall_ui_t      *purr_kernel_ui(void);
 // ESP_ERR_NOT_SUPPORTED) if no registered input driver implements it.
 esp_err_t purr_kernel_keyboard_set_backlight(uint8_t brightness);
 
+// The one safe way for a LOADED .claw object (source/modules/claw_loader/)
+// to read a keypress — polls every registered input for a KEY_DOWN event
+// and returns its raw keycode byte (0-255), or -1 if none arrived. Same
+// "poll ALL registered inputs, not just the first" logic purr_fbtty.c's
+// own fbtty_read_byte() already documents (a device can register a
+// pointer-only input, e.g. a trackball, before its real keyboard).
+//
+// NOT the same as a statically-linked caller doing this itself via
+// purr_kernel_input_count()/_at() + a catcall_input_t's own poll_event()
+// member — that's normal for code the linker resolves at build time.
+// Loaded code should never hold or dereference a pointer to a driver
+// struct's own function-pointer members: doing so sidesteps claw_elf.c's
+// import-table resolution entirely, which is the actual capability
+// boundary for loaded code (see claw_elf.h's own header comment). Call
+// this by name instead, the same way source/apps/system/login_ui/'s two
+// render backends (login_render_fb.c/login_render_lvgl.c) both do.
+int purr_kernel_poll_key(void);
+
 // ── UI thread safety ──────────────────────────────────────────────────────────
 // LVGL (and other catcall_ui_t backends) are not safe to call from more than
 // one task at a time. The registered UI backend's own render/message-pump

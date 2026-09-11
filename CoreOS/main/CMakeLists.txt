@@ -229,6 +229,13 @@ idf_component_register(
         # that dependency real instead of assumed, on every device regardless
         # of whether that transitive path stays true as REQUIRES elsewhere change.
         app_update
+        # lvgl__lvgl — CONFIG_PURR_LOGIN_UI_LVGL's own display-driver setup
+        # (this file, gated block) #includes "lvgl.h" directly. Already
+        # linked into every device's firmware regardless (dead weight since
+        # the UI archive), transitively via claw_loader's own REQUIRES —
+        # explicit here too rather than assumed, same "explicit, not
+        # inherited" reasoning as esp_app_format/app_update just above.
+        lvgl__lvgl
         ${DRIVER_REQUIRES}
         ${EXTRA_REQUIRES}
         ${USB_MSC_REQUIRES}

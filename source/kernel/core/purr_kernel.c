@@ -179,6 +179,38 @@ esp_err_t purr_kernel_keyboard_set_backlight(uint8_t brightness) {
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+// The one safe way for a loaded .claw object to read a keypress. Every
+// statically-linked caller (purr_fbtty.c's fbtty_read_byte(), and this
+// package's own login_render_fb.c/login_render_lvgl.c before this
+// existed) is free to iterate purr_kernel_input_count()/_at() itself and
+// call a catcall_input_t's own poll_event() member directly — that's
+// completely normal for code the linker resolves at build time. Loaded
+// code is a different story: reaching into a driver struct's own
+// function-pointer MEMBERS and calling through them sidesteps claw_elf.c's
+// import-table resolution entirely (see claw_elf.h's own header comment
+// on why the import table — not linkage — is the real capability
+// boundary for loaded code) — a loaded module was never meant to hold or
+// dereference a pointer like that at all, only call things by NAME
+// through claw_imports_generated.h. This wraps the identical "poll every
+// registered input for a KEY_DOWN event" logic purr_fbtty.c's own comment
+// documents (a device can register a pointer-only input like a trackball
+// before its real keyboard, so polling only the first-registered one
+// misses the keyboard entirely) behind one plain, scalar-returning,
+// nameable function instead.
+int purr_kernel_poll_key(void) {
+    for (int i = 0; i < s_input_count; i++) {
+        const catcall_input_t *input = s_inputs[i];
+        if (!input || !input->poll_event) continue;
+        input_event_t ev;
+        while (input->poll_event(&ev)) {
+            if (ev.type == INPUT_EVENT_KEY_DOWN && ev.keycode > 0 && ev.keycode <= 0xFF) {
+                return (int)ev.keycode;
+            }
+        }
+    }
+    return -1;
+}
+
 // ── App window tracking ───────────────────────────────────────────────────────
 
 static purr_window_created_cb_t s_window_created_cb = NULL;

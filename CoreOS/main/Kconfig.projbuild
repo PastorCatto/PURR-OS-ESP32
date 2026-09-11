@@ -289,6 +289,31 @@ menu "PURR OS"
             its own separate implementation, so this is only meaningful on
             LVGL-backed devices (cupcake/kittenui/nougat/cardstack).
 
+    config PURR_LOGIN_UI_LVGL
+        bool "loginUI renders via LVGL (super-basic widgets, no on-screen keyboard)"
+        default n
+        help
+            Set automatically by purrstrap from a device.pcat [modules]
+            ui = "lvgl" entry — same mechanism as PURR_SYSTEMUI just above —
+            so devices opt in there rather than here.
+
+            Gates a small LVGL init + display-driver-registration block in
+            kernel_tdp_boot.c that runs BEFORE loginUI (source/apps/system/
+            login_ui/, a loadable .claw package — see claw_loader.h) loads,
+            using real lv_conf.h/purr_lv_flush.h exactly like every archived
+            UI backend's own *_hal.c already did (source/modules/common/
+            purr_lv_flush.h). loginUI's own LVGL renderer (login_render_
+            lvgl.c) then only creates WIDGETS on the already-set-up default
+            screen — no on-screen keyboard (a physical one already exists
+            on every device this targets), no lv_group/lv_indev routing, no
+            custom styles — deliberately smaller than every archived LVGL
+            UI backend's own login screen, which is what this option name
+            is trying to say plainly rather than imply.
+
+            When off, purrstrap stages loginUI's plain framebuffer renderer
+            instead (login_render_fb.c) — the default for every device that
+            hasn't set ui = "lvgl" explicitly.
+
     choice PURR_SYSTEMUI_STYLE
         prompt "System UI style"
         depends on PURR_SYSTEMUI

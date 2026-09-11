@@ -12,12 +12,14 @@
 #include <stdbool.h>
 #include <string.h>
 
-// Hand-declared mirrors of catcall_display.h/catcall_input.h — no
-// #include of the real headers in this standalone compile (see
-// app.pcat's own comment). Field-for-field confirmed against
-// source/kernel/catcalls/catcall_display.h (CATCALL_DISPLAY_VERSION 3)
-// and catcall_input.h (CATCALL_INPUT_VERSION 2) before writing this —
-// same convention claw_loader_selftest.c's guest_ui_o_bytes established.
+// Hand-declared mirror of catcall_display.h — no #include of the real
+// header in this standalone compile (see app.pcat's own comment). Field-
+// for-field confirmed against source/kernel/catcalls/catcall_display.h
+// (CATCALL_DISPLAY_VERSION 3) before writing this — same convention
+// claw_loader_selftest.c's guest_ui_o_bytes established. Keyboard input
+// does NOT need a catcall_input_t mirror at all — see purr_kernel_poll_
+// key()'s own doc comment on why a loaded module calls that instead of
+// reaching into a driver struct's own function-pointer members directly.
 typedef int32_t esp_err_t;
 
 typedef struct {
@@ -40,33 +42,8 @@ typedef struct {
     void      (*flush_done_cb)(void (*cb)(void *user), void *user);
 } catcall_display_t;
 
-typedef enum {
-    INPUT_EVENT_NONE     = 0,
-    INPUT_EVENT_KEY_DOWN = 1,
-    INPUT_EVENT_KEY_UP   = 2,
-    INPUT_EVENT_POINTER  = 3,
-} input_event_type_t;
-
-typedef struct {
-    input_event_type_t type;
-    uint16_t keycode;
-    int16_t  delta_x;
-    int16_t  delta_y;
-    uint8_t  modifiers;
-} input_event_t;
-
-typedef struct {
-    const char *name;
-    uint8_t     catcall_version;
-    esp_err_t (*init)(void);
-    bool      (*poll_event)(input_event_t *out);
-    esp_err_t (*deinit)(void);
-    esp_err_t (*set_backlight)(uint8_t brightness);
-} catcall_input_t;
-
 extern const catcall_display_t *purr_kernel_display(void);
-extern int                      purr_kernel_input_count(void);
-extern const catcall_input_t   *purr_kernel_input_at(int idx);
+extern int                       purr_kernel_poll_key(void);
 
 #define FONT_W 6
 #define FONT_H 8
@@ -242,29 +219,14 @@ void login_render_draw(const login_core_t *lc)
     redraw(lc);
 }
 
-// Non-blocking-ish: polls every registered input for up to timeout_ms,
-// returns a raw keycode byte (ASCII — same convention purr_fbtty.c's own
-// fbtty_read_byte() already established: a driver's KEY_DOWN keycode IS
-// the ASCII byte, no HID translation layer exists or is needed today), or
-// -1 if nothing arrived. Polls ALL registered inputs, not just the first
-// — purr_fbtty.c's own comment explains why: a device can register a
-// pointer-only input (trackball) before its real keyboard, and the first-
-// registered one alone would silently never see a keystroke.
+// Non-blocking: a raw keycode byte (ASCII — same convention purr_fbtty.c's
+// own fbtty_read_byte() already established: a driver's KEY_DOWN keycode
+// IS the ASCII byte, no HID translation layer exists or is needed today),
+// or -1 if nothing arrived. purr_kernel_poll_key() itself polls every
+// registered input, not just the first — see its own doc comment.
 int login_render_poll_key(void)
 {
-    int count = purr_kernel_input_count();
-    if (count <= 0) return -1;
-    for (int i = 0; i < count; i++) {
-        const catcall_input_t *input = purr_kernel_input_at(i);
-        if (!input || !input->poll_event) continue;
-        input_event_t ev;
-        while (input->poll_event(&ev)) {
-            if (ev.type == INPUT_EVENT_KEY_DOWN && ev.keycode > 0 && ev.keycode <= 0xFF) {
-                return (int)ev.keycode;
-            }
-        }
-    }
-    return -1;
+    return purr_kernel_poll_key();
 }
 
 #endif // LOGIN_UI_BACKEND_FB
