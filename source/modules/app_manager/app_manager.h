@@ -177,6 +177,17 @@ void app_manager_notify_exited(const char *name);
 int              app_manager_count(void);
 const app_entry_t *app_manager_get(int idx);
 
+// Copies the idx'th entry's display name into out (NUL-terminated,
+// truncated to fit), without exposing app_entry_t itself — the one safe
+// way for a LOADED .claw object (source/modules/claw_loader/) to read an
+// app's name; see this function's own definition comment in app_manager.c
+// for why (app_entry_t is a real, actively-evolving struct, not something
+// loaded code should hand-mirror). Returns false (out set to "") if idx
+// is out of range. Same local/remote transparency as app_manager_count()/
+// get() themselves — works from either mode with no caller-visible
+// difference.
+bool app_manager_entry_name(int idx, char *out, size_t out_sz);
+
 // ── Local unlock gate ────────────────────────────────────────────────────
 // app_manager_init() no longer scans/populates the local registry
 // unconditionally at boot (unless OOBE hasn't completed yet — see

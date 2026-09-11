@@ -566,13 +566,26 @@ def _stage_sysclaw_assets(name, app_dir):
     return sorted(staged)
 
 def _build_sysclaw(name, app_dir, cfg):
-    """Builds BOTH render-backend variants unconditionally — framebuffer
-    (LOGIN_UI_BACKEND_FB) and LVGL (LOGIN_UI_BACKEND_LVGL) — into
-    cattobaked/apps/<name>_fb.claw and <name>_lvgl.claw. Per-device backend
+    """Builds each render-backend variant this package declares — framebuffer
+    (-DSYSCLAW_BACKEND_FB) and/or LVGL (-DSYSCLAW_BACKEND_LVGL) — into
+    cattobaked/apps/<name>_fb.claw / <name>_lvgl.claw. Per-device backend
     SELECTION happens later, in purrstrap.py's build_flash_image() (reads
     the target device's own [modules] ui flag — "none" stages the fb
     variant, anything else stages lvgl) — catstrap itself builds generically
     for every device, same as every other tier here.
+
+    app.pcat's optional `variants` key (comma/space-separated "fb"/"lvgl",
+    default both) lets a package that only ever needs one skip building a
+    dead stub for the other — login_ui needs both (a device with no
+    graphical UI at all still gets a real login screen); a package that's
+    inherently LVGL-only (a home screen's tile grid, touch-driven) just
+    declares `variants = "lvgl"` instead of shipping a permanently-unused
+    framebuffer file whose only job would be to fail cleanly if ever
+    loaded on the wrong device — see this comment because that IS the
+    honest fallback shape every render backend already uses (login_render_
+    lvgl.c's own history, before it was implemented for real, was exactly
+    that kind of stub) — just skipped here rather than written out for a
+    package that was never going to need it in the first place.
 
     Also stages app_dir/assets/ (if present) — see _stage_sysclaw_assets()'s
     own comment for why this is a plain file copy, not a compile step."""
@@ -583,11 +596,15 @@ def _build_sysclaw(name, app_dir, cfg):
         return False
     info(f"    sources: {', '.join(c_files)}")
 
+    variants_wanted = cfg.get("variants", "fb,lvgl").replace(" ", "").split(",")
     os.makedirs(OUT_APPS, exist_ok=True)
-    ok_fb   = _build_sysclaw_variant(name, app_dir, c_files, "fb",   "LOGIN_UI_BACKEND_FB",
-                                      os.path.join(OUT_APPS, f"{name}_fb.claw"))
-    ok_lvgl = _build_sysclaw_variant(name, app_dir, c_files, "lvgl", "LOGIN_UI_BACKEND_LVGL",
-                                      os.path.join(OUT_APPS, f"{name}_lvgl.claw"))
+    ok_fb = ok_lvgl = False
+    if "fb" in variants_wanted:
+        ok_fb = _build_sysclaw_variant(name, app_dir, c_files, "fb", "SYSCLAW_BACKEND_FB",
+                                        os.path.join(OUT_APPS, f"{name}_fb.claw"))
+    if "lvgl" in variants_wanted:
+        ok_lvgl = _build_sysclaw_variant(name, app_dir, c_files, "lvgl", "SYSCLAW_BACKEND_LVGL",
+                                          os.path.join(OUT_APPS, f"{name}_lvgl.claw"))
     assets = _stage_sysclaw_assets(name, app_dir)
     if assets:
         info(f"    assets: {', '.join(assets)} → cattobaked/apps/{name}.assets/")
@@ -600,9 +617,13 @@ def _build_sysclaw(name, app_dir, cfg):
             "variants": {"fb": ok_fb, "lvgl": ok_lvgl},
         }, f, indent=2)
 
-    if ok_fb:
+    # Success = every variant this package actually asked for built clean —
+    # not just "fb", now that a package can legitimately declare itself
+    # lvgl-only (or, in principle, fb-only) via `variants`.
+    ok = all(("fb" not in variants_wanted or ok_fb, "lvgl" not in variants_wanted or ok_lvgl))
+    if ok:
         info(f"    registered — included in next purrstrap build")
-    return ok_fb   # lvgl is best-effort/optional this pass; fb is the baseline every device needs
+    return ok
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 

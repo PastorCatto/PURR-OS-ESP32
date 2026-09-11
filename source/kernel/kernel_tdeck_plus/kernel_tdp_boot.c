@@ -445,30 +445,34 @@ static const purr_console_io_t s_console_io = {
 // console instead of a graphical login screen).
 
 #ifdef CONFIG_PURR_LOGIN_UI_LVGL
-// loginUI's LVGL backend (source/apps/system/login_ui/login_render_lvgl.c)
-// only ever creates WIDGETS on the default screen — it never sets up the
-// display driver itself (a loaded module can't safely hand-mirror
-// lv_disp_drv_t/lv_color_t the way it hand-mirrors catcall_display_t; see
-// that file's own top comment). This is the "normal, fully-header-
-// included code" half of that split: real lv_conf.h/lvgl.h, no struct-
-// mirroring risk at all.
+// Shared LVGL hardware setup for every loaded LVGL-backed sysclaw package
+// on this device (loginUI's login_render_lvgl.c, the launcher's
+// launcher_lvgl.c) — neither one sets up the display/input drivers
+// itself (a loaded module can't safely hand-mirror lv_disp_drv_t/
+// lv_indev_drv_t/lv_color_t the way it hand-mirrors catcall_display_t;
+// see login_render_lvgl.c's own top comment). This is the "normal,
+// fully-header-included code" half of that split: real lv_conf.h/
+// lvgl.h, no struct-mirroring risk at all. A loaded package only ever
+// creates WIDGETS and attaches click callbacks (lv_obj_add_event_cb) on
+// the already-set-up default screen.
 //
 // Deliberately NOT purr_lv_flush.h's full async/compose/shadow-theme
 // machinery every archived UI backend's own *_hal.c used (mochi_hal.c,
 // cupcake_hal.c, ...) — that exists to make a CONTINUOUSLY-RENDERED,
-// performance-sensitive UI fast. A login screen redraws a handful of
-// times total, for one boot, then hands off — synchronous push_pixels()
+// performance-sensitive UI fast. Neither loginUI nor this launcher
+// redraw often enough yet to need it — synchronous push_pixels()
 // straight from flush_cb is the actually-basic version of "make this
 // work", not a corner cut. Re-visit only if a real, measured need shows
 // up, same discipline as every other perf claim in this codebase.
 #include "lvgl.h"
 
-#define LOGIN_LVGL_BUF_LINES 40   // a modest slice of the screen — this UI redraws rarely, no reason to size for throughput
+#define LVGL_BUF_LINES 40   // a modest slice of the screen — neither package redraws often enough to need sizing for throughput
 
-static lv_disp_draw_buf_t s_login_lv_draw_buf;
-static lv_disp_drv_t      s_login_lv_disp_drv;
+static lv_disp_draw_buf_t s_lv_draw_buf;
+static lv_disp_drv_t      s_lv_disp_drv;
+static lv_indev_drv_t     s_lv_touch_drv;
 
-static void login_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
+static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
 {
     const catcall_display_t *disp = purr_kernel_display();
     if (disp && disp->push_pixels) {
@@ -482,13 +486,39 @@ static void login_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_co
     lv_disp_flush_ready(drv);
 }
 
+// Same shape as the archived mochi_hal.c's own touch_read_cb() — real
+// catcall_touch.h this time (normal code, no hand-mirroring needed at
+// all). The launcher's tile grid is tap-driven, unlike loginUI's textareas
+// (typed on the physical keyboard, no touch needed there at all) — this
+// still gets registered unconditionally whenever LVGL is set up at all,
+// since a login screen ignoring touch events it never asked for is
+// harmless, and it means the launcher doesn't need its own separate
+// display-driver init pass later.
+static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
+{
+    (void)drv;
+    const catcall_touch_t *touch = purr_kernel_touch();
+    if (touch && touch->is_pressed && touch->is_pressed()) {
+        uint16_t x = 0, y = 0;
+        if (touch->read_point) touch->read_point(&x, &y);
+        data->point.x = (lv_coord_t)x;
+        data->point.y = (lv_coord_t)y;
+        data->state   = LV_INDEV_STATE_PR;
+    } else {
+        data->state = LV_INDEV_STATE_REL;
+    }
+}
+
 // Returns false (no ESP_LOG here on purpose — the only caller already
 // logs its own outcome) if no display is registered or the draw buffer
-// allocation fails; loginUI's own claw_personal_init() falls through to
-// login_render_init() returning false in that case, same "fails cleanly,
-// falls back to the console" contract as every other loginUI failure
-// path already has.
-static bool login_lvgl_display_init(void)
+// allocation fails; a loaded package's own render_init() falls through
+// to returning false in that case, same "fails cleanly, falls back"
+// contract every loginUI/launcher failure path already has. Touch
+// registration is best-effort — a device with no touch catcall (or one
+// that failed to init) still gets a working display, just no tap input;
+// checked at the ONLY caller (the launcher) via a real interaction, not
+// here.
+static bool lvgl_hw_init(void)
 {
     const catcall_display_t *disp = purr_kernel_display();
     if (!disp) return false;
@@ -500,22 +530,32 @@ static bool login_lvgl_display_init(void)
 
     lv_init();
 
-    size_t buf_px = (size_t)w * LOGIN_LVGL_BUF_LINES;
+    size_t buf_px = (size_t)w * LVGL_BUF_LINES;
     lv_color_t *buf1 = heap_caps_malloc(sizeof(lv_color_t) * buf_px, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
     if (!buf1) {
-        ESP_LOGE(TAG, "login_ui lvgl: draw buffer alloc failed (%u px)", (unsigned)buf_px);
+        ESP_LOGE(TAG, "lvgl: draw buffer alloc failed (%u px)", (unsigned)buf_px);
         return false;
     }
 
-    lv_disp_draw_buf_init(&s_login_lv_draw_buf, buf1, NULL, buf_px);
-    lv_disp_drv_init(&s_login_lv_disp_drv);
-    s_login_lv_disp_drv.hor_res  = (lv_coord_t)w;
-    s_login_lv_disp_drv.ver_res  = (lv_coord_t)h;
-    s_login_lv_disp_drv.flush_cb = login_lvgl_flush_cb;
-    s_login_lv_disp_drv.draw_buf = &s_login_lv_draw_buf;
-    lv_disp_drv_register(&s_login_lv_disp_drv);
+    lv_disp_draw_buf_init(&s_lv_draw_buf, buf1, NULL, buf_px);
+    lv_disp_drv_init(&s_lv_disp_drv);
+    s_lv_disp_drv.hor_res  = (lv_coord_t)w;
+    s_lv_disp_drv.ver_res  = (lv_coord_t)h;
+    s_lv_disp_drv.flush_cb = lvgl_flush_cb;
+    s_lv_disp_drv.draw_buf = &s_lv_draw_buf;
+    lv_disp_drv_register(&s_lv_disp_drv);
 
-    ESP_LOGI(TAG, "login_ui lvgl: display driver ready (%ux%u, %d-line buffer)", w, h, LOGIN_LVGL_BUF_LINES);
+    if (purr_kernel_touch()) {
+        lv_indev_drv_init(&s_lv_touch_drv);
+        s_lv_touch_drv.type    = LV_INDEV_TYPE_POINTER;
+        s_lv_touch_drv.read_cb = lvgl_touch_read_cb;
+        lv_indev_drv_register(&s_lv_touch_drv);
+        ESP_LOGI(TAG, "lvgl: touch indev registered (pointer)");
+    } else {
+        ESP_LOGW(TAG, "lvgl: no touch catcall — tap input unavailable");
+    }
+
+    ESP_LOGI(TAG, "lvgl: display driver ready (%ux%u, %d-line buffer)", w, h, LVGL_BUF_LINES);
     return true;
 }
 #endif // CONFIG_PURR_LOGIN_UI_LVGL
@@ -567,12 +607,12 @@ static void serial_console_task(void *arg)
 #ifdef CONFIG_PURR_LOGIN_UI_LVGL
     // Set up BEFORE the load, not inside it — the LVGL-backed variant's
     // own login_render_init() only ever calls lv_disp_get_default(), it
-    // never registers a display driver itself (see login_lvgl_display_
-    // init()'s own top comment on why that split exists). A display-init
-    // failure here just means login_render_init() sees no default display
-    // and returns false — same clean "fall back to console" path every
-    // other loginUI failure already has, not a special case.
-    login_lvgl_display_init();
+    // never registers a display driver itself (see lvgl_hw_init()'s own
+    // top comment on why that split exists). A display-init failure here
+    // just means login_render_init() sees no default display and returns
+    // false — same clean "fall back to console" path every other loginUI
+    // failure already has, not a special case.
+    lvgl_hw_init();
 #endif
     claw_loaded_module_t login_ui_mod;
     if (claw_loader_system_load("login_ui", &login_ui_mod)) {
@@ -583,6 +623,29 @@ static void serial_console_task(void *arg)
         logged_in_via_ui = (rc == 0);
     } else {
         ESP_LOGW(TAG, "login_ui: claw_loader_system_load failed — falling back to console login");
+    }
+
+    // launcher (source/apps/system/launcher/) — the tile-grid home screen,
+    // tried only once loginUI itself actually succeeded (app_manager's
+    // local registry is genuinely populated by then — app_manager_notify_
+    // unlocked() already fired inside login_core.c). LVGL-only package
+    // (no framebuffer variant exists at all — see its own app.pcat
+    // `variants = "lvgl"`), so this only ever has anything to try on a
+    // device that already set up LVGL above; claw_loader_system_load()
+    // failing (package not staged, e.g. a framebuffer-only device) or the
+    // package's own init() returning at all (it's meant to run forever —
+    // a home screen has nowhere else to hand off to yet) both fall
+    // through to the console exactly like every other failure here.
+    if (logged_in_via_ui) {
+        claw_loaded_module_t launcher_mod;
+        if (claw_loader_system_load("launcher", &launcher_mod)) {
+            int rc = launcher_mod.init();   // never returns on success — this IS the running home screen
+            ESP_LOGW(TAG, "launcher: init() returned %d — unexpected, falling back to console", rc);
+            launcher_mod.deinit();
+            claw_loader_unload(&launcher_mod);
+        } else {
+            ESP_LOGW(TAG, "launcher: claw_loader_system_load failed — falling back to console");
+        }
     }
 
     // The actual point of "console mode": type on the device's own

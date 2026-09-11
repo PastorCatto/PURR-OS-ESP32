@@ -1553,6 +1553,29 @@ _CLAW_IMPORT_LVGL_ESSENTIALS = [
     "lv_label_create", "lv_label_set_text",
     "lv_textarea_create", "lv_textarea_set_text", "lv_textarea_set_password_mode",
     "lv_timer_handler",
+    # lv_obj_add_event_cb/lv_event_get_user_data — tap-to-launch tiles
+    # (source/apps/system/launcher/) need LVGL's OWN click event delivery,
+    # unlike login_ui's textareas (which are only ever read from/written to
+    # imperatively, never clicked). Both take/return opaque pointers only
+    # (lv_obj_t*, lv_event_t*, void*) — no struct mirroring needed, same
+    # "opaque handle" safety as everything else in this list. The callback
+    # function itself is the LOADED MODULE'S OWN code (a real, direct
+    # function reference inside its own compiled object, the same kind of
+    # local self-relocation claw_elf.c already proves correct elsewhere) —
+    # LVGL just stores and later calls that address like any other function
+    # pointer; it doesn't need to be an import at all.
+    "lv_obj_add_event_cb", "lv_event_get_user_data",
+    # lv_obj_clean — deletes every child of an object in one call. The
+    # launcher calls this on the default screen before building its own
+    # tiles, precisely BECAUSE nothing before it cleans up after itself:
+    # loginUI's own claw_personal_deinit() is a documented no-op (its
+    # widgets were never meant to be the last thing on screen), so
+    # without this the tile grid rendered ON TOP of the still-visible
+    # login screen — confirmed live, not guessed (T-Deck Plus: "it works,
+    # but the login screen stays behind the tiles"). Clearing defensively
+    # here, in whatever loads SECOND, is more robust than trying to make
+    # every possible predecessor screen clean up after itself correctly.
+    "lv_obj_clean",
     # lv_tick_inc — LVGL's own internal clock has to be advanced manually
     # by whoever drives lv_timer_handler() when nothing else already calls
     # it (mochi_hal.c/cupcake_hal.c's own render tasks call both every

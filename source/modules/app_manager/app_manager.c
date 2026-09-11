@@ -1661,6 +1661,27 @@ const app_entry_t *app_manager_get(int idx)
     return s_remote_mode ? remote_get(idx) : local_get(idx);
 }
 
+// The one safe way for a LOADED .claw object (source/modules/claw_loader/)
+// to read an app's display name — a plain accessor, never exposing
+// app_entry_t itself, for the same reason purr_kernel_poll_key() exists
+// instead of a loaded module hand-mirroring catcall_input_t (see that
+// function's own doc comment, purr_kernel.h, for the general principle).
+// Doubly worth it here: app_entry_t is a real, actively-evolving struct
+// (several fields have been added to it over this rewrite's own history)
+// — a hand-mirrored copy in loaded code would need to track every future
+// change, where this accessor's own signature never has to. Works
+// identically in local or remote mode — app_manager_get() already
+// dispatches on s_remote_mode internally, and this just forwards to it.
+bool app_manager_entry_name(int idx, char *out, size_t out_sz)
+{
+    if (!out || out_sz == 0) return false;
+    const app_entry_t *e = app_manager_get(idx);
+    if (!e) { out[0] = '\0'; return false; }
+    strncpy(out, e->name, out_sz - 1);
+    out[out_sz - 1] = '\0';
+    return true;
+}
+
 bool app_manager_remote_mac(uint8_t out_mac[6])
 {
     if (!s_remote_mode || !out_mac) return false;

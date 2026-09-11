@@ -1,11 +1,11 @@
 // login_render_fb.c — plain framebuffer render backend for loginUI.
 //
 // Compiled only when catstrap's "fb" sysclaw variant is built
-// (-DLOGIN_UI_BACKEND_FB, see catstrap.py's _build_sysclaw_variant()) —
+// (-DSYSCLAW_BACKEND_FB, see catstrap.py's _build_sysclaw_variant()) —
 // the #if below makes this an empty translation unit otherwise, so both
 // backend .c files can always be handed to the compiler unconditionally
 // without the "lvgl" variant accidentally pulling this one in too.
-#if defined(LOGIN_UI_BACKEND_FB)
+#if defined(SYSCLAW_BACKEND_FB)
 
 #include "login_core.h"
 #include <stdint.h>
@@ -229,4 +229,4 @@ int login_render_poll_key(void)
     return purr_kernel_poll_key();
 }
 
-#endif // LOGIN_UI_BACKEND_FB
+#endif // SYSCLAW_BACKEND_FB

@@ -23,7 +23,7 @@
 // incomplete struct is all an opaque handle ever needs; see purrstrap.py's
 // _CLAW_IMPORT_LVGL_ESSENTIALS for the exact, deliberately short list of
 // LVGL entry points this relies on.
-#if defined(LOGIN_UI_BACKEND_LVGL)
+#if defined(SYSCLAW_BACKEND_LVGL)
 
 #include "login_core.h"
 #include <stdint.h>
@@ -156,4 +156,4 @@ int login_render_poll_key(void)
     return k;
 }
 
-#endif // LOGIN_UI_BACKEND_LVGL
+#endif // SYSCLAW_BACKEND_LVGL

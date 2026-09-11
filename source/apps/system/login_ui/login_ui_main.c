@@ -4,7 +4,7 @@
 // login_core.c's state machine using whichever render backend variant this
 // build was compiled with (login_render_fb.c / login_render_lvgl.c define
 // the SAME three functions below — login_render_init/_draw/_poll_key —
-// guarded by their own LOGIN_UI_BACKEND_FB/_LVGL #if, so exactly one is
+// guarded by their own SYSCLAW_BACKEND_FB/_LVGL #if, so exactly one is
 // ever a real definition per compiled variant).
 //
 // Deliberately BLOCKS inside claw_personal_init() until login succeeds —
