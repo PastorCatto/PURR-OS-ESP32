@@ -6,16 +6,23 @@
 // framebuffer/keyboard UI could meaningfully be.
 //
 // Deliberately basic — "a bunch of windows phone squares", nothing more
-// yet: no status bar, no nav bar, no lock screen (systemUI stays a
-// separate, later package — not bundled in here, per direction). No
-// scrolling (fits exactly as many tiles as one screen holds; a device
-// with more apps than that just doesn't show the rest yet). No window
-// management for a launched app to actually draw into — app_manager_
-// launch_idx() below DOES really launch the app (spawns its task,
-// app_entry_t.state goes RUNNING, all real, not a stub), but nothing
-// here registers a catcall_ui_t for it to create a window against yet.
-// That's real, honest scope — a window manager is systemUI's job, not
-// this pass's.
+// yet: no nav bar. No scrolling (fits exactly as many tiles as one screen
+// holds; a device with more apps than that just doesn't show the rest
+// yet). No window management for a launched app to actually draw into —
+// app_manager_launch_idx() below DOES really launch the app (spawns its
+// task, app_entry_t.state goes RUNNING, all real, not a stub), but
+// nothing here registers a catcall_ui_t for it to create a window against
+// yet. That's real, honest scope — a window manager is systemUI's job,
+// not this pass's.
+//
+// Status bar + lock screen now live in the separate systemui package
+// (source/apps/system/systemui/) — genuinely separate, not just "not
+// bundled in here": this file never calls into it, never links against
+// it, and has no idea it exists. The two packages only ever meet inside
+// kernel_tdp_boot.c's own session loop, which loads both and ticks
+// whichever ones export claw_personal_tick(). This file does NOT export
+// one — see claw_personal_init()'s own comment on why it returns instead
+// of looping forever now.
 //
 // Local vs remote is NOT this file's concern at all: app_manager_count()/
 // _entry_name()/_launch_idx() already dispatch on app_manager's own
@@ -55,8 +62,6 @@ extern void      *lv_obj_add_event_cb(lv_obj_t *obj, void (*event_cb)(lv_event_t
                                        lv_event_code_t filter, void *user_data);
 extern void      *lv_event_get_user_data(lv_event_t *e);
 extern void       lv_obj_clean(lv_obj_t *obj);
-extern uint32_t   lv_timer_handler(void);
-extern void       lv_tick_inc(uint32_t tick_period_ms);
 
 // LV_EVENT_CLICKED's real numeric value — confirmed against CoreOS/
 // managed_components/lvgl__lvgl/src/core/lv_event.h's own lv_event_code_t
@@ -69,10 +74,6 @@ extern void       lv_tick_inc(uint32_t tick_period_ms);
 // to taps after an LVGL version bump.
 #define LV_EVENT_CLICKED_VALUE 7
 
-extern int  purr_kernel_poll_key(void);   // unused here directly, but see login_ui's own doc comment on why this exists at all
-extern void purr_kernel_delay_ms(unsigned int ms);
-extern uint64_t purr_kernel_uptime_ms(void);
-
 // app_manager's own dual-mode registry — app_manager_count()/_entry_name()/
 // _launch_idx() already dispatch on s_remote_mode internally (see this
 // file's own top comment). app_manager_entry_name() is a plain accessor,
@@ -82,24 +83,6 @@ extern uint64_t purr_kernel_uptime_ms(void);
 extern int  app_manager_count(void);
 extern bool app_manager_entry_name(int idx, char *out, size_t out_sz);
 extern int  app_manager_launch_idx(int idx);
-
-// Same tick+render discipline login_render_lvgl.c's own lvgl_tick_and_
-// render() already proved load-bearing (see that file's comment on the
-// real bug this fixed) — LVGL's display refresh timer gates on lv_tick_
-// inc() actually advancing, and this package has no separate tick task
-// either.
-static void lvgl_tick_and_render(void)
-{
-    static uint64_t s_last_ms = 0;
-    uint64_t now = purr_kernel_uptime_ms();
-    if (s_last_ms == 0) s_last_ms = now;
-    uint32_t delta = (uint32_t)(now - s_last_ms);
-    if (delta > 0) {
-        lv_tick_inc(delta);
-        s_last_ms = now;
-    }
-    lv_timer_handler();
-}
 
 // Grid geometry — fixed, not computed from the real screen size (no
 // lv_disp_get_hor_res()/_ver_res() in the import list yet — nothing here
@@ -155,27 +138,30 @@ int claw_personal_init(void)
         lv_obj_set_pos(label, 4, 4);
     }
 
-    // A home screen runs forever — there is nowhere else to hand off to
-    // yet (no systemUI/window manager exists as a separate package
-    // still), so unlike loginUI's own claw_personal_init() (which returns
-    // once login succeeds), this one deliberately never returns on
-    // success. kernel_tdp_boot.c's own orchestrator comment documents
-    // this: init() returning at all is treated as a failure, falling back
-    // to the console.
-    for (;;) {
-        lvgl_tick_and_render();
-        purr_kernel_delay_ms(30);
-    }
+    // Tiles built — return instead of looping forever. kernel_tdp_boot.c's
+    // own session loop is now the one place driving lv_tick_inc()/
+    // lv_timer_handler() (and ticking systemui's status bar alongside
+    // this package), so a tap on a tile still gets detected and still
+    // calls app_manager_launch_idx() above exactly as before — this file
+    // just no longer needs to pump that loop itself. See this file's own
+    // top comment for why that ownership moved to the host.
+    return 0;
 }
 
 void claw_personal_deinit(void)
 {
-    // Nothing to tear down — no heap allocation of our own, no registered
-    // catcall_ui_t (this package draws straight through LVGL's own
-    // already-set-up default screen, same as login_render_lvgl.c). Never
-    // actually called today (claw_personal_init() above never returns on
-    // success), kept for the same "every loaded module has both entry
-    // points" contract claw_loader_load() requires either way.
+    // Called for real now (unlike before this package stopped owning its
+    // own forever-loop): kernel_tdp_boot.c's session loop unloads the
+    // launcher on every relock, before reloading loginUI. No heap
+    // allocation of our own to free, no registered catcall_ui_t (this
+    // package draws straight through LVGL's own already-set-up default
+    // screen, same as login_render_lvgl.c) — nothing to actually tear
+    // down, but the tiles themselves are left in place deliberately: the
+    // NEXT thing to touch the default screen (loginUI, on relock) already
+    // clears it via login_render_lvgl.c's own lv_obj_clean() at init,
+    // same as this package clears loginUI's leftovers on ITS OWN init —
+    // see that comment just above for the established convention this
+    // follows.
 }
 
 #endif // SYSCLAW_BACKEND_LVGL

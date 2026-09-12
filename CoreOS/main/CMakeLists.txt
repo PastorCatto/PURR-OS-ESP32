@@ -236,6 +236,21 @@ idf_component_register(
         # explicit here too rather than assumed, same "explicit, not
         # inherited" reasoning as esp_app_format/app_update just above.
         lvgl__lvgl
+        # speed_demon — purr_speed_demon_active() (source/modules/speed_demon/),
+        # polled by run_graphical_session()'s own session loop (this
+        # device's kernel_tdp_boot.c). speed_demon.c's teardown was written
+        # against the OLD static-module UI backend (it walks and unloads
+        # the P0-P3 registry by name) and has no idea the new claw-loaded
+        # systemui/launcher packages even exist — confirmed live, not
+        # theoretical: the status bar bled straight through into a
+        # speed-demon game's own full-screen framebuffer pushes, because
+        # nothing told this loop to stop re-flushing LVGL onto the display
+        # while the game had it. Rather than teaching speed_demon.c about
+        # a second, unrelated UI mechanism, the session loop just polls
+        # this flag itself and stops touching the display entirely while
+        # a game is active — same "nothing else may draw" contract every
+        # OTHER thing speed_demon.h unloads already gets for free.
+        speed_demon
         ${DRIVER_REQUIRES}
         ${EXTRA_REQUIRES}
         ${USB_MSC_REQUIRES}

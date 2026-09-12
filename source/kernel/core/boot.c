@@ -24,6 +24,21 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#ifdef CONFIG_PURR_GENERIC_CONSOLE
+// A real, interactive console at the end of THIS generic boot path — see
+// Kconfig.projbuild's own comment for why this is opt-in (default off,
+// zero change to every existing generic-kernel device) and its first
+// real use (Waveshare ESP32-S3-ePaper-1.54: no touch, no keyboard, so a
+// UI module can only ever auto-login and draw a one-time status screen —
+// see epaper_ui.c — real interaction happens here instead). Same USB-
+// Serial-JTAG binding kernel_tdp_boot.c's own serial_console_task()
+// already uses and for the same reason: this peripheral is reachable
+// over the same cable used to flash the device, UART0 typically isn't.
+#include "driver/usb_serial_jtag.h"
+#include "purr_console.h"
+#include "purr_console_login.h"
+#endif
+
 static const char *TAG = "purr_boot";
 
 // ── Flash VFS (SPIFFS) ────────────────────────────────────────────────────────
@@ -106,6 +121,58 @@ static void ensure_sd_dirs(void)
         }
     }
 }
+
+#ifdef CONFIG_PURR_GENERIC_CONSOLE
+// ── Generic USB-Serial-JTAG console ──────────────────────────────────────
+// Trimmed version of kernel_tdp_boot.c's own serial_console_task()/
+// s_console_io pair — no device-specific command table (a generic-kernel
+// device has no equivalent of that file's s_tdp_console_cmds; purr_
+// console's own built-in commands still work), no panic-console wiring
+// (that's this device class's own follow-up if it ever needs one), and
+// with_login=false unconditionally: whatever UI module already ran (e.g.
+// epaper_ui.c) has already auto-logged a session in by the time this
+// starts, same "the point of a UI backend doing this at all is to not
+// need the text prompt too" reasoning kernel_tdp_boot.c's own comment
+// gives for loginUI.
+static int usbjtag_console_read_byte(uint32_t timeout_ms)
+{
+    uint8_t c = 0;
+    if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(timeout_ms)) > 0) return c;
+    return -1;
+}
+
+static void usbjtag_console_write(const void *data, size_t len)
+{
+    usb_serial_jtag_write_bytes(data, len, portMAX_DELAY);
+}
+
+static void usbjtag_console_flush(void)
+{
+    // No blocking "wait for TX to drain" primitive in this driver's API —
+    // usb_serial_jtag_write_bytes() above already blocks until accepted,
+    // same reasoning kernel_tdp_boot.c's own identical stub documents.
+}
+
+static const purr_console_io_t s_generic_console_io = {
+    .read_byte = usbjtag_console_read_byte,
+    .write     = usbjtag_console_write,
+    .flush     = usbjtag_console_flush,
+};
+
+static void generic_console_task(void *arg)
+{
+    (void)arg;
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    esp_err_t ret = usb_serial_jtag_driver_install(&cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "usb_serial_jtag_driver_install failed: %s — console unavailable", esp_err_to_name(ret));
+        return;
+    }
+    purr_console_set_login_fn(purr_console_login_default_login_fn);
+    purr_console_set_exec_fn(purr_console_login_default_exec_fn);
+    purr_console_run(&s_generic_console_io, false);   // never returns
+}
+#endif // CONFIG_PURR_GENERIC_CONSOLE
 
 // ── app_main ──────────────────────────────────────────────────────────────────
 
@@ -214,6 +281,22 @@ void app_main(void)
     purr_kernel_set_boot_ready(true);
 
     ESP_LOGI(TAG, "boot complete — %u bytes free", (unsigned)purr_kernel_free_ram());
+
+#ifdef CONFIG_PURR_GENERIC_CONSOLE
+    // Protected process, not a raw xTaskCreate() — same reasoning
+    // kernel_tdp_boot.c's own console launch documents: this must never
+    // be silently strike-disabled the way a misbehaving P2/P3 module can
+    // be.
+    static const purr_protected_process_t s_generic_console_proc = {
+        .name       = "console",
+        .run        = generic_console_task,
+        .arg        = NULL,
+        .stack_size = 4096,
+        .priority   = 1,
+        .core_id    = -1,
+    };
+    purr_kernel_start_protected(&s_generic_console_proc);
+#endif
 
     // Kernel spine parks here. All work happens in module FreeRTOS tasks.
     // The active UI module opens the Cat Apps launcher after its WM is ready.

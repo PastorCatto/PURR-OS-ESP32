@@ -1,0 +1,110 @@
+# devices/waveshare154/device.pcat
+# Waveshare ESP32-S3-ePaper-1.54 (V2, non-touch) — ESP32-S3-PICO-1-N8R8,
+# 8MB flash/8MB PSRAM, 200x200 1.54" e-paper (SSD1681-family), onboard
+# PCF85063 RTC + battery ADC divider. No touch, no physical keyboard —
+# only BOOT/PWR buttons — so this device auto-logs in and shows the
+# active username on the e-paper panel (epaper_ui.c); real interaction is
+# the USB console (modules.console below), not the panel.
+#
+# First pass, deliberately scoped: display (full-refresh only, no
+# partial-refresh LUT yet — see epd1in54.c's own top comment), battery,
+# RTC (read-only — see pcf85063.c's own top comment on why write-back is
+# a follow-up). NOT this pass: SD card (slot exists on this board, unused
+# here), SHTC3 temp/humidity sensor, ES8311 audio codec + mic/speaker —
+# all real onboard hardware, all explicitly out of scope until a real use
+# case needs them, not built speculatively.
+#
+# Pin assignments confirmed against the vendor's own repo (waveshareteam/
+# ESP32-S3-ePaper-1.54, 02_Example/ESP-IDF/V2/09_LVGL_V8_Test/main/
+# user_config.h and .../board_power_bsp.cpp for PWR/battery-enable
+# polarity) — not guessed from a generic SSD1681/PCF85063 datasheet.
+
+[device]
+name        = "waveshare154"
+chip        = "esp32s3"
+kernel_type = "native"
+flash_mb    = 8
+psram       = true
+psram_mb    = 8
+
+[drivers]
+display     = "epd1in54"
+touch       = ""
+input       = ""
+radio       = ""
+gps         = ""
+battery     = "adc_battery"
+rtc         = "pcf85063"
+
+[radio]
+# WiFi + BLE5 dual-mode onboard — no LoRa on this board.
+wifi        = true
+bt          = true
+lora        = ""
+
+[modules]
+# epaper_ui — NOT a UI_BACKEND_MAP entry (like heltec's own oled_ui,
+# neither is this): a real, bespoke static UI module for this device's
+# own hardware shape, not an archived graphical shell. See epaper_ui.c's
+# own top comment.
+ui          = "epaper_ui"
+app_manager = "app_manager"
+# user_mgr — REQUIRED for epaper_ui's own auto-login (user_mgr_set_
+# logged_in(user_mgr_default_username())) to have an account to log into
+# at all — same latent-bug shape heltec/device.pcat's own comment on this
+# exact key already documents; added explicitly here from the start
+# rather than discovering the gap the hard way a second time.
+user_mgr    = "user_mgr"
+# console — starts a real interactive USB-Serial-JTAG console at the end
+# of the GENERIC boot.c (source/kernel/core/boot.c) — see Kconfig.
+# projbuild's own PURR_GENERIC_CONSOLE comment. This device's only real
+# interaction path: no touch, no keyboard, and the e-paper panel is far
+# too slow (a real ~1-2s hardware refresh per draw call, see epd1in54.c)
+# to host a live-updating console the way purr_fbtty does on every other
+# device.
+console     = true
+
+[apps]
+# No local apps this pass — a headless-ish device with no interactive
+# screen and no way to launch anything locally beyond the console's own
+# `exec` command. Same "empty/sparse listing is correct, not a gap"
+# reasoning heltec/device.pcat's own [apps] comment gives.
+
+[flash]
+display/epd1in54    = 1
+rtc/pcf85063        = 2
+epaper_ui           = 2
+app_manager         = 2
+user_mgr            = 2
+battery/adc_battery = 3
+
+[pins]
+display_dc    = 10
+display_cs    = 11
+display_mosi  = 13
+display_sclk  = 12
+display_rst   = 9
+display_busy  = 8
+display_pwr   = 6
+
+# ADC1_CHANNEL_3 / GPIO4 — same physical channel adc_battery.c's own
+# compile-time default already targets (T-Deck/T-Deck Plus use the same
+# pin), so only the multiplier actually differs here: this board's own
+# official firmware computes `voltage = raw_mv * 2` (components/adc_bsp/
+# adc_bsp.c in the vendor repo — a plain 2.0x divider, no Meshtastic-style
+# undervoltage correction factor), not T-Deck's 2.11x.
+battery_adc_channel    = 3
+# VBAT_PWR_PIN (GPIO17) must be driven HIGH to connect the battery divider
+# to the ADC pin at all (confirmed: board_power_bsp.cpp's VBAT_POWER_ON()
+# drives it high) — adc_battery_configure()'s own ctrl_pin auto-detect-
+# and-invert dance (written for Heltec V3's genuinely ambiguous polarity)
+# handles this correctly regardless of this pin's floating state at boot,
+# same mechanism, no new code needed.
+battery_adc_ctrl_pin   = 17
+battery_adc_multiplier = 2.0
+battery_adc_atten      = "12"
+
+rtc_sda       = 47
+rtc_scl       = 48
+
+sd_enabled    = false

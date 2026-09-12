@@ -46,6 +46,7 @@ extern void       lv_textarea_set_text(lv_obj_t *obj, const char *txt);
 extern void       lv_textarea_set_password_mode(lv_obj_t *obj, bool en);
 extern uint32_t   lv_timer_handler(void);
 extern void       lv_tick_inc(uint32_t tick_period_ms);
+extern void       lv_obj_clean(lv_obj_t *obj);
 
 // LVGL needs its own internal clock advanced periodically — lv_timer_
 // handler() (and everything it drives: the display refresh timer,
@@ -92,6 +93,17 @@ bool login_render_init(void)
     if (!disp) return false;   // display driver not registered — see kernel_tdp_boot.c's CONFIG_PURR_LOGIN_UI_LVGL block
     lv_obj_t *scr = lv_disp_get_scr_act(disp);
     if (!scr) return false;
+
+    // Wipe whatever the previous screen left behind — this now runs on
+    // every relock, not just the very first boot: kernel_tdp_boot.c's
+    // session loop reloads and re-inits this package after the launcher's
+    // tiles have been on screen for a while (systemUI's own "Lock" tap),
+    // and the launcher's claw_personal_deinit() deliberately leaves its
+    // tiles in place (see that file's own comment on why) rather than
+    // cleaning up after itself. Same defensive "whoever loads SECOND
+    // cleans up" convention launcher_lvgl.c's own claw_personal_init()
+    // already established for the reverse direction.
+    lv_obj_clean(scr);
 
     s_title = lv_label_create(scr);
     lv_label_set_text(s_title, "Welcome to PURR OS");

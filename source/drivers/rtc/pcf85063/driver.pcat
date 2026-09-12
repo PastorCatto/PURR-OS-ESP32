@@ -1,0 +1,9 @@
+[driver]
+name        = "pcf85063"
+type        = "rtc"
+description = "NXP PCF85063 I2C RTC (Waveshare ESP32-S3-ePaper-1.54's onboard RTC, addr 0x51). Read-only this pass — seeds purr_kernel_time_set(PURR_TIME_SOURCE_RTC_HW, ...) at boot from whatever the chip already holds. Does not write time back to the chip when a higher-authority source (NTP/GPS) syncs — see pcf85063.c's own top comment for why that's a deliberate follow-up, not built here."
+chips       = ["esp32s3"]
+
+[pins]
+sda = 47
+scl = 48

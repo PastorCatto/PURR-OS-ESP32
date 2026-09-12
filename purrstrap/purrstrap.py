@@ -1586,6 +1586,35 @@ _CLAW_IMPORT_LVGL_ESSENTIALS = [
     # gates the display refresh timer on tick-based due-time checks, which
     # never fire again once the tick is frozen at 0.
     "lv_tick_inc",
+    # lv_layer_top — systemUI's status bar/lock chip draw here instead of
+    # the default screen specifically so the launcher's own lv_obj_clean()
+    # (called on the default screen every time it rebuilds its tile grid,
+    # including after a relock cycle) never wipes them — see systemui_
+    # lvgl.c's own top comment for the full reasoning. Opaque lv_obj_t*
+    # return, same safety as every other entry in this list.
+    "lv_layer_top",
+    # lv_obj_clear_flag — needed to turn OFF a plain lv_obj_create()'s
+    # default LV_OBJ_FLAG_SCROLLABLE. Found live: systemUI's bottom bar
+    # and lock chip both showed real, draggable scrollbars in every
+    # direction before this — a plain container object is scrollable by
+    # default in this LVGL build, which the tile grid's own tiles never
+    # surfaced (nothing in a tile is bigger than the tile), but a status
+    # bar sized to exactly fit its content did. Takes an opaque lv_obj_t*
+    # plus a plain uint32_t bitmask (lv_obj_flag_t is typedef'd to
+    # uint32_t in lv_obj.h) — no struct mirroring, same safety as every
+    # other entry in this list.
+    "lv_obj_clear_flag",
+    # lv_obj_set_style_bg_opa — systemUI's lock control sets its own
+    # background fully transparent (LV_OPA_TRANSP=0) rather than accepting
+    # the default theme's box look, matching archive/ui_backends_v1/
+    # modules/mochi/mochi_springboard.c's own home-button pattern (see
+    # systemui_lvgl.c's own top comment for the full cross-check). Takes
+    # an opaque lv_obj_t* plus two plain scalars (lv_opa_t is uint8_t,
+    # the part/state selector is uint32_t) — deliberately NOT lv_obj_set_
+    # style_bg_color, which takes an lv_color_t BY VALUE whose real memory
+    # layout depends on CONFIG_LV_COLOR_DEPTH; nothing here needs color at
+    # all once "transparent" is the only value ever passed.
+    "lv_obj_set_style_bg_opa",
 ]
 
 def _generate_claw_imports():
@@ -1748,6 +1777,13 @@ def _generate_glue(device, cfg, out_dir):
         "CONFIG_DRV_DISPLAY_SCLK_PIN":  pin("display_sclk"),
         "CONFIG_DRV_DISPLAY_RST_PIN":   pin("display_rst"),
         "CONFIG_DRV_DISPLAY_BL_PIN":    pin("display_bl"),
+        # BUSY/PWR — e-paper-specific (epd1in54.c's own first use): BUSY is
+        # the panel's own "still refreshing" line, PWR is a board power
+        # rail that must be enabled before the panel responds at all. No
+        # existing display driver needed either, hence new macros here
+        # rather than reusing one of the ones above.
+        "CONFIG_DRV_DISPLAY_BUSY_PIN":  pin("display_busy"),
+        "CONFIG_DRV_DISPLAY_PWR_PIN":   pin("display_pwr"),
         "CONFIG_DRV_TOUCH_SDA_PIN":     pin("touch_sda"),
         "CONFIG_DRV_TOUCH_SCL_PIN":     pin("touch_scl"),
         "CONFIG_DRV_TOUCH_INT_PIN":     pin("touch_int", 0xFF),
@@ -1760,6 +1796,13 @@ def _generate_glue(device, cfg, out_dir):
         "CONFIG_LORA_CS_PIN":           pin("lora_cs"),
         "CONFIG_LORA_RST_PIN":          pin("lora_rst"),
         "CONFIG_LORA_IRQ_PIN":          pin("lora_irq"),
+        # RTC — pcf85063.c's own first use, a plain I2C bus (not shared
+        # with touch's own touch_sda/touch_scl, since no device has both
+        # yet — a future device wiring both an RTC and a touch controller
+        # to the SAME physical bus would just set both pairs to the same
+        # GPIO numbers; nothing here assumes they're different).
+        "CONFIG_DRV_RTC_SDA_PIN":       pin("rtc_sda"),
+        "CONFIG_DRV_RTC_SCL_PIN":       pin("rtc_scl"),
     }
     for macro, val in pin_map.items():
         lines.append(f"#define {macro} {val}")
@@ -1788,7 +1831,7 @@ def _generate_glue(device, cfg, out_dir):
     # to avoid double-init. Radio and GPS are still plug-and-play.
     baked_keys = ("drivers.display", "drivers.touch", "drivers.input") if specialized else ()
     for key in ("drivers.display", "drivers.touch", "drivers.input",
-                "drivers.radio", "drivers.gps", "drivers.battery"):
+                "drivers.radio", "drivers.gps", "drivers.battery", "drivers.rtc"):
         if key in baked_keys:
             continue
         val = cfg.get(key, "")
@@ -1799,7 +1842,13 @@ def _generate_glue(device, cfg, out_dir):
     # own comment on the two), not module names — excluded here or
     # to_sym("true"/"false") would produce a bogus "extern
     # purr_module_true;" reference.
-    CONTROL_FLAG_MODULE_KEYS = ("modules.radio_companion", "modules.server")
+    # modules.console = true (waveshare154/device.pcat) is the same kind
+    # of policy flag as radio_companion/server below — read directly by
+    # _sdkconfig_lines() to emit CONFIG_PURR_GENERIC_CONSOLE, never a
+    # component name. Found live: without this exclusion, to_sym("true")
+    # produced "extern purr_module_header_t purr_module_true;" — a real
+    # undefined-reference link failure, not a silent no-op.
+    CONTROL_FLAG_MODULE_KEYS = ("modules.radio_companion", "modules.server", "modules.console")
     for raw_key, raw_val in sorted(cfg.items()):
         if raw_key.startswith("modules.") and raw_val and raw_key not in CONTROL_FLAG_MODULE_KEYS:
             # modules.ui = "none"/"lvgl" names no static module (see
@@ -1903,6 +1952,7 @@ UI_BACKEND_MAP = {
     "kittenui":  "KITTENUI",
     "miniwin":   "MINIWIN",
     "oled_ui":   "OLED",
+    "epaper_ui": "EPAPER_UI",
     "blackpurr": "BLACKPURR",
     "cardstack": "CARDSTACK",
     "cupcake":   "CUPCAKE",
@@ -2015,6 +2065,21 @@ def _sdkconfig_lines(device, cfg):
         lines.append("")
         lines.append("# loginUI renders via LVGL — see Kconfig.projbuild's own comment")
         lines.append("CONFIG_PURR_LOGIN_UI_LVGL=y")
+
+    # [modules] console = true -> a real interactive USB-Serial-JTAG
+    # console started at the end of the GENERIC boot.c (source/kernel/
+    # core/boot.c), gated OFF by default (every existing generic-kernel
+    # device's real, unchanged behavior: idle after boot, no typed
+    # console). First real use: the Waveshare ESP32-S3-ePaper-1.54 (no
+    # touch, no keyboard — its epaper_ui module auto-logs in and draws a
+    # one-time boot screen; actual interaction happens over this console
+    # instead). A device with a specialized kernel (kernel_tdp_boot.c and
+    # friends) already starts its own console directly and never sets
+    # this flag.
+    if cfg.get("modules.console", "").lower() in ("true", "1", "yes"):
+        lines.append("")
+        lines.append("# Generic-kernel USB-Serial-JTAG console (boot.c)")
+        lines.append("CONFIG_PURR_GENERIC_CONSOLE=y")
 
     # [modules] bt/mesh presence -> the Kconfig gates that actually compile
     # bt_mgr.c/meshtastic's mesh_router.c+mesh_radio.c in. Mirrors the ui
@@ -2160,7 +2225,7 @@ def _build_kernel_spine(device, cfg, out_dir):
     _drv = []
     for _k in ("drivers.display", "drivers.touch", "drivers.input",
                "drivers.keyboard", "drivers.radio", "drivers.gps",
-               "drivers.battery"):
+               "drivers.battery", "drivers.rtc"):
         _v = (cfg.get(_k, "") or "").strip().strip('"')
         if _v and _v not in _drv:
             _drv.append(_v)

@@ -465,6 +465,13 @@ static const purr_console_io_t s_console_io = {
 // work", not a corner cut. Re-visit only if a real, measured need shows
 // up, same discipline as every other perf claim in this codebase.
 #include "lvgl.h"
+// purr_speed_demon_active() — polled by run_graphical_session()'s own
+// session loop so it stops touching the display entirely while a game has
+// torn the OS down for itself. See that function's own comment and
+// CoreOS/main/CMakeLists.txt's REQUIRES entry for the full story (found
+// live: the status bar bled through into a game's own framebuffer pushes
+// before this existed).
+#include "speed_demon.h"
 
 #define LVGL_BUF_LINES 40   // a modest slice of the screen — neither package redraws often enough to need sizing for throughput
 
@@ -558,6 +565,135 @@ static bool lvgl_hw_init(void)
     ESP_LOGI(TAG, "lvgl: display driver ready (%ux%u, %d-line buffer)", w, h, LVGL_BUF_LINES);
     return true;
 }
+
+// Same tick+render discipline login_render_lvgl.c's/launcher_lvgl.c's own
+// lvgl_tick_and_render() helpers proved load-bearing (see either file's
+// comment on the real "renders once, never updates again" bug this
+// fixes) — duplicated here, host-side, rather than shared, because this
+// is the ONE place that now owns it for the whole graphical session (see
+// run_graphical_session()'s own top comment): once loginUI hands off to
+// the launcher/systemUI pair, NEITHER loaded package calls lv_tick_inc()/
+// lv_timer_handler() itself any more — a loaded module's own
+// claw_personal_tick() (if it exports one) only ever updates its own
+// widgets' content, it never drives LVGL's clock.
+static void lvgl_tick_and_render_host(void)
+{
+    static uint64_t s_last_ms = 0;
+    uint64_t now = purr_kernel_uptime_ms();
+    if (s_last_ms == 0) s_last_ms = now;
+    uint32_t delta = (uint32_t)(now - s_last_ms);
+    if (delta > 0) {
+        lv_tick_inc(delta);
+        s_last_ms = now;
+    }
+    lv_timer_handler();
+}
+
+// Owns the whole post-login graphical session: systemUI (status bar +
+// lock control, loaded once) and the launcher (tile grid, reloaded fresh
+// every unlock) as two independent loaded packages that never call into
+// each other — they only ever meet HERE, in this loop. See systemui_
+// lvgl.c's and launcher_lvgl.c's own top comments for why neither one
+// owns a forever-loop of its own any more: only one task can safely
+// drive lv_timer_handler(), so this function is that one task, and every
+// loaded UI package becomes a "create widgets, then get ticked" — plus,
+// for the launcher, "get relaunched after a relock" — participant
+// instead.
+//
+// Returns when there is nothing more it can do (a package failed to
+// load/init, or a relock's re-run of loginUI itself failed) — same
+// "return on unrecoverable failure, let the caller fall back to console"
+// contract every other piece of this boot sequence already has. Never
+// returns on the ordinary, working path: a lock/re-auth/relaunch cycle
+// just loops back around to loading the launcher again.
+static void run_graphical_session(void)
+{
+    // Missing/failing to load just means no status bar/lock control this
+    // session — the launcher still runs fine without it, same "degrade,
+    // don't block" contract every other optional piece of this boot
+    // sequence already has (e.g. touch registration in lvgl_hw_init()
+    // above).
+    claw_loaded_module_t systemui_mod = {0};
+    bool have_systemui = false;
+    if (claw_loader_system_load("systemui", &systemui_mod)) {
+        int rc = systemui_mod.init();
+        if (rc == 0) {
+            have_systemui = true;
+        } else {
+            ESP_LOGW(TAG, "systemui: init() = %d — running without status bar/lock", rc);
+            systemui_mod.deinit();
+            claw_loader_unload(&systemui_mod);
+        }
+    } else {
+        ESP_LOGW(TAG, "systemui: claw_loader_system_load failed — running without status bar/lock");
+    }
+
+    for (;;) {
+        claw_loaded_module_t launcher_mod;
+        if (!claw_loader_system_load("launcher", &launcher_mod)) {
+            ESP_LOGW(TAG, "launcher: claw_loader_system_load failed — falling back to console");
+            break;
+        }
+        int rc = launcher_mod.init();   // builds the tile grid, returns immediately (no forever-loop of its own any more)
+        if (rc != 0) {
+            ESP_LOGW(TAG, "launcher: init() = %d — falling back to console", rc);
+            launcher_mod.deinit();
+            claw_loader_unload(&launcher_mod);
+            break;
+        }
+
+        bool relock = false;
+        while (!relock) {
+            // While a speed-demon game is active it owns the display
+            // outright — no lock to take, nothing to fight, per speed_
+            // demon.h's own design. This loop still has to keep RUNNING
+            // (the launcher's own claw_loaded_module_t is only unloaded
+            // on relock below, and a lock request could still be pending
+            // from before the game launched), it just has to stop calling
+            // anything that touches LVGL/the display for as long as the
+            // game holds it — confirmed live this was necessary: without
+            // this check, the status bar's own periodic clock/battery
+            // tick kept invalidating and re-flushing a small screen
+            // region straight through the game's own framebuffer pushes.
+            if (!purr_speed_demon_active()) {
+                lvgl_tick_and_render_host();
+                if (launcher_mod.tick) launcher_mod.tick();
+                if (have_systemui && systemui_mod.tick) systemui_mod.tick();
+                relock = purr_kernel_consume_lock_request();
+            }
+            purr_kernel_delay_ms(30);
+        }
+
+        ESP_LOGI(TAG, "systemui: lock requested — tearing down launcher, re-running login_ui");
+        launcher_mod.deinit();
+        claw_loader_unload(&launcher_mod);
+        // Symmetric reset — see app_manager_notify_locked()'s own doc
+        // comment (app_manager.h): local registry goes idle until the
+        // relogin below calls app_manager_notify_unlocked() again inside
+        // login_core.c, same contract the very first login already used.
+        app_manager_notify_locked();
+
+        claw_loaded_module_t relogin_mod;
+        if (!claw_loader_system_load("login_ui", &relogin_mod)) {
+            ESP_LOGW(TAG, "login_ui: claw_loader_system_load failed on relock — falling back to console");
+            break;
+        }
+        int login_rc = relogin_mod.init();   // blocks internally until a real login succeeds, same contract as first boot
+        relogin_mod.deinit();
+        claw_loader_unload(&relogin_mod);
+        if (login_rc != 0) {
+            ESP_LOGW(TAG, "login_ui: init() = %d on relock — falling back to console", login_rc);
+            break;
+        }
+        // Reauthenticated — loop back around and reload the launcher for
+        // the freshly-unlocked session.
+    }
+
+    if (have_systemui) {
+        systemui_mod.deinit();
+        claw_loader_unload(&systemui_mod);
+    }
+}
 #endif // CONFIG_PURR_LOGIN_UI_LVGL
 
 static void serial_console_task(void *arg)
@@ -625,27 +761,26 @@ static void serial_console_task(void *arg)
         ESP_LOGW(TAG, "login_ui: claw_loader_system_load failed — falling back to console login");
     }
 
-    // launcher (source/apps/system/launcher/) — the tile-grid home screen,
-    // tried only once loginUI itself actually succeeded (app_manager's
-    // local registry is genuinely populated by then — app_manager_notify_
-    // unlocked() already fired inside login_core.c). LVGL-only package
-    // (no framebuffer variant exists at all — see its own app.pcat
-    // `variants = "lvgl"`), so this only ever has anything to try on a
-    // device that already set up LVGL above; claw_loader_system_load()
-    // failing (package not staged, e.g. a framebuffer-only device) or the
-    // package's own init() returning at all (it's meant to run forever —
-    // a home screen has nowhere else to hand off to yet) both fall
-    // through to the console exactly like every other failure here.
+    // launcher + systemui (source/apps/system/launcher/, .../systemui/) —
+    // the tile-grid home screen and its status bar/lock chrome, tried
+    // only once loginUI itself actually succeeded (app_manager's local
+    // registry is genuinely populated by then — app_manager_notify_
+    // unlocked() already fired inside login_core.c). Both are LVGL-only
+    // packages (no framebuffer variant exists for either — see their own
+    // app.pcat `variants = "lvgl"`), so this only ever has anything to
+    // try on a device that already set up LVGL above — see run_graphical_
+    // session()'s own top comment for the full session loop (systemUI's
+    // "Lock" tap re-runs loginUI for real re-authentication, then
+    // reloads the launcher, all without either package calling into the
+    // other directly). Returning from it at all — package not staged, a
+    // relock's re-run of loginUI itself failing — falls through to the
+    // console exactly like every other failure here.
     if (logged_in_via_ui) {
-        claw_loaded_module_t launcher_mod;
-        if (claw_loader_system_load("launcher", &launcher_mod)) {
-            int rc = launcher_mod.init();   // never returns on success — this IS the running home screen
-            ESP_LOGW(TAG, "launcher: init() returned %d — unexpected, falling back to console", rc);
-            launcher_mod.deinit();
-            claw_loader_unload(&launcher_mod);
-        } else {
-            ESP_LOGW(TAG, "launcher: claw_loader_system_load failed — falling back to console");
-        }
+#ifdef CONFIG_PURR_LOGIN_UI_LVGL
+        run_graphical_session();
+#else
+        ESP_LOGW(TAG, "graphical session unavailable on this build (no LVGL) — falling back to console");
+#endif
     }
 
     // The actual point of "console mode": type on the device's own

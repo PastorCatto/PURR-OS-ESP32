@@ -199,7 +199,17 @@ bool claw_elf_find_offset(const uint8_t *data, size_t len, const char *symbol, u
 
     elf32_sym_t sym;
     if (!find_symbol(data, len, &symtab_sh, &strtab_sh, symbol, &sym)) {
-        ESP_LOGE(TAG, "symbol '%s' not found", symbol);
+        // ESP_LOGD, not ESP_LOGE: claw_loader_load() calls this for BOTH
+        // required (claw_personal_deinit) and genuinely OPTIONAL
+        // (claw_personal_tick) symbols — "not found" is the everyday,
+        // expected outcome for the latter (most loaded modules export no
+        // tick() at all, see claw_loaded_module_t::tick's own comment),
+        // and logging it as an ERROR made every such module's ordinary
+        // load look like something had gone wrong. A caller that DOES
+        // treat a missing symbol as fatal (claw_loader_load()'s own
+        // deinit check) already logs its own, more specific ESP_LOGE
+        // right after this returns false — no error visibility lost.
+        ESP_LOGD(TAG, "symbol '%s' not found", symbol);
         return false;
     }
     if ((int)sym.st_shndx != text_idx) {

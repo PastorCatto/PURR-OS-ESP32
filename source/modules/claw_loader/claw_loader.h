@@ -33,6 +33,8 @@ extern "C" {
 
 typedef int  (*claw_init_fn)(void);
 typedef void (*claw_deinit_fn)(void);
+// Optional third entry point — see claw_loaded_module_t::tick below.
+typedef void (*claw_tick_fn)(void);
 
 // Two independent flash pools, each with its own CLAW_MAX_SLOTS sub-regions
 // — see partitions_16mb_ota.csv's own comment on claw_slot/sys_claw for the
@@ -62,6 +64,14 @@ typedef enum {
 typedef struct {
     claw_init_fn   init;
     claw_deinit_fn deinit;
+    // NULL unless the module exports claw_personal_tick() — resolved the
+    // same way init/deinit are, but never required: a module with no
+    // per-frame work (e.g. loginUI, which blocks inside its own init()
+    // until it's done) just doesn't define the symbol. A caller that
+    // drives its own frame loop (kernel_tdp_boot.c's systemUI/launcher
+    // session loop) calls this every frame IF non-NULL instead of every
+    // loaded module needing to own a forever-loop of its own.
+    claw_tick_fn   tick;
     // Kept alive for the loaded module's whole lifetime — freed by
     // claw_loader_unload(), never touched by the caller directly.
     void    *rodata_ram;

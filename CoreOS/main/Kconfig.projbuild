@@ -26,6 +26,21 @@ menu "PURR OS"
                 Minimal OLED UI for devices with monochrome displays or
                 no display at all.
 
+        config PURR_UI_BACKEND_EPAPER_UI
+            bool "e-paper UI (headless/no touch or keyboard)"
+            help
+                One-shot boot screen for a device with an e-paper panel
+                and no touch/keyboard (source/modules/epaper_ui/,
+                Waveshare ESP32-S3-ePaper-1.54). Auto-logs in and draws
+                "PURR OS / logged in as <user>" once — real interaction on
+                that device is its USB console (see PURR_GENERIC_CONSOLE
+                below), not this panel. This symbol itself isn't read by
+                any live code today (same as PURR_UI_BACKEND_OLED's
+                sibling entries — this whole choice block just satisfies
+                purrstrap's own UI_BACKEND_MAP validation, see that dict's
+                comment in purrstrap.py); which module actually runs comes
+                from device.pcat's [modules] ui value directly.
+
         config PURR_UI_BACKEND_BLACKPURR
             bool "BlackPURR (LVGL 8, dark hybrid UI)"
             help
@@ -313,6 +328,28 @@ menu "PURR OS"
             When off, purrstrap stages loginUI's plain framebuffer renderer
             instead (login_render_fb.c) — the default for every device that
             hasn't set ui = "lvgl" explicitly.
+
+    config PURR_GENERIC_CONSOLE
+        bool "Start a USB-Serial-JTAG console at the end of the generic boot.c"
+        default n
+        help
+            Set automatically by purrstrap from a device.pcat [modules]
+            console = true entry. Off by default — every existing generic-
+            kernel device (cyd/cyd_s024c/cyd_s028r/heltec/jc3248w535/
+            waveshare169/tab5) keeps its exact current behavior (idle after
+            boot, no typed console) unless it explicitly opts in.
+
+            A device with a specialized kernel (kernel_tdp_boot.c and
+            friends) already starts its own console directly as part of
+            its own app_main() — this option only matters for a device
+            using the generic source/kernel/core/boot.c.
+
+            First real use: the Waveshare ESP32-S3-ePaper-1.54 (no touch,
+            no keyboard — epaper_ui.c auto-logs in and draws a one-time
+            boot screen; real interaction happens over this console
+            instead, since a live-updating console on that panel would
+            mean a real ~1-2s hardware refresh per character — see
+            epd1in54.c's own top comment).
 
     choice PURR_SYSTEMUI_STYLE
         prompt "System UI style"

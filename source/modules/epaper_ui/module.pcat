@@ -1,0 +1,16 @@
+# modules/epaper_ui/module.pcat
+
+name            = "epaper_ui"
+version         = "0.1.0"
+type            = "module"
+module_type     = "PURR_MOD_UI"
+catcall_version = 1
+idf_min         = "5.3.0"
+chip            = ["esp32s3"]
+kernel_min      = "0.11.1"
+kernel_max      = ""
+
+required_catcalls = ["display"]
+provides          = []
+
+notes = "Boot screen + one physical-button nav for the Waveshare ESP32-S3-ePaper-1.54 (no touch, no keyboard): auto-login (same no-password contract oled_ui_module.c's own auto-login already established) + 'PURR OS / logged in as <user>' on the e-paper panel, one-shot. Also polls the BOOT button (GPIO0) and redraws a larger 'PAGE n' line each press — the mechanism proven out, not a real menu yet. Primary interaction is still the USB console (see boot.c's CONFIG_PURR_GENERIC_CONSOLE): epd1in54.c does a real ~1-2s full hardware refresh per draw call, so this panel is deliberately not used for anything live-updating."

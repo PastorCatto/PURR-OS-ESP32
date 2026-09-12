@@ -121,6 +121,16 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_pool_t pool
         claw_elf_free(&m);
         return false;
     }
+    // claw_personal_tick() is OPTIONAL, unlike init/deinit above — a module
+    // with nothing to do between frames (loginUI, which blocks inside its
+    // own init() until login succeeds) just doesn't export it. A module
+    // that DOES (systemUI's status-bar clock/battery refresh) gets called
+    // once per host frame without needing to own a forever-loop of its
+    // own — see systemui_lvgl.c's own top comment for why that ownership
+    // split matters (the host, not any one loaded module, owns the single
+    // LVGL tick/render loop for the whole graphical session).
+    uint32_t tick_off = 0;
+    bool have_tick = claw_elf_find_offset(obj_bytes, obj_len, "claw_personal_tick", &tick_off);
 
     const char *part_name = partition_name_for(pool);
     const esp_partition_t *part =
@@ -247,10 +257,11 @@ bool claw_loader_load(const uint8_t *obj_bytes, size_t obj_len, claw_pool_t pool
         out->slot   = slot;
         out->init   = (claw_init_fn)((uint32_t)exec_ptr + m.entry_off);
         out->deinit = (claw_deinit_fn)((uint32_t)exec_ptr + deinit_off);
+        out->tick   = have_tick ? (claw_tick_fn)((uint32_t)exec_ptr + tick_off) : NULL;
     }
 
-    ESP_LOGI(TAG, "loaded into slot %d/%d: init=%p deinit=%p",
-             slot, CLAW_MAX_SLOTS, (void *)out->init, (void *)out->deinit);
+    ESP_LOGI(TAG, "loaded into slot %d/%d: init=%p deinit=%p tick=%p",
+             slot, CLAW_MAX_SLOTS, (void *)out->init, (void *)out->deinit, (void *)out->tick);
     claw_elf_free(&m);
     return true;
 
