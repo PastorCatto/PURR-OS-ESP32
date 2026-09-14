@@ -20,4 +20,4 @@ required_catcalls = [
     "catcall_display_t.deinit",
 ]
 
-notes = "SSD1681-family 200x200 1.54\" e-paper (Waveshare ESP32-S3-ePaper-1.54, non-touch). Full-refresh only for this first pass — see epd1in54.c's own top comment for the partial-refresh/debounce follow-up this deliberately doesn't do yet."
+notes = "SSD1681-family 200x200 1.54\" e-paper (Waveshare ESP32-S3-ePaper-1.54, non-touch). Partial refresh (~0.3s) after the initial full-refresh baseline, re-baselining every 10 updates to clear ghosting — see epd1in54.c's own top comment (measured best on real hardware among the variants tried). No coalescing of rapid successive writes into one flush yet."

@@ -1317,6 +1317,34 @@ def build_flash_image(device, pcat_cfg, out_dir, spiffs_size_kb=512):
             continue
 
         name = parts[1]
+
+        # `.pui` UI screens (catstrap.py's own new claw-tier compile+stage
+        # step — see _stage_pui_screens() there). Staged keyed off this
+        # SAME [flash] app-selection loop, not a blanket copy of every
+        # app's screens onto every device — a claw-tier app is statically
+        # linked (see the `src is None` branch just below: it has no blob
+        # of its own to copy at all), so this is the one place its own
+        # per-device presence is actually decided. Mounted at
+        # /flash/ui/<name>/<screen>.puib — purr_uiconf_core.c's own
+        # purr_uiconf_load_screen() reads exactly that path.
+        ui_src = os.path.join(OUTPUT_DIR, "apps", f"{name}.ui")
+        if os.path.isdir(ui_src):
+            ui_dst = os.path.join(staging_dir, "ui", name)
+            if os.path.isdir(ui_dst):
+                shutil.rmtree(ui_dst)
+            shutil.copytree(ui_src, ui_dst)
+            screens = sorted(f for f in os.listdir(ui_dst) if f.endswith(".puib"))
+            for screen_file in screens:
+                # Same SPIFFS_OBJ_NAME_LEN (32 bytes incl. NUL) real bug
+                # _stage_sysclaw_packages()'s own assets block already hit
+                # once — checked again here rather than assumed safe just
+                # because these paths look shorter today.
+                img_path = f"/ui/{name}/{screen_file}"
+                if len(img_path) > 31:
+                    warn(f"'{img_path}' is {len(img_path)} chars — over SPIFFS_OBJ_NAME_LEN's "
+                         f"31-char usable limit, will silently corrupt on flash; shorten the app or screen name")
+            print(f"  {C_GRN}[OK]{C_RST}  ui/{name}/{'':<{max(1, 22 - len(name))}} {len(screens)} screen(s)")
+
         src  = _find_purr_blob(slug)
 
         if src is None:

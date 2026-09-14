@@ -152,6 +152,24 @@ esp_err_t purr_kernel_keyboard_set_backlight(uint8_t brightness);
 // render backends (login_render_fb.c/login_render_lvgl.c) both do.
 int purr_kernel_poll_key(void);
 
+// ── Lock request ─────────────────────────────────────────────────────────
+// Same "loaded code calls a plain nameable function, never a struct/
+// callback pointer" boundary purr_kernel_poll_key() above documents —
+// there is no mechanism for a loaded .claw module to call back into host
+// (kernel_tdp_boot.c) code directly, so a "please lock the session" signal
+// from systemUI's own LVGL "Lock" tap callback (running inside the loaded
+// systemui module) has to cross that boundary as a plain flag instead.
+//
+// purr_kernel_request_lock() — called from inside the loaded module — sets
+// the flag; purr_kernel_consume_lock_request() — polled once per frame by
+// the host's own session loop, source/kernel/kernel_tdeck_plus/
+// kernel_tdp_boot.c — reads AND clears it atomically-enough for this
+// single-task usage (both sides run on the same task; LVGL's own event
+// dispatch inside lv_timer_handler() is synchronous, so there's no real
+// concurrent-access case here despite the flag being declared volatile).
+void purr_kernel_request_lock(void);
+bool purr_kernel_consume_lock_request(void);
+
 // ── UI thread safety ──────────────────────────────────────────────────────────
 // LVGL (and other catcall_ui_t backends) are not safe to call from more than
 // one task at a time. The registered UI backend's own render/message-pump
@@ -285,6 +303,15 @@ bool     purr_kernel_sd_available(void);
 // Heltec V3), and needs a way to know that root exists before touching it.
 bool     purr_kernel_flash_available(void);
 bool     purr_kernel_wifi_connected(void);
+// Hardware PRESENCE, not connection state — distinct from
+// purr_kernel_wifi_connected() above (a device can have WiFi hardware
+// and simply not be associated to an AP yet). Added for the new `.pui`
+// UI-config format's device-aware conditional visibility (a settings
+// screen's WiFi section should be hidden on a WiFi-less device, not
+// shown-and-broken) — mirrors purr_kernel_lora_available()'s own
+// pattern exactly; see wifi_mgr.c's own call site for where this gets
+// set true on the real-hardware branch.
+bool     purr_kernel_wifi_available(void);
 int      purr_kernel_battery_percent(void);  // -1 = unknown (no PMIC/fuel gauge)
 int      purr_kernel_battery_voltage_mv(void);  // -1 = unknown
 bool     purr_kernel_lora_available(void);
@@ -319,6 +346,13 @@ bool                purr_kernel_time_is_synced(void);
 time_t              purr_kernel_time_now(void);
 // Which source the current reading came from.
 purr_time_source_t  purr_kernel_time_source(void);
+
+// Plain "HH:MM" (UTC, 24h, always exactly 5 chars + NUL) — for a status
+// bar (systemui_lvgl.c) to show without needing struct tm/gmtime itself.
+// Writes "--:--" instead of a plausible-looking wrong time when
+// purr_kernel_time_is_synced() is false. out_sz must be >= 6; a no-op
+// otherwise.
+void purr_kernel_time_hhmm(char *out, size_t out_sz);
 
 // Called by a time source to push a reading. A lower-authority source
 // cannot overwrite a still-fresh higher-authority one (e.g. a GPS fix
@@ -417,6 +451,7 @@ bool purr_kernel_hostname_valid(const char *name);
 void     purr_kernel_set_sd_available(bool v);
 void     purr_kernel_set_flash_available(bool v);   // boot.c's mount_flash_vfs() only
 void     purr_kernel_set_wifi_connected(bool v);
+void     purr_kernel_set_wifi_available(bool v);
 void     purr_kernel_set_battery_percent(int v);
 void     purr_kernel_set_battery_voltage_mv(int mv);
 void     purr_kernel_set_lora_available(bool v);

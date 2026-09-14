@@ -38,6 +38,11 @@ import subprocess
 import sys
 import tempfile
 
+# uiconf.py lives right next to this file — see that module's own top
+# comment for the `.pui` format it compiles.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import uiconf
+
 os.system("")
 
 # Force UTF-8 on our own stdout/stderr.
@@ -531,6 +536,36 @@ def _build_sysclaw_variant(name, app_dir, c_files, variant, define, out_path):
     info(f"    [{variant}] .text={text_size} B (of {SYSCLAW_SLOT_SIZE} B slot) → {os.path.relpath(out_path, REPO_DIR)}")
     return True
 
+def _stage_pui_screens(name, app_dir):
+    """Compiles app_dir/ui/*.pui (if present) and stages the resulting
+    .puib binaries into cattobaked/apps/<name>.ui/<screen>.puib — the
+    claw-tier equivalent of _stage_sysclaw_assets() above, new plumbing
+    added for the uiconf effort (see the approved plan's own "no per-app
+    build step in catstrap today" ground-truth note: claw-tier apps never
+    had one before this).
+
+    Parse/validate/compile errors are real build failures, same severity
+    as a C compile error — raises uiconf.PuiError, which build_app() below
+    catches only to print it in this file's own error style before
+    stopping the build, per the plan's own "build-time errors" framing
+    (the on-device interpreter never has to detect or degrade from a
+    malformed config).
+
+    Returns the list of screen names staged (empty if app_dir/ui/ doesn't
+    exist — most apps have no .pui screens yet during this transition)."""
+    screens = uiconf.compile_app_ui(app_dir)
+    if not screens:
+        return []
+
+    ui_dst = os.path.join(OUT_APPS, f"{name}.ui")
+    if os.path.isdir(ui_dst):
+        shutil.rmtree(ui_dst)
+    os.makedirs(ui_dst, exist_ok=True)
+    for screen_name, blob in screens.items():
+        with open(os.path.join(ui_dst, f"{screen_name}.puib"), "wb") as f:
+            f.write(blob)
+    return sorted(screens.keys())
+
 def _stage_sysclaw_assets(name, app_dir):
     """Copies app_dir/assets/ (if present) verbatim into
     cattobaked/apps/<name>.assets/ — a plain directory of files, no
@@ -699,6 +734,21 @@ def build_app(name, app_dir, pcat_path, tier):
         with open(cmake_path, "w") as f:
             f.write(cmake_txt)
         info(f"    wrote CMakeLists.txt")
+
+    # `.pui` screens (claw-tier only, per the approved plan — a `.paws`
+    # userland app has no kernel-facing UI-config story yet). A malformed
+    # `.pui` is a real build failure, same severity as a C compile error
+    # further down this same path (idf.py would fail to compile a broken
+    # .c file the same hard way) — caught here only to print it in this
+    # file's own error style (die()) instead of leaking a raw Python
+    # traceback, not to soften it into a skip.
+    if tier == "claw":
+        try:
+            pui_screens = _stage_pui_screens(name, app_dir)
+        except uiconf.PuiError as e:
+            die(f"    {name}: .pui build failed — {e}")
+        if pui_screens:
+            info(f"    ui screens: {', '.join(pui_screens)} → cattobaked/apps/{name}.ui/")
 
     with open(out_path + ".meta.json", "w") as f:
         json.dump({

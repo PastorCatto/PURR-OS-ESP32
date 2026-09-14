@@ -153,15 +153,18 @@ systemui_style = "ios"
 # "cheetah" (a Windows XP-style desktop, see source/modules/cheetah/) on
 # 2026-07-26 while the ST7789 display work was in flight. All three stay
 # compiled in and selectable, just no longer this device's default.
-# ui/systemui — console-only for the protected-processes/Unix-boot
-# rewrite: every static UI backend (Mochi included) moved to
-# archive/ui_backends_v1/ (see that folder's own README.md). ui = "none"
-# is now an explicit flag (not a comment) — see purrstrap.py's
-# UI_NO_STATIC_MODULE_VALUES — meaning loginUI (source/apps/system/
-# login_ui/) ships its framebuffer renderer here. Flip to "lvgl" once this
-# device's login screen should render via LVGL instead (still no static
-# systemui/shell module — that's a separate, later rebuild).
-ui          = "none"
+# ui/systemui — was console-only for the protected-processes/Unix-boot
+# rewrite (every static UI backend, Mochi included, moved to
+# archive/ui_backends_v1/ — see that folder's own README.md). Restored to
+# MiniWin (source/modules/miniwin/, un-archived) as this device's first
+# real UI backend for the uiconf effort — the framebuffer-only path
+# (purr_uiconf_render_fb.c) crashed launching diagnostics on real
+# hardware, so apps move onto purr_win_*() (via
+# purr_uiconf_render_winapi.c) with a real catcall_ui_t underneath
+# instead. loginUI (source/apps/system/login_ui/) picks its LVGL variant
+# now that a real UI backend is registered (see purrstrap.py's own
+# fb/lvgl selection logic in _stage_sysclaw_packages()).
+ui          = "miniwin"
 #systemui    = "systemui"
 app_manager = "app_manager"
 # mesh — OFF as of 2026-09-01: MSN (the meshtastic/meshcore-backed chat app)
@@ -300,16 +303,38 @@ theme       = "wce"
 # block (mochi is a member) would otherwise cfg.setdefault it back to
 # true, since setdefault only no-ops when the key is already PRESENT.
 msn         = false
-# Merges what used to be five separate apps (drivermgr, hwtest, services,
-# meshdiag, taskmgr) — see source/apps/system/diagnostics/diagnostics.c's
-# file header for the mapping.
-#diagnostics = true
+# Rewritten onto the uiconf declarative UI-config format — first real app
+# re-selected off the console-only test phase (see this section's own top
+# comment). First-pass scope is a single read-only screen (loaded
+# modules + free RAM/uptime); see diagnostics.c's own top comment for why
+# and what's deferred.
+diagnostics = true
+# MiniWin's own "startx" — a small window listing installed apps to
+# launch, reachable from the console's own `startx` command
+# (purr_console.c). See home.c's own top comment.
+home        = true
 # MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
 # systemui, the mesh stack and the radios before it starts, and restores them
 # when it exits. The app calls nothing itself. See docs/15_SpeedDemon.md.
 magidos     = true
 
-#milkbar     = true
+# milkbar — OFF, explicit `false` not a comment. Real, hardware-found bug
+# fixed 2026-09-13: a merely-commented `#milkbar = true` is ABSENT to
+# parse_pcat (comments are stripped before parsing at all), not `false` —
+# apply_radio_companion_defaults()'s PURR_WIN_UI_BACKENDS block DOES fire
+# the moment `ui` becomes a real windowed backend (confirmed live:
+# switching this device to `ui = "miniwin"` silently re-added
+# apps.milkbar=true via cfg.setdefault(), pulling in milkbar's own
+# CMakeLists.txt `REQUIRES ... systemui` — a component that no longer
+# exists anywhere in source/, only archive/ — and failing the whole
+# build with "component systemui could not be found"). The comment this
+# replaced claimed setdefault() was a no-op here "since msn/milkbar/
+# server_manager are all already explicit" — that was never actually
+# true for milkbar/server_manager, only for msn's own real `= false`
+# line; it just never got exercised while ui="none" kept this whole
+# block from firing at all. Stays false until milkbar's own uiconf
+# rewrite (this effort's Phase 2) is real.
+milkbar     = false
 doom        = true
 moy         = true
 # server_manager — reached only through app_manager.h's synthetic remote-mode
@@ -319,14 +344,18 @@ moy         = true
 # auto-add: stale note corrected 2026-09-02 — modules.ui is "mochi" now,
 # not "cheetah" as this comment used to say, and "mochi" IS in that set
 # (purrstrap.py's PURR_WIN_UI_BACKENDS), so the auto-add block DOES fire
-# for tdeck_plus today. It's just a no-op here regardless: cfg.setdefault()
-# only ever fills in an ABSENT key, and msn/milkbar/server_manager are all
-# already explicit below — msn/milkbar's own comment above already flags
-# they predate that mechanism and stay explicit for the same reason. Root-
-# caused after `apps.server_manager=true` silently never made
-# it into the component list despite being set the identical setdefault way
-# msn is.
-#server_manager = true
+# for tdeck_plus whenever `ui` is a real windowed backend. This comment
+# used to claim that was harmless here "since msn/milkbar/server_manager
+# are all already explicit below" — WRONG, corrected 2026-09-13 (see
+# milkbar's own comment above for the full story): a merely-commented
+# `#server_manager = true` is ABSENT to parse_pcat, not `false`, so
+# setdefault() DOES fire and silently re-adds it. Explicit `false` here
+# now, same as milkbar/msn, to actually mean what this comment always
+# claimed it did. server_manager's own CMakeLists.txt doesn't reference
+# the missing `systemui` module the way milkbar's does, so it likely
+# would have compiled — but it's not one of this effort's six in-scope
+# apps either, so it stays off on purpose, not by accident.
+server_manager = false
 # Basic chat UI for the reticulum module (source/modules/reticulum) —
 # named reticulum_app, not reticulum, to avoid colliding with that
 # module's own PURR_MODULE_REGISTER name (see its own app.pcat comment).
@@ -365,6 +394,7 @@ apps/oobe         = 3
 apps/terminal     = 3
 apps/fileman      = 3
 apps/diagnostics  = 3
+apps/home         = 3
 # apps/msn — no entry needed: [apps] msn=false above.
 apps/magidos      = 3
 apps/milkbar      = 3

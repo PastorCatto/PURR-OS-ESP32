@@ -1,6 +1,10 @@
-# Merged from drivermgr/hwtest/services/meshdiag/taskmgr's own CMakeLists —
-# union of INCLUDE_DIRS/REQUIRES, minus drivermgr's old `miniwin` (the app
-# only ever used the portable purr_win_* API, never miniwin directly).
+# Rewritten onto the uiconf declarative UI-config format (see
+# /home/PastorCatto/.claude/plans/delightful-exploring-hearth.md) — REQUIRES
+# scrubbed down from the previous five-tabs-merged version's own union of
+# driver_manager/bt_mgr/meshtastic/lib_mesh_pb, none of which this
+# first-pass, read-only screen touches. Those come back (and this list
+# grows again) as the deferred Hardware/Services/Mesh/Tasks tabs are
+# rebuilt on the new format in a later pass.
 idf_component_register(
     SRCS
         diagnostics.c
@@ -8,11 +12,7 @@ idf_component_register(
         .
         ../../../kernel/core
         ../../../kernel/catcalls
-        ../../../modules/driver_manager
-        ../../../modules/bt_mgr
         ../../../modules/app_manager
-        ../../../modules/meshtastic
-        ../../../lib/lib_mesh_pb
-    REQUIRES esp_common driver freertos esp_hw_support app_manager driver_manager bt_mgr meshtastic
+        ../../../modules/uiconf
+    REQUIRES esp_common driver freertos app_manager uiconf
 )
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-format-truncation)

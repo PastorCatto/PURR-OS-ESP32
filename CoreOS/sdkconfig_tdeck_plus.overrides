@@ -20,15 +20,27 @@
 # variable moves at a time here.
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
-# WinCE-style taskbar+start-menu desktop instead of the default icon-grid
-# desktop — EXPERIMENTAL, opted into on this device for testing/dogfooding
-# ahead of a possible wider rollout to the T-Deck series.
-#
-# CURRENTLY INERT: this device's [modules] ui is back to "cupcake" (see
-# device.pcat), so no MiniWin desktop of either style is built for it. Kept
-# rather than deleted because it's the setting to restore once the 4-window
-# desktop split from commit 9ef61b97 — which broke on hardware — is fixed.
-CONFIG_PURR_MINIWIN_DESKTOP_WINCE=y
+# WinCE-style taskbar+start-menu desktop — EXPLICITLY OFF (2026-09-13),
+# now that this device's [modules] ui really is "miniwin" (see
+# device.pcat) and this Kconfig option's own `default y` would otherwise
+# silently turn it back on. Direct instruction: "barebones minwin, start
+# with just a basic apps window, nothing else, no taskbar, no nothing, a
+# basic one window, a basic minwin instance" — the exact opposite of what
+# this option builds. Also matches this option's own long-standing note
+# (kept from when this WAS briefly active on this device, before the
+# console-only rewrite) that "the 4-window desktop split from commit
+# 9ef61b97... broke on hardware" — confirmed independently this session
+# too: the WinCE desktop is where the idle-timeout lock screen
+# (miniwin_lock.c, only ever wired up by miniwin_wince_desktop.c) and the
+# status-bar clock/battery corner that bled into other screens both
+# actually come from. With this off, miniwin_module.c's own non-WinCE
+# branch runs instead — no separate Kconfig toggle for it, it's just
+# miniwin_task()'s own #ifndef CONFIG_PURR_MINIWIN_DESKTOP_WINCE path, an
+# empty root window with no chrome of its own (see that file's own
+# "Desktop boots empty... Launcher now opens on demand" comment) — a real
+# app's own single purr_win_create() window (source/apps/system/home/) is
+# the whole UI now.
+CONFIG_PURR_MINIWIN_DESKTOP_WINCE=n
 
 # This panel batch is physically wired BGR — every colour's red/blue channels
 # render swapped otherwise. Confirmed live on the WinCE desktop above: the

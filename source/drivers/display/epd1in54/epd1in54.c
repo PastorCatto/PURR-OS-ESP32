@@ -8,19 +8,27 @@
 // values are panel-specific), so this is a faithful C port of the
 // vendor's own C++ BSP, not a reimplementation from scratch.
 //
-// ── Deliberately full-refresh only, no debounce ─────────────────────────
-// Every push_pixels()/fill_rect() call triggers a REAL, full ~1-2s
-// hardware refresh (write RAM + activate + wait for BUSY) — no partial-
-// refresh LUT, no coalescing of rapid successive writes into one flush.
-// This is fine for THIS device's actual use (epaper_ui draws a
-// one-time "logged in as X" screen at boot, a handful of calls total,
-// never a live-updating console — see epaper_ui.c's own comment on why
-// purr_fbtty is deliberately NOT wired to this panel: it calls push_
-// pixels PER GLYPH, which would make a full refresh per character —
-// unusable). A future partial-refresh mode (WF_PARTIAL_1IN54_0, ported
-// from the same vendor source, unused here) or a debounce/coalesce task
-// are real, concrete follow-ups once something actually needs frequent
-// updates on this panel — not built speculatively here.
+// ── Partial refresh ──────────────────────────────────────────────────
+// Every push_pixels()/fill_rect() call after init uses the PARTIAL-
+// refresh LUT (~0.3s) instead of the full one (~1-2s) — real speedup for
+// epaper_ui's menu cycling, which used to feel sluggish per the exact
+// hardware-refresh cost this file's own earlier comment documented.
+// Ported from the same vendor BSP as the full-refresh path: EPD_Init()
+// (full LUT) -> EPD_DisplayPartBaseImage() (writes the CURRENT buffer to
+// BOTH SSD1681 RAM banks via one full-activation cycle, so "previous
+// image" and "current image" start identical) -> EPD_Init_Partial()
+// (loads the partial LUT + partial border/activation config) — after
+// that, EPD_DisplayPart()'s equivalent (epd_partial_refresh() below)
+// just writes the new buffer and activates with the partial control
+// byte (0xCF instead of 0xC7). No coalescing of rapid successive writes
+// into one flush yet — a debounce task is a real, separate follow-up if
+// epaper_ui ever fires faster than one redraw per button event.
+//
+// Partial refresh accumulates visible ghosting over repeated updates
+// (a real, documented characteristic of this LUT, not a bug) — this
+// driver re-runs the full-refresh baseline every FULL_REFRESH_EVERY
+// partial updates to clear it, same practice most e-paper reference
+// designs use.
 //
 // ── Pixel format ──────────────────────────────────────────────────────
 // catcall_display_t's push_pixels/fill_rect take RGB565 (uint16_t)
@@ -82,6 +90,18 @@ static const char *TAG = "drv:epd1in54";
 
 static spi_device_handle_t s_spi = NULL;
 static uint8_t s_fb[EPD_BUF_LEN];   // 1bpp shadow buffer — bit=1 WHITE, bit=0 BLACK (Waveshare's own convention)
+static bool s_partial_mode = false;   // false until epd_drv_init() finishes the one-time transition
+static int  s_partial_count = 0;
+
+// How many partial refreshes to do before forcing one full-refresh cycle
+// to clear accumulated ghosting — see this file's own top comment.
+// Measured on real hardware: ghosting becomes visible around 6-7 partial
+// refreshes. Tried lowering this to 5 and separately tried forcing a
+// full refresh on every real screen change (both reverted — see this
+// file's own git history/commit message for that attempt and why it
+// made things worse on real hardware, not better); 10 remains the
+// version that measured best overall.
+#define FULL_REFRESH_EVERY 10
 
 // Full-refresh LUT — ported byte-for-byte from the vendor BSP's
 // WF_Full_1IN54[159]. Opaque timing/voltage-sequence data to this driver;
@@ -107,6 +127,30 @@ static const uint8_t WF_FULL_1IN54[159] = {
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,
     0x22,0x22,0x22,0x22,0x22,0x22,0x00,0x00,0x00,
     0x22,0x17,0x41,0x00,0x32,0x20,
+};
+
+// Partial-refresh LUT — ported byte-for-byte from the vendor BSP's
+// WF_PARTIAL_1IN54_0[159]. Same opaque-data, same epd_set_lut() split.
+static const uint8_t WF_PARTIAL_1IN54[159] = {
+    0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x80,0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x40,0x40,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x80,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x0F,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x01,0x01,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x22,0x22,0x22,0x22,0x22,0x22,0x00,0x00,0x00,
+    0x02,0x17,0x41,0xB0,0x32,0x28,
 };
 
 // ── Low-level SPI/GPIO helpers ───────────────────────────────────────────
@@ -236,6 +280,79 @@ static void epd_full_refresh(void)
     epd_wait_busy();
 }
 
+// EPD_DisplayPartBaseImage() equivalent — writes the CURRENT buffer to
+// BOTH the "current" (0x24) and "previous" (0x26) SSD1681 RAM banks and
+// does one FULL activation. Establishes the clean, ghost-free baseline
+// partial refresh compares every future update against; called once at
+// the partial-mode transition and again every FULL_REFRESH_EVERY partial
+// updates to clear accumulated ghosting.
+static void epd_write_baseline_full(void)
+{
+    epd_cmd(0x24); epd_data_buf(s_fb, EPD_BUF_LEN);
+    epd_cmd(0x26); epd_data_buf(s_fb, EPD_BUF_LEN);
+
+    epd_cmd(0x22); epd_data(0xC7);
+    epd_cmd(0x20);
+    epd_wait_busy();
+}
+
+// EPD_Init_Partial() equivalent — loads the partial LUT plus this
+// panel's own partial-mode border/activation config (the 0x37 payload
+// and 0x3C/0x80 border byte are opaque, panel-specific bytes ported
+// verbatim from the vendor BSP, same as every other command sequence in
+// this file).
+static void epd_enter_partial_mode(void)
+{
+    epd_hw_reset();
+    epd_wait_busy();
+
+    epd_set_lut(WF_PARTIAL_1IN54);
+
+    epd_cmd(0x37);
+    static const uint8_t cfg37[10] = {0x00,0x00,0x00,0x00,0x00,0x40,0x00,0x00,0x00,0x00};
+    epd_data_buf(cfg37, sizeof(cfg37));
+
+    epd_cmd(0x3C); epd_data(0x80);   // border waveform (partial)
+
+    epd_cmd(0x22); epd_data(0xC0);
+    epd_cmd(0x20);                   // master activation
+    epd_wait_busy();
+}
+
+// EPD_DisplayPart() equivalent — the fast path: write the new buffer,
+// activate with the PARTIAL control byte (0xCF, not 0xC7). No LUT
+// reload, no hardware reset — that's what makes this the fast one.
+static void epd_partial_refresh(void)
+{
+    epd_cmd(0x24); epd_data_buf(s_fb, EPD_BUF_LEN);
+
+    epd_cmd(0x22); epd_data(0xCF);
+    epd_cmd(0x20);
+    epd_wait_busy();
+}
+
+// The one function push_pixels()/fill_rect() actually call. Dispatches
+// to a full refresh before partial mode is armed (early boot, and this
+// driver's own module_init() call before purr_kernel_register_display()
+// runs), otherwise does a fast partial refresh — except every
+// FULL_REFRESH_EVERY-th call, which re-establishes the ghost-free
+// baseline first (see epd_write_baseline_full()'s own comment).
+static void epd_refresh(void)
+{
+    if (!s_partial_mode) {
+        epd_full_refresh();
+        return;
+    }
+    s_partial_count++;
+    if (s_partial_count >= FULL_REFRESH_EVERY) {
+        epd_write_baseline_full();
+        epd_enter_partial_mode();
+        s_partial_count = 0;
+    } else {
+        epd_partial_refresh();
+    }
+}
+
 // ── Pixel buffer ──────────────────────────────────────────────────────
 
 static inline void epd_set_pixel(int x, int y, bool white)
@@ -308,7 +425,10 @@ static esp_err_t epd_drv_init(const display_config_t *cfg)
     epd_init_sequence();
 
     memset(s_fb, 0xFF, EPD_BUF_LEN);   // all-white known state
-    epd_full_refresh();
+    epd_write_baseline_full();         // one full refresh — also seeds BOTH RAM banks for partial mode below
+    epd_enter_partial_mode();
+    s_partial_mode = true;
+    s_partial_count = 0;
 
     ESP_LOGI(TAG, "EPD1in54 ready %dx%d (DC=%d CS=%d SCK=%d MOSI=%d RST=%d BUSY=%d PWR=%d)",
              EPD_WIDTH, EPD_HEIGHT,
@@ -326,7 +446,7 @@ static esp_err_t epd_push_pixels(int x, int y, int w, int h, const uint16_t *dat
             epd_set_pixel(x + col, y + row, white);
         }
     }
-    epd_full_refresh();
+    epd_refresh();
     return ESP_OK;
 }
 
@@ -338,7 +458,7 @@ static esp_err_t epd_fill_rect(int x, int y, int w, int h, uint16_t color)
             epd_set_pixel(x + col, y + row, white);
         }
     }
-    epd_full_refresh();
+    epd_refresh();
     return ESP_OK;
 }
 

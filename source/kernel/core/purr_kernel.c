@@ -211,6 +211,30 @@ int purr_kernel_poll_key(void) {
     return -1;
 }
 
+// ── Lock request ─────────────────────────────────────────────────────────
+// A plain scalar flag, same "give loaded code a nameable accessor instead
+// of a struct/callback to hold onto" discipline as purr_kernel_poll_key()
+// just above — systemUI's LVGL "Lock" tap callback runs INSIDE a loaded
+// .claw module (systemui_lvgl.c) and has no way to call back into
+// kernel_tdp_boot.c's own orchestration loop directly (there's no
+// mechanism for a loaded module to invoke host-side, non-imported code by
+// pointer — same boundary poll_key's own comment describes). Setting this
+// flag and having the host's session loop poll+clear it each frame is the
+// whole mechanism: no queue, no ISR-safety needed (both sides run on the
+// same task, LVGL's own event dispatch is synchronous inside
+// lv_timer_handler()).
+static volatile bool s_lock_requested = false;
+
+void purr_kernel_request_lock(void) {
+    s_lock_requested = true;
+}
+
+bool purr_kernel_consume_lock_request(void) {
+    bool r = s_lock_requested;
+    s_lock_requested = false;
+    return r;
+}
+
 // ── App window tracking ───────────────────────────────────────────────────────
 
 static purr_window_created_cb_t s_window_created_cb = NULL;
@@ -1426,6 +1450,7 @@ void purr_kernel_delay_ms(uint32_t ms) {
 static bool s_sd_available    = false;
 static bool s_flash_available = false;
 static bool s_wifi_connected  = false;
+static bool s_wifi_available  = false;   // hardware presence, distinct from connected — see purr_kernel.h's own doc comment
 static int  s_battery_percent = -1;   // -1 = unknown (no PMIC/fuel gauge found)
 static int  s_battery_voltage_mv = -1;   // -1 = unknown
 static bool s_lora_available  = false;
@@ -1458,6 +1483,7 @@ static bool     s_dark_mode = false;
 void purr_kernel_set_sd_available(bool v)    { s_sd_available    = v; }
 void purr_kernel_set_flash_available(bool v) { s_flash_available = v; }
 void purr_kernel_set_wifi_connected(bool v)  { s_wifi_connected  = v; }
+void purr_kernel_set_wifi_available(bool v)  { s_wifi_available  = v; }
 void purr_kernel_set_battery_percent(int v)  { s_battery_percent = v; }
 void purr_kernel_set_battery_voltage_mv(int mv) { s_battery_voltage_mv = mv; }
 void purr_kernel_set_lora_available(bool v)  { s_lora_available  = v; }
@@ -1475,6 +1501,7 @@ void purr_kernel_set_dark_mode(bool v)             { s_dark_mode = v; }
 bool purr_kernel_sd_available(void)    { return s_sd_available; }
 bool purr_kernel_flash_available(void) { return s_flash_available; }
 bool purr_kernel_wifi_connected(void)  { return s_wifi_connected; }
+bool purr_kernel_wifi_available(void)  { return s_wifi_available; }
 int  purr_kernel_battery_percent(void) { return s_battery_percent; }
 int  purr_kernel_battery_voltage_mv(void) { return s_battery_voltage_mv; }
 bool purr_kernel_lora_available(void)  { return s_lora_available; }
@@ -1508,6 +1535,31 @@ time_t purr_kernel_time_now(void) {
 }
 
 purr_time_source_t purr_kernel_time_source(void) { return s_wall_time_source; }
+
+// Plain "HH:MM" (UTC, 24h) for a status bar to show without needing to
+// pull in struct tm/gmtime itself — same "no libc TZ dependence" choice
+// purr_kernel_time_from_utc_calendar()'s own comment makes for the reverse
+// direction, done here with plain integer math off the raw epoch seconds
+// (a day and an hour are always exactly 86400/3600 seconds in UTC — no
+// leap-second tracking in this codebase anywhere, same as everywhere else
+// this epoch is used). Writes "--:--" (not silently 00:00) when time was
+// never synced (purr_kernel_time_is_synced() == false) — a status bar
+// showing that literally, rather than a plausible-looking wrong time, was
+// judged the more honest failure mode for the one caller this exists for
+// (systemui_lvgl.c). out_sz must be at least 6 (5 chars + NUL); does
+// nothing if smaller, same defensive convention app_manager_entry_name()
+// already uses for its own out/out_sz pair.
+void purr_kernel_time_hhmm(char *out, size_t out_sz) {
+    if (!out || out_sz < 6) return;
+    if (!purr_kernel_time_is_synced()) {
+        snprintf(out, out_sz, "--:--");
+        return;
+    }
+    time_t epoch = purr_kernel_time_now();
+    int hour = (int)((epoch % 86400) / 3600);
+    int min  = (int)((epoch % 3600) / 60);
+    snprintf(out, out_sz, "%02d:%02d", hour, min);
+}
 
 void purr_kernel_time_set(purr_time_source_t source, time_t epoch_utc) {
     if (source == PURR_TIME_SOURCE_NONE || epoch_utc <= 0) return;

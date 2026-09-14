@@ -727,61 +727,27 @@ static void serial_console_task(void *arg)
     purr_console_set_login_fn(purr_console_login_default_login_fn);
     purr_console_set_exec_fn(purr_console_login_default_exec_fn);
 
-    // loginUI (source/apps/system/login_ui/) — a real .claw package,
-    // loaded via CLAW_POOL_SYSTEM, not statically linked. Tried first,
-    // from this same protected-process task: claw_personal_init() blocks
-    // internally (its own render+input loop) until a real login succeeds,
-    // so by the time this call returns, someone is genuinely authenticated
-    // — app_manager_notify_unlocked() already fired (login_core.c's own
-    // contract). On success, the console shell below starts with
-    // with_login=false — skip re-prompting, the point of running loginUI
-    // at all was to not need the text prompt. On ANY failure (missing/
-    // corrupt staged package, no display, etc.) fall through to today's
-    // full console login exactly as before — never a silent hang, and
-    // never a boot that depends on loginUI having worked.
+    // loginUI (source/apps/system/login_ui/) — deliberately SKIPPED on
+    // this device as of the uiconf/MiniWin effort (2026-09-13), by direct
+    // request: login happens at the console (a real text prompt) instead
+    // of any graphical/framebuffer-drawn login screen. Two real reasons,
+    // not just preference:
+    //   1. login_ui's own framebuffer variant draws directly via
+    //      catcall_display_t, with no coordination against MiniWin's own
+    //      periodic status-bar redraw (miniwin_module.c's own message-
+    //      pump task starts around the same point in boot) — confirmed
+    //      live: MiniWin's battery/clock status bar visibly bled straight
+    //      through login_ui's own screen, both drawing to the same
+    //      display with no shared lock between them.
+    //   2. Now that ui="miniwin" is real infrastructure apps actually
+    //      render through, a text console login is the simpler, more
+    //      reliable front door — no graphical login screen to keep in
+    //      sync with whichever UI backend a future device.pcat change
+    //      might select.
+    // logged_in_via_ui stays false unconditionally, so the console below
+    // runs with_login=true — a real interactive prompt
+    // (purr_console_login_default_login_fn(), registered just above).
     bool logged_in_via_ui = false;
-#ifdef CONFIG_PURR_LOGIN_UI_LVGL
-    // Set up BEFORE the load, not inside it — the LVGL-backed variant's
-    // own login_render_init() only ever calls lv_disp_get_default(), it
-    // never registers a display driver itself (see lvgl_hw_init()'s own
-    // top comment on why that split exists). A display-init failure here
-    // just means login_render_init() sees no default display and returns
-    // false — same clean "fall back to console" path every other loginUI
-    // failure already has, not a special case.
-    lvgl_hw_init();
-#endif
-    claw_loaded_module_t login_ui_mod;
-    if (claw_loader_system_load("login_ui", &login_ui_mod)) {
-        int rc = login_ui_mod.init();
-        ESP_LOGI(TAG, "login_ui: init() = %d", rc);
-        login_ui_mod.deinit();
-        claw_loader_unload(&login_ui_mod);
-        logged_in_via_ui = (rc == 0);
-    } else {
-        ESP_LOGW(TAG, "login_ui: claw_loader_system_load failed — falling back to console login");
-    }
-
-    // launcher + systemui (source/apps/system/launcher/, .../systemui/) —
-    // the tile-grid home screen and its status bar/lock chrome, tried
-    // only once loginUI itself actually succeeded (app_manager's local
-    // registry is genuinely populated by then — app_manager_notify_
-    // unlocked() already fired inside login_core.c). Both are LVGL-only
-    // packages (no framebuffer variant exists for either — see their own
-    // app.pcat `variants = "lvgl"`), so this only ever has anything to
-    // try on a device that already set up LVGL above — see run_graphical_
-    // session()'s own top comment for the full session loop (systemUI's
-    // "Lock" tap re-runs loginUI for real re-authentication, then
-    // reloads the launcher, all without either package calling into the
-    // other directly). Returning from it at all — package not staged, a
-    // relock's re-run of loginUI itself failing — falls through to the
-    // console exactly like every other failure here.
-    if (logged_in_via_ui) {
-#ifdef CONFIG_PURR_LOGIN_UI_LVGL
-        run_graphical_session();
-#else
-        ESP_LOGW(TAG, "graphical session unavailable on this build (no LVGL) — falling back to console");
-#endif
-    }
 
     // The actual point of "console mode": type on the device's own
     // keyboard, read its own screen — no cable to another machine

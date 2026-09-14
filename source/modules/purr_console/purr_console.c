@@ -261,6 +261,20 @@ static void cmd_exec(const char *args) {
     s_exec_fn(args ? args : "");
 }
 
+// startx — MiniWin's own failsafe UI, brought up from the console the
+// same way `startx` brings up X11 from a bare tty: launches "home"
+// (source/apps/system/home/), a small MiniWin window listing installed
+// apps. Same `s_exec_fn` plumbing as `exec` above (this component still
+// carries no direct app_manager dependency), just with the target
+// hardcoded rather than taken from args — this is meant to be the one
+// memorable command that works regardless of what else this device's
+// [apps] happens to have, not a general-purpose launcher (that's `exec`).
+static void cmd_startx(const char *args) {
+    (void)args;
+    if (!s_exec_fn) { purr_console_println("startx: not available on this build"); return; }
+    s_exec_fn("home");
+}
+
 static void cmd_mem(const char *args) {
     (void)args;
     char buf[48];
@@ -335,6 +349,7 @@ static const purr_console_cmd_t s_builtin_cmds[] = {
     { "restart", cmd_restart, "<name>  disable+enable a module" },
     { "startui", cmd_startui, "<name>  enable a UI module" },
     { "exec",    cmd_exec,    "<app>   launch an app by name" },
+    { "startx",  cmd_startx,  "launch MiniWin's failsafe app list (home)" },
     { "mem",     cmd_mem,     "free RAM" },
     { "uptime",  cmd_uptime,  "uptime in seconds" },
     { "kb",      cmd_kb,      "echo keyboard keypresses (q to exit)" },

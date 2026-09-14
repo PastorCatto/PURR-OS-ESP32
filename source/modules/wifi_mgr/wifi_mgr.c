@@ -296,6 +296,15 @@ int wifi_mgr_init(void) {
         return -1;
     }
 
+    // Hardware PRESENCE, not connection state (purr_kernel_set_wifi_
+    // connected() below only flips true once actually associated to an
+    // AP) — this is the real-hardware branch of this file (the whole
+    // module compiles down to a stub above on a chip with no radio and
+    // no esp_wifi_remote co-processor path), so reaching this line at
+    // all already means real WiFi hardware exists. Added for the new
+    // `.pui` UI-config format's device-aware conditional visibility.
+    purr_kernel_set_wifi_available(true);
+
     char ssid[33] = "", pass[65] = "";
     if (load_creds(ssid, sizeof(ssid), pass, sizeof(pass))) {
         ESP_LOGI(TAG, "auto-reconnecting to saved network '%s'", ssid);
