@@ -188,6 +188,16 @@ const app_entry_t *app_manager_get(int idx);
 // difference.
 bool app_manager_entry_name(int idx, char *out, size_t out_sz);
 
+// True if the idx'th entry's state is APP_STATE_RUNNING — same "plain
+// accessor, never expose app_entry_t itself" reasoning as
+// app_manager_entry_name() just above, for a caller (the launcher's own
+// Recents/running-apps page) that only needs to filter the catalog down
+// to what's actually running, not read the full entry. False (not just
+// "false because idx is out of range") also for an entry that's IDLE/
+// STOPPED/ERROR — a caller doesn't need to tell those apart to decide
+// whether something belongs on a running-apps page.
+bool app_manager_entry_running(int idx);
+
 // ── Local unlock gate ────────────────────────────────────────────────────
 // app_manager_init() no longer scans/populates the local registry
 // unconditionally at boot (unless OOBE hasn't completed yet — see

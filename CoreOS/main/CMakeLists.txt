@@ -5,6 +5,7 @@
 
 set(KERNEL_DIR  ${CMAKE_SOURCE_DIR}/../source/kernel/core)
 set(CATCALL_DIR ${CMAKE_SOURCE_DIR}/../source/kernel/catcalls)
+set(COMMON_DIR  ${CMAKE_SOURCE_DIR}/../source/modules/common)
 
 set(PURR_DEVICE $ENV{PURR_DEVICE})
 if(NOT PURR_DEVICE)
@@ -103,6 +104,22 @@ set(TAB5_REQUIRES "")
 # kernel_tdp_boot.c when this work resumes.
 set(USB_MSC_REQUIRES "")
 
+# miniwin — only when this device.pcat sets [modules] safe_mode_ui = true
+# (CONFIG_PURR_SAFE_MODE_UI, emitted by purrstrap.py). Unlike the
+# always-REQUIREd components above, miniwin is a real, sizeable component
+# deliberately NOT compiled into every device (see modulestrap.py's
+# _device_referenced() own comment on the flag) — this generic boot.c
+# only needs it at all to register the `startx` prepare hook
+# (purr_console_set_startx_prepare_fn(), boot.c's own generic_console_
+# task()) that lazily starts MiniWin's dormant message pump. Same
+# if(CONFIG_...) conditional-SRCS/REQUIRES shape already used in
+# meshtastic's and miniwin's own CMakeLists.txt for an analogous reason.
+if(CONFIG_PURR_SAFE_MODE_UI)
+    set(MINIWIN_REQUIRES miniwin)
+else()
+    set(MINIWIN_REQUIRES "")
+endif()
+
 # Per-device boot settle, from device.pcat [device] boot_settle_ms (see
 # purr_kernel.c's BOOT_SETTLE_MS). Environment rather than a CMake variable for
 # the same reason as PURR_DRIVER_REQUIRES above — component CMakeLists are
@@ -120,6 +137,24 @@ idf_component_register(
         ${KERNEL_DIR}/purr_kernel.c
         ${KERNEL_DIR}/purr_crash_guard.c
         ${GLUE_DIR}/purr_device_glue.c
+        # purr_icons.c — real (non-claw) code building lv_img_dsc_t
+        # icon descriptors for the LVGL launcher's tile grid (source/
+        # apps/system/launcher/launcher_lvgl.c calls purr_icon_get()
+        # through the claw import table — see that file's own top
+        # comment on why the STRUCT construction has to happen here,
+        # not in claw-loaded code). Unconditional, same "main already
+        # links lvgl__lvgl on every device regardless of ui=" shape as
+        # everything else in this REQUIRES list below — see purr_icons.h's
+        # own comment on the resulting small, deliberate fleet-wide flash
+        # cost (8KB, a curated 4-icon subset).
+        ${COMMON_DIR}/purr_icons.c
+        # purr_lv_style.c — real (non-claw) code building lv_color_t
+        # values (see purr_lv_style.h's own top comment on why that
+        # construction has to happen here, not in claw-loaded code).
+        # Unconditional, same shape as purr_icons.c just above — tiny
+        # (one function, no big data table), so no per-device flash-cost
+        # tradeoff to weigh the way that file's icon data needed.
+        ${COMMON_DIR}/purr_lv_style.c
     INCLUDE_DIRS
         ${KERNEL_DIR}
         ${CATCALL_DIR}
@@ -255,7 +290,40 @@ idf_component_register(
         ${EXTRA_REQUIRES}
         ${USB_MSC_REQUIRES}
         ${TAB5_REQUIRES}
+        ${MINIWIN_REQUIRES}
 )
+
+# purr_icon_get() (purr_icons.c, this component's own SRCS above)
+# has no caller anywhere inside "main" itself — its ONLY reference is
+# claw_imports_generated.h's s_imports[] table, compiled into a
+# DIFFERENT component (claw_loader), which appears EARLIER than libmain.a
+# in the final link command. Confirmed live: without this, the link
+# failed with "undefined reference to `purr_icon_get'" even though
+# `xtensa-esp32s3-elf-nm libmain.a` shows the symbol defined right there
+# — plain GNU ld's single-pass archive scan doesn't retroactively pull a
+# LATER archive's member to satisfy an EARLIER one's reference the way
+# app_manager/user_mgr's own claw-imported functions get away with
+# (those are ALSO called directly from elsewhere inside "main" itself —
+# e.g. purr_kernel_request_back()/_home() from kernel_tdp_boot.c's own
+# session loop — so they're pulled in for that unrelated reason first,
+# and this symbol has no such second caller). `-u <symbol>` is ESP-IDF's
+# own standard fix for exactly this shape (see esp_app_format's/cxx's/
+# bootloader_support's own CMakeLists.txt for the identical pattern) —
+# forces the symbol onto ld's undefined-symbol list from the START of
+# the link, independent of archive order.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_icon_get")
+# Same archive-ordering fix, same reason — every purr_lv_style_*()
+# function (purr_lv_style.c) has no caller inside "main" besides claw_
+# imports_generated.h's own table.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_tray")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_shade_bg")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_dim_text")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_row_text")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_handle")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_border")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_card")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_white_bg")
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u purr_lv_style_strip_text")
 
 if(PURR_BOOT_SETTLE_ENV)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE BOOT_SETTLE_MS=${PURR_BOOT_SETTLE_ENV}UL)

@@ -153,18 +153,34 @@ systemui_style = "ios"
 # "cheetah" (a Windows XP-style desktop, see source/modules/cheetah/) on
 # 2026-07-26 while the ST7789 display work was in flight. All three stay
 # compiled in and selectable, just no longer this device's default.
-# ui/systemui — was console-only for the protected-processes/Unix-boot
-# rewrite (every static UI backend, Mochi included, moved to
-# archive/ui_backends_v1/ — see that folder's own README.md). Restored to
-# MiniWin (source/modules/miniwin/, un-archived) as this device's first
-# real UI backend for the uiconf effort — the framebuffer-only path
-# (purr_uiconf_render_fb.c) crashed launching diagnostics on real
-# hardware, so apps move onto purr_win_*() (via
-# purr_uiconf_render_winapi.c) with a real catcall_ui_t underneath
-# instead. loginUI (source/apps/system/login_ui/) picks its LVGL variant
-# now that a real UI backend is registered (see purrstrap.py's own
-# fb/lvgl selection logic in _stage_sysclaw_packages()).
-ui          = "miniwin"
+# ui/systemui — "lvgl" (2026-09-15): the real graphical session
+# (source/kernel/kernel_tdeck_plus/kernel_tdp_boot.c's run_graphical_
+# session(), restored) — login_ui's own LVGL login screen, then
+# launcher_lvgl.c's tile grid, with systemui_lvgl.c's status/nav bar
+# (clock/battery/Back/Home/Lock) hosted on lv_layer_top(). A launched
+# app now has somewhere real to draw: purr_lv_win.h (source/modules/
+# common/) is a real catcall_ui_t backend registered from lvgl_hw_init(),
+# adapted from archive/ui_backends_v1/modules/kittenui/kittenui_win.c —
+# see that header's own top comment for the full "why not a claw package,
+# why not a .purr module" reasoning. Was briefly "miniwin" during the
+# uiconf effort (2026-09-13) while this graphical session was disabled
+# (MiniWin's own status bar bled through login_ui's, with no shared lock
+# between the two) — MiniWin is not this device's registered UI catcall
+# any more, so that race no longer applies; it stays available as the
+# dormant `startx` safe-mode shell instead (see safe_mode_ui below).
+# loginUI/systemui/launcher are all sysclaw packages — purrstrap.py's
+# _stage_sysclaw_packages() picks each one's LVGL variant automatically
+# from this ui= value, no separate [flash] entry needed for any of them.
+ui          = "lvgl"
+# safe_mode_ui — bundles MiniWin as a dormant fallback shell, reachable
+# from the console via `startx`, independent of the graphical session
+# above (see source/modules/miniwin/miniwin_module.c's own miniwin_init()
+# comment on why it stays dormant rather than auto-starting and fighting
+# this device's real primary UI for the display). MiniWin "should be
+# there for most users" as this codebase's own pcat-level baseline,
+# regardless of which UI a device otherwise runs — this device is the
+# one it was originally built and hardware-verified on.
+safe_mode_ui = true
 #systemui    = "systemui"
 app_manager = "app_manager"
 # mesh — OFF as of 2026-09-01: MSN (the meshtastic/meshcore-backed chat app)
@@ -287,12 +303,25 @@ theme       = "wce"
 # documented crash history: "not yet proven safe under sustained mesh
 # traffic + BLE together") — that's a radio decision, not an apps one, and
 # these apps' UI still compiles/runs without it, just without a BLE backend.
-# settings/oobe/terminal/fileman/diagnostics/milkbar/server_manager/
-# reticulum_app — DESELECTED for the console-only test phase: all call
-# purr_win_* directly, and every UI backend is archived (see
-# archive/ui_backends_v1/README.md). doom/moy/magidos stay — they bypass
-# purr_win entirely via speed_demon's raw hardware handoff.
-#settings    = true
+# settings — RE-ENABLED (2026-09-17): the "every UI backend is archived"
+# reasoning below no longer applies now that purr_lv_win.h (source/
+# modules/common/) is a real, working catcall_ui_t backend. Its menu/
+# list/label/button calls (settings.c's actual category browsing) all
+# have real, working fallbacks there; textarea_*/kb_show (WiFi password
+# entry, Add User) safely no-op instead of crashing (see purr_win.h's own
+# _UI_CALL/_UI_VOID NULL-check) since that backend doesn't implement
+# on-screen text entry yet — a real, acknowledged gap, not a stub.
+#
+# oobe/terminal/fileman/milkbar/server_manager/reticulum_app — still
+# DESELECTED for the console-only test phase: all call purr_win_*
+# directly, and every UI backend is archived (see archive/ui_backends_
+# v1/README.md) — same reasoning settings had until just above, not yet
+# revisited for these (diagnostics is its own separate `diagnostics =
+# true` line further down, already enabled). (Stale as of 2026-09-15:
+# doom/moy/magidos no longer stay regardless — see their own comments
+# further down for why they're off now too, unrelated to this original
+# reason.)
+settings    = true
 #oobe        = true
 #terminal    = true
 #fileman     = true
@@ -309,14 +338,20 @@ msn         = false
 # modules + free RAM/uptime); see diagnostics.c's own top comment for why
 # and what's deferred.
 diagnostics = true
-# MiniWin's own "startx" — a small window listing installed apps to
-# launch, reachable from the console's own `startx` command
-# (purr_console.c). See home.c's own top comment.
-home        = true
-# MagiDOS declares .speed_demon = 1, so app_manager unloads the UI backend,
-# systemui, the mesh stack and the radios before it starts, and restores them
-# when it exits. The app calls nothing itself. See docs/15_SpeedDemon.md.
-magidos     = true
+# home — MiniWin's own "startx" app list, no longer needed on this
+# device now that the real LVGL launcher (source/apps/system/launcher/)
+# is this device's actual home screen (2026-09-15). MiniWin itself stays
+# available as the dormant `startx` safe-mode shell (safe_mode_ui=true
+# above); it's specifically the redundant "home" app-list app that's
+# gone, not MiniWin.
+#home        = true
+# magidos/doom/moy — removed by direct request (2026-09-15) to keep this
+# device's app roster to what the real launcher actually needs right
+# now. MagiDOS declared .speed_demon = 1 (app_manager unloads the UI
+# backend/systemui/mesh/radios before it starts, restores them on exit —
+# see docs/15_SpeedDemon.md) — none of that machinery is exercised while
+# it's off.
+#magidos     = true
 
 # milkbar — OFF, explicit `false` not a comment. Real, hardware-found bug
 # fixed 2026-09-13: a merely-commented `#milkbar = true` is ABSENT to
@@ -335,8 +370,11 @@ magidos     = true
 # block from firing at all. Stays false until milkbar's own uiconf
 # rewrite (this effort's Phase 2) is real.
 milkbar     = false
-doom        = true
-moy         = true
+# doom/moy — removed alongside magidos above (2026-09-15), same reason:
+# trimming this device's roster to what the launcher actually needs
+# right now, by direct request.
+#doom        = true
+#moy         = true
 # server_manager — reached only through app_manager.h's synthetic remote-mode
 # entry (see app_manager_launch_by_name("server_manager")), never a Start
 # Menu icon. Needs to be explicit here like milkbar/oobe above rather than
@@ -394,9 +432,11 @@ apps/oobe         = 3
 apps/terminal     = 3
 apps/fileman      = 3
 apps/diagnostics  = 3
-apps/home         = 3
+# apps/home — no entry needed: [apps] home is commented out above.
+#apps/home         = 3
 # apps/msn — no entry needed: [apps] msn=false above.
-apps/magidos      = 3
+# apps/magidos — no entry needed: [apps] magidos is commented out above.
+#apps/magidos      = 3
 apps/milkbar      = 3
 apps/server_manager = 3
 apps/reticulum_app = 3

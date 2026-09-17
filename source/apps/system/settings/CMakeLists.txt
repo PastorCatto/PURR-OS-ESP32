@@ -11,10 +11,9 @@ idf_component_register(
         ../../../modules/wifi_mgr
         ../../../modules/bt_mgr
         ../../../modules/meshtastic
-        ../../../modules/systemui
         ../../../modules/ota_mgr
         ../../../modules/user_mgr
-    REQUIRES esp_common driver freertos nvs_flash esp_hw_support spi_flash miniwin cupcake app_manager wifi_mgr bt_mgr meshtastic systemui ota_mgr user_mgr
+    REQUIRES esp_common driver freertos nvs_flash esp_hw_support spi_flash app_manager wifi_mgr bt_mgr meshtastic ota_mgr user_mgr lvgl__lvgl
 )
 # users_refresh()'s s_users_labels[i] snprintf (name + a fixed " (network)"/
 # " (local)" + optional " [admin]" literal suffix) is genuinely bounded —

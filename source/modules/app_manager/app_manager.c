@@ -1200,7 +1200,21 @@ int app_manager_launch_path(const char *path)
     for (int i = 0; i < s_app_count; i++) {
         if (strcmp(s_apps[i].path, path) == 0) {
             app_entry_t *app = &s_apps[i];
-            if (app->state == APP_STATE_RUNNING) return 0;
+            // Real, hardware-motivated fix: an already-running app whose
+            // window was merely minimized (purr_lv_win.h's own Back/Home —
+            // see source/kernel/kernel_tdeck_plus/kernel_tdp_boot.c) used
+            // to just return 0 here with no re-show, so tapping its tile
+            // (or re-running `exec`/`startx`) a second time did nothing
+            // at all — the task/state/window were all still valid, there
+            // was just no way back to seeing them. Re-showing (not
+            // relaunching) is exactly what "the already running, just
+            // re-show the tracked window" path app_manager_notify_
+            // exited()'s own comment already describes was meant to
+            // exist here.
+            if (app->state == APP_STATE_RUNNING) {
+                if (app->window) purr_win_show(app->window);
+                return 0;
+            }
             if (app->tier == APP_TIER_MEOW || app->tier == APP_TIER_HISS ||
                 app->tier == APP_TIER_KITTEN) return launch_meow(app, i);
             if (app->tier == APP_TIER_PERSONAL) return launch_personal(app, i);
@@ -1222,7 +1236,21 @@ int app_manager_launch_by_name(const char *name)
     for (int i = 0; i < s_app_count; i++) {
         if (strcmp(s_apps[i].name, name) == 0) {
             app_entry_t *app = &s_apps[i];
-            if (app->state == APP_STATE_RUNNING) return 0;
+            // Real, hardware-motivated fix: an already-running app whose
+            // window was merely minimized (purr_lv_win.h's own Back/Home —
+            // see source/kernel/kernel_tdeck_plus/kernel_tdp_boot.c) used
+            // to just return 0 here with no re-show, so tapping its tile
+            // (or re-running `exec`/`startx`) a second time did nothing
+            // at all — the task/state/window were all still valid, there
+            // was just no way back to seeing them. Re-showing (not
+            // relaunching) is exactly what "the already running, just
+            // re-show the tracked window" path app_manager_notify_
+            // exited()'s own comment already describes was meant to
+            // exist here.
+            if (app->state == APP_STATE_RUNNING) {
+                if (app->window) purr_win_show(app->window);
+                return 0;
+            }
             if (app->tier == APP_TIER_MEOW || app->tier == APP_TIER_HISS ||
                 app->tier == APP_TIER_KITTEN) return launch_meow(app, i);
             if (app->tier == APP_TIER_PERSONAL) return launch_personal(app, i);
@@ -1680,6 +1708,12 @@ bool app_manager_entry_name(int idx, char *out, size_t out_sz)
     strncpy(out, e->name, out_sz - 1);
     out[out_sz - 1] = '\0';
     return true;
+}
+
+bool app_manager_entry_running(int idx)
+{
+    const app_entry_t *e = app_manager_get(idx);
+    return e && e->state == APP_STATE_RUNNING;
 }
 
 bool app_manager_remote_mac(uint8_t out_mac[6])

@@ -24,7 +24,13 @@
 #include "bt_mgr.h"
 #include "mesh_ble.h"
 #include "ota_mgr.h"
-#include "systemui.h"   // purr_systemui_fx_refresh() — see on_effects_toggle()
+// systemui.h / purr_systemui_fx_refresh() are gone — they belonged to the
+// archived, richer systemui (translucent shade/nav-bar chrome) that the
+// UI-stack rewrite replaced with a minimal status-bar-only systemui_lvgl.c
+// with no live-restyle hook at all. The Effects toggle below still exists
+// (it's a real, persisted preference other surfaces read when THEY are
+// built), it just can't force already-built systemui chrome to re-skin
+// itself immediately anymore — see on_effects_toggle()'s comment.
 #include "user_mgr.h"   // the new "Users" tab — see on_open_users()
 #include "sdkconfig.h"
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR — see s_wifi_labels's own comment below
@@ -754,12 +760,11 @@ static void on_effects_toggle(purr_wid_t w, purr_event_t e, void *u) {
     s_ui_effects = s_ui_effects ? 0 : 1;
     purr_kernel_set_ui_effects(s_ui_effects != 0);
     nvs_save_u8("ui_effects", s_ui_effects);
-    // Restyle what is already built. The shade panel and nav bar are created
-    // once at systemui init and only ever slid around afterwards, so without
-    // this the toggle silently does nothing to them until the next reboot.
-    // Safe to call straight from here: widget callbacks run on the UI task with
-    // the UI lock already held.
-    purr_systemui_fx_refresh();
+    // No live-restyle hook exists anymore (see the systemui.h comment up top)
+    // — the current systemui_lvgl.c status bar has no translucent chrome to
+    // re-skin in the first place, and nothing else reads this flag until it
+    // is next (re)built. The preference is still saved below, so it takes
+    // effect for whatever gets built after this point.
     refresh_effects_labels();
     set_customization_status(s_ui_effects
         ? "Translucency on."
@@ -805,7 +810,7 @@ static void on_accent_apply(purr_wid_t w, purr_event_t e, void *u) {
     char hex[8];
     snprintf(hex, sizeof(hex), "%06lX", (unsigned long)s_accent_color);
     nvs_save_str("accent_color", hex);
-    purr_systemui_fx_refresh();   // see on_effects_toggle() for why
+    // see on_effects_toggle() for why there's no live-refresh call here anymore
     refresh_effects_labels();
     if (s_ui_effects) {
         // Saying "applied" here would be a lie — nothing accent-coloured is on
