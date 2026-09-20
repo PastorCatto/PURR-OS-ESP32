@@ -12,8 +12,11 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_SIZE=8388608
 CONFIG_SPIRAM_USE_MALLOC=y
 
-# PURR OS UI Backend
-CONFIG_PURR_UI_BACKEND_MINIWIN=y
+# loginUI renders via LVGL — see Kconfig.projbuild's own comment
+CONFIG_PURR_LOGIN_UI_LVGL=y
+
+# Bundle MiniWin as the dormant `startx` safe-mode shell (CoreOS/main/CMakeLists.txt)
+CONFIG_PURR_SAFE_MODE_UI=y
 
 # Bluetooth (NimBLE)
 CONFIG_BT_ENABLED=y

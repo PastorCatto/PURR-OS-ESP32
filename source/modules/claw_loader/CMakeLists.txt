@@ -16,6 +16,11 @@
 # archive/ui_backends_v1/README.md), so this adds no new footprint, just
 # makes its existing addresses reachable by name to a loaded object the
 # same way purr_kernel.h's own functions already are.
+#
+# ../common — claw_imports_generated.h also scans purr_icons.h and
+# purr_lv_style.h (real code compiled into main, see each header's own top
+# comment), so both have to be includable from here. Headers only: the
+# definitions live in main, which claw_loader neither requires nor links.
 idf_component_register(
     SRCS
         claw_elf.c
@@ -26,6 +31,7 @@ idf_component_register(
         ../../kernel/catcalls
         ../user_mgr
         ../app_manager
+        ../common
     REQUIRES
         esp_common
         freertos

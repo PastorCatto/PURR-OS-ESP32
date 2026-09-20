@@ -17,7 +17,7 @@
 //
 // This is a plain library indexed by NAME, not by app — nothing here knows
 // what app_manager is. Whatever wants an icon (the App Manager grid today,
-// anything else later) picks whichever name fits and calls purr_icon_get()
+// anything else later) picks whichever name fits and calls purr_miniwin_icon_get()
 // itself; the app<->icon-name mapping lives at that call site, not here.
 #include <stdint.h>
 #include <stdbool.h>
@@ -63,4 +63,4 @@ extern const uint8_t  purr_icon_write_rgb[];
 // Returns false (and leaves the out-params untouched) for an unknown name —
 // callers decide their own fallback (e.g. "program_manager") rather than
 // this header silently picking one for them.
-bool purr_icon_get(const char *icon_name, uint16_t *out_w, uint16_t *out_h, const uint8_t **out_rgb);
+bool purr_miniwin_icon_get(const char *icon_name, uint16_t *out_w, uint16_t *out_h, const uint8_t **out_rgb);

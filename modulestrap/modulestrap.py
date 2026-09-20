@@ -372,6 +372,12 @@ def _device_referenced(cfg):
                 want.add(v)
         elif key.startswith("apps.") and v.lower() in ("true", "1", "yes"):
             want.add(key.split(".", 1)[1])
+    # modules.safe_mode_ui = true bundles MiniWin as the dormant `startx`
+    # fallback shell. Not a component slug of its own (the loop above skips
+    # boolean values), so the flag has to add `miniwin` by hand — purrstrap.py
+    # emits the matching CONFIG_PURR_SAFE_MODE_UI that gates main's REQUIRES.
+    if str(cfg.get("modules.safe_mode_ui", "")).strip().strip('"').lower() in ("true", "1", "yes"):
+        want.add("miniwin")
     return want
 
 

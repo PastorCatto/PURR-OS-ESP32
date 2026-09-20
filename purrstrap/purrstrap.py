@@ -1528,6 +1528,16 @@ _CLAW_IMPORT_HEADERS = [
     ("kernel/core",           "purr_kernel.h"),
     ("modules/user_mgr",      "user_mgr.h"),
     ("modules/app_manager",   "app_manager.h"),
+    # purr_icons.h / purr_lv_style.h — the launcher's icon lookup and the
+    # notification shade/Recents styling. Both are real (non-claw) code
+    # compiled into main on every device (see each header's own top
+    # comment on why the lv_img_dsc_t / lv_color_t construction has to
+    # happen on that side of the boundary), so, like purr_kernel.h,
+    # they're safe to import unconditionally from one device-independent
+    # table. CoreOS/main/CMakeLists.txt force-links every function here
+    # with `-u` — nothing inside main itself calls them.
+    ("modules/common",        "purr_icons.h"),
+    ("modules/common",        "purr_lv_style.h"),
 ]
 
 # A handful of libc essentials, hand-curated rather than header-scanned —
@@ -1643,6 +1653,23 @@ _CLAW_IMPORT_LVGL_ESSENTIALS = [
     # layout depends on CONFIG_LV_COLOR_DEPTH; nothing here needs color at
     # all once "transparent" is the only value ever passed.
     "lv_obj_set_style_bg_opa",
+    # The launcher (source/apps/system/launcher/launcher_lvgl.c): icon
+    # tiles, swipe paging, the notification shade and the Recents page.
+    # Every entry takes/returns only opaque pointers (lv_obj_t*, lv_img
+    # sources as const void*, lv_event_t*, lv_indev_t*) or plain scalars
+    # (flags/coords/enum values) — the two exceptions, lv_indev_get_point()
+    # filling a caller-owned lv_point_t (two int16 coords, no padding
+    # surprises) and lv_label_set_long_mode()'s plain enum, need no struct
+    # mirroring beyond that. Restored from the last committed
+    # claw_imports_generated.h, whose entries this list had fallen behind.
+    "lv_event_get_code",
+    "lv_img_create", "lv_img_set_src",
+    "lv_indev_get_act", "lv_indev_get_gesture_dir", "lv_indev_get_point",
+    "lv_label_set_long_mode",
+    "lv_obj_add_flag",
+    "lv_obj_set_scroll_dir",
+    "lv_obj_set_style_border_width",
+    "lv_obj_set_style_pad_left", "lv_obj_set_style_pad_right",
 ]
 
 def _generate_claw_imports():
@@ -1703,7 +1730,10 @@ def _generate_claw_imports():
     ]
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w") as f:
+    # Explicit UTF-8/LF: this file is tracked, and the comments above carry
+    # em-dashes — the platform default (cp1252 + CRLF on Windows) rewrote
+    # them as invalid bytes and touched every line on every Windows build.
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines))
 
     info(f"  claw import table -> {os.path.relpath(out_path, REPO_DIR)} "
@@ -1876,7 +1906,12 @@ def _generate_glue(device, cfg, out_dir):
     # component name. Found live: without this exclusion, to_sym("true")
     # produced "extern purr_module_header_t purr_module_true;" — a real
     # undefined-reference link failure, not a silent no-op.
-    CONTROL_FLAG_MODULE_KEYS = ("modules.radio_companion", "modules.server", "modules.console")
+    # modules.safe_mode_ui = true (tdeck_plus/device.pcat) — same kind of
+    # policy flag: read by _sdkconfig_lines() to emit CONFIG_PURR_SAFE_MODE_UI
+    # (and by modulestrap.py to bundle the miniwin component), never a
+    # component name of its own. Same to_sym("true") failure mode as above.
+    CONTROL_FLAG_MODULE_KEYS = ("modules.radio_companion", "modules.server", "modules.console",
+                                "modules.safe_mode_ui")
     for raw_key, raw_val in sorted(cfg.items()):
         if raw_key.startswith("modules.") and raw_val and raw_key not in CONTROL_FLAG_MODULE_KEYS:
             # modules.ui = "none"/"lvgl" names no static module (see
@@ -2108,6 +2143,15 @@ def _sdkconfig_lines(device, cfg):
         lines.append("")
         lines.append("# Generic-kernel USB-Serial-JTAG console (boot.c)")
         lines.append("CONFIG_PURR_GENERIC_CONSOLE=y")
+
+    # modules.safe_mode_ui = true bundles MiniWin as a dormant `startx`
+    # fallback shell (see tdeck_plus/device.pcat's own comment). Gates the
+    # `miniwin` REQUIRES in CoreOS/main/CMakeLists.txt; modulestrap.py's
+    # _device_referenced() reads the same flag to build the component.
+    if cfg.get("modules.safe_mode_ui", "").lower() in ("true", "1", "yes"):
+        lines.append("")
+        lines.append("# Bundle MiniWin as the dormant `startx` safe-mode shell (CoreOS/main/CMakeLists.txt)")
+        lines.append("CONFIG_PURR_SAFE_MODE_UI=y")
 
     # [modules] bt/mesh presence -> the Kconfig gates that actually compile
     # bt_mgr.c/meshtastic's mesh_router.c+mesh_radio.c in. Mirrors the ui

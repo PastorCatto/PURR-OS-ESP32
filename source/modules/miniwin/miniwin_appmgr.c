@@ -20,7 +20,7 @@ static mw_handle_t s_win = MW_INVALID_HANDLE;
 // The ONE place that decides which library icon (icon_lib/purr_icon_lib.h)
 // each app gets — change an association here, not the library itself, to
 // give an app a different icon. Falls back to "program_manager" for
-// anything not listed yet, same as purr_icon_get()'s own caller-decides-
+// anything not listed yet, same as purr_miniwin_icon_get()'s own caller-decides-
 // the-fallback contract.
 static const char *icon_name_for_app(const char *app_name)
 {
@@ -94,7 +94,7 @@ static void appmgr_paint(mw_handle_t window_handle, const mw_gl_draw_info_t *dra
 
         uint16_t iw, ih;
         const uint8_t *rgb;
-        if (purr_icon_get(icon_name_for_app(app->name), &iw, &ih, &rgb)) {
+        if (purr_miniwin_icon_get(icon_name_for_app(app->name), &iw, &ih, &rgb)) {
             mw_gl_colour_bitmap(draw_info, x + (CELL_W - ICON_SIZE) / 2, y, iw, ih, rgb);
         }
 

@@ -32,7 +32,7 @@ static const purr_icon_entry_t s_icon_lib[] = {
 };
 #define ICON_LIB_COUNT (int)(sizeof(s_icon_lib) / sizeof(s_icon_lib[0]))
 
-bool purr_icon_get(const char *icon_name, uint16_t *out_w, uint16_t *out_h, const uint8_t **out_rgb)
+bool purr_miniwin_icon_get(const char *icon_name, uint16_t *out_w, uint16_t *out_h, const uint8_t **out_rgb)
 {
     for (int i = 0; i < ICON_LIB_COUNT; i++) {
         if (strcmp(s_icon_lib[i].name, icon_name) == 0) {

@@ -351,6 +351,21 @@ menu "PURR OS"
             mean a real ~1-2s hardware refresh per character — see
             epd1in54.c's own top comment).
 
+    config PURR_SAFE_MODE_UI
+        bool "Bundle MiniWin as a dormant `startx` safe-mode shell"
+        default n
+        help
+            Set automatically by purrstrap from a device.pcat [modules]
+            safe_mode_ui = true entry. Off by default — MiniWin is a real,
+            sizeable component, deliberately not compiled into every device.
+            When on, CoreOS/main/CMakeLists.txt REQUIREs the miniwin
+            component, and modulestrap.py builds it for the device.
+
+            MiniWin stays dormant as a fallback shell reachable from the
+            console, independent of the device's real primary UI (see
+            source/modules/miniwin/miniwin_module.c's own miniwin_init()
+            comment on why it doesn't auto-start).
+
     choice PURR_SYSTEMUI_STYLE
         prompt "System UI style"
         depends on PURR_SYSTEMUI
