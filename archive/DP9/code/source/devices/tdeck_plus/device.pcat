@@ -168,10 +168,18 @@ systemui_style = "ios"
 # between the two) — MiniWin is not this device's registered UI catcall
 # any more, so that race no longer applies; it stays available as the
 # dormant `startx` safe-mode shell instead (see safe_mode_ui below).
+# 2026-09-22: back to MiniWin. The LVGL graphical session above (login_ui
+# + launcher_lvgl + systemui_lvgl) isn't booting to a working UI on real
+# hardware — switching to MiniWin's barebones desktop instead, which
+# already auto-opens the App Manager window on login (miniwin_module.c's
+# miniwin_task(), #ifndef CONFIG_PURR_MINIWIN_DESKTOP_WINCE branch —
+# CoreOS/sdkconfig_tdeck_plus.overrides already sets that symbol to `n`
+# for this device, so no sdkconfig change needed here, just this value).
+#
 # loginUI/systemui/launcher are all sysclaw packages — purrstrap.py's
 # _stage_sysclaw_packages() picks each one's LVGL variant automatically
 # from this ui= value, no separate [flash] entry needed for any of them.
-ui          = "lvgl"
+ui          = "miniwin"
 # safe_mode_ui — bundles MiniWin as a dormant fallback shell, reachable
 # from the console via `startx`, independent of the graphical session
 # above (see source/modules/miniwin/miniwin_module.c's own miniwin_init()
@@ -403,6 +411,14 @@ display/st7789    = 1
 touch/gt911       = 1
 input/trackball   = 1
 cardstack         = 2
+# miniwin — needed now that [modules] ui = "miniwin" above (2026-09-22).
+# Without this entry the static CONFIG_PURR_UI_BACKEND_MINIWIN=y build
+# still compiles the module in, but its .purr blob never lands in the
+# SPIFFS image, so it never actually loads at boot — same "compiles ≠
+# loads" trap this pcat's other flash-staging comments already document.
+# Same tier as app_manager/cardstack below (see tdeck_plus_arduino's
+# device.pcat for the reference "miniwin = 2" this mirrors).
+miniwin           = 2
 app_manager       = 2
 radio/sx1262_rl   = 2
 driver_manager    = 2
