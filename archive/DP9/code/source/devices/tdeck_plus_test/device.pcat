@@ -1,0 +1,35 @@
+# devices/tdeck_plus_test/device.pcat
+# T-Deck Plus — input test mode
+# Boots straight into touch/trackball/keyboard visualizer. No real apps or
+# modules loaded — [modules] ui = "none" below exists only because
+# purrstrap.py's _sdkconfig_lines() now requires every device to state it
+# explicitly (see UI_NO_STATIC_MODULE_VALUES), not because this profile
+# does anything with a UI backend.
+
+[device]
+name        = "tdeck_plus_test"
+chip        = "esp32s3"
+kernel_type = "arduino"
+flash_mb    = 16
+port        = "/dev/ttyACM0"
+psram       = true
+psram_mb    = 8
+
+spiffs_offset  = "0xD90000"
+
+[drivers]
+display     = "st7789"
+
+[modules]
+ui = "none"
+
+[flash]
+display/st7789 = 1
+
+[pins]
+display_cs    = 12
+display_dc    = 11
+display_mosi  = 41
+display_sclk  = 40
+display_rst   = -1
+display_bl    = 42

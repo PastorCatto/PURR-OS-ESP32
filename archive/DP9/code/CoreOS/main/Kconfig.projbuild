@@ -1,0 +1,501 @@
+menu "PURR OS"
+
+    choice PURR_UI_BACKEND
+        prompt "UI Backend"
+        default PURR_UI_BACKEND_KITTENUI
+        help
+            Select the windowing system for this device. All UI modules are
+            compiled into every firmware; only the selected one is activated.
+
+        config PURR_UI_BACKEND_KITTENUI
+            bool "KittenUI (LVGL 8)"
+            select PURR_UI_LVGL
+            help
+                KittenUI uses LVGL for rich touch-based UI. Best for devices
+                with sufficient RAM and a colour touchscreen.
+
+        config PURR_UI_BACKEND_MINIWIN
+            bool "MiniWin"
+            help
+                MiniWin is a lightweight windowing system for smaller devices
+                or when LVGL's footprint is unwanted.
+
+        config PURR_UI_BACKEND_OLED
+            bool "OLED UI (headless/SSD1306)"
+            help
+                Minimal OLED UI for devices with monochrome displays or
+                no display at all.
+
+        config PURR_UI_BACKEND_EPAPER_UI
+            bool "e-paper UI (headless/no touch or keyboard)"
+            help
+                One-shot boot screen for a device with an e-paper panel
+                and no touch/keyboard (source/modules/epaper_ui/,
+                Waveshare ESP32-S3-ePaper-1.54). Auto-logs in and draws
+                "PURR OS / logged in as <user>" once — real interaction on
+                that device is its USB console (see PURR_GENERIC_CONSOLE
+                below), not this panel. This symbol itself isn't read by
+                any live code today (same as PURR_UI_BACKEND_OLED's
+                sibling entries — this whole choice block just satisfies
+                purrstrap's own UI_BACKEND_MAP validation, see that dict's
+                comment in purrstrap.py); which module actually runs comes
+                from device.pcat's [modules] ui value directly.
+
+        config PURR_UI_BACKEND_BLACKPURR
+            bool "BlackPURR (LVGL 8, dark hybrid UI)"
+            help
+                BlackPURR is the PURR OS flagship UI shell — dark theme, icon
+                ribbon + app drawer inspired by BlackBerry OS 6/7. Supports
+                hybrid touch/trackball input, software cursor overlay for
+                legacy apps. Requires LVGL 8. Best on T-Deck Plus.
+
+        config PURR_UI_BACKEND_CARDSTACK
+            bool "Cardstack (LVGL 8, Rabbit R1-style card stack)"
+            select PURR_UI_LVGL
+            help
+                Vertical snap-scrolling card stack — one full-screen card per
+                app, home card (clock/wallpaper/notifications) first, an
+                end-of-stack Task Manager card last. Two-stage drag-down
+                status bar (peek, then full notification center) and a
+                left-edge swipe back to Home from inside any app. Requires
+                LVGL 8 and the kernel notification API (PURR_KERNEL_VERSION
+                >= 1.0.0).
+
+        config PURR_UI_BACKEND_CUPCAKE
+            bool "Cupcake (LVGL 8, Android 1.5-style launcher)"
+            select PURR_UI_LVGL
+            help
+                Android 1.5 ("Cupcake")-style launcher: a home screen with a
+                small number of pinned app shortcuts plus a bottom dock, and
+                a separate all-apps drawer (opened from the dock's center
+                button) showing every registered app in a scrollable grid.
+                Status bar + drag-down notification panel forked from
+                Cardstack. Requires LVGL 8 and the kernel notification API.
+
+        config PURR_UI_BACKEND_MOCHI
+            bool "Mochi (LVGL 8, iOS-style springboard)"
+            select PURR_UI_LVGL
+            help
+                iOS-style home screen: a paged grid of rounded-square
+                ("squircle") app icons with captions, page dots, a
+                translucent dock along the bottom, and a home indicator
+                instead of an Android-style Back/Home/Recents row. Uses
+                Apple's own light system palette (systemGroupedBackground
+                ground, systemBlue accent) and a fixed saturated icon palette
+                rather than hash-derived colours, which is what makes a grid
+                read as a springboard rather than as arbitrary tiles.
+
+                Not touch-only, unlike real iOS: a selection cursor spans the
+                grid and dock as one space, driven by the trackball or arrow
+                keys, with Enter or a ball click to open. Touching an icon
+                moves the cursor to it, so the two input models never
+                disagree about what is selected.
+
+                Hosts source/modules/systemui/ for the status bar, drag-down
+                panels, Recents and lock screen, but sets its suppress_navbar
+                host flag — those four surfaces map onto iOS equivalents
+                (Notification Center, Control Center, the app switcher, the
+                lock screen) while the nav bar does not.
+
+        config PURR_UI_BACKEND_CHEETAH
+            bool "Cheetah (LVGL 8, Windows XP-style desktop)"
+            select PURR_UI_LVGL
+            help
+                Named after Mac OS X 10.0's own codename — was "Flow" (built
+                for a since-paused BlackBerry 10-style Home Screen), renamed
+                once its content became a Windows XP-style desktop instead.
+
+                A single desktop pane of FAVORITE apps (not the full
+                registry — that's what the Start Menu covers), curated via a
+                long-press "Choose Favorites..." picker. No paging, no
+                minimize gesture of its own — the taskbar
+                (systemui_xp.c) owns running-app switching/minimizing, one
+                button per running app.
+
+                Hosts source/modules/systemui/ for the taskbar (Start Menu,
+                running-app buttons, tray) and the shared login/lock welcome
+                screen, and reuses Mochi's icon/colour tables
+                (mochi_icon_for_app() / mochi_color_for_app()) rather than a
+                third copy of the same name->icon map — see cheetah.h.
+
+                Also the app-widget theme every app in the system renders
+                through (buttons/lists/menus/textareas) — iOS-7 grouped-
+                table style, with dark mode support — independent of this
+                backend's own XP desktop above it, which stays XP
+                deliberately as the project's minimal-UI benchmark.
+
+        config PURR_UI_BACKEND_TABBY
+            bool "Tabby (LVGL 8, keyboard-first type-to-filter launcher)"
+            select PURR_UI_LVGL
+            help
+                Keyboard-first shell for thumb-keyboard handhelds (T-Deck /
+                T-Deck Plus). The home screen is a vertical app list rather
+                than a grid, and typing any printable character filters it
+                live — no search field to open first, no paging as the app
+                count grows. The trackball is registered as a real LVGL
+                ENCODER (roll to move, click to open) instead of being
+                rewritten into synthetic PREV/NEXT keypresses, which keeps
+                "typed a character" and "rolled the ball" distinguishable —
+                the distinction a type-to-filter shell depends on. Touch
+                works throughout as a third input.
+
+                Unlike Cupcake, every focusable widget joins the keyboard
+                focus group, not just textareas, so buttons and lists inside
+                ordinary apps are reachable without touching the screen.
+
+                Hosts source/modules/systemui/ for the status bar, drag-down
+                panels, nav bar, Recents and lock screen — the same module
+                Cupcake hosts, making Tabby its second consumer.
+
+                Compare PURR_UI_BACKEND_POUNCE below, which targets the same
+                class of device but drops LVGL entirely for a direct
+                framebuffer widget model: Pounce trades text/widget fidelity
+                (6x8 bitmap font, own minimal widget set) for speed, Tabby
+                keeps LVGL's rendering and widget coverage.
+
+        config PURR_UI_BACKEND_LVGLDEBUG
+            bool "LVGL Debug (touch/HAL diagnostics)"
+            select PURR_UI_LVGL
+            help
+                Minimal LVGL screen for diagnosing touch mapping: shows live
+                raw + mapped coordinates as text and draws a dot exactly
+                where a tap is detected, so misalignment is visible
+                immediately instead of read from serial logs. Not a real
+                desktop shell — purely a debugging tool.
+
+        config PURR_UI_BACKEND_POUNCE
+            bool "Pounce (raw framebuffer, keyboard+trackball-first)"
+            help
+                Direct-to-panel immediate-mode UI backend — no LVGL, no
+                vendored MiniWin. Implements the full catcall_ui_t/purr_win_t
+                contract (every system app runs unmodified) with its own
+                small widget model, synchronous redraw at the mutation call
+                site (no dirty-flag scan), and a genuinely new
+                keyboard/trackball widget-to-widget focus-navigation system —
+                nothing else in this codebase has one. A full-screen modal
+                window stack only, no overlapping/floating chrome. Built for
+                physical-keyboard + trackball devices (T-Deck/T-Deck Plus);
+                touch is optional/secondary. See pounce_plan.md at the repo
+                root for the full design. EXPERIMENTAL — landing opt-in via
+                the tdeck_plus_pounce device, not the default tdeck_plus.
+
+        config PURR_UI_BACKEND_NOUGAT
+            bool "Nougat (LVGL 9, Android 7.1.2-style chrome)"
+            select PURR_UI_LVGL
+            help
+                Cupcake's nav bar/status bar/recents/home screen ported 1:1
+                in spirit onto LVGL v9 — the only UI backend built against
+                v9 rather than v8 (every other backend above stays on v8;
+                see CoreOS/CMakeLists.txt's EXCLUDE_COMPONENTS and
+                idf_component.yml's per-target lvgl/lvgl version resolution).
+                First and only device: M5Stack Tab5 (ESP32-P4).
+
+    endchoice
+
+    config PURR_UI_LVGL
+        bool
+        help
+            Set automatically by every LVGL-based UI backend; not user-selectable.
+
+            Apps use this to decide whether LVGL types and LV_SYMBOL_* glyph
+            constants exist at all, so features that genuinely depend on LVGL
+            compile in without hard-coding WHICH LVGL backend is active. Before
+            this symbol existed, apps guarded such code on
+            CONFIG_PURR_UI_BACKEND_CUPCAKE, which silently dropped every list
+            row icon in MSN and Milkbar the moment a device moved to Mochi or
+            Tabby - the icons were still fully supported, just compiled out.
+
+            Do NOT use this to reach into a specific backend's internals. It
+            means "LVGL headers are available", nothing more; the portable
+            purr_win_* API is still how apps talk to the UI.
+
+    config PURR_UI_WINCE_SHELL
+        bool "WinCE shell baked directly into kernel (no .purr module wrapper)"
+        default n
+        depends on PURR_UI_BACKEND_MINIWIN
+        help
+            For devices that bake the WinCE-style shell (ported from PURR OS
+            0.11) directly into their specialized kernel instead of using
+            MiniWin's own desktop module. Tells miniwin_module.c to skip
+            starting its own desktop/task since the kernel already started
+            its own.
+
+    config PURR_MINIWIN_DESKTOP_WINCE
+        bool "MiniWin: WinCE-style desktop (taskbar + start menu) [EXPERIMENTAL]"
+        default y
+        depends on PURR_UI_BACKEND_MINIWIN && !PURR_UI_WINCE_SHELL
+        help
+            Default desktop for any MiniWin device now (was opt-in per-device
+            via a manual sdkconfig override) — Cupcake is parked as a
+            work-in-progress pending an unresolved app-window-visibility bug,
+            so this is the active default UI direction project-wide.
+            Generalized version of the WinCE-style taskbar/start-menu chrome
+            (see miniwin_wince_desktop.c) for any native-kernel MiniWin
+            device — replaces the default icon-grid desktop. The Start
+            Menu's Programs list is built from the real app_manager
+            registry, and every purr_win_create() window gets a taskbar
+            button automatically. Mutually exclusive with PURR_UI_WINCE_SHELL,
+            which is for kernels that bake their own shell in directly instead
+            of using this module.
+
+            Known-rough edges as of introduction: apps launch in their own
+            FreeRTOS task via app_manager, so any UI backend's own render
+            task loop must serialize against that with purr_kernel_ui_lock()
+            or risk racing the display driver. Build-time opt-in only for
+            now — see docs/01_Architecture.md.
+
+    config PURR_DISPLAY_ST7789_BGR_ORDER
+        bool "ST7789: panel is physically wired BGR, not RGB"
+        default n
+        help
+            The ST7789 driver's MADCTL register (source/drivers/display/
+            st7789/st7789.c) hardcodes RGB colour order for every device that
+            uses it (tdeck, tdeck_plus, waveshare169). Some panel batches are
+            physically wired BGR internally, which shows up as every colour's
+            red and blue channels swapped on screen — confirmed live on
+            tdeck_plus's MiniWin WinCE desktop: the teal wallpaper
+            (WCE_DESKTOP = 0x008080) rendered as a dark olive-yellow
+            (0x808000, R/B swapped), and a focused app window's title bar
+            colour (MW_TITLE_BAR_COLOUR_FOCUS = MW_HAL_LCD_BLUE = 0x0000FF)
+            rendered as exactly MW_HAL_LCD_RED (0xFF0000) — not approximately
+            red, the identical named constant, which is the strongest single
+            piece of evidence this is a channel swap and not some other
+            colour bug.
+
+            Ruled out before landing this: SPI byte-order (already correct,
+            st7789_fill_rect()/push_pixels() byte-swap before transmission —
+            see hal_lcd.c's own comment on a prior, different, already-fixed
+            double-swap bug), software RGB math in the vendored MiniWin gl.c
+            (checked, standard/correct shifts), and panel inversion (ST_INVON
+            is already correctly enabled from an earlier fix, an orthogonal
+            setting from channel order).
+
+            Enabling this ORs the MADCTL RGB/BGR order bit (0x08) into the
+            register value st7789.c already computes. Left off by default
+            since this may be a wiring quirk specific to one panel batch
+            rather than universal to every ST7789 device this driver serves
+            — opt in per-device (see CoreOS/sdkconfig_tdeck_plus.overrides)
+            rather than risking a regression on tdeck/waveshare169, which
+            haven't reported this symptom and aren't part of active hardware
+            testing right now.
+
+    config PURR_SYSTEMUI
+        bool "System UI (status bar, nav bar, Recents, lock screen)"
+        default n
+        help
+            Gates source/modules/systemui/ — the persistent chrome that draws
+            above every app window: the top status bar and its two drag-down
+            panels (Notifications / Running Apps), the Back/Home/Recents nav
+            bar, the Recents card carousel, and the idle-timeout lock screen.
+
+            Set automatically by purrstrap from a device.pcat [modules]
+            systemui = "systemui" entry — same mechanism as bt/mesh/meshcore —
+            so devices opt in there rather than here.
+
+            When off, systemui.c compiles to a stub implementation of every
+            function systemui.h declares, so a host UI backend keeps calling
+            purr_systemui_init()/_tick() unconditionally with no #ifdef of its
+            own. Nothing is drawn, purr_systemui_navbar_height() returns 0 so
+            the host reclaims that space, and purr_systemui_is_locked() always
+            reports false. Same shape as PURR_FEATURE_MESHTASTIC below.
+
+            LVGL-only today: every surface is built on lv_layer_top(). MiniWin
+            has no equivalent compositing layer (see miniwin_lock.h) and keeps
+            its own separate implementation, so this is only meaningful on
+            LVGL-backed devices (cupcake/kittenui/nougat/cardstack).
+
+    config PURR_LOGIN_UI_LVGL
+        bool "loginUI renders via LVGL (super-basic widgets, no on-screen keyboard)"
+        default n
+        help
+            Set automatically by purrstrap from a device.pcat [modules]
+            ui = "lvgl" entry — same mechanism as PURR_SYSTEMUI just above —
+            so devices opt in there rather than here.
+
+            Gates a small LVGL init + display-driver-registration block in
+            kernel_tdp_boot.c that runs BEFORE loginUI (source/apps/system/
+            login_ui/, a loadable .claw package — see claw_loader.h) loads,
+            using real lv_conf.h/purr_lv_flush.h exactly like every archived
+            UI backend's own *_hal.c already did (source/modules/common/
+            purr_lv_flush.h). loginUI's own LVGL renderer (login_render_
+            lvgl.c) then only creates WIDGETS on the already-set-up default
+            screen — no on-screen keyboard (a physical one already exists
+            on every device this targets), no lv_group/lv_indev routing, no
+            custom styles — deliberately smaller than every archived LVGL
+            UI backend's own login screen, which is what this option name
+            is trying to say plainly rather than imply.
+
+            When off, purrstrap stages loginUI's plain framebuffer renderer
+            instead (login_render_fb.c) — the default for every device that
+            hasn't set ui = "lvgl" explicitly.
+
+    config PURR_GENERIC_CONSOLE
+        bool "Start a USB-Serial-JTAG console at the end of the generic boot.c"
+        default n
+        help
+            Set automatically by purrstrap from a device.pcat [modules]
+            console = true entry. Off by default — every existing generic-
+            kernel device (cyd/cyd_s024c/cyd_s028r/heltec/jc3248w535/
+            waveshare169/tab5) keeps its exact current behavior (idle after
+            boot, no typed console) unless it explicitly opts in.
+
+            A device with a specialized kernel (kernel_tdp_boot.c and
+            friends) already starts its own console directly as part of
+            its own app_main() — this option only matters for a device
+            using the generic source/kernel/core/boot.c.
+
+            First real use: the Waveshare ESP32-S3-ePaper-1.54 (no touch,
+            no keyboard — epaper_ui.c auto-logs in and draws a one-time
+            boot screen; real interaction happens over this console
+            instead, since a live-updating console on that panel would
+            mean a real ~1-2s hardware refresh per character — see
+            epd1in54.c's own top comment).
+
+    config PURR_SAFE_MODE_UI
+        bool "Bundle MiniWin as a dormant `startx` safe-mode shell"
+        default n
+        help
+            Set automatically by purrstrap from a device.pcat [modules]
+            safe_mode_ui = true entry. Off by default — MiniWin is a real,
+            sizeable component, deliberately not compiled into every device.
+            When on, CoreOS/main/CMakeLists.txt REQUIREs the miniwin
+            component, and modulestrap.py builds it for the device.
+
+            MiniWin stays dormant as a fallback shell reachable from the
+            console, independent of the device's real primary UI (see
+            source/modules/miniwin/miniwin_module.c's own miniwin_init()
+            comment on why it doesn't auto-start).
+
+    choice PURR_SYSTEMUI_STYLE
+        prompt "System UI style"
+        depends on PURR_SYSTEMUI
+        default PURR_SYSTEMUI_STYLE_ANDROID
+        help
+            Which visual language the system chrome uses. All three styles
+            implement the identical purr_systemui_* contract, so the UI
+            backend hosting them needs no changes either way — exactly one
+            of systemui_android.c / systemui_ios.c / systemui_xp.c compiles
+            in.
+
+            Set automatically by purrstrap from device.pcat's
+            [ui] systemui_style key.
+
+        config PURR_SYSTEMUI_STYLE_ANDROID
+            bool "Android System UI"
+            help
+                Back/Home/Recents nav bar, drag-down Notifications and
+                Running Apps panels as plain text rows, battery-left status
+                bar, and a centred lock screen. The original implementation;
+                what Cupcake and Tabby are designed around.
+
+        config PURR_SYSTEMUI_STYLE_IOS
+            bool "iOS UI"
+            help
+                No nav bar (the host draws a home indicator instead).
+                Notifications are rounded cards carrying the posting app's
+                icon, accent colour and a relative timestamp, and the SAME
+                card builder renders them both in the Notification Center
+                and on the lock screen — so the two always match, which is
+                how iOS behaves. Both scroll like the Recents carousel.
+                Clock-left status bar with indicators right.
+
+        config PURR_SYSTEMUI_STYLE_XP
+            bool "Windows XP UI"
+            help
+                A persistent bottom taskbar owns the whole bottom edge
+                itself (no suppress_navbar handling — this style never asks
+                the host to omit anything): a Start button opening a flat
+                single-column Start Menu of every registered app, one
+                taskbar button per RUNNING app that toggles minimize/
+                restore, and a clock-only system tray. Idle lock is a plain
+                dim-and-tap-to-wake, the same scope level the other two
+                styles use for it. Deliberately does not draw per-window
+                title-bar chrome (minimize/maximize/close buttons) — no
+                backend's window contract draws window chrome today; see
+                systemui_xp.c's own header comment.
+
+    endchoice
+
+    config PURR_FEATURE_MESHTASTIC
+        bool "Meshtastic-compatible mesh module"
+        default n
+        help
+            Gates source/modules/meshtastic/ (mesh_router.c, mesh_radio.c,
+            and the real half of meshtastic_module.c) — off by default on
+            every device. When off, meshtastic_module.c compiles to a stub
+            implementation of every function meshtastic.h declares
+            (mesh_manager_send_text() etc. return false/0), so callers like
+            MeshChat (meshchat.c) keep compiling and linking unchanged —
+            its buddy list just shows 0 nodes and sends silently no-op,
+            rather than the app being removed. mesh_router.c/mesh_radio.c
+            have no external callers and compile to an empty translation
+            unit when this is off.
+
+            Same shape as CONFIG_BT_NIMBLE_ENABLED's existing bt_mgr.c
+            guard (a real Kconfig toggle, not just a device.pcat
+            registration entry — components under source/modules/ compile
+            into every device's firmware regardless of device.pcat's
+            [modules] section, so only a compile-time #ifdef actually saves
+            the static footprint on devices that don't want this feature).
+
+            Devices with real LoRa + antenna hardware provisioned for mesh
+            opt in via their own .overrides file, same pattern as
+            PURR_DISPLAY_ST7789_BGR_ORDER above.
+
+    config PURR_FEATURE_MESHCORE
+        bool "MeshCore-compatible mesh module"
+        default n
+        help
+            Gates source/modules/meshcore/ (vendored MeshCore protocol core
+            under vendor/, plus mc_radio_adapter.cpp/mc_contacts.cpp/
+            mc_identity.cpp/meshcore_module.cpp) — off by default on every
+            device, same two-layer gate shape as CONFIG_PURR_FEATURE_
+            MESHTASTIC above (components under source/modules/ compile into
+            every device's firmware regardless of device.pcat's [modules]
+            section, so this Kconfig flag is what actually saves footprint
+            and switches meshcore_module.cpp between its real implementation
+            and a stub). When off, meshcore.h's public API compiles to a
+            stub returning false/0/empty everywhere.
+
+            Mutually exclusive with CONFIG_PURR_FEATURE_MESHTASTIC at
+            runtime (not at compile time — both can be enabled in the same
+            build; meshcore_module.cpp/meshtastic_module.c each refuse to
+            activate if the other is already loaded, since both need
+            exclusive use of the one physical LoRa radio). Both being
+            compiled in simultaneously is intentional groundwork for a
+            future runtime protocol switch, not an oversight.
+
+    config PURR_TDECK_PLUS_PHYSICAL_KEYBOARD
+        bool "T-Deck Plus: init physical BBQ20 keyboard"
+        default y
+        help
+            Disable to skip BBQ20 I2C keyboard init entirely and rely solely
+            on the on-screen keyboard (Cupcake's purr_win_keyboard_show()) —
+            useful for bring-up/testing without the physical keyboard
+            attached. Previously there was no way to disable this at all —
+            bbq20_drv_init() was unconditionally hardcoded into
+            kernel_tdp_boot.c.
+
+    # arduino-esp32 3.3.10's own USB.cpp/USBCDC.cpp/USBMSC.cpp/
+    # esp32-hal-tinyusb.h (source/modules/usb_msc pulls arduino-esp32 in
+    # transitively — see CoreOS/main/idf_component.yml) gate their entire
+    # bodies behind `#if CONFIG_TINYUSB_ENABLED`, including the #include of
+    # tusb.h/tusb_config.h itself — but arduino-esp32 never defines this
+    # symbol anywhere in its own Kconfig, and neither does espressif/
+    # esp_tinyusb (which uses TINYUSB_CDC_ENABLED/TINYUSB_MSC_ENABLED, no
+    # master switch) or ESP-IDF's own "usb" component on IDF < 6.0.
+    # Confirmed live: without this, CFG_TUD_CDC/tud_cdc_n_write/etc. are
+    # simply never declared, since the #include that would pull them in
+    # never runs — arduino-esp32's USB support appears to assume either
+    # IDF >= 6.0 (whose "usb" component reportedly defines this itself) or
+    # some other pairing this project doesn't have. Defined here, tied to
+    # esp_tinyusb's own feature flags rather than as a separate manual
+    # toggle, so it's automatically on exactly when source/modules/usb_msc
+    # needs it and off (matching every device's previous behavior) everywhere
+    # else.
+    config TINYUSB_ENABLED
+        bool
+        default y if TINYUSB_CDC_ENABLED || TINYUSB_MSC_ENABLED
+        default n
+
+endmenu

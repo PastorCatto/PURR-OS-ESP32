@@ -1,0 +1,76 @@
+# devices/jc3248w535/device.pcat
+# JC3248W535 — ESP32-S3, 3.5" 480x320 QSPI, AXS15231B display+touch, 8MB PSRAM
+# Largest screen in the lineup. Full GUI base OS profile. MiniWin UI.
+
+[device]
+name        = "jc3248w535"
+chip        = "esp32s3"
+kernel_type = "native"
+flash_mb    = 16
+psram       = true
+psram_mb    = 8
+spiffs_kb      = 1024
+spiffs_offset  = "0xD90000"
+
+[drivers]
+display     = "axs15231b"
+touch       = "axs15231b"
+input       = ""
+radio       = ""
+gps         = ""
+
+[radio]
+# Stripped-down minimal profile — see cyd/device.pcat's matching comment.
+wifi        = true
+bt          = false
+lora        = ""
+
+[modules]
+# ui — console-only for the protected-processes/Unix-boot rewrite, same
+# flip as cyd/device.pcat's matching comment — "none" is an explicit flag
+# (not a comment), meaning loginUI ships its framebuffer renderer here.
+# Was "miniwin" (archived, no longer in the live tree) — compile-only
+# verified, no JC3248W535 on the bench for this change specifically.
+ui          = "none"
+app_manager = "app_manager"
+lua         = "lua_runtime"
+wifi        = "wifi_mgr"
+
+[ui]
+theme       = "wce"
+
+[apps]
+# settings/diagnostics — DESELECTED alongside the ui flip above, same
+# reasoning as cyd/device.pcat's matching comment (both call purr_win_*,
+# and settings.c's own CMakeLists.txt hardcodes REQUIRES on archived
+# miniwin/cupcake/systemui — a real link failure with ui = "none").
+#settings    = true
+#diagnostics = true
+
+[flash]
+display/axs15231b  = 1
+touch/axs15231b    = 1
+miniwin            = 2
+app_manager        = 2
+driver_manager     = 2
+wifi_mgr           = 2
+lua_runtime        = 2
+apps/settings      = 3
+apps/diagnostics   = 3
+
+[pins]
+display_cs    = 45
+display_pclk  = 47
+display_d0    = 21
+display_d1    = 48
+display_d2    = 40
+display_d3    = 39
+display_bl    = 1
+display_rst   = -1
+
+touch_sda     = 4
+touch_scl     = 8
+touch_int     = -1
+touch_rst     = -1
+
+sd_enabled    = false

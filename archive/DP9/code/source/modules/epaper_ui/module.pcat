@@ -1,0 +1,16 @@
+# modules/epaper_ui/module.pcat
+
+name            = "epaper_ui"
+version         = "0.1.0"
+type            = "module"
+module_type     = "PURR_MOD_UI"
+catcall_version = 1
+idf_min         = "5.3.0"
+chip            = ["esp32s3"]
+kernel_min      = "0.11.1"
+kernel_max      = ""
+
+required_catcalls = ["display"]
+provides          = []
+
+notes = "Watch-style UI for the Waveshare ESP32-S3-ePaper-1.54 (no touch on this variant, two physical buttons): Watchface (root, big clock) -> App List (Pebble-style card list: Battery/Clock/About system cards + real app_manager entries) -> Detail (one glanceable value, or a launch confirmation for a real app). Auto-login (same no-password contract oled_ui_module.c's own auto-login already established) happens silently at boot. Screen transitions live in one input-agnostic nav_dispatch(nav_event_t) — the button task is just an adapter (BOOT short=NEXT, BOOT hold=SELECT, PWR=BACK); a future touch-variant adapter would translate gestures into the same three events with no screen-logic changes. The USB console (see boot.c's CONFIG_PURR_GENERIC_CONSOLE) remains the primary interaction surface for anything this panel doesn't cover."

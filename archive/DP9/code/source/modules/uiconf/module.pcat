@@ -1,0 +1,16 @@
+# modules/uiconf/module.pcat
+
+name            = "uiconf"
+version         = "0.1.0"
+type            = "module"
+module_type     = "PURR_MOD_SYSTEM"
+catcall_version = 0
+idf_min         = "5.3.0"
+chip            = ["esp32", "esp32s2", "esp32s3", "esp32p4"]
+kernel_min      = "0.11.1"
+kernel_max      = ""
+
+required_catcalls = []
+provides          = []
+
+notes = "Backend-agnostic `.pui` UI-config interpreter core — loads/walks a compiled .puib screen (catstrap/uiconf.py), resolves visible_if/enabled_if conditions and live data bindings, tracks nav state. No display/touch/LVGL code (that's a render backend, e.g. purr_uiconf_render_fb.c, linked separately by whichever app needs it). Not a PURR_MODULE_REGISTER static module in its own right — no init()/deinit() to run; apps that use it just REQUIRES this component and call its plain functions directly, same shape as user_mgr/app_manager's own public API."

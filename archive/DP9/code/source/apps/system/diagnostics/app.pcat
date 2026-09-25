@@ -1,0 +1,17 @@
+# apps/system/diagnostics/app.pcat
+# Rewritten onto the uiconf declarative UI-config format — see
+# /home/PastorCatto/.claude/plans/delightful-exploring-hearth.md. First-pass
+# scope is deliberately smaller than the version this replaces: one
+# read-only screen (loaded modules + free RAM/uptime), not the five merged
+# tabs (Hardware I/O, Services, Mesh diag, Tasks) the old app.pcat
+# described — see diagnostics.c's own top comment for the full reasoning
+# and archive/apps_v1/diagnostics/ (once hardware-verified) for that
+# version's source.
+
+name        = "diagnostics"
+version     = "2.0.0"
+tier        = "claw"
+author      = "PURR OS"
+description = "Diagnostics: loaded modules, free RAM, and uptime."
+
+idf_requires = "esp_common driver freertos"

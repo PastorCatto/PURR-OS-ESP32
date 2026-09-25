@@ -1,0 +1,17 @@
+# apps/system/systemui/app.pcat
+
+name        = "systemui"
+version     = "0.1.0"
+tier        = "sysclaw"
+author      = "PURR OS"
+description = "Status bar (clock + battery) drawn on lv_layer_top(), plus a tap-to-lock affordance that re-runs loginUI for real re-authentication. Loaded once, alongside the launcher — see kernel_tdp_boot.c's own session-loop comment for how the two stay independent packages that never call into each other directly."
+
+# LVGL only — a status bar/lock control is inherently tap-driven chrome,
+# not something a plain framebuffer/keyboard UI could meaningfully host.
+# Same reasoning as launcher/app.pcat's own `variants` comment.
+variants    = "lvgl"
+
+# No idf_requires — a sysclaw package is never an IDF component at all
+# (catstrap.py's own comment on this tier). Compiled standalone by
+# catstrap's _build_sysclaw_variant() with the same restricted flags every
+# claw_loader_selftest.c guest object uses.

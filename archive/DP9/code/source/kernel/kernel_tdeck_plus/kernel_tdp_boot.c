@@ -1,0 +1,1449 @@
+// kernel_tdp_boot.c — specialized boot for T-Deck Plus
+//
+// Inits display, touch, trackball, and keyboard directly before the module
+// loader runs. This avoids module priority races and ensures all Layer 0
+// catcalls are registered before KittenUI tries to use them.
+//
+// Baked-in (Layer 0, initialized here, NOT via module loader):
+//   ST7789  — SPI display  (CS=12 DC=11 MOSI=41 SCLK=40 RST=-1 BL=42)
+//   GT911   — I2C touch    (SDA=18 SCL=8 INT=16 RST=NC)
+//   Trackball — GPIO       (UP=3 DN=15 LT=1 RT=2 CLK=0)
+//   BB Q20  — I2C keyboard (SDA=18 SCL=8 addr=0x55)
+//
+// Plug-and-play (Layer 4, loaded by module loader):
+//   MiniWin, app_manager, SX1276 LoRa, generic_nmea GPS
+
+#include "purr_kernel.h"
+#include "purr_crash_guard.h"
+#include "esp_log.h"
+#include "esp_spiffs.h"
+#include "esp_littlefs.h"
+#include "esp_heap_caps.h"
+#include "nvs_flash.h"
+#include "driver/gpio.h"
+#include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <sys/stat.h>
+#include <string.h>
+#include <stdio.h>
+
+// Baked-in driver headers
+#include "../../drivers/display/st7789/st7789.h"
+#include "../../drivers/touch/gt911/gt911.h"
+#include "../../drivers/input/trackball/trackball.h"
+#include "../../drivers/input/bbq20/bbq20.h"
+#include "../../drivers/radio/sx1262_rl/sx1262_rl.h"
+#include "../../modules/boot_splash/boot_splash.h"
+#include "../../modules/purr_console/purr_console.h"
+#include "../../modules/purr_console_login/purr_console_login.h"
+#include "../../modules/purr_fbtty/purr_fbtty.h"
+#include "../../modules/user_mgr/user_mgr.h"
+#include "../../modules/app_manager/app_manager.h"
+#include "../../modules/claw_loader/claw_loader.h"
+#include "../../modules/purr_quirk/purr_quirk.h"
+#include "driver/i2c_master.h"
+#include "esp_rom_sys.h"
+// usb_msc.h — pinned/dormant (source/modules/usb_msc/DISABLED.md), its own
+// module.pcat renamed so modulestrap no longer discovers it. Everything
+// that touches it (this include, tdp_usb_share_sd() below, and the actual
+// usb_msc_init() call further down) is #if 0'd together — the component
+// isn't part of the build at all right now, so a bare #include would fail
+// to resolve the header just as the init call would fail to link.
+#if 0
+#include "../../modules/usb_msc/usb_msc.h"
+#endif
+
+// SD card (shares the display's SPI bus — see mount_sd_vfs()'s comment)
+#include "driver/spi_master.h"
+#include "driver/sdspi_host.h"
+#include "sdmmc_cmd.h"
+#include "esp_vfs_fat.h"
+
+// WiFi station-mode bring-up (esp_wifi_init() itself, not connect/scan —
+// that's wifi_mgr.c, a plug-and-play module driven by Settings)
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "esp_wifi.h"
+
+// AES hardware-lock prewarm (see app_main()'s call site comment)
+#include "aes/esp_aes.h"
+
+static const char *TAG = "tdp_boot";
+
+// ── T-Deck Plus pin assignments ───────────────────────────────────────────────
+
+#define TDP_DISPLAY_CS    12
+#define TDP_DISPLAY_DC    11
+#define TDP_DISPLAY_MOSI  41
+#define TDP_DISPLAY_SCLK  40
+#define TDP_DISPLAY_RST   (-1)
+#define TDP_DISPLAY_BL    42
+
+// SD shares the display's SPI2_HOST bus (same MOSI=41/SCLK=40 on the PCB,
+// separate CS) — see mount_sd_vfs()'s comment for why it must be mounted
+// before st7789_drv_init() runs.
+// CS confirmed against LilyGo's own utilities.h/TDECK_PINS.h (TDECK_SDCARD_CS)
+// — the previous value of 13 here was wrong and collided with the real LoRa
+// BUSY pin (see TDP_LORA_BUSY below).
+#define TDP_SD_CS    39
+#define TDP_SD_MOSI  41
+#define TDP_SD_MISO  38
+#define TDP_SD_SCLK  40
+
+// LoRa (SX1262) shares the same SPI2_HOST bus as display/SD above — only CS
+// differs. Confirmed against LilyGo's utilities.h/TDECK_PINS.h; this device
+// previously ran the wrong radio driver entirely (sx1276, with pins that
+// happened to describe a separate, nonexistent bus) — see device.pcat.
+#define TDP_LORA_MOSI  41
+#define TDP_LORA_MISO  38
+#define TDP_LORA_SCLK  40
+#define TDP_LORA_CS    9
+#define TDP_LORA_RST   17
+#define TDP_LORA_BUSY  13
+#define TDP_LORA_IRQ   45
+
+// GT911 and BB Q20 share I2C bus on port 0
+// Trackball uses GPIO only
+
+// ── Flash VFS (SPIFFS) ────────────────────────────────────────────────────────
+
+static void mount_flash_vfs(void)
+{
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path              = "/flash",
+        .partition_label        = NULL,
+        .max_files              = 12,
+        .format_if_mount_failed = true,
+    };
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "SPIFFS mount failed (%s)", esp_err_to_name(ret));
+    } else {
+        size_t total = 0, used = 0;
+        esp_spiffs_info(NULL, &total, &used);
+        ESP_LOGI(TAG, "flash VFS: %u KB / %u KB",
+                 (unsigned)(used / 1024), (unsigned)(total / 1024));
+        purr_kernel_set_flash_available(true);
+    }
+}
+
+// ── App config VFS (LittleFS) ────────────────────────────────────────────
+// The one genuinely mutable partition in an otherwise semi-immutable image
+// — see partitions_16mb_ota.csv's own app_cfg comment. Mounted here, at the
+// same kernel-boot point as mount_flash_vfs() above and for the same
+// reason: purr_kernel_app_config_read()/_write() (purr_kernel.h) need this
+// ready before ANY module's init() runs, since a module may want to read
+// its own config from its own init(). format_if_mount_failed=true is what
+// makes a genuinely blank partition (first boot, or a full chip erase) a
+// normal, self-healing case rather than a boot-time failure — LittleFS
+// formats it in place the first time no valid filesystem is found there.
+static void mount_app_config_vfs(void)
+{
+    esp_vfs_littlefs_conf_t conf = {
+        .base_path              = "/config",
+        .partition_label        = "app_cfg",
+        .format_if_mount_failed = true,
+    };
+    esp_err_t ret = esp_vfs_littlefs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "app config VFS mount failed (%s)", esp_err_to_name(ret));
+    } else {
+        size_t total = 0, used = 0;
+        esp_littlefs_info("app_cfg", &total, &used);
+        ESP_LOGI(TAG, "app config VFS: %u KB / %u KB",
+                 (unsigned)(used / 1024), (unsigned)(total / 1024));
+
+        // Real round-trip self-test, not just "did the mount call return
+        // ESP_OK" — this is the first boot that ever exercises
+        // purr_app_config_read()/_write() against real hardware, so prove
+        // the actual read/write path works rather than assuming a clean
+        // mount implies it. Uses a throwaway app name so it never collides
+        // with a real one; leaves the file behind (harmless, ~30 bytes) —
+        // deleting it would need unlink(), not worth adding for a
+        // diagnostic that's fine to just overwrite on every boot.
+        const char test_msg[] = "purr_app_config self-test";
+        char readback[64] = {0};
+        bool wrote = purr_app_config_write("__selftest", test_msg, sizeof(test_msg));
+        int  got   = wrote ? purr_app_config_read("__selftest", readback, sizeof(readback)) : -1;
+        bool ok    = wrote && got == (int)sizeof(test_msg) && memcmp(readback, test_msg, sizeof(test_msg)) == 0;
+        ESP_LOGI(TAG, "app config self-test: %s", ok ? "PASS" : "FAIL");
+    }
+}
+
+// ── SD card VFS (FAT over SPI) ───────────────────────────────────────────────
+//
+// T-Deck Plus wires the SD card and the ST7789 display to the same physical
+// SPI bus (MOSI=41, SCLK=40 on both — only CS differs, display=12 vs sd=13).
+// spi_bus_initialize() fixes a host's pin config on its FIRST successful call
+// for the lifetime of the bus; every later call for that host just returns
+// ESP_ERR_INVALID_STATE and is ignored (st7789.c already tolerates this, see
+// its own spi_bus_initialize call). Display never needs to read, so
+// st7789_configure() hardcodes MISO=-1 (not connected) — if display's own
+// init ran first, the bus would come up with no working MISO line at all,
+// and any later SD device on that same host could never read a byte back.
+// So SD must call spi_bus_initialize() (with a real MISO pin) before
+// st7789_drv_init() runs, and display's later call just no-ops into the
+// bus SD already brought up.
+//
+// Bus host is SPI2_HOST — confirmed against LilyGo's own utilities.h/
+// TDECK_PINS.h for this exact pin set (MOSI=41/MISO=38/SCLK=40/CS=39).
+// (A detour through SPI3_HOST + a longer settle delay, matching an archived
+// PURR OS 0.11 reference, reproduced the identical failure on real hardware
+// — that reference's own tdeck_plus build was never actually compiled into
+// a flashable image either, so it wasn't a verified baseline. Back to the
+// pin-verified SPI2_HOST here; the delay/retry logic stays as reasonable
+// defense-in-depth while this gets debugged further.)
+static sdmmc_card_t *s_sd_card = NULL;
+
+static void mount_sd_vfs(void)
+{
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num     = TDP_SD_MOSI,
+        .miso_io_num     = TDP_SD_MISO,
+        .sclk_io_num     = TDP_SD_SCLK,
+        .quadwp_io_num   = -1,
+        .quadhd_io_num   = -1,
+        // Must cover the display's own transfer size too, since this call
+        // (not st7789's) is the one that actually configures the shared bus.
+        .max_transfer_sz = 320 * 240 * 2 + 8,
+    };
+    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "SD: spi_bus_initialize failed (%s) — continuing without SD",
+                  esp_err_to_name(ret));
+        return;
+    }
+
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SPI2_HOST;
+    // SDSPI_HOST_DEFAULT()'s 20MHz default probes the card (CMD0/CMD52/etc.)
+    // at full speed from the very first transaction — conservative to keep
+    // this slower given the shared/comparatively long bus.
+    host.max_freq_khz = 4000;
+
+    sdspi_device_config_t slot_cfg = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_cfg.gpio_cs = TDP_SD_CS;
+    slot_cfg.host_id = SPI2_HOST;
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_cfg = {
+        .format_if_mount_failed = false,
+        .max_files              = 5,
+        .allocation_unit_size   = 16 * 1024,
+    };
+
+    // Extra settle delay beyond the fixed 50ms upstream (tuned for GT911,
+    // not the SD card), plus a retry loop — defensive measures against the
+    // flaky/non-deterministic failure signature observed on this bus.
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    ret = ESP_FAIL;
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        ret = esp_vfs_fat_sdspi_mount("/sdcard", &host, &slot_cfg, &mount_cfg, &s_sd_card);
+        if (ret == ESP_OK) break;
+        ESP_LOGW(TAG, "SD mount attempt %d/3 failed (%s)", attempt, esp_err_to_name(ret));
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "SD mount failed (%s) — continuing without SD", esp_err_to_name(ret));
+        return;
+    }
+
+    purr_kernel_set_sd_available(true);
+    uint64_t mb = ((uint64_t)s_sd_card->csd.capacity) * s_sd_card->csd.sector_size / (1024 * 1024);
+    ESP_LOGI(TAG, "SD VFS mounted: %s, %llu MB", s_sd_card->cid.name, mb);
+
+    char body[PURR_NOTIFY_BODY_LEN];
+    snprintf(body, sizeof(body), "%s, %llu MB", s_sd_card->cid.name, mb);
+    purr_kernel_notify("SD card mounted", body, "sd");
+}
+
+// purr_kernel_set_panic_usb_share_cb() callbacks are void(void) — this just
+// closes over s_sd_card (mount_sd_vfs()'s own handle, still valid at panic
+// time regardless of which task/entity actually panicked).
+// Dormant along with the #if 0'd usb_msc_init() call below — see the
+// #include's matching comment above.
+#if 0
+static void tdp_usb_share_sd(void)
+{
+    usb_msc_share_sd("/sdcard", s_sd_card);
+}
+#endif
+
+static void ensure_sd_dirs(void)
+{
+    if (!purr_kernel_sd_available()) return;
+    const char *dirs[] = {
+        "/sdcard/apps", "/sdcard/modules", "/sdcard/drivers",
+        "/sdcard/drivers/display", "/sdcard/drivers/touch",
+        "/sdcard/drivers/input", "/sdcard/drivers/radio",
+        "/sdcard/drivers/gps", "/sdcard/system", "/sdcard/system/logs",
+        "/sdcard/meshchat",       // MeshChat DM/room history text files
+        "/sdcard/personal",       // per-user .claw storage — see claw_loader.h's
+                                   // "Personal-space storage" section; usernames
+                                   // aren't known at boot so only this top level
+                                   // is ensured here, claw_loader_personal_add()
+                                   // creates its own per-username subdir lazily
+        "/sdcard/quirks",         // .purr v2 device quirk packages — see
+                                   // source/modules/purr_quirk/ and this
+                                   // function's own caller, right after the
+                                   // purr_quirk_load("/sdcard/quirks/device.purr")
+                                   // call this directory exists for
+        NULL
+    };
+    for (int i = 0; dirs[i]; i++) {
+        struct stat st;
+        if (stat(dirs[i], &st) != 0) mkdir(dirs[i], 0755);
+    }
+}
+
+// ── Serial console ────────────────────────────────────────────────────────────
+// Always-on task on UART0. Phase 1c of the modular-core/Unix-boot plan:
+// this used to be its own ad hoc if/else chain with exactly two commands
+// (kb/scan) and its own hand-rolled line editing, duplicated near-
+// identically across every kernel_*_boot.c. Now it's a thin UART binding
+// (read_byte/write/flush below) handed to source/modules/purr_console/'s shared
+// command table + REPL loop — kb (BBQ20 keypress echo) is one of that
+// module's own built-ins now; scan (an I2C bus sweep) stays here and is
+// registered via purr_console_register_commands() because it needs this
+// board's own SDA=18/SCL=8 pins, which the shared, device-agnostic console
+// module has no business knowing.
+
+static void i2c_scan_cmd(const char *args)
+{
+    (void)args;
+    i2c_master_bus_handle_t bus = NULL;
+    bool created = false;
+    esp_err_t r = i2c_master_get_bus_handle(I2C_NUM_0, &bus);
+    if (r != ESP_OK) {
+        i2c_master_bus_config_t cfg = {
+            .i2c_port          = I2C_NUM_0,
+            .sda_io_num        = 18,
+            .scl_io_num        = 8,
+            .clk_source        = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
+        };
+        if (i2c_new_master_bus(&cfg, &bus) != ESP_OK) {
+            purr_console_println("[SCAN] failed to acquire I2C bus");
+            return;
+        }
+        created = true;
+    }
+    purr_console_println("[SCAN] full I2C sweep SDA=18 SCL=8:");
+    int found = 0;
+    for (uint8_t addr = 0x03; addr <= 0x77; addr++) {
+        esp_err_t res = i2c_master_probe(bus, addr, pdMS_TO_TICKS(10));
+        if (res == ESP_OK) {
+            const char *name = "";
+            if (addr == 0x5D) name = " (GT911 primary)";
+            else if (addr == 0x14) name = " (GT911 alt)";
+            else if (addr == 0x55) name = " (BBQ20 keyboard)";
+            char line[48];
+            snprintf(line, sizeof(line), "[SCAN]   0x%02X ACK%s", addr, name);
+            purr_console_println(line);
+            found++;
+        }
+    }
+    if (found == 0) purr_console_println("[SCAN]   no devices found");
+    char summary[32];
+    snprintf(summary, sizeof(summary), "[SCAN] done (%d device(s))", found);
+    purr_console_println(summary);
+    if (created) i2c_del_master_bus(bus);
+}
+
+// Deliberate, controlled trigger for purr_kernel_panic_ex()'s recoverable
+// path — added to verify tdp_panic_console() (this file's own
+// purr_kernel_set_panic_console_cb() registration).
+//
+// History worth keeping: this command originally reliably CRASHED the
+// device (twice, reproduced with and without an app open) — running it
+// while the UI is actively rendering hit a genuine, previously-unknown
+// cross-task race in st7789.c: purr_kernel_panic_ex() does not stop any
+// other task, so mochi's own render task kept flushing frames via the
+// async SPI path on core 1 while panic_render()'s first disp->fill_rect()
+// call concurrently touched the exact same SPI bus lock from this
+// command's own (different) task. Both crashes hit an assert inside the
+// SPI driver itself (spi_bus_lock_acquire_end/spi_device_release_bus,
+// "lock that hasn't been acquired") and hard-rebooted the device before
+// purr_kernel_panic_ex() ever reached tdp_panic_console() below. Root-
+// caused and fixed at the source (st7789.c's s_async_bus_sem — a real
+// cross-task semaphore replacing the plain-boolean poll async_wait_idle()
+// used to do) rather than by avoiding triggering it here. Kept registered
+// as a real, permanent diagnostic command now that the underlying bug is
+// fixed, not just as a one-off test.
+static void cmd_panic_test(const char *args) {
+    (void)args;
+    purr_console_println("Triggering a deliberate recoverable panic...");
+    purr_kernel_panic_ex("deliberate test panic from console command", /*recoverable=*/true, "console-test");
+}
+
+static const purr_console_cmd_t s_tdp_console_cmds[] = {
+    { "scan",       i2c_scan_cmd,    "full I2C bus sweep (SDA=18 SCL=8)" },
+    { "panic-test", cmd_panic_test,  "trigger a deliberate recoverable panic (test)" },
+};
+
+// ── USB-Serial-JTAG binding for the shared console core ─────────────────────
+//
+// NOT UART0, and this was found live, on real hardware, not assumed: the
+// original version of this code (and this driver's own first pass at
+// porting it) bound to UART0, matching every other kernel_*_boot.c's
+// serial_console_task() before it. But T-Deck Plus's actual USB-C port
+// enumerates as the S3's native USB-Serial-JTAG peripheral (confirmed via
+// `lsusb`: "Espressif USB JTAG/serial debug unit", VID:PID 303a:1001) —
+// electrically separate hardware from UART0, which isn't broken out to
+// this connector at all. Tested directly: ESP_LOG boot output DID appear
+// over the USB-C cable (CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG
+// mirrors output there), but typing into that same connection reached
+// nothing — a UART0-bound console is running, just permanently
+// unreachable via the only cable this board actually uses. Binding here
+// instead makes it reachable over the same connection used to flash it,
+// which is the entire point of a boot-time console.
+static int usbjtag_console_read_byte(uint32_t timeout_ms)
+{
+    uint8_t c = 0;
+    if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(timeout_ms)) > 0) return c;
+    return -1;
+}
+
+static void usbjtag_console_write(const void *data, size_t len)
+{
+    usb_serial_jtag_write_bytes(data, len, portMAX_DELAY);
+}
+
+static void usbjtag_console_flush(void)
+{
+    // No blocking "wait for TX to actually drain" primitive in this
+    // driver's API (unlike uart_wait_tx_done()) — usb_serial_jtag_write_
+    // bytes() above already blocks until accepted into the TX buffer,
+    // which is the same guarantee this console core's other callers
+    // (e.g. the `reboot` command, flushing its "Rebooting..." message
+    // before resetting) actually need.
+}
+
+static const purr_console_io_t s_console_io = {
+    .read_byte = usbjtag_console_read_byte,
+    .write     = usbjtag_console_write,
+    .flush     = usbjtag_console_flush,
+};
+
+// ── Login gate + exec — registered with the shared console core ────────────
+//
+// Used to be this file's own tdp_console_login()/tdp_console_exec() — the
+// ONE place that called into user_mgr/app_manager for console purposes
+// (purr_console.c itself stays free of both; see purr_console_login_fn/
+// purr_console_exec_fn's own doc comments for why). Lifted verbatim into
+// source/modules/purr_console_login/ as this session's "unified console/
+// login boot head" phase spread purr_console to every real device's
+// kernel boot file — no point re-deriving the same user_mgr/app_manager
+// glue four more times. See that module's own header for the full
+// picture (login blocks, retrying on a wrong password, same as a real
+// getty/login never "failing" outward, until some account is actually
+// authenticated, then calls app_manager_notify_unlocked() — the same call
+// systemui_login.c/systemui_login_ios.c already make, just from the
+// console instead of a graphical login screen).
+
+#ifdef CONFIG_PURR_LOGIN_UI_LVGL
+// Shared LVGL hardware setup for every loaded LVGL-backed sysclaw package
+// on this device (loginUI's login_render_lvgl.c, the launcher's
+// launcher_lvgl.c) — neither one sets up the display/input drivers
+// itself (a loaded module can't safely hand-mirror lv_disp_drv_t/
+// lv_indev_drv_t/lv_color_t the way it hand-mirrors catcall_display_t;
+// see login_render_lvgl.c's own top comment). This is the "normal,
+// fully-header-included code" half of that split: real lv_conf.h/
+// lvgl.h, no struct-mirroring risk at all. A loaded package only ever
+// creates WIDGETS and attaches click callbacks (lv_obj_add_event_cb) on
+// the already-set-up default screen.
+//
+// Deliberately NOT purr_lv_flush.h's full async/compose/shadow-theme
+// machinery every archived UI backend's own *_hal.c used (mochi_hal.c,
+// cupcake_hal.c, ...) — that exists to make a CONTINUOUSLY-RENDERED,
+// performance-sensitive UI fast. Neither loginUI nor this launcher
+// redraw often enough yet to need it — synchronous push_pixels()
+// straight from flush_cb is the actually-basic version of "make this
+// work", not a corner cut. Re-visit only if a real, measured need shows
+// up, same discipline as every other perf claim in this codebase.
+#include "lvgl.h"
+// purr_speed_demon_active() — polled by run_graphical_session()'s own
+// session loop so it stops touching the display entirely while a game has
+// torn the OS down for itself. See that function's own comment and
+// CoreOS/main/CMakeLists.txt's REQUIRES entry for the full story (found
+// live: the status bar bled through into a game's own framebuffer pushes
+// before this existed).
+#include "speed_demon.h"
+
+#define LVGL_BUF_LINES 40   // a modest slice of the screen — neither package redraws often enough to need sizing for throughput
+
+static lv_disp_draw_buf_t s_lv_draw_buf;
+static lv_disp_drv_t      s_lv_disp_drv;
+static lv_indev_drv_t     s_lv_touch_drv;
+
+static void lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
+{
+    const catcall_display_t *disp = purr_kernel_display();
+    if (disp && disp->push_pixels) {
+        int w = area->x2 - area->x1 + 1;
+        int h = area->y2 - area->y1 + 1;
+        // LV_COLOR_DEPTH is 16 in this project's lv_conf.h (confirmed, not
+        // assumed) — lv_color_t is a plain RGB565 word here, the exact
+        // shape catcall_display_t::push_pixels() already expects.
+        disp->push_pixels(area->x1, area->y1, w, h, (const uint16_t *)color_p);
+    }
+    lv_disp_flush_ready(drv);
+}
+
+// Same shape as the archived mochi_hal.c's own touch_read_cb() — real
+// catcall_touch.h this time (normal code, no hand-mirroring needed at
+// all). The launcher's tile grid is tap-driven, unlike loginUI's textareas
+// (typed on the physical keyboard, no touch needed there at all) — this
+// still gets registered unconditionally whenever LVGL is set up at all,
+// since a login screen ignoring touch events it never asked for is
+// harmless, and it means the launcher doesn't need its own separate
+// display-driver init pass later.
+static void lvgl_touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
+{
+    (void)drv;
+    const catcall_touch_t *touch = purr_kernel_touch();
+    if (touch && touch->is_pressed && touch->is_pressed()) {
+        uint16_t x = 0, y = 0;
+        if (touch->read_point) touch->read_point(&x, &y);
+        data->point.x = (lv_coord_t)x;
+        data->point.y = (lv_coord_t)y;
+        data->state   = LV_INDEV_STATE_PR;
+    } else {
+        data->state = LV_INDEV_STATE_REL;
+    }
+}
+
+// Returns false (no ESP_LOG here on purpose — the only caller already
+// logs its own outcome) if no display is registered or the draw buffer
+// allocation fails; a loaded package's own render_init() falls through
+// to returning false in that case, same "fails cleanly, falls back"
+// contract every loginUI/launcher failure path already has. Touch
+// registration is best-effort — a device with no touch catcall (or one
+// that failed to init) still gets a working display, just no tap input;
+// checked at the ONLY caller (the launcher) via a real interaction, not
+// here.
+static bool lvgl_hw_init(void)
+{
+    const catcall_display_t *disp = purr_kernel_display();
+    if (!disp) return false;
+
+    display_info_t info = {0};
+    if (disp->get_info) disp->get_info(&info);
+    uint16_t w = info.width  ? info.width  : 320;
+    uint16_t h = info.height ? info.height : 240;
+
+    lv_init();
+
+    size_t buf_px = (size_t)w * LVGL_BUF_LINES;
+    lv_color_t *buf1 = heap_caps_malloc(sizeof(lv_color_t) * buf_px, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    if (!buf1) {
+        ESP_LOGE(TAG, "lvgl: draw buffer alloc failed (%u px)", (unsigned)buf_px);
+        return false;
+    }
+
+    lv_disp_draw_buf_init(&s_lv_draw_buf, buf1, NULL, buf_px);
+    lv_disp_drv_init(&s_lv_disp_drv);
+    s_lv_disp_drv.hor_res  = (lv_coord_t)w;
+    s_lv_disp_drv.ver_res  = (lv_coord_t)h;
+    s_lv_disp_drv.flush_cb = lvgl_flush_cb;
+    s_lv_disp_drv.draw_buf = &s_lv_draw_buf;
+    lv_disp_drv_register(&s_lv_disp_drv);
+
+    if (purr_kernel_touch()) {
+        lv_indev_drv_init(&s_lv_touch_drv);
+        s_lv_touch_drv.type    = LV_INDEV_TYPE_POINTER;
+        s_lv_touch_drv.read_cb = lvgl_touch_read_cb;
+        lv_indev_drv_register(&s_lv_touch_drv);
+        ESP_LOGI(TAG, "lvgl: touch indev registered (pointer)");
+    } else {
+        ESP_LOGW(TAG, "lvgl: no touch catcall — tap input unavailable");
+    }
+
+    ESP_LOGI(TAG, "lvgl: display driver ready (%ux%u, %d-line buffer)", w, h, LVGL_BUF_LINES);
+    return true;
+}
+
+// Same tick+render discipline login_render_lvgl.c's/launcher_lvgl.c's own
+// lvgl_tick_and_render() helpers proved load-bearing (see either file's
+// comment on the real "renders once, never updates again" bug this
+// fixes) — duplicated here, host-side, rather than shared, because this
+// is the ONE place that now owns it for the whole graphical session (see
+// run_graphical_session()'s own top comment): once loginUI hands off to
+// the launcher/systemUI pair, NEITHER loaded package calls lv_tick_inc()/
+// lv_timer_handler() itself any more — a loaded module's own
+// claw_personal_tick() (if it exports one) only ever updates its own
+// widgets' content, it never drives LVGL's clock.
+static void lvgl_tick_and_render_host(void)
+{
+    static uint64_t s_last_ms = 0;
+    uint64_t now = purr_kernel_uptime_ms();
+    if (s_last_ms == 0) s_last_ms = now;
+    uint32_t delta = (uint32_t)(now - s_last_ms);
+    if (delta > 0) {
+        lv_tick_inc(delta);
+        s_last_ms = now;
+    }
+    lv_timer_handler();
+}
+
+// Owns the whole post-login graphical session: systemUI (status bar +
+// lock control, loaded once) and the launcher (tile grid, reloaded fresh
+// every unlock) as two independent loaded packages that never call into
+// each other — they only ever meet HERE, in this loop. See systemui_
+// lvgl.c's and launcher_lvgl.c's own top comments for why neither one
+// owns a forever-loop of its own any more: only one task can safely
+// drive lv_timer_handler(), so this function is that one task, and every
+// loaded UI package becomes a "create widgets, then get ticked" — plus,
+// for the launcher, "get relaunched after a relock" — participant
+// instead.
+//
+// Returns when there is nothing more it can do (a package failed to
+// load/init, or a relock's re-run of loginUI itself failed) — same
+// "return on unrecoverable failure, let the caller fall back to console"
+// contract every other piece of this boot sequence already has. Never
+// returns on the ordinary, working path: a lock/re-auth/relaunch cycle
+// just loops back around to loading the launcher again.
+static void run_graphical_session(void)
+{
+    // Missing/failing to load just means no status bar/lock control this
+    // session — the launcher still runs fine without it, same "degrade,
+    // don't block" contract every other optional piece of this boot
+    // sequence already has (e.g. touch registration in lvgl_hw_init()
+    // above).
+    claw_loaded_module_t systemui_mod = {0};
+    bool have_systemui = false;
+    if (claw_loader_system_load("systemui", &systemui_mod)) {
+        int rc = systemui_mod.init();
+        if (rc == 0) {
+            have_systemui = true;
+        } else {
+            ESP_LOGW(TAG, "systemui: init() = %d — running without status bar/lock", rc);
+            systemui_mod.deinit();
+            claw_loader_unload(&systemui_mod);
+        }
+    } else {
+        ESP_LOGW(TAG, "systemui: claw_loader_system_load failed — running without status bar/lock");
+    }
+
+    for (;;) {
+        claw_loaded_module_t launcher_mod;
+        if (!claw_loader_system_load("launcher", &launcher_mod)) {
+            ESP_LOGW(TAG, "launcher: claw_loader_system_load failed — falling back to console");
+            break;
+        }
+        int rc = launcher_mod.init();   // builds the tile grid, returns immediately (no forever-loop of its own any more)
+        if (rc != 0) {
+            ESP_LOGW(TAG, "launcher: init() = %d — falling back to console", rc);
+            launcher_mod.deinit();
+            claw_loader_unload(&launcher_mod);
+            break;
+        }
+
+        bool relock = false;
+        while (!relock) {
+            // While a speed-demon game is active it owns the display
+            // outright — no lock to take, nothing to fight, per speed_
+            // demon.h's own design. This loop still has to keep RUNNING
+            // (the launcher's own claw_loaded_module_t is only unloaded
+            // on relock below, and a lock request could still be pending
+            // from before the game launched), it just has to stop calling
+            // anything that touches LVGL/the display for as long as the
+            // game holds it — confirmed live this was necessary: without
+            // this check, the status bar's own periodic clock/battery
+            // tick kept invalidating and re-flushing a small screen
+            // region straight through the game's own framebuffer pushes.
+            if (!purr_speed_demon_active()) {
+                lvgl_tick_and_render_host();
+                if (launcher_mod.tick) launcher_mod.tick();
+                if (have_systemui && systemui_mod.tick) systemui_mod.tick();
+                relock = purr_kernel_consume_lock_request();
+            }
+            purr_kernel_delay_ms(30);
+        }
+
+        ESP_LOGI(TAG, "systemui: lock requested — tearing down launcher, re-running login_ui");
+        launcher_mod.deinit();
+        claw_loader_unload(&launcher_mod);
+        // Symmetric reset — see app_manager_notify_locked()'s own doc
+        // comment (app_manager.h): local registry goes idle until the
+        // relogin below calls app_manager_notify_unlocked() again inside
+        // login_core.c, same contract the very first login already used.
+        app_manager_notify_locked();
+
+        claw_loaded_module_t relogin_mod;
+        if (!claw_loader_system_load("login_ui", &relogin_mod)) {
+            ESP_LOGW(TAG, "login_ui: claw_loader_system_load failed on relock — falling back to console");
+            break;
+        }
+        int login_rc = relogin_mod.init();   // blocks internally until a real login succeeds, same contract as first boot
+        relogin_mod.deinit();
+        claw_loader_unload(&relogin_mod);
+        if (login_rc != 0) {
+            ESP_LOGW(TAG, "login_ui: init() = %d on relock — falling back to console", login_rc);
+            break;
+        }
+        // Reauthenticated — loop back around and reload the launcher for
+        // the freshly-unlocked session.
+    }
+
+    if (have_systemui) {
+        systemui_mod.deinit();
+        claw_loader_unload(&systemui_mod);
+    }
+}
+#endif // CONFIG_PURR_LOGIN_UI_LVGL
+
+static void serial_console_task(void *arg)
+{
+    (void)arg;
+    // CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG already uses this same
+    // peripheral for output-only ESP_LOG mirroring, through a lighter
+    // internal path than this driver — confirmed live on real hardware,
+    // not assumed: this console's own banner/prompt and every ESP_LOG
+    // line (including ones firing mid-command, e.g. heapwatch) interleave
+    // correctly with no conflict, no dropped output, no hang. Still
+    // installed unconditionally here even though the interactive session
+    // below now prefers the on-device screen+keyboard — tdp_panic_console()
+    // (this file's own recoverable-panic path) uses this same peripheral,
+    // and it must already be live by the time a panic could ever reach it.
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    esp_err_t ret = usb_serial_jtag_driver_install(&cfg);
+    if (ret != ESP_OK) {
+        // A protected process returning IS the failure signal (see
+        // purr_kernel_start_protected()'s own doc comment) — no
+        // vTaskDelete(NULL) here any more. The earlier version of this
+        // function self-deleted on this exact path, which would have
+        // silently defeated that primitive's whole "no silent skip"
+        // point the moment it was actually needed.
+        ESP_LOGE(TAG, "usb_serial_jtag_driver_install failed: %s — console unavailable", esp_err_to_name(ret));
+        return;
+    }
+
+    purr_console_register_commands(s_tdp_console_cmds,
+        sizeof(s_tdp_console_cmds) / sizeof(s_tdp_console_cmds[0]));
+    purr_console_set_login_fn(purr_console_login_default_login_fn);
+    purr_console_set_exec_fn(purr_console_login_default_exec_fn);
+
+    // loginUI (source/apps/system/login_ui/) — deliberately SKIPPED on
+    // this device as of the uiconf/MiniWin effort (2026-09-13), by direct
+    // request: login happens at the console (a real text prompt) instead
+    // of any graphical/framebuffer-drawn login screen. Two real reasons,
+    // not just preference:
+    //   1. login_ui's own framebuffer variant draws directly via
+    //      catcall_display_t, with no coordination against MiniWin's own
+    //      periodic status-bar redraw (miniwin_module.c's own message-
+    //      pump task starts around the same point in boot) — confirmed
+    //      live: MiniWin's battery/clock status bar visibly bled straight
+    //      through login_ui's own screen, both drawing to the same
+    //      display with no shared lock between them.
+    //   2. Now that ui="miniwin" is real infrastructure apps actually
+    //      render through, a text console login is the simpler, more
+    //      reliable front door — no graphical login screen to keep in
+    //      sync with whichever UI backend a future device.pcat change
+    //      might select.
+    // logged_in_via_ui stays false unconditionally, so the console below
+    // runs with_login=true — a real interactive prompt
+    // (purr_console_login_default_login_fn(), registered just above).
+    bool logged_in_via_ui = false;
+
+    // The actual point of "console mode": type on the device's own
+    // keyboard, read its own screen — no cable to another machine
+    // required. Falls back to USB-Serial-JTAG only if no display ever
+    // registered (should not happen on this device — display is baked in
+    // at Phase 0, before this task ever starts — but this task returning
+    // outright over a display driver problem would be a strictly worse
+    // failure than "console reachable over the cable instead").
+    if (purr_fbtty_init()) {
+        purr_console_run(&purr_fbtty_io, !logged_in_via_ui);   // never returns
+    } else {
+        ESP_LOGW(TAG, "purr_fbtty_init failed (no display?) — falling back to USB-Serial-JTAG");
+        purr_console_run(&s_console_io, !logged_in_via_ui);    // never returns
+    }
+}
+
+// Registered with purr_kernel_set_panic_console_cb() — called from inside
+// panic_render()'s recoverable/UI_DISABLED branches, in whatever task
+// detected the failure (a crash-guard watchdog task, typically), NOT the
+// console task itself. purr_kernel_panic_ex() only blocks the task that
+// called it; every other task, including the normal console task above,
+// keeps running completely unaware anything went wrong — so without
+// stopping it first, that still-running console task and this function's
+// own purr_console_run() call would both read from the exact same
+// USB-Serial-JTAG peripheral at once.
+//
+// HISTORY, kept because it is the actual reason this looks the way it
+// does: the first version of this function called vTaskDelete() on the
+// old console task's handle instead of the request-stop dance below.
+// Confirmed live, hard, on real hardware: the old task can be ANYWHERE at
+// the instant of a panic, including mid-call inside usb_serial_jtag_
+// write_bytes() itself, and killing it there left that driver's internal
+// locking stuck — every subsequent call into it, including this
+// function's own first banner print, then silently blocked forever. The
+// device was not crashed (heapwatch and everything else kept running
+// normally) — only the console was ever reachable again, and it wasn't,
+// requiring a fresh flash to recover. purr_console_request_stop() (see
+// its own doc comment) exists specifically to avoid this: it only ever
+// stops the old loop between io->read_byte() calls, a point the driver is
+// always left clean at.
+static void tdp_panic_console(void)
+{
+    purr_console_request_stop();
+    // Comfortably longer than one read_byte(50) poll interval, so the old
+    // loop has definitely reached its own safe checkpoint and parked
+    // before this function starts using the same peripheral itself.
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    // with_login=false — see purr_console_run()'s own doc comment: this
+    // path must never depend on user_mgr/app_manager being in a working
+    // state, since it exists specifically for when something else in the
+    // system already isn't.
+    purr_console_run(&s_console_io, false);   // never returns
+}
+
+// ── Recovery-boot bounded bring-up ───────────────────────────────────────
+//
+// Only used when purr_crash_guard_pending_recovery() says this boot is
+// recovering from a hang-triggered reboot (see purr_crash_guard.c) — a
+// still-wedged SPI2 bus right after that reboot would otherwise just hang
+// SD mount / display init the exact same way, defeating the whole point.
+// On a normal cold boot these are never invoked; mount_sd_vfs()/
+// st7789_drv_init() run exactly as they always have, unwrapped.
+#define TDP_SD_MOUNT_TIMEOUT_MS      6000UL
+#define TDP_DISPLAY_INIT_TIMEOUT_MS  3000UL
+
+static void run_mount_sd_vfs(void *arg)
+{
+    (void)arg;
+    mount_sd_vfs();
+}
+
+typedef struct { int rc; } display_init_ctx_t;
+
+static void run_st7789_drv_init(void *arg)
+{
+    display_init_ctx_t *c = (display_init_ctx_t *)arg;
+    c->rc = st7789_drv_init();
+}
+
+// ── app_main ──────────────────────────────────────────────────────────────────
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "PURR OS %s / KITT %s  T-Deck Plus booting...",
+             PURR_KERNEL_VERSION, KITT_VERSION);
+
+    // NVS
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
+    // Prewarm the hardware AES lock while internal DRAM is still abundant.
+    // esp_aes_acquire_hardware() lazily creates its underlying mutex (via
+    // newlib's lock_init_generic() -> xQueueCreateMutex()) the FIRST time
+    // anything calls it — if that first call happens much later (e.g.
+    // meshtastic's periodic self-NodeInfo broadcast, after WiFi/BT/LoRa/app
+    // windows have already eaten most of internal DRAM), the allocation can
+    // fail and lock_init_generic() hard-aborts the whole device. Confirmed
+    // live via a real boot-time crash ("abort() was called ... /* No more
+    // semaphores available or OOM */" inside lock_init_generic, reached via
+    // esp_aes_acquire_hardware <- mesh_radio_aes_ctr). One throwaway
+    // acquire/release here — before anything else has a chance to touch
+    // internal DRAM — makes that lock permanently initialized so it can
+    // never fail this way again for the rest of the session.
+    esp_aes_acquire_hardware();
+    esp_aes_release_hardware();
+
+    mount_flash_vfs();
+    mount_app_config_vfs();
+
+    // Device quirk package — see source/modules/purr_quirk/. Must load
+    // before ANY of st7789_configure()/gt911_configure()/adc_battery's own
+    // module_init() run (all further down this function, or via the
+    // static module loader later), since each of those checks for a
+    // matching quirk block itself. /flash first (this device's own SPIFFS,
+    // just mounted above), /sdcard as a fallback for a swap-without-
+    // reflashing workflow, once ensure_sd_dirs() below has actually
+    // mounted it — see the second purr_quirk_load() call further down,
+    // right after that mount. Loading none here is not an error: every
+    // driver checking purr_quirk_get_block() falls back to its own
+    // compiled-in defaults when nothing is loaded, so a device that never
+    // ships a .purr file behaves exactly as it always has.
+    purr_quirk_load("/flash/quirks/device.purr");
+
+    // WiFi station mode: bring up esp_netif/esp_event/esp_wifi once here —
+    // not started/connected yet, just initialized so wifi_mgr.c (a
+    // plug-and-play module loaded below, driven by Settings) can scan/
+    // connect on demand. CONFIG_ESP_WIFI_ENABLED was already set in
+    // sdkconfig but nothing on this native boot path ever called into it.
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wifi_init_cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_LOGI(TAG, "WiFi station mode initialized (not connected yet)");
+
+    // ── Phase 0: baked-in hardware init ──────────────────────────────────────
+    //
+    // These run before ANY module is loaded, guaranteeing that display and
+    // touch catcalls exist when KittenUI's init() checks for them.
+
+    ESP_LOGI(TAG, "=== phase 0: baked-in drivers ===");
+
+    // GT911 has no RST pin on T-Deck Plus (NC per LilyGO utilities.h).
+    // INT=16, BOARD_POWERON=10.
+    // Drive INT LOW before BOARD_POWERON so GT911 latches address 0x5D on power-up,
+    // then release INT to input after 50ms startup margin.
+    gpio_set_direction(GPIO_NUM_16, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_16, 0);
+
+    gpio_set_direction(GPIO_NUM_10, GPIO_MODE_OUTPUT);
+    gpio_set_level(GPIO_NUM_10, 1);
+    ESP_LOGI(TAG, "BOARD_POWERON HIGH");
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Display and radio share this SPI bus with the SD card but haven't
+    // called spi_bus_add_device() yet at this point in boot — their CS
+    // pins (display=TDP_DISPLAY_CS, radio=TDP_LORA_CS) are still at
+    // whatever state they reset to, effectively floating. If either floats
+    // low while the SD card's own CMD52 probe clocks out, that chip can
+    // wake up and drive garbage back onto the shared MISO line, corrupting
+    // the very first transaction the SD card ever sees — independent of
+    // SPI host/clock/timing, which matches every mount failure logged here
+    // so far. Park both CS lines HIGH (deasserted) and pull up the shared
+    // MISO line before SD ever touches the bus.
+    gpio_set_direction((gpio_num_t)TDP_DISPLAY_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)TDP_DISPLAY_CS, 1);
+    gpio_set_direction((gpio_num_t)TDP_LORA_CS, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)TDP_LORA_CS, 1);
+    gpio_set_pull_mode((gpio_num_t)TDP_SD_MISO, GPIO_PULLUP_ONLY);
+
+    // NVS is already up (nvs_flash_init() above) — safe to peek here.
+    // Computed once, reused for both SD and display below; Phase 1's own
+    // module loading (purr_kernel_load_static_modules()) does its own,
+    // separate peek for the same reason.
+    // Name captured, not just the bool: a recovery from GAME MODE is worth
+    // telling the user about specifically. That path leaves the device with no
+    // UI backend loaded, so a game that faults during startup produces a black
+    // screen with no indication anything is wrong — the boot splash saying so
+    // is the only feedback available at that point.
+    char recover_name[32] = {0};
+    bool recovering = purr_crash_guard_pending_recovery(recover_name, sizeof(recover_name), NULL, 0);
+    bool from_game  = recovering && strcmp(recover_name, "speed_demon") == 0;
+    if (recovering) {
+        ESP_LOGW(TAG, "recovering from a hang-triggered reboot (%s) — bounding SD/display bring-up this boot",
+                 recover_name[0] ? recover_name : "unknown");
+    }
+
+    // SD card slot is on the same BOARD_POWERON peripheral rail as touch/etc.
+    // — mounting it before this GPIO went high meant the slot had no power
+    // yet, so the mount failed every time regardless of correct wiring.
+    // Must still run before st7789_drv_init() below — see mount_sd_vfs()'s
+    // comment (SD's own spi_bus_initialize() call must win the shared bus's
+    // pin config, in particular a real MISO pin).
+    if (recovering) {
+        if (!purr_kernel_run_bounded("sd_mount", run_mount_sd_vfs, NULL, TDP_SD_MOUNT_TIMEOUT_MS)) {
+            ESP_LOGE(TAG, "SD mount did not respond within %lu ms post-recovery — continuing without SD",
+                     (unsigned long)TDP_SD_MOUNT_TIMEOUT_MS);
+        }
+    } else {
+        mount_sd_vfs();
+    }
+    ensure_sd_dirs();
+
+    // Re-check for a quirk package on the SD card now that it's mounted —
+    // deliberately AFTER the /flash load earlier in this function, so an
+    // SD card's copy OVERRIDES the one baked into this build's own SPIFFS
+    // image (purr_quirk_load() replaces whatever was previously loaded).
+    // This is the actual "swap the device package without reflashing"
+    // capability: st7789_configure()/gt911_configure() and adc_battery's
+    // own module_init() all run AFTER this point, so whichever package won
+    // here is what they'll all see. Not present on the card is the normal
+    // case and not an error — see the /flash load's own comment.
+    purr_quirk_load("/sdcard/quirks/device.purr");
+
+    // Composite USB CDC+MSC — PAUSED. Confirmed live: with
+    // CONFIG_TINYUSB_CDC_ENABLED + the console switched off USB-Serial-JTAG
+    // (sdkconfig_tdeck_plus.overrides, see its own comment), the board
+    // never re-enumerated on the USB bus at all after flashing — not even
+    // as an unrecognized device — with no serial path left to diagnose why.
+    // Reverted alongside those sdkconfig options so the board goes back to
+    // its known-working USB-Serial-JTAG console. Re-enable only once the
+    // enumeration failure is understood, ideally testing the MSC-only path
+    // (no CDC, no console conflict) first since CDC's console takeover is
+    // the more likely culprit.
+#if 0
+    if (purr_kernel_sd_available()) {
+        if (usb_msc_init() == ESP_OK) {
+            purr_kernel_set_panic_usb_share_cb(tdp_usb_share_sd);
+        }
+    }
+#endif
+
+    gpio_set_direction(GPIO_NUM_16, GPIO_MODE_INPUT);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Display — ST7789 SPI
+    // ST7789 init includes a ~120ms SLPOUT delay internally, which counts
+    // toward the GT911's required 300ms startup time after BOARD_POWERON.
+    st7789_configure(TDP_DISPLAY_CS, TDP_DISPLAY_DC, TDP_DISPLAY_MOSI,
+                     -1, TDP_DISPLAY_SCLK, TDP_DISPLAY_RST, TDP_DISPLAY_BL);
+    // Default SPI2_HOST (st7789_set_spi_host() available if a future fix
+    // needs to move this — see mount_sd_vfs()'s comment).
+    //
+    // Clock-speed tuning (80/40/20/10MHz, all tried this session) only ever
+    // changed the ODDS of the shared-bus hang, never eliminated it — root
+    // cause is the SPI driver calls on both the display and radio side
+    // having no software timeout (see purr_crash_guard.c's new hang->reboot
+    // path). Deliberately back at the driver's 80MHz default here — this is
+    // now the FASTEST repro condition on purpose, to exercise that recovery
+    // path (hang -> reboot -> staged bring-up -> notify/dump) under test,
+    // not an attempt to avoid the hang.
+    st7789_set_spi_freq(80 * 1000 * 1000);
+    if (recovering) {
+        // On a normal cold boot, display-init failure is fatal (below) —
+        // the rest of the OS assumes a working screen. But on a recovery
+        // boot specifically, if the bus is STILL bad, purr_kernel_panic()
+        // would just reboot again straight back into this same state
+        // (pending-recovery isn't cleared until after Phase 1 — see
+        // below), looping forever. Degrade instead: log and continue with
+        // no display registered — purr_kernel_register_display() (called
+        // from inside st7789_drv_init() only on success) never runs, so
+        // s_display stays NULL, which the rest of the kernel already
+        // tolerates via its existing `if (disp)` guards.
+        // Heap-allocated, NOT a stack local — this is the actual bug that
+        // caused a real, live infinite reboot loop tonight. If
+        // st7789_drv_init() doesn't hang forever but just finishes some
+        // time after the timeout window (plausible right after a bus
+        // reset — slow, not permanently stuck), the zombie helper task
+        // writes into `dctx->rc` AFTER purr_kernel_run_bounded() already
+        // returned false and app_main() moved on. A stack local at that
+        // point is stale memory now holding something else — a silent
+        // stack corruption hitting at a near-identical point on every
+        // boot, which is exactly what was observed. load_one_static()'s
+        // own bounded call (purr_kernel.c) already did this correctly;
+        // this call site didn't — fixed to match.
+        display_init_ctx_t *dctx = (display_init_ctx_t *)calloc(1, sizeof(*dctx));
+        if (!dctx) {
+            ESP_LOGE(TAG, "display init: ctx alloc failed — falling back to unbounded call");
+            if (st7789_drv_init() != 0) {
+                ESP_LOGE(TAG, "display init failed post-recovery (unbounded fallback) — continuing without display");
+            }
+        } else {
+            dctx->rc = -1;
+            bool ok = purr_kernel_run_bounded("display_init", run_st7789_drv_init, dctx, TDP_DISPLAY_INIT_TIMEOUT_MS);
+            if (!ok) {
+                ESP_LOGE(TAG, "display init did not respond within %lu ms post-recovery — continuing without display",
+                         (unsigned long)TDP_DISPLAY_INIT_TIMEOUT_MS);
+                // Deliberately NOT freed — see purr_kernel_run_bounded()'s
+                // doc comment. The zombie task may still write into this
+                // later; freeing it here would just move the same bug
+                // from "stack" to "heap" (a use-after-free instead of a
+                // stack corruption) rather than fixing it.
+            } else {
+                if (dctx->rc != 0) {
+                    ESP_LOGE(TAG, "display init failed post-recovery (rc=%d) — continuing without display", dctx->rc);
+                }
+                free(dctx);
+            }
+        }
+    } else if (st7789_drv_init() != 0) {
+        purr_kernel_panic("ST7789 display init failed");
+    }
+
+    // Raw-framebuffer splash — drawn directly via catcall_display_t, well
+    // before any UI backend (Cupcake/MiniWin) has started (that happens in
+    // Phase 1 below). A no-op if display init above degraded to "continuing
+    // without display" on a recovery boot.
+    //
+    // A game-mode recovery says so explicitly. That boot is the aftermath of a
+    // game faulting while it owned the whole device with no UI loaded, so the
+    // user's last experience was a black screen with no explanation; the normal
+    // "Starting PURR OS..." would give them no reason to think anything had
+    // gone wrong, and no hint as to what.
+    if (from_game) {
+        purr_splash_show("Recovering from Game Mode", BOOT_SPLASH_STEPS);
+        purr_splash_status("game exited unexpectedly - restoring");
+    } else {
+        boot_splash_show();
+    }
+
+    // Perf mode: bulk-transfer PSRAM buffer for push_pixels — collapses
+    // per-row transfers into one per flush (see st7789.h's doc comment).
+    //
+    // RE-ENABLED. This was disabled after producing visible corruption
+    // (black rectangular chunks) and the note here blamed the buffer's own
+    // bookkeeping rather than cache coherency. Measurement says otherwise, and
+    // st7789_set_perf_mode() now allocates the buffer cache-line aligned and
+    // padded to whole lines — see its comment for why a partial line at either
+    // end is exactly what renders as a rectangular block.
+    //
+    // Why this is worth the second attempt: Step 0 of DP8_CHECKLIST.md measured
+    // the row-by-row path on real hardware at ~80-100us per SPI transaction
+    // against only ~18us of actual wire time. Roughly 83% of display time is
+    // per-transaction overhead, and this path is what removes it — 66
+    // transactions per flush should collapse to about 4.
+    //
+    // ROOT CAUSE, finally: the SPI transfer-length register is 18 bits, so one
+    // transaction can carry at most 2^18 bits = 32,768 bytes. A full 320x240
+    // frame is 153,600 and a single 80-line LVGL flush buffer is 51,200 — both
+    // were rejected outright with
+    //
+    //   E spi_master: check_trans_valid: txdata transfer > hardware max
+    //                 supported len
+    //
+    // and a rejected transfer sends NOTHING, so that region of GRAM kept
+    // whatever was in it. Hence black rectangular blocks. Small dirty rects
+    // stayed under the limit, which is why the trackball cursor still worked
+    // while opening an app did not.
+    //
+    // Neither hypothesis in DP8_CHECKLIST.md Step 1 was right — it was not
+    // cache alignment and not buffer lifetime. push_pixels now splits the push
+    // into chunks bounded by spi_bus_get_max_transaction_len(), which the panel
+    // cannot see: after RAMWR the ST7789 consumes a continuous pixel stream.
+    //
+    // Measured before this fix, small flushes already showed the payoff:
+    // 6 trans/flush at 1453us, down from 34 at 3251us.
+    st7789_set_perf_mode(true);
+
+    // Touch — GT911 I2C (creates I2C bus on port 0)
+    // GT911 needs ~300ms from BOARD_POWERON before I2C responds.
+    // Display init (SWRESET 150ms + ~30ms GRAM clear) counts toward that budget.
+    // Wait the remainder — 400ms gives comfortable margin.
+    // Use polling mode (int_pin=-1): avoids GPIO ISR and is simpler to diagnose.
+    vTaskDelay(pdMS_TO_TICKS(400));
+
+    // RST=17, matching PURR OS 0.11's devices/tdeck_plus/hal_touch.cpp
+    // exactly — this "plug and play" driver previously configured RST as
+    // not-connected (-1), skipping the hardware reset pulse 0.11 always
+    // did before talking to the chip. Found by direct comparison against
+    // 0.11's code once the touch instability traced back to "this only
+    // started after the driver became plug-and-play."
+    gt911_configure(18, 8, -1, 17, 0);   // SDA=18 SCL=8 poll-mode RST=17 port=0
+    if (gt911_drv_init() != 0) {
+        ESP_LOGW(TAG, "GT911 touch init failed — continuing without touch");
+    }
+
+    // Trackball — GPIO
+    if (trackball_drv_init() != 0) {
+        ESP_LOGW(TAG, "trackball init failed — continuing without trackball");
+    }
+
+
+    // Keyboard — BB Q20 (joins GT911's I2C bus on port 0)
+#if CONFIG_PURR_TDECK_PLUS_PHYSICAL_KEYBOARD
+    if (bbq20_drv_init() != 0) {
+        ESP_LOGW(TAG, "BB Q20 keyboard init failed — continuing without keyboard");
+    }
+#else
+    ESP_LOGI(TAG, "physical keyboard disabled via Kconfig — on-screen keyboard only");
+#endif
+
+    ESP_LOGI(TAG, "baked-in drivers ready");
+    boot_splash_advance();
+
+    // Checked here — after display/touch (Layer 0) are up, so the blue
+    // recoverable panic screen can actually render/accept touch if this
+    // trips, but before any P2/P3 module (including the UI backend
+    // itself) gets a chance to load. See purr_crash_guard.h for the full
+    // design: this correlates an unclean reset (a real hard crash) against
+    // a breadcrumb left over from the previous boot.
+    purr_crash_guard_check_reset_reason();
+
+    // ── Phase 1: plug-and-play modules ───────────────────────────────────────
+    //
+    // Only modules NOT baked in above: UI backend, app_manager, radio (SX1262),
+    // GPS, meshtastic. purr_register_static_modules() is generated by purrstrap
+    // from device.pcat and omits display/touch/trackball/keyboard for this device.
+    //
+    // sx1262_rl_configure() must run before purr_kernel_load_static_modules()
+    // below, since that's what calls the radio module's own module_init() ->
+    // sx1262_rl_init(), which reads these pins at SPI-bus-setup time.
+    //
+    // Guarded: this call is unconditional in source, but the SYMBOL only
+    // exists when source/drivers/radio/sx1262_rl/ is actually compiled,
+    // which is device.pcat's [drivers].radio choice, not anything this
+    // specialized kernel controls itself — a device with that cleared
+    // (the "minimal" build profile; see purrstrap.py's apply_build_profile())
+    // would otherwise fail at LINK time with "undefined reference to
+    // sx1262_rl_configure", the exact gap PURR_OS_1.0_CHECKLIST.md's
+    // "[drivers] are not freely toggleable on a device with a specialized
+    // kernel" entry described. PURR_HAS_RADIO_DRIVER is purrstrap-generated
+    // (see CoreOS/main/CMakeLists.txt); the #ifndef fallback below defaults
+    // to 1 so a build that bypasses purrstrap keeps today's behaviour.
+#ifndef PURR_HAS_RADIO_DRIVER
+#define PURR_HAS_RADIO_DRIVER 1
+#endif
+#if PURR_HAS_RADIO_DRIVER
+    sx1262_rl_configure(TDP_LORA_MOSI, TDP_LORA_MISO, TDP_LORA_SCLK,
+                         TDP_LORA_CS, TDP_LORA_RST, TDP_LORA_BUSY, TDP_LORA_IRQ);
+    // Default SPI2_HOST (sx1262_rl_set_spi_host() available if a future fix
+    // needs to move this — see mount_sd_vfs()'s comment).
+#else
+    ESP_LOGI(TAG, "drivers.radio unset in device.pcat — skipping sx1262_rl_configure()");
+#endif
+
+    ESP_LOGI(TAG, "=== phase 1: static modules ===");
+    extern void purr_register_static_modules(void);
+    purr_register_static_modules();
+    purr_kernel_load_static_modules();
+    boot_splash_advance();
+
+    // Ends the "recovering" window — every device (SD/display above,
+    // radio/UI/everything else via load_one_static()'s own gating inside
+    // purr_kernel_load_static_modules()) has now had its one bounded
+    // bring-up attempt for this boot. Must run AFTER the call above, not
+    // before — load_one_static() needs the flag still set while Phase 1
+    // is running.
+    if (recovering) {
+        purr_crash_guard_clear_pending_recovery();
+    }
+
+    // bt_mgr no longer brings the NimBLE controller/host up here (or
+    // anywhere in boot) — confirmed live that doing so unconditionally at
+    // boot permanently starved this board's small internal DMA-capable
+    // memory pool within seconds, breaking every SD card read (and
+    // therefore .meow/.hiss script loading) for the rest of boot.
+    // Bring-up is now lazy: bt_mgr_ensure_active() runs the first time a
+    // user actually asks for Bluetooth (Settings' toggle, or Meshtastic's
+    // BLE phone-companion toggle). See bt_mgr.h/mesh_ble.c for the full
+    // story.
+
+    // app_manager's own init() scans for apps before the P3 system apps
+    // (settings/about/terminal/fileman/calculator) have registered, so its
+    // first scan always finds 0. Re-scan now that every priority tier above
+    // has loaded — by here the registry is complete.
+    // Reuses `recovering`, captured earlier in this same function (Phase 0)
+    // — by this point purr_crash_guard_clear_pending_recovery() has already
+    // run, so re-reading the NVS flag here would incorrectly say "not
+    // recovering" even on a boot that very much still is. See
+    // app_manager_scan_ex()'s comment for why SD gets skipped specifically.
+    // Uses the cached wrapper (app_manager.h) instead of calling
+    // app_manager_scan_ex() directly — pre-linked apps are re-derived fresh
+    // every boot regardless (they're 100% deterministic per firmware), but
+    // the filesystem/personal-space walk is skipped whenever a valid cache
+    // exists for this exact firmware build and nothing has been flagged
+    // dirty (claw_loader_personal_add/remove, or a future "installed an
+    // app" call) since the last real scan.
+    extern int app_manager_scan_cached(bool include_sd);
+    app_manager_scan_cached(!recovering);
+
+    // claw_loader_selftest_run()/run2()/run3() calls removed — all THREE
+    // PASSED on real hardware. run(): resolving BOTH claw_personal_init and
+    // claw_personal_deinit through the real, promoted claw_loader module
+    // (source/modules/claw_loader/): "claw_personal_init() = 109 (expected
+    // 109)", clean deinit, "SELFTEST PASS". run2(): the named-host-function
+    // import table (claw_loader.c's s_imports[] / claw_elf.c's
+    // CLAW_SEC_EXTERN path) — a loaded module called purr_kernel_uptime_ms()
+    // BY NAME (not through a parameter it was handed) and got back a
+    // plausible live value: "claw_personal_init() = 3044 ... SELFTEST PASS
+    // (import table resolved purr_kernel_uptime_ms by name)". run3(): piece
+    // 2, personal-space SD storage (claw_loader_personal_add/count/at/load/
+    // remove) — full add->count->at->load->init/deinit->remove->count
+    // round-trip under a throwaway username, "SELFTEST PASS". Every round's
+    // 20s boot log was otherwise clean (no error/assert/panic lines). See
+    // claw_loader_selftest.c's own header comment for the full story. No
+    // reason to keep re-running these on every boot now that all three are
+    // confirmed; re-add whichever's needed when app_manager integration
+    // (piece 3) resumes.
+    // claw_loader_selftest_run()/run2()/run3()/run4() calls removed — ALL
+    // FOUR PASSED on real hardware, completing the full "named imports,
+    // per-user storage, app_manager launch path" arc:
+    //   run():  claw_personal_init/claw_personal_deinit resolved by name
+    //           through claw_loader, "claw_personal_init() = 109 (expected
+    //           109)" — SELFTEST PASS.
+    //   run2(): the named-host-function import table (claw_loader.c's
+    //           s_imports[] / claw_elf.c's CLAW_SEC_EXTERN path) — a loaded
+    //           module called purr_kernel_uptime_ms() BY NAME and got back
+    //           a plausible live value — SELFTEST PASS.
+    //   run3(): personal-space SD storage (claw_loader_personal_add/count/
+    //           at/load/remove) — full round-trip under a throwaway
+    //           username — SELFTEST PASS.
+    //   run4(): the app_manager integration (APP_TIER_PERSONAL, the
+    //           personal-app scan block, launch_personal()) exercised
+    //           through app_manager's REAL public API (scan/count/get/
+    //           launch_by_name/stop) under a throwaway user_mgr account:
+    //           found in the registry at tier=APP_TIER_PERSONAL, launched
+    //           (native app task init() returned rc=0, state went
+    //           RUNNING), stopped cleanly (deinit() + claw_loader_unload(),
+    //           state went STOPPED), throwaway account removed — SELFTEST
+    //           PASS. Every round's boot log was otherwise clean (no error/
+    //           assert/panic lines).
+    // See claw_loader_selftest.c's own header comment for the full story
+    // and each guest object's exact source. No reason to keep re-running
+    // these on every boot now that all four are confirmed.
+    //
+    // Re-verified live after claw_loader.c's claw_pool_t refactor (adding
+    // CLAW_POOL_SYSTEM/sys_claw alongside the original CLAW_POOL_DYNAMIC/
+    // claw_slot) — temporarily re-enabled run()/run4(), rebuilt, reflashed:
+    // both still PASS (run(): "loaded into slot 0/2 ... SELFTEST PASS";
+    // run4(): full app_manager launch/stop lifecycle, "SELFTEST PASS").
+    // run4() itself needed one real fix along the way, unrelated to the
+    // pool refactor: it never called app_manager_notify_unlocked() before
+    // checking the registry, so app_manager_get() correctly returned NULL
+    // for everything (the registry-lock feature postdates when this test
+    // was last actually run) — fixed in claw_loader_selftest.c itself.
+    extern void claw_loader_selftest_run(void);
+    (void)claw_loader_selftest_run;
+    extern void claw_loader_selftest_run2(void);
+    (void)claw_loader_selftest_run2;
+    extern void claw_loader_selftest_run3(void);
+    (void)claw_loader_selftest_run3;
+    extern void claw_loader_selftest_run4(void);
+    (void)claw_loader_selftest_run4;
+
+    // claw_loader_selftest_run5() call removed — PASSED on real hardware,
+    // and along the way found and fixed a real bug in claw_elf.c itself
+    // (see that file's own comment on the local-section relocation
+    // branch): the toolchain embeds a local relocation's real target
+    // offset as pre-existing bytes at the relocation site, not in
+    // r_addend (always 0) — silently correct for every offset-0 target
+    // (all guest3/4/5 and this object's own win_create field ever
+    // exercised), silently WRONG for anything at a nonzero offset
+    // (s_registered, at .bss+0xb0, corrupted s_ui.name at .bss+0 the
+    // moment `s_registered = 1;` ran). Confirmed via direct objdump -d/
+    // readelf -r inspection, not guessed, before fixing it.
+    //
+    // run5(): a loaded .claw object built a real catcall_ui_t AT RUNTIME
+    // (field-by-field assignment — a `static const` initializer would
+    // have failed differently, see guest_ui_o_bytes's own comment on why),
+    // called purr_kernel_register_ui() (reachable via purr_kernel.h's
+    // existing import-table entry), then drove its own just-registered
+    // struct directly (win_create -> win_show -> canvas_rect), reaching
+    // all the way through to a real catcall_display_t and moving real
+    // pixels: "claw_personal_init() = 0 (expect 0), purr_kernel_ui()
+    // after = 0x3fceb524 (name='guest_ui')" — SELFTEST PASS on the boot
+    // log; the white ~60x60 square this should have drawn on the physical
+    // screen was not independently confirmed by eye before this call was
+    // disabled — re-enable to check that specifically if it matters later.
+    // Either way this answers the loginUI/systemUI-launcher plan's biggest
+    // open question ("has anything UI-shaped ever loaded via claw_loader
+    // at all") — yes, proven live, registration and call chain both real.
+    extern void claw_loader_selftest_run5(void);
+    (void)claw_loader_selftest_run5;
+
+    // pairing_selftest_ecdh() call removed — PASSED on real hardware:
+    // "selftest: keygen A=1 B=1", "shared secrets match = 1", "pairing
+    // code A=5629 B=5629 match=1", "SELFTEST PASS". Confirms the ECDH math
+    // itself (pairing_module.c's Phase A of the remote-login work) is
+    // self-consistent — both simulated sides land on the identical shared
+    // secret and the identical derived pairing code. A real two-device
+    // handshake still needs a second physical board to verify end-to-end;
+    // this only proves the crypto, not the wire protocol between two real
+    // devices. Boot log otherwise clean (no error/assert/panic lines).
+    extern void pairing_selftest_ecdh(void);
+    (void)pairing_selftest_ecdh;
+
+    // pairing_selftest_userauth() call removed — PASSED on real hardware:
+    // "salt ok=1 len=16", "request ok=1 status=1 (pending)", "state after
+    // confirm = 2 (APPROVED)", "register ok=1 status=1", "challenge ok=1
+    // len=16", "verify (correct proof) ok=1 status=1", "wrong-proof
+    // correctly rejected = 1", "SELFTEST PASS". Confirms Phase B/C's RPC
+    // handlers (remote-login work) — SALT/REQUEST/confirm/REGISTER then
+    // CHALLENGE/VERIFY, both the success path and the negative (wrong
+    // proof rejected) case — all work correctly, exercised directly
+    // against a fake paired-device secret + a real throwaway user_mgr
+    // account. Boot log otherwise clean (no error/assert/panic lines).
+    extern void pairing_selftest_userauth(void);
+    (void)pairing_selftest_userauth;
+
+    // pairing_selftest_remote_oobe() call removed — PASSED on real
+    // hardware: "this device's own oobe_completed=1", "query (untrusted)
+    // = 0 (expect 0)", "query (trusted) = 0 (expect 0)", "push (untrusted)
+    // = 0 (expect 0)", "push (trusted, tampered) = 0 (expect 0)",
+    // "SKIPPING positive push case — this device's own OOBE is already
+    // complete" (this board completed its own OOBE during earlier testing
+    // this session, so the positive-path assertion correctly self-skipped
+    // — see the selftest's own doc comment on why that's expected, not a
+    // gap), "SELFTEST PASS". Confirms the trust-gating and GCM-encrypted
+    // exchange for pairing.h's Remote OOBE push (this session's Heltec
+    // work) all function correctly. Boot log otherwise clean (no error/
+    // assert/panic lines) — server_mgr, wifi_mgr, user_mgr all loaded
+    // (31/31 static modules initialised) alongside it.
+    extern void pairing_selftest_remote_oobe(void);
+    (void)pairing_selftest_remote_oobe;
+
+    purr_kernel_set_boot_ready(true);
+
+    // ── Phase 2: SD extras ───────────────────────────────────────────────────
+
+    if (purr_kernel_sd_available()) {
+        ESP_LOGI(TAG, "=== phase 2: SD extras ===");
+        // One-time snapshot of the MALLOC_CAP_DMA pool right at the point
+        // where live captures show "esp_dma_capable_malloc(172): Not
+        // enough heap memory" -> "sdmmc_read_blocks failed" starting to
+        // happen (this scan is the first thing to touch the SD card after
+        // bt_mgr/wifi_mgr/meshtastic have all loaded). purr_kernel.c's
+        // periodic heapwatch log only ticks every 2s and its first tick
+        // lands ~800ms+ after this point — too late to see the pool state
+        // at the actual moment of failure. dma_free is the reserved
+        // CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL pool specifically (32KB by
+        // default), distinct from and narrower than internal_free.
+        ESP_LOGW(TAG, "phase 2 DMA pool: dma_free=%u largest_dma=%u internal_free=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        purr_kernel_scan_modules("/sdcard/modules", NULL);
+        purr_kernel_scan_modules("/sdcard/drivers", NULL);
+    }
+
+    boot_splash_advance();
+
+    if (!purr_kernel_display()) {
+        ESP_LOGW(TAG, "no display catcall — check ST7789 init");
+    }
+    if (!purr_kernel_get_module("app_manager")) {
+        ESP_LOGW(TAG, "app_manager not loaded");
+    }
+
+    boot_splash_advance();   // final step — normally a UI backend's first paint supersedes this shortly after
+    // Console-only test phase (archive/ui_backends_v1/README.md): no UI
+    // backend exists right now to ever paint over the splash, so without
+    // this it sits on screen forever — indistinguishable from a real hang
+    // to anyone looking at the physical display, even though boot
+    // completed. Confirmed live: exactly this was reported as "the boot
+    // screen hangs" on real hardware before this line existed. Brief and
+    // soon superseded for real — purr_fbtty_init() (below, inside the
+    // console's own protected process) clears this and starts drawing
+    // the actual login prompt within a couple hundred ms.
+    purr_splash_status("Loading console...");
+    ESP_LOGI(TAG, "boot complete — %u bytes free", (unsigned)purr_kernel_free_ram());
+    purr_kernel_notify("PURR OS ready", "T-Deck Plus booted", "kernel");
+
+    // Protected process, not a raw xTaskCreate(): the login/recovery
+    // console must never be silently strike-disabled the way a
+    // misbehaving P2/P3 module can be — see purr_kernel_start_protected()'s
+    // own doc comment.
+    //
+    // 8192, not 4096 — this same task now also runs loginUI's LVGL backend
+    // (login_render_lvgl.c, when CONFIG_PURR_LOGIN_UI_LVGL) via login_
+    // lvgl_display_init()/lv_timer_handler(), and 4096 silently wasn't
+    // enough: confirmed live, purr_kernel_input_count() (a genuinely
+    // simple function) started reporting 0 from inside the loaded module
+    // even though the kernel log showed 2 real inputs registered moments
+    // earlier — corruption from a near-full stack, not a relocation or
+    // import-table bug, matched against the archived mochi_module.c's own
+    // LVGL render task, which already needed 8192 for the same reason
+    // (MOCHI_STACK_SIZE). The plain framebuffer backend never needed more
+    // than 4096 on its own; this is strictly for the LVGL path sharing
+    // this task now.
+    static const purr_protected_process_t s_console_proc = {
+        .name       = "console",
+        .run        = serial_console_task,
+        .arg        = NULL,
+        .stack_size = 8192,
+        .priority   = 1,
+        .core_id    = -1,
+    };
+    purr_kernel_start_protected(&s_console_proc);
+    purr_kernel_set_panic_console_cb(tdp_panic_console);
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
