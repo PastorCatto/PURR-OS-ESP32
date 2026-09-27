@@ -203,6 +203,66 @@ typedef struct PURR_PACKED {
 
 PURR_STATIC_ASSERT(sizeof(purr_handoff_t) == 16, "handoff layout changed");
 
+/* ------------------------------------------------------------------------- */
+/* Boot package (bootloader/SPEC.md section 9)                               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The payload of a boot package image (module subtype PURR_MOD_BOOTPKG) is this
+ * preamble, then `text_size` bytes of code, then `data_size` bytes of read-only and
+ * initialised data. The bootloader copies them into its reserved RAM window, zeroes
+ * `bss_size` bytes after the data, and calls `entry`.
+ *
+ * ESP32-S3 window: one block of internal SRAM that is seen twice, as data at
+ * 0x3FC88000 and as code at 0x40378000. The first 32 KB is code, the next 32 KB is
+ * data and bss. The package is linked for those addresses, so it needs no relocation.
+ * The window is free before the system is loaded and is overwritten by it.
+ */
+typedef struct PURR_PACKED {
+    uint32_t text_size;
+    uint32_t data_size;
+    uint32_t bss_size;
+    uint32_t entry;                           /* run address of purr_pkg_entry */
+} purr_pkg_preamble_t;
+
+PURR_STATIC_ASSERT(sizeof(purr_pkg_preamble_t) == 16, "package preamble layout changed");
+
+#define PURR_PKG_S3_TEXT_WRITE     0x3FC88000u   /* where the bootloader writes the code */
+#define PURR_PKG_S3_TEXT_RUN       0x40378000u   /* where the code runs */
+#define PURR_PKG_S3_DATA           0x3FC90000u
+#define PURR_PKG_S3_TEXT_MAX       0x8000u
+#define PURR_PKG_S3_DATA_MAX       0x8000u
+
+#define PURR_PKG_MAX_PARTS         8
+#define PURR_PKG_SERVICES_VERSION  1
+
+/* A bootable-or-not app slot, as the bootloader found it in the partition table. */
+typedef struct {
+    char    name[16];
+    uint8_t bootable;                         /* nonzero if it starts with a valid image */
+    uint8_t pad[3];
+} purr_boot_part_t;
+
+#define PURR_GPIO_OUT              0         /* push-pull output, starts low */
+#define PURR_GPIO_OPEN_DRAIN       1         /* output low or released; pulled up, readable */
+
+/* What the bootloader offers the package. */
+typedef struct {
+    uint32_t version;                         /* PURR_PKG_SERVICES_VERSION */
+    void (*log)(const char *line);
+    void (*delay_us)(uint32_t us);
+    /* Route a pin to the GPIO matrix in the given mode. Levels are then written by the
+     * package itself, straight to the GPIO registers. */
+    void (*gpio_setup)(int pin, int mode);
+} purr_boot_services_t;
+
+/*
+ * The package's entry. Returns the index in `parts` to boot, or -1 to leave the
+ * choice to the bootloader (the normal boot).
+ */
+typedef int (*purr_pkg_entry_fn)(const purr_boot_services_t *svc,
+                                 const purr_boot_part_t *parts, int nparts, int preferred);
+
 #ifdef __cplusplus
 }
 #endif

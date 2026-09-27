@@ -33,4 +33,9 @@ from inside the build directory.
 
 Builds for both chips. **Flashed and running on a T-Deck Plus** (ESP32-S3, 16 MB): it logs
 `PURR OS bootloader`, reads the partition table, boots slot 0, and hands off to the stub app.
-Not yet tested on the CYD 2.4C. No verification yet: it only picks a slot.
+Not yet tested on the CYD 2.4C.
+
+On the T-Deck Plus it now also loads the **boot package** (`bootpkg` partition, see SPEC.md section 9),
+which shows the boot menu on the screen and returns the slot to boot. Built with
+`python purrstrap/purrstrap.py bootpkg build`. The package is checked by hash only; signatures
+come with the key bag.

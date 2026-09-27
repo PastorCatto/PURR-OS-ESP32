@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "bootloader_init.h"
 #include "bootloader_utility.h"
+#include "purr_bootpkg.h"
 
 static const char *TAG = "purr_boot";
 
@@ -28,6 +29,12 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     if (boot_index == INVALID_INDEX) {
         ESP_LOGE(TAG, "no bootable app found");
         bootloader_reset();
+    }
+
+    /* The boot package shows the menu and may pick another slot. Without one, boot normally. */
+    int chosen = purr_bootpkg_run(&bs, boot_index);
+    if (chosen >= 0) {
+        boot_index = chosen;
     }
 
     ESP_LOGI(TAG, "booting app slot %d", boot_index);

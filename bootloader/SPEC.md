@@ -303,6 +303,38 @@ board that happens before the kernel lives in the **boot package**.
 - Entries are open. At least: boot normally, and boot KittenOS (recovery).
 - The bootloader acts on the returned choice: it sets the boot target and continues.
 
+**Decided for the first cut (T-Deck Plus, built and checked on hardware)**
+
+- **Partition:** a raw data partition named `bootpkg`, type data, subtype `0x40`, at `0x12000`,
+  56 KB, right after `phy_init`. The bootloader finds it by name in the partition table.
+- **RAM window (ESP32-S3):** the bottom of internal SRAM, which is free before the system
+  loads. It is seen twice: as data at `0x3FC88000` and as code at `0x40378000` (the two are the
+  same memory). The first 32 KB is code, the next 32 KB is data and bss. The package is linked
+  for those addresses. The addresses and the preamble are in `purr_abi.h`. Other chips get their
+  own window when their boards are done.
+- **Payload:** a 16-byte preamble (code size, data size, bss size, entry address), the code,
+  then the data. The payload length is a multiple of 4, because the bootloader's hardware SHA
+  only takes whole words.
+- **Checks:** magic, header version, chip, type and subtype, size, and the SHA-256 of the
+  payload. The signature is **not checked yet**, so an unsigned package is accepted. That is
+  allowed only while secure mode is off, and checking it comes with the key bag.
+- **Service table** (`purr_boot_services_t`): a version, `log`, `delay_us` and `gpio_setup`.
+  Flash reads are not offered, because the bootloader reads the partition table itself and hands
+  the package the list of app slots and which of them start with a valid image.
+- **Entry:** `purr_pkg_entry(services, parts, nparts, preferred)` returns the slot to boot, or
+  -1 to leave it to the bootloader.
+- **No drivers:** the package drives the panel with bit-banged SPI and the keyboard with
+  bit-banged I2C, writing the GPIO registers directly. It is slow (a few MHz) and needs no code
+  from the bootloader, so it stays small (about 4 KB). Bit-banging is only for the menu. The
+  kernel has real drivers.
+- **Menu rules:** in `PurrOS/components/coreos/src/purr_menu.c`, plain C with host tests. One
+  entry per bootable slot, a 3 second countdown that any key stops, and, when nothing can boot,
+  "Internet recovery" after 2 seconds. Internet recovery is a stub until Milestone 2, and the
+  package says so on screen and shows the menu again.
+- **Keys:** the T-Deck has no arrow keys, so menus use W and S to move and D or Enter to
+  choose. Text fields (the Wi-Fi password, for example) take the raw characters instead.
+- **Built by** `purrstrap bootpkg build`, which compiles, links, and wraps the result.
+
 **Fallback.** If the package is missing, invalid, or crashed the last time (a crash counter in
 `purrcfg`), the bootloader skips the menu. On a modular board it then starts KittenOS, which
 has its own filesystem reader, because without the package nothing can read the filesystem. If
@@ -320,10 +352,7 @@ verified file.
   so a compromised OS-signing key cannot touch trust state.
 - Whether KittenOS may replace the PURR OS image and edit `purrcfg` directly
   when secure boot is disabled, or whether that also needs a request.
-- The boot menu's timeout and entries, and the key or button per board.
-- The addresses of the RAM window, and the package's size limit.
 - Where the package crash counter lives in `purrcfg`.
-- The exact service table the bootloader offers the package.
-- Whether the boot package is one program with two modes (menu only on monolithic boards,
+- The RAM windows for the ESP32 (CYD 2.4C) and whether the package is one program with two modes (menu only on monolithic boards,
   loader on modular ones).
 - How the boot target is recorded in `purrcfg` and how KittenOS is started.

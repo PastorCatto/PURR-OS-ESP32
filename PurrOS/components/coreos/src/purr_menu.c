@@ -1,6 +1,6 @@
 #include "purr_menu.h"
 
-#include <string.h>
+/* No libc: this also runs in the boot package, which links none. */
 
 purr_key_t purr_key_from_char(char c)
 {
@@ -14,15 +14,22 @@ purr_key_t purr_key_from_char(char c)
 
 static void add_entry(purr_menu_t *m, const char *label, int part)
 {
-    strncpy(m->entries[m->count].label, label, PURR_MENU_LABEL_LEN - 1);
-    m->entries[m->count].label[PURR_MENU_LABEL_LEN - 1] = '\0';
+    char *dst = m->entries[m->count].label;
+    int i = 0;
+    for (; i < PURR_MENU_LABEL_LEN - 1 && label[i]; i++) {
+        dst[i] = label[i];
+    }
+    dst[i] = '\0';
     m->entries[m->count].part = part;
     m->count++;
 }
 
 void purr_menu_init(purr_menu_t *m, const purr_menu_part_t *parts, int nparts, int preferred)
 {
-    memset(m, 0, sizeof(*m));
+    char *raw = (char *)m;
+    for (unsigned i = 0; i < sizeof(*m); i++) {
+        raw[i] = 0;
+    }
     for (int i = 0; i < nparts && m->count < PURR_MENU_MAX_ENTRIES; i++) {
         if (parts[i].bootable) {
             if (i == preferred) {

@@ -1,5 +1,6 @@
-idf_component_register(SRCS "purr_boot.c"
-                       REQUIRES bootloader bootloader_support)
+idf_component_register(SRCS "purr_boot.c" "purr_bootpkg.c"
+                       INCLUDE_DIRS "." "${CMAKE_CURRENT_LIST_DIR}/../../../PurrOS/components/coreos/include"
+                       REQUIRES bootloader bootloader_support hal esp_rom soc spi_flash)
 
 # Same linker scripts as the stock bootloader main component
 idf_build_get_property(target IDF_TARGET)
