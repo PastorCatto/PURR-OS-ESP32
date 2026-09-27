@@ -10,8 +10,11 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "login.h"
 #include "purr_cfgstore.h"
 #include "purr_console.h"
 #include "purr_crypto_mbedtls.h"
@@ -74,6 +77,11 @@ static int need_fs(purr_cli_t *cli)
     }
     purr_cli_puts(cli, "no filesystem mounted (run: format --yes)\n");
     return 0;
+}
+
+purr_fs_t *purr_login_fs(void)
+{
+    return &s_fs;
 }
 
 void purr_fs_setup(purr_cli_t *cli)
@@ -675,6 +683,265 @@ static int cmd_purrcfg(purr_cli_t *cli, int argc, char **argv)
     return 0;
 }
 
+/* ---------------------------------------------------------------- accounts */
+
+static void console_puts_raw(const char *s)
+{
+    while (*s) {
+        purr_console_put(NULL, *s++);
+    }
+    purr_console_flush();
+}
+
+/* A masked line read directly from the keyboard, bypassing the shell's own line editor
+ * (which would echo it in the clear). Used for passwords typed mid-command. */
+static void read_masked_line(char *buf, size_t cap)
+{
+    size_t len = 0;
+    for (;;) {
+        char c = purr_kernel_key();
+        if (c == 0) {
+            vTaskDelay(pdMS_TO_TICKS(15));
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            break;
+        }
+        if ((c == '\b' || c == 0x7F) && len > 0) {
+            len--;
+            console_puts_raw("\b \b");
+            continue;
+        }
+        if (c >= 0x20 && c <= 0x7E && len < cap - 1) {
+            buf[len++] = c;
+            console_puts_raw("*");
+        }
+    }
+    buf[len] = '\0';
+    console_puts_raw("\n");
+}
+
+static int cmd_whoami(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    purr_cli_printf(cli, "%s%s\n", purr_login_current()->name, purr_login_is_root() ? " (root)" : "");
+    return 0;
+}
+
+static int cmd_id(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    const purr_user_t *u = purr_login_current();
+    purr_cli_printf(cli, "uid=%u(%s) role=%s%s\n", u->uid, u->name,
+                    u->role == PURR_ROLE_USER_ADMIN ? "admin" : "standard",
+                    purr_login_is_root() ? " root" : "");
+    return 0;
+}
+
+static int cmd_logout(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)cli; (void)argc; (void)argv;
+    purr_login_set_root(0);
+    purr_login_request_logout();
+    return 0;
+}
+
+static int cmd_su(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (purr_login_is_root()) {
+        purr_cli_puts(cli, "already root\n");
+        return 0;
+    }
+    if (purr_login_current()->role != PURR_ROLE_USER_ADMIN) {
+        purr_cli_puts(cli, "su: only an admin can do that\n");
+        return 1;
+    }
+    purr_cli_puts(cli, "password: ");
+    purr_console_flush();
+    char pass[64];
+    read_masked_line(pass, sizeof(pass));
+    int ok = purr_shadow_check(purr_login_shadow(), purr_login_current()->name, pass);
+    memset(pass, 0, sizeof(pass));
+    if (!ok) {
+        purr_cli_puts(cli, "su: incorrect password\n");
+        return 1;
+    }
+    purr_login_set_root(1);
+    return 0;
+}
+
+static int cmd_passwd(purr_cli_t *cli, int argc, char **argv)
+{
+    const char *target = argc > 1 ? argv[1] : purr_login_current()->name;
+    int is_self = strcmp(target, purr_login_current()->name) == 0;
+    if (!is_self && !purr_login_is_root() && purr_login_current()->role != PURR_ROLE_USER_ADMIN) {
+        purr_cli_puts(cli, "passwd: only an admin can change another account's password\n");
+        return 1;
+    }
+    if (purr_user_list_find(purr_login_users(), target) == NULL) {
+        purr_cli_printf(cli, "passwd: no such user '%s'\n", target);
+        return 1;
+    }
+    if (is_self) {
+        purr_cli_puts(cli, "current password: ");
+        purr_console_flush();
+        char current[64];
+        read_masked_line(current, sizeof(current));
+        int ok = purr_shadow_check(purr_login_shadow(), target, current);
+        memset(current, 0, sizeof(current));
+        if (!ok) {
+            purr_cli_puts(cli, "passwd: incorrect password\n");
+            return 1;
+        }
+    }
+    purr_cli_puts(cli, "new password: ");
+    purr_console_flush();
+    char pass1[64], pass2[64];
+    read_masked_line(pass1, sizeof(pass1));
+    purr_cli_puts(cli, "confirm: ");
+    purr_console_flush();
+    read_masked_line(pass2, sizeof(pass2));
+    if (strcmp(pass1, pass2) != 0 || pass1[0] == '\0') {
+        memset(pass1, 0, sizeof(pass1));
+        memset(pass2, 0, sizeof(pass2));
+        purr_cli_puts(cli, "passwd: those did not match, or were empty\n");
+        return 1;
+    }
+    uint8_t salt[PURR_SALT_LEN];
+    purr_login_random_salt(salt);
+    purr_shadow_set(purr_login_shadow(), target, pass1, salt, PURR_PBKDF2_ITERATIONS);
+    memset(pass1, 0, sizeof(pass1));
+    memset(pass2, 0, sizeof(pass2));
+    if (purr_login_persist() != 0) {
+        purr_cli_puts(cli, "passwd: could not save\n");
+        return 1;
+    }
+    purr_cli_puts(cli, "password changed\n");
+    return 0;
+}
+
+static int require_admin(purr_cli_t *cli)
+{
+    if (purr_login_is_root() || purr_login_current()->role == PURR_ROLE_USER_ADMIN) {
+        return 1;
+    }
+    purr_cli_puts(cli, "only an admin can do that\n");
+    return 0;
+}
+
+static int cmd_useradd(purr_cli_t *cli, int argc, char **argv)
+{
+    if (!require_admin(cli)) {
+        return 1;
+    }
+    if (argc < 2) {
+        purr_cli_puts(cli, "usage: useradd <name> [admin|standard]\n");
+        return 1;
+    }
+    purr_user_role_t role = PURR_ROLE_USER_STANDARD;
+    if (argc > 2) {
+        if (strcmp(argv[2], "admin") == 0) {
+            role = PURR_ROLE_USER_ADMIN;
+        } else if (strcmp(argv[2], "standard") != 0) {
+            purr_cli_puts(cli, "usage: useradd <name> [admin|standard]\n");
+            return 1;
+        }
+    }
+    uint8_t uid = purr_user_next_uid(purr_login_users());
+    int r = purr_user_list_add(purr_login_users(), argv[1], uid, role);
+    if (r != PURR_USER_ADDED) {
+        purr_cli_printf(cli, "useradd: %s\n", r == PURR_USER_EXISTS ? "already exists" :
+                        r == PURR_USER_FULL ? "too many accounts" : "invalid name");
+        return 1;
+    }
+    purr_cli_puts(cli, "set their password:\n");
+    purr_console_flush();
+    char pass1[64], pass2[64];
+    purr_cli_puts(cli, "new password: ");
+    purr_console_flush();
+    read_masked_line(pass1, sizeof(pass1));
+    purr_cli_puts(cli, "confirm: ");
+    purr_console_flush();
+    read_masked_line(pass2, sizeof(pass2));
+    if (strcmp(pass1, pass2) != 0 || pass1[0] == '\0') {
+        memset(pass1, 0, sizeof(pass1));
+        memset(pass2, 0, sizeof(pass2));
+        purr_user_list_remove(purr_login_users(), argv[1]);
+        purr_cli_puts(cli, "useradd: those did not match, or were empty; not created\n");
+        return 1;
+    }
+    uint8_t salt[PURR_SALT_LEN];
+    purr_login_random_salt(salt);
+    purr_shadow_set(purr_login_shadow(), argv[1], pass1, salt, PURR_PBKDF2_ITERATIONS);
+    memset(pass1, 0, sizeof(pass1));
+    memset(pass2, 0, sizeof(pass2));
+    if (purr_login_persist() != 0) {
+        purr_cli_puts(cli, "useradd: could not save\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s created (uid %u, %s)\n", argv[1], uid, role == PURR_ROLE_USER_ADMIN ? "admin" : "standard");
+    return 0;
+}
+
+static int cmd_userdel(purr_cli_t *cli, int argc, char **argv)
+{
+    if (!require_admin(cli)) {
+        return 1;
+    }
+    if (argc < 2) {
+        purr_cli_puts(cli, "usage: userdel <name>\n");
+        return 1;
+    }
+    if (strcmp(argv[1], purr_login_current()->name) == 0) {
+        purr_cli_puts(cli, "userdel: cannot delete the account you are logged in as\n");
+        return 1;
+    }
+    if (purr_user_is_last_admin(purr_login_users(), argv[1])) {
+        purr_cli_puts(cli, "userdel: refusing to remove the last admin\n");
+        return 1;
+    }
+    if (!purr_user_list_remove(purr_login_users(), argv[1])) {
+        purr_cli_printf(cli, "userdel: no such user '%s'\n", argv[1]);
+        return 1;
+    }
+    purr_shadow_list_remove(purr_login_shadow(), argv[1]);
+    if (purr_login_persist() != 0) {
+        purr_cli_puts(cli, "userdel: could not save\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s removed\n", argv[1]);
+    return 0;
+}
+
+static int cmd_usermod(purr_cli_t *cli, int argc, char **argv)
+{
+    if (!require_admin(cli)) {
+        return 1;
+    }
+    if (argc < 3 || (strcmp(argv[2], "admin") != 0 && strcmp(argv[2], "standard") != 0)) {
+        purr_cli_puts(cli, "usage: usermod <name> admin|standard\n");
+        return 1;
+    }
+    purr_user_t *u = purr_user_list_find(purr_login_users(), argv[1]);
+    if (u == NULL) {
+        purr_cli_printf(cli, "usermod: no such user '%s'\n", argv[1]);
+        return 1;
+    }
+    purr_user_role_t role = strcmp(argv[2], "admin") == 0 ? PURR_ROLE_USER_ADMIN : PURR_ROLE_USER_STANDARD;
+    if (role == PURR_ROLE_USER_STANDARD && purr_user_is_last_admin(purr_login_users(), argv[1])) {
+        purr_cli_puts(cli, "usermod: refusing to demote the last admin\n");
+        return 1;
+    }
+    u->role = role;
+    if (purr_login_persist() != 0) {
+        purr_cli_puts(cli, "usermod: could not save\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s is now %s\n", argv[1], role == PURR_ROLE_USER_ADMIN ? "admin" : "standard");
+    return 0;
+}
+
 static const purr_cmd_t s_cmds[] = {
     {"help",    "list the commands",             purr_cli_cmd_help},
     {"version", "show the system and profile",   cmd_version},
@@ -697,6 +964,14 @@ static const purr_cmd_t s_cmds[] = {
     {"clear",   "clear the screen",              cmd_clear},
     {"reboot",  "restart (or recovery|loader)",  cmd_reboot},
     {"purrcfg", "show the boot config",          cmd_purrcfg},
+    {"whoami",  "the logged-in user",            cmd_whoami},
+    {"id",      "uid, role and root state",      cmd_id},
+    {"su",      "become root (own password)",    cmd_su},
+    {"passwd",  "change a password",             cmd_passwd},
+    {"useradd", "add an account (admin only)",   cmd_useradd},
+    {"userdel", "remove an account (admin only)", cmd_userdel},
+    {"usermod", "change a role (admin only)",    cmd_usermod},
+    {"logout",  "end the session",               cmd_logout},
 };
 
 const purr_cmd_t *purr_commands(int *count)

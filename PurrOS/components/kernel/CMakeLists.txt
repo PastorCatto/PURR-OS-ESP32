@@ -10,6 +10,7 @@ set(srcs
     "src/purr_netrec.c"
     "src/purr_fetch.c"
     "src/purr_crypto_mbedtls.c"
+    "src/purr_userstore.c"
     "src/purr_font_data.c")
 
 if(CONFIG_PURR_BOARD_TDECK_PLUS)

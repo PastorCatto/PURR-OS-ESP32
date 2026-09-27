@@ -3,6 +3,10 @@
 #define PURR_COMMANDS_H
 
 #include "purr_cli.h"
+#include "purr_fs.h"
+
+/* The shared, already-mounted root filesystem, for login.c's account files. */
+purr_fs_t *purr_login_fs(void);
 
 /* The table of commands for this build's profile. */
 const purr_cmd_t *purr_commands(int *count);
