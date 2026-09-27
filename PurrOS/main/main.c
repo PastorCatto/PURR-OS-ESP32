@@ -43,6 +43,7 @@ void app_main(void)
     purr_cli_init(&cli, cmds, n, purr_console_put, NULL, prompt);
 
     purr_cli_printf(&cli, "%s shell\n", purr_system_name());
+    purr_fs_setup(&cli);
     purr_cli_puts(&cli, "Type help for the commands.\n\n");
     purr_cli_prompt(&cli);
     purr_console_flush();
