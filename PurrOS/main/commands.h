@@ -10,4 +10,7 @@ const purr_cmd_t *purr_commands(int *count);
 /* What this build calls itself, e.g. "KittenOS" or "PURR OS". */
 const char *purr_system_name(void);
 
+/* Mount the root filesystem and say how it went. */
+void purr_fs_setup(purr_cli_t *cli);
+
 #endif

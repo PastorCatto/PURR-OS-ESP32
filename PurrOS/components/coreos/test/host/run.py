@@ -19,6 +19,9 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORE = os.path.abspath(os.path.join(HERE, "..", ".."))
 BUILD = os.path.join(HERE, "build")
+COMPONENTS = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+LFS = os.path.join(COMPONENTS, "littlefs")
+KERNEL = os.path.join(COMPONENTS, "kernel")
 
 
 def find_gcc():
@@ -82,8 +85,12 @@ def main(argv):
 
     os.makedirs(BUILD, exist_ok=True)
     src = sorted(glob.glob(os.path.join(CORE, "src", "*.c")))
+    # The filesystem layer is kernel code, but it is plain C over an abstract block device,
+    # so it is tested here against a RAM disk. LittleFS itself is third-party.
+    src.append(os.path.join(KERNEL, "src", "purr_fs.c"))
     common = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
-              "-I", os.path.join(CORE, "include"), "-I", HERE, "-I", uecc]
+              "-I", os.path.join(CORE, "include"), "-I", os.path.join(KERNEL, "include"),
+              "-I", LFS, "-I", HERE, "-I", uecc]
 
     # Third-party code is compiled once, without our warning flags.
     uecc_obj = os.path.join(BUILD, "uECC.o")
@@ -93,6 +100,16 @@ def main(argv):
         print(res.stdout + res.stderr)
         return 2
 
+    lfs_objs = []
+    for name in ("lfs.c", "lfs_util.c"):
+        obj = os.path.join(BUILD, name[:-2] + ".o")
+        res = run([gcc, "-std=c11", "-O1", "-w", "-DLFS_NO_DEBUG", "-DLFS_NO_WARN",
+                   "-DLFS_NO_ERROR", "-I", LFS, "-c", os.path.join(LFS, name), "-o", obj])
+        if res.returncode != 0:
+            print(res.stdout + res.stderr)
+            return 2
+        lfs_objs.append(obj)
+
     tests = sorted(glob.glob(os.path.join(HERE, "test_*.c")))
     if argv:
         tests = [t for t in tests if any(a in os.path.basename(t) for a in argv)]
@@ -101,7 +118,7 @@ def main(argv):
         name = os.path.splitext(os.path.basename(test))[0]
         exe = os.path.join(BUILD, name + (".exe" if os.name == "nt" else ""))
         cmd = [gcc] + common + [test, os.path.join(HERE, "crypto_uecc.c")] + src + \
-              [uecc_obj, "-o", exe]
+              [uecc_obj] + lfs_objs + ["-o", exe]
         if os.name == "nt":
             cmd.append("-ladvapi32")
         res = run(cmd)
