@@ -18,12 +18,13 @@ menu "PURR OS profile"
 
     config PURR_RECOVERY_MANIFEST_URL
         string "Recovery manifest URL"
-        depends on PURR_PROFILE_MINIMAL
         default "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/INTERN/recovery.manifest"
         help
-            Where the recovery loader fetches the recovery manifest (OTA/SPEC.md section 5)
-            from, over HTTPS. The KittenOS image it names is fetched from the same URL's
-            directory. Set this to a real release's manifest before building for a device
-            that needs to recover over the internet.
+            Where the recovery manifest (OTA/SPEC.md section 5) is fetched from, over HTTPS.
+            The recovery loader (minimal profile) uses this on its own for KittenOS; KittenOS
+            itself (recovery profile) uses it for the shell's "net install" (Install/SPEC.md),
+            which installs PURR OS. Named images are fetched from the same URL's directory.
+            Set this to a real release's manifest before building for a device that needs to
+            recover or install over the internet.
 
 endmenu

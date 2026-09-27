@@ -1,11 +1,2 @@
 # CoreOS profile: minimal (recovery loader)
 CONFIG_PURR_PROFILE_MINIMAL=y
-
-# Where the recovery loader fetches the recovery manifest from. Kept here (not just as the
-# Kconfig default) so it is not silently stuck on a stale value in an already-configured
-# build directory.
-CONFIG_PURR_RECOVERY_MANIFEST_URL="https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/INTERN/recovery.manifest"
-
-# HTTPS (mbedtls/esp-tls) plus the ECDSA P-256 verify all run on the main task; the 8 KB
-# default (raised for LittleFS on the other profiles) is not enough and overflows.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

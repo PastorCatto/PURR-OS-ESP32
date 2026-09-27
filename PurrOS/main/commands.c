@@ -5,6 +5,7 @@
 
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -13,10 +14,24 @@
 
 #include "purr_cfgstore.h"
 #include "purr_console.h"
+#include "purr_crypto_mbedtls.h"
+#include "purr_fetch.h"
 #include "purr_fs.h"
-#include "purr_net.h"
-#include "purr_wifi.h"
 #include "purr_kernel.h"
+#include "purr_manifest.h"
+#include "purr_net.h"
+#include "purr_util.h"
+#include "purr_verify.h"
+#include "purr_wifi.h"
+
+extern const purr_key_t purr_default_keys[];
+extern const size_t purr_default_keys_count;
+
+#if CONFIG_IDF_TARGET_ESP32S3
+#define NET_INSTALL_CHIP PURR_CHIP_ESP32S3
+#else
+#define NET_INSTALL_CHIP PURR_CHIP_ESP32
+#endif
 
 #define VERSION "0.1.0"
 
@@ -212,9 +227,182 @@ void purr_net_setup(purr_cli_t *cli)
     }
 }
 
+/* ---------------------------------------------------------------- net install */
+
+typedef struct {
+    const uint8_t *base;
+    size_t size;
+} install_mem_ctx_t;
+
+static int install_mem_read(void *ctx, uint32_t offset, void *buf, uint32_t len)
+{
+    install_mem_ctx_t *m = ctx;
+    if ((uint64_t)offset + len > m->size) {
+        return -1;
+    }
+    memcpy(buf, m->base + offset, len);
+    return 0;
+}
+
+/* Resolves `name` against the directory `base_url` sits in, same as the recovery loader. */
+static void resolve_manifest_url(const char *base_url, const char *name, char *out, size_t cap)
+{
+    const char *slash = strrchr(base_url, '/');
+    size_t dir_len = slash ? (size_t)(slash - base_url) + 1 : 0;
+    if (dir_len >= cap) {
+        dir_len = 0;
+    }
+    memcpy(out, base_url, dir_len);
+    snprintf(out + dir_len, cap - dir_len, "%s", name);
+}
+
+/* Installs a component from the recovery manifest into ota_0 (Install/SPEC.md's network
+ * install, run from an already-working system instead of the recovery loader). Defaults to
+ * "purros"; a component name can be given to fetch something else the manifest lists. */
+static int cmd_net_install(purr_cli_t *cli, int argc, char **argv)
+{
+    const char *component = argc > 1 ? argv[1] : "purros";
+    purr_cli_printf(cli, "netinstall: %s\n", component);
+    purr_console_flush();
+
+    purr_net_status_t st;
+    purr_net_status(&st);
+    if (!st.connected) {
+        purr_cli_puts(cli, "not connected. run: wifi connect <ssid> [password]\n");
+        return 1;
+    }
+
+    purr_cli_puts(cli, "fetching the recovery manifest...\n");
+    purr_console_flush();
+    uint8_t *manifest_buf = NULL;
+    size_t manifest_len = 0;
+    if (purr_fetch_alloc(CONFIG_PURR_RECOVERY_MANIFEST_URL, &manifest_buf, &manifest_len,
+                         32 * 1024) != ESP_OK) {
+        purr_cli_puts(cli, "could not fetch the manifest\n");
+        return 1;
+    }
+    purr_manifest_t man;
+    purr_manifest_parse(&man, (const char *)manifest_buf, manifest_len);
+    free(manifest_buf);
+
+    const purr_manifest_entry_t *entry = purr_manifest_find(&man, component, CONFIG_IDF_TARGET,
+                                                             purr_board()->name);
+    if (entry == NULL) {
+        purr_cli_printf(cli, "no %s entry for this board in the manifest\n", component);
+        return 1;
+    }
+    purr_cli_printf(cli, "found %s %s (%u bytes)\n", component, entry->version, (unsigned)entry->size);
+
+    char image_url[256];
+    resolve_manifest_url(CONFIG_PURR_RECOVERY_MANIFEST_URL, entry->file, image_url, sizeof(image_url));
+    purr_cli_printf(cli, "downloading %s...\n", entry->file);
+    purr_console_flush();
+
+    uint8_t *image = NULL;
+    size_t image_len = 0;
+    if (purr_fetch_alloc(image_url, &image, &image_len, 2 * 1024 * 1024) != ESP_OK) {
+        purr_cli_puts(cli, "download failed\n");
+        return 1;
+    }
+    uint8_t got_hash[PURR_SHA256_LEN];
+    purr_sha256(image, image_len, got_hash);
+    if (image_len != entry->size || memcmp(got_hash, entry->sha256, PURR_SHA256_LEN) != 0) {
+        free(image);
+        purr_cli_puts(cli, "download does not match the manifest (size or hash)\n");
+        return 1;
+    }
+
+    purr_cli_puts(cli, "verifying...\n");
+    purr_console_flush();
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
+    purr_verify_env_t env = {
+        .chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
+    };
+    install_mem_ctx_t rdctx = {image, image_len};
+    purr_image_header_t hdr;
+    purr_verify_result_t vr = purr_image_verify(&env, install_mem_read, &rdctx, (uint32_t)image_len, &hdr);
+
+    if (hdr.magic != PURR_IMAGE_MAGIC || hdr.image_type != PURR_IMG_OS) {
+        free(image);
+        purr_cli_puts(cli, "not a PURR OS image\n");
+        return 1;
+    }
+    if (vr != PURR_V_OK && cfg.secure_mode != PURR_SECURE_OFF) {
+        free(image);
+        purr_cli_printf(cli, "verification failed: %s\n", purr_verify_name(vr));
+        return 1;
+    }
+    if (vr != PURR_V_OK) {
+        purr_cli_printf(cli, "unverified (%s), accepted because secure mode is off\n",
+                        purr_verify_name(vr));
+    }
+
+    const esp_partition_t *slot = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
+                                                            ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    if (slot == NULL) {
+        free(image);
+        purr_cli_puts(cli, "no ota_0 partition on this board\n");
+        return 1;
+    }
+    if (hdr.payload_size > slot->size) {
+        free(image);
+        purr_cli_puts(cli, "the image is bigger than the ota_0 partition\n");
+        return 1;
+    }
+
+    purr_cli_puts(cli, "writing to ota_0...\n");
+    purr_console_flush();
+    const uint8_t *payload = image + hdr.payload_offset;
+    if (esp_partition_erase_range(slot, 0, slot->size) != ESP_OK ||
+        esp_partition_write(slot, 0, payload, hdr.payload_size) != ESP_OK) {
+        free(image);
+        purr_cli_puts(cli, "write failed\n");
+        return 1;
+    }
+
+    /* Read back and compare, rather than trust the write. */
+    uint8_t chunk[512];
+    purr_sha256_t sha;
+    uint8_t digest[PURR_SHA256_LEN];
+    purr_sha256_init(&sha);
+    for (uint32_t off = 0; off < hdr.payload_size; off += sizeof(chunk)) {
+        uint32_t n = hdr.payload_size - off;
+        if (n > sizeof(chunk)) {
+            n = sizeof(chunk);
+        }
+        if (esp_partition_read(slot, off, chunk, n) != ESP_OK) {
+            free(image);
+            purr_cli_puts(cli, "read-back failed\n");
+            return 1;
+        }
+        purr_sha256_update(&sha, chunk, n);
+    }
+    purr_sha256_final(&sha, digest);
+    free(image);
+    if (memcmp(digest, hdr.payload_sha256, sizeof(digest)) != 0) {
+        purr_cli_puts(cli, "read-back hash mismatch: the write did not take\n");
+        return 1;
+    }
+
+    if (esp_ota_set_boot_partition(slot) != ESP_OK) {
+        purr_cli_puts(cli, "installed, but could not set it as the boot target\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s %s installed. Run: reboot\n", component, hdr.version);
+    return 0;
+}
+
 static int cmd_net(purr_cli_t *cli, int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    (void)argc;
+    (void)argv;
     purr_net_status_t st;
     purr_net_status(&st);
     if (st.connected) {
@@ -503,7 +691,8 @@ static const purr_cmd_t s_cmds[] = {
     {"df",      "filesystem space",              cmd_df},
     {"format",  "erase and create the fs",       cmd_format},
     {"wifi",    "scan|connect|forget|list|status", cmd_wifi},
-    {"net",     "connection status",             cmd_net},
+    {"net",       "connection status",             cmd_net},
+    {"netinstall", "install [component] over the network", cmd_net_install},
     {"echo",    "print the arguments",           cmd_echo},
     {"clear",   "clear the screen",              cmd_clear},
     {"reboot",  "restart (or recovery|loader)",  cmd_reboot},

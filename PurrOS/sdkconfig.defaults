@@ -2,4 +2,9 @@
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# The recovery manifest (OTA/SPEC.md section 5): used by the recovery loader on its own,
+# and by KittenOS's "net install". Kept here (not just as the Kconfig default) so it is
+# not silently stuck on a stale value in an already-configured build directory.
+CONFIG_PURR_RECOVERY_MANIFEST_URL="https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/INTERN/recovery.manifest"
