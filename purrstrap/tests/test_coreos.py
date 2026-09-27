@@ -22,12 +22,13 @@ def touch(root, rel, text=""):
 
 
 def full_project(root):
-    for name in ("CMakeLists.txt", "partitions.csv", "sdkconfig.defaults"):
+    for name in ("CMakeLists.txt", "sdkconfig.defaults"):
         touch(root, f"PurrOS/{name}")
-    for t in coreos.TARGETS:
-        touch(root, f"PurrOS/sdkconfig.defaults.{t}")
-    for f in coreos.PROFILES:
-        touch(root, f"PurrOS/sdkconfig.profile.{f}")
+    for b in coreos.BOARDS:
+        touch(root, f"PurrOS/sdkconfig.board.{b}")
+        touch(root, f"PurrOS/partitions/{b}.csv")
+    for p in coreos.PROFILES:
+        touch(root, f"PurrOS/sdkconfig.profile.{p}")
 
 
 class FindIdfTests(unittest.TestCase):
@@ -77,12 +78,13 @@ class FindIdfTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_idf_args(self):
-        args = coreos.idf_args("esp32", "recovery")
-        self.assertEqual(args[:3], ["idf.py", "-B", "build/esp32-recovery"])
-        self.assertIn("IDF_TARGET=esp32", args)
-        self.assertIn("SDKCONFIG=build/esp32-recovery/sdkconfig", args)
-        self.assertIn("SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.defaults.esp32;"
+        args = coreos.idf_args("cyd_24c", "recovery")
+        self.assertEqual(args[:3], ["idf.py", "-B", "build/cyd_24c-recovery"])
+        self.assertIn("IDF_TARGET=esp32", args)                    # the board decides the chip
+        self.assertIn("SDKCONFIG=build/cyd_24c-recovery/sdkconfig", args)
+        self.assertIn("SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.board.cyd_24c;"
                       "sdkconfig.profile.recovery", args)
+        self.assertIn("IDF_TARGET=esp32s3", coreos.idf_args("tdeck_plus", "full"))
 
     def test_wrap_active_is_unchanged(self):
         idf = coreos.Idf("active")
@@ -120,14 +122,14 @@ class ActionTests(unittest.TestCase):
     def test_project_problems_lists_missing_files(self):
         touch(self.root, "PurrOS/CMakeLists.txt")
         problems = coreos.project_problems(os.path.join(self.root, "PurrOS"),
-                                           "esp32", "recovery")
-        self.assertIn("PurrOS/partitions.csv is missing", problems)
+                                           "tdeck_plus", "recovery")
+        self.assertIn("PurrOS/partitions/tdeck_plus.csv is missing", problems)
         self.assertIn("PurrOS/sdkconfig.profile.recovery is missing", problems)
         self.assertNotIn("PurrOS/CMakeLists.txt is missing", problems)
 
     def test_build_refuses_when_project_incomplete(self):
         with mock.patch.object(self.ctx, "run") as run:
-            code = coreos.build(self.ctx, "esp32", "recovery", False)
+            code = coreos.build(self.ctx, "tdeck_plus", "recovery", False)
         self.assertEqual(code, 1)
         run.assert_not_called()
         self.assertIn("is missing", self.out.getvalue())
@@ -136,7 +138,7 @@ class ActionTests(unittest.TestCase):
         full_project(self.root)
         with mock.patch.object(coreos, "find_idf", return_value=self.idf), \
                 mock.patch.object(self.ctx, "run", return_value=0) as run:
-            code = coreos.build(self.ctx, "esp32s3", "full", False)
+            code = coreos.build(self.ctx, "tdeck_plus", "full", False)
         self.assertEqual(code, 0)
         argv = run.call_args.args[0]
         self.assertEqual(argv[-1], "build")
@@ -148,31 +150,31 @@ class ActionTests(unittest.TestCase):
         full_project(self.root)
         with mock.patch.object(coreos, "find_idf", return_value=self.idf), \
                 mock.patch.object(self.ctx, "run", return_value=3):
-            self.assertEqual(coreos.build(self.ctx, "esp32", "recovery", False), 3)
+            self.assertEqual(coreos.build(self.ctx, "tdeck_plus", "recovery", False), 3)
         self.assertIn("build failed", self.out.getvalue())
 
     def test_build_without_idf_fails_cleanly(self):
         full_project(self.root)
         with mock.patch.object(coreos, "find_idf", return_value=None):
-            self.assertEqual(coreos.build(self.ctx, "esp32", "recovery", False), 1)
+            self.assertEqual(coreos.build(self.ctx, "tdeck_plus", "recovery", False), 1)
         self.assertIn("ESP-IDF not found", self.out.getvalue())
 
     def test_clean_flag_removes_old_build_dir(self):
         full_project(self.root)
-        stale = touch(self.root, "PurrOS/build/esp32-recovery/old.txt")
+        stale = touch(self.root, "PurrOS/build/tdeck_plus-recovery/old.txt")
         with mock.patch.object(coreos, "find_idf", return_value=self.idf), \
                 mock.patch.object(self.ctx, "run", return_value=0):
-            coreos.build(self.ctx, "esp32", "recovery", True)
+            coreos.build(self.ctx, "tdeck_plus", "recovery", True)
         self.assertFalse(os.path.exists(stale))
 
     def test_clean_action(self):
-        touch(self.root, "PurrOS/build/esp32-recovery/x")
-        self.assertEqual(coreos.clean(self.ctx, "esp32", "recovery"), 0)
-        self.assertFalse(os.path.isdir(os.path.join(self.root, "PurrOS/build/esp32-recovery")))
-        self.assertEqual(coreos.clean(self.ctx, "esp32", "recovery"), 0)
+        touch(self.root, "PurrOS/build/tdeck_plus-recovery/x")
+        self.assertEqual(coreos.clean(self.ctx, "tdeck_plus", "recovery"), 0)
+        self.assertFalse(os.path.isdir(os.path.join(self.root, "PurrOS/build/tdeck_plus-recovery")))
+        self.assertEqual(coreos.clean(self.ctx, "tdeck_plus", "recovery"), 0)
 
     def test_size_needs_a_build(self):
-        self.assertEqual(coreos.size(self.ctx, "esp32", "recovery"), 1)
+        self.assertEqual(coreos.size(self.ctx, "tdeck_plus", "recovery"), 1)
 
     def test_check_reports_ready_and_missing(self):
         full_project(self.root)

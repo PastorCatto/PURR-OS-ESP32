@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from lib.model import Action, Param, Script
 
 IDF_VERSION = "5.3.5"
-TARGETS = ("esp32", "esp32s3")
+# A board decides the chip. Adding a board means adding a row here and a folder of
+# settings files in PurrOS/.
+BOARDS = {"tdeck_plus": "esp32s3", "cyd_24c": "esp32"}
 PROFILES = ("minimal", "recovery", "full")
 PROJECT_DIR = "PurrOS"
 
@@ -114,24 +116,24 @@ def child_env(env=None):
             if not k.upper().startswith(("MSYS", "MINGW"))}
 
 
-def build_dir_name(target, profile):
-    return f"build/{target}-{profile}"
+def build_dir_name(board, profile):
+    return f"build/{board}-{profile}"
 
 
-def idf_args(target, profile):
-    d = build_dir_name(target, profile)
-    defaults = ";".join(("sdkconfig.defaults", f"sdkconfig.defaults.{target}",
+def idf_args(board, profile):
+    d = build_dir_name(board, profile)
+    defaults = ";".join(("sdkconfig.defaults", f"sdkconfig.board.{board}",
                          f"sdkconfig.profile.{profile}"))
-    return ["idf.py", "-B", d, "-D", f"IDF_TARGET={target}",
+    return ["idf.py", "-B", d, "-D", f"IDF_TARGET={BOARDS[board]}",
             "-D", f"SDKCONFIG={d}/sdkconfig",
             "-D", f"SDKCONFIG_DEFAULTS={defaults}"]
 
 
 # -- project checks ----------------------------------------------------
-def project_problems(project, target, profile):
+def project_problems(project, board, profile):
     """Files the build needs that are missing, as readable strings."""
-    needed = ["CMakeLists.txt", "partitions.csv", "sdkconfig.defaults",
-              f"sdkconfig.defaults.{target}", f"sdkconfig.profile.{profile}"]
+    needed = ["CMakeLists.txt", "sdkconfig.defaults", f"sdkconfig.board.{board}",
+              f"sdkconfig.profile.{profile}", f"partitions/{board}.csv"]
     return [f"{PROJECT_DIR}/{n} is missing" for n in needed
             if not os.path.isfile(os.path.join(project, n))]
 
@@ -172,36 +174,36 @@ def check(ctx):
     if not os.path.isdir(project):
         ctx.error(f"{PROJECT_DIR}/ does not exist")
         return 1
-    for target in TARGETS:
+    for board in BOARDS:
         for profile in PROFILES:
-            problems = project_problems(project, target, profile)
+            problems = project_problems(project, board, profile)
             if problems:
                 bad += 1
-                ctx.error(f"{target}/{profile}:")
+                ctx.error(f"{board}/{profile}:")
                 for line in problems:
                     ctx.info(f"    {line}")
             else:
-                ctx.ok(f"{target}/{profile}: ready to build")
+                ctx.ok(f"{board}/{profile}: ready to build")
     return 1 if bad else 0
 
 
-def build(ctx, target, profile, clean):
+def build(ctx, board, profile, clean):
     project = _project(ctx)
-    problems = project_problems(project, target, profile)
+    problems = project_problems(project, board, profile)
     if problems:
-        ctx.error(f"cannot build {target}/{profile}:")
+        ctx.error(f"cannot build {board}/{profile}:")
         for line in problems:
             ctx.info(f"    {line}")
         return 1
     idf = _require_idf(ctx)
     if idf is None:
         return 1
-    bdir = os.path.join(project, build_dir_name(target, profile))
+    bdir = os.path.join(project, build_dir_name(board, profile))
     if clean and os.path.isdir(bdir):
         ctx.info(f"removing {bdir}")
         shutil.rmtree(bdir)
-    ctx.info(f"building {target}/{profile} into {bdir}")
-    code = ctx.run(wrap(idf, idf_args(target, profile) + ["build"]), cwd=project,
+    ctx.info(f"building {board}/{profile} into {bdir}")
+    code = ctx.run(wrap(idf, idf_args(board, profile) + ["build"]), cwd=project,
                    env=child_env(),
                    log_path=os.path.join(bdir, "purrstrap-build.log"))
     if code != 0:
@@ -221,8 +223,8 @@ def build(ctx, target, profile, clean):
     return 0
 
 
-def clean(ctx, target, profile):
-    bdir = os.path.join(_project(ctx), build_dir_name(target, profile))
+def clean(ctx, board, profile):
+    bdir = os.path.join(_project(ctx), build_dir_name(board, profile))
     if not os.path.isdir(bdir):
         ctx.info(f"nothing to clean: {bdir} does not exist")
         return 0
@@ -231,20 +233,20 @@ def clean(ctx, target, profile):
     return 0
 
 
-def size(ctx, target, profile):
+def size(ctx, board, profile):
     project = _project(ctx)
-    if not os.path.isdir(os.path.join(project, build_dir_name(target, profile))):
-        ctx.error(f"no build for {target}/{profile}. Run 'coreos build' first.")
+    if not os.path.isdir(os.path.join(project, build_dir_name(board, profile))):
+        ctx.error(f"no build for {board}/{profile}. Run 'coreos build' first.")
         return 1
     idf = _require_idf(ctx)
     if idf is None:
         return 1
-    return ctx.run(wrap(idf, idf_args(target, profile) + ["size"]), cwd=project,
+    return ctx.run(wrap(idf, idf_args(board, profile) + ["size"]), cwd=project,
                    env=child_env())
 
 
-_TARGET = Param("target", "choice", default="esp32", choices=TARGETS,
-                help="chip to build for")
+_BOARD = Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
+               help="the board to build for (it decides the chip)")
 _PROFILE = Param("profile", "choice", default="full", choices=PROFILES,
                 help="minimal = recovery loader, recovery = KittenOS, full = normal system")
 
@@ -256,14 +258,14 @@ SCRIPT = Script(
         Action("check", "Check", check,
                help="report ESP-IDF and project status without building"),
         Action("build", "Build", build,
-               help="build one target and profile",
-               params=(_TARGET, _PROFILE,
+               help="build one board and profile",
+               params=(_BOARD, _PROFILE,
                        Param("clean", "bool", default=False,
                              help="delete the build directory first"))),
         Action("clean", "Clean", clean,
-               help="delete one build directory", params=(_TARGET, _PROFILE)),
+               help="delete one build directory", params=(_BOARD, _PROFILE)),
         Action("size", "Size", size,
                help="show memory use of an existing build",
-               params=(_TARGET, _PROFILE)),
+               params=(_BOARD, _PROFILE)),
     ),
 )

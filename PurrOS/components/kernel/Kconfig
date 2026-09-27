@@ -1,0 +1,17 @@
+menu "PURR OS"
+
+    choice PURR_BOARD
+        prompt "Board"
+        default PURR_BOARD_TDECK_PLUS
+        help
+            The board profile compiled in (pins, buses and devices). Only the
+            kernel reads this.
+
+        config PURR_BOARD_TDECK_PLUS
+            bool "LilyGO T-Deck Plus"
+
+        config PURR_BOARD_CYD_24C
+            bool "CYD 2.4C (ESP32-2432S024C)"
+    endchoice
+
+endmenu
