@@ -5,9 +5,11 @@ flow. If code and this document disagree, fix one of them in the same commit.
 
 ## 1. Purpose and threat model
 
-The bootloader loads exactly two kinds of image: the **kernel** (PURR OS) and
-the **recovery** image (**KittenOS**). It verifies each against a public key it holds, applies a
-small policy from flags in flash, and hands off.
+The bootloader loads exactly two things: the **boot package**, and **KittenOS** when the
+boot target says so. On monolithic boards it also loads the packed OS image after the boot
+package's menu. It verifies each against a public key it holds, applies a small policy from
+flags in flash, and hands off. Everything else (kernel, CoreOS, drivers, apps) is a file in
+the root filesystem, loaded later and not by the bootloader. See `PurrOS/SPEC.md` section 1.
 
 **What this is:** an authenticity and integrity check with a recovery policy.
 It catches corrupted images, wrong-vendor builds, bad updates and accidental
@@ -18,35 +20,51 @@ eFuses nothing verifies the bootloader itself, so a physical attacker can
 replace it, change the flags or change the keys. eFuse support (section 8) is
 optional and adds a real root of trust underneath this layer.
 
-**KittenOS** is the recovery OS. It is a barebones PURR OS build with recovery
-functions added on top (updating, key management, diagnostics), built from the
-same tree as PURR OS. It uses the same container format, the same driver
-interface and the same signing as the kernel image, so recovery is just another
-image to the bootloader. Handling a key or verification failure is KittenOS's
-job, not the bootloader's.
+**KittenOS** is the recovery system: a small (about 1 MB) fixed system in a raw partition,
+not updated in normal use. It is a small real OS with its own drivers, a filesystem reader
+and the shell, and it applies updates. It uses the same signing as everything else.
+Handling a key or verification failure is KittenOS's job, not the bootloader's.
 
-Non-goals for v1: UI, networking, filesystem access, loadable driver modules.
-The bootloader stays small and has no FreeRTOS.
+Non-goals for v1: networking, filesystem access, and loading anything except the boot
+package, KittenOS and, on monolithic boards, the packed image. The boot menu and reading the
+root filesystem belong to the boot package (section 9), not the bootloader. The bootloader
+stays small and has no FreeRTOS.
 
-## 2. Flash layout (example, 16 MB)
+## 2. Flash layout (example)
+
+The full layouts per board are in `PurrOS/SPEC.md` section 4. The raw partitions the
+bootloader knows about:
 
 | Name       | Type/Subtype | Size   | Notes |
 |------------|--------------|--------|-------|
 | bootloader | -            | ~32 KB | Second stage. |
 | purrcfg    | data/0x40    | 8 KB   | Two 4 KB copies (A/B) of the config struct. |
-| otadata    | data/ota     | 8 KB   | Standard IDF slot selection. |
 | nvs        | data/nvs     | 24 KB  | Used by the OS, never by the bootloader. |
-| kittenos   | app/factory  | 2 MB   | KittenOS recovery image, updated separately. Sized as a barebones PURR OS plus recovery tools; revisit once a build exists. |
-| kernel_0   | app/ota_0    | rest/2 | Kernel image. |
-| kernel_1   | app/ota_1    | rest/2 | Kernel image. |
+| bootpkg    | data/0x44    | ~64 KB | The boot package, right after the bootloader. |
+| kittenos   | app/factory  | 1 MB   | KittenOS, recovery only. Not updated in normal use. |
+| rescue     | app/test     | ~1 MB  | Modular boards: the recovery loader (Wi-Fi, TLS, keys, minimal CoreOS). Almost never changed. |
+| os         | app/ota_0    | rest   | Monolithic boards only: the packed OS image, one slot. |
+| root       | data/littlefs | rest  | The root filesystem on modular boards (the apps filesystem, 1 MB, on monolithic ones). |
 
-Sizes are placeholders per device. The bootloader binary must fit before the
-partition table, so budget its size and move the table if it grows.
+The bootloader binary must fit before the partition table, so budget its size and move the
+table if it grows. There is no OTA slot switching: which target boots is recorded in
+`purrcfg`.
+
+### 2.1 Sizing
+
+- **Bootloader budget.** On original ESP32 the bootloader sits at 0x1000 and the partition
+  table at 0x8000, leaving 28,672 bytes. The basic bootloader in this repo already builds to
+  27,008 bytes on esp32 (21,728 on esp32s3). Signature checking and `purrcfg` handling will
+  not fit, so the partition table has to move (`CONFIG_PARTITION_TABLE_OFFSET`) and every
+  partition after it shifts.
+- Layouts are per board, so each board carries its own partition file.
+- **Codename.** For a board that has a driver pack, the bootloader is built with the board's
+  codename inside (`Boards/SPEC.md` section 3, `Install/SPEC.md`).
 
 ## 3. Image container
 
 Every image starts with a `purr_image_header_t`, followed by the payload. For
-kernel and recovery the payload is a standard ESP-IDF app image.
+the OS and recovery the payload is a standard ESP-IDF app image.
 
 | Field            | Size | Meaning |
 |------------------|------|---------|
@@ -54,7 +72,7 @@ kernel and recovery the payload is a standard ESP-IDF app image.
 | header_version   | 1    | Container version, starts at 1 |
 | header_size      | 2    | Bytes, lets the header grow |
 | chip_id          | 2    | `esp_chip_id_t` value; bootloader rejects a mismatch |
-| image_type       | 1    | 1 = kernel (PURR OS), 2 = recovery (KittenOS), 3+ reserved for loadable modules |
+| image_type       | 1    | 1 = OS (PURR OS), 2 = recovery (KittenOS), 3 = system module (`.kitt`: kernel, CoreOS, AppManager, runtimes, drivers, boot package, device bundle), 4 = app image (`.cat`), 5 and up reserved for other app kinds such as MicroPython. The bootloader only loads types 1 and 2. CoreOS and the app runtime handle 3 and 4. |
 | key_id           | 1    | Which bootloader key signed this image |
 | flags            | 2    | Reserved |
 | name             | 32   | Human-readable name |
@@ -82,12 +100,12 @@ keys.
 | Field    | Meaning |
 |----------|---------|
 | key_id   | Referenced by an image header |
-| role     | 1 = PURR OS (kernel images), 2 = KittenOS (recovery images) |
+| role     | boot, system, owner, developer or vendor (`Keys/SPEC.md`). A file only verifies against a key whose role allows that type of file. |
 | pubkey   | P-256 public key, 64 bytes |
 | revoked  | Bit in `revoked_keys` |
 
 - An image verifies only against a key whose role matches its `image_type`.
-  A kernel image signed with a recovery-role key fails, and the reverse.
+  An OS image signed with a recovery-role key fails, and the reverse.
 - Default keys are compiled into the bootloader. The bag stored in `purrcfg`
   overrides them slot by slot. The effective bag is the defaults with the
   overrides applied.
@@ -118,6 +136,8 @@ trusts a copy with a valid CRC. This survives power loss during a write.
 | revoked_keys   | Bitmask of revoked key slots |
 | key_update     | Optional: slot, new public key, signature by an existing key |
 | boot_seq       | Boot counter, incremented by the bootloader on every boot |
+| version_floor | Per component, the newest version confirmed on this device. It only rises, when an update is confirmed. In `enforce` mode a file below its floor is rejected. In `warn` and `off` it is allowed with a warning. |
+| update_state | Written by CoreOS and KittenOS: target file, state (`staged`, `requested`, `moving`, `unconfirmed`, `confirmed`, `failed`) and attempt count. The bootloader never writes it. See `PurrOS/SPEC.md` section 6.1. |
 | efuse_arm      | `arm_stage`, per-flag `set_at_seq`, and the request (section 8) |
 | crc32          | Over everything above |
 
@@ -128,7 +148,7 @@ Flags:
 | IGNORE_ONCE      | one boot   | Skip verification failure for the next boot only. Cleared before handoff. |
 | UPDATE_KEY       | one boot   | Apply the signed `key_update` block, then clear. |
 | SECURE_OFF_ONCE  | one boot   | Treat `secure_mode` as off for the next boot only. |
-| FORCE_RECOVERY   | one boot   | Boot recovery instead of the kernel. |
+| FORCE_RECOVERY   | one boot   | Boot recovery instead of the OS. |
 
 Setting `secure_mode` permanently to off is done through the same signed
 mechanism as a key update, not by a bare flag.
@@ -153,31 +173,39 @@ requests) depend on whether secure boot is enabled. Here "enabled" means
 
 ## 6. Boot flow
 
-1. Init, load the partition table, read `purrcfg`. If both copies are invalid,
-   use defaults (secure_mode = warn) and continue.
+1. Init, load the partition table, read `purrcfg`. If both copies are invalid, use defaults
+   (secure_mode = warn) and continue.
 2. If `UPDATE_KEY` is set, validate and apply the key update, then clear it.
-3. If `FORCE_RECOVERY` is set, jump to step 5 with recovery selected.
-4. Pick the kernel slot from otadata.
-5. Verify the selected image:
-   chip ID, magic and version, payload SHA-256, signature against its `key_id`,
-   revoked bit, and IDF's own image check.
-6. Apply the policy:
+3. Choose the target: KittenOS if `FORCE_RECOVERY` is set or the recorded boot target says so,
+   the recovery loader if that is what was asked for, otherwise the boot package.
+4. Verify the chosen image: chip ID, magic and version, payload SHA-256, signature against
+   its `key_id`, revoked bit, IDF's own image check, and, in `enforce` mode, that its version is not below the
+   version floor.
+5. Apply the policy:
 
 | Result | off | warn | enforce |
 |--------|-----|------|---------|
 | Verified | boot | boot | boot |
-| Failed | boot | boot, warning state set | boot recovery |
+| Failed | boot | boot, warning state set | boot KittenOS |
 | Failed, and `IGNORE_ONCE` set | boot | boot, warning state set | boot, warning state set |
 
-7. If recovery is the selected image and fails verification: in `off` and `warn`
-   boot it with the warning; in `enforce` stop and wait. Open item: decide
-   whether "wait" means a reset loop or a halt.
-8. Clear one-shot flags, write `purrcfg` if it changed, write the handoff
-   struct, jump.
+6. If KittenOS is the target and is missing, damaged or fails verification: on a modular board start
+   the recovery loader, which downloads a new KittenOS (`RecoveryLoader/SPEC.md`). On a board
+   without one, in `off` and `warn` boot KittenOS with the warning, and in `enforce` print the
+   serial prompt and wait. Open item: decide whether "wait" means a reset loop or a halt.
+7. Clear one-shot flags, write `purrcfg` if it changed, write the handoff struct, jump.
+8. **Monolithic boards:** when the boot package returns its menu choice, verify and load the
+   packed image the same way (steps 4 and 5).
+
+The boot package verifies the kernel and CoreOS files it loads with the same rules
+(`PurrOS/components/coreos/SPEC.md` section 3.5).
 
 ## 7. Handoff to the OS
 
-A small struct in RTC no-init memory (survives a soft reset, not power loss):
+A small struct in the RTC FAST memory area that ESP-IDF reserves for custom
+use (`CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC`). It has a fixed address shared by
+the bootloader and the app, survives a soft reset but not power loss, and needs
+the same option and size in both builds. It carries its own magic and CRC:
 
 | Field         | Meaning |
 |---------------|---------|
@@ -187,7 +215,8 @@ A small struct in RTC no-init memory (survives a soft reset, not power loss):
 | flags_used    | Which one-shot flags were consumed |
 | bootloader_v  | Bootloader version |
 
-The kernel or recovery reads this and shows any warning. The bootloader itself
+CoreOS reads this first, decides what to do with it, and records any warning
+for the layers above to show. The bootloader itself
 never shows anything.
 
 ## 8. eFuse support (optional, gated)
@@ -228,7 +257,7 @@ Reboot enforcement:
   set by running code.
 - The burn needs a signed `efuse_request` in `purrcfg`: action ID plus its
   parameters, signed by a valid key. A bare flag edit cannot trigger a burn.
-- Preconditions at burn time: `secure_mode` = enforce, the kernel and recovery
+- Preconditions at burn time: `secure_mode` = enforce, the OS and recovery
   images both verify, and a dry-run report has been written to the log.
 - One action per arming cycle. v1 defines only "program secure boot key
   digest". Other actions (disable JTAG, disable ROM download, flash encryption)
@@ -237,12 +266,64 @@ Reboot enforcement:
   handoff struct and reset `arm_stage` to 0.
 - Develop and test on a sacrificial board first.
 
-## 9. Open questions
+## 9. The boot package and the boot menu
+
+The bootloader stays small and generic, one build per chip family. Everything specific to one
+board that happens before the kernel lives in the **boot package**.
+
+**Boot package**
+
+- A signed `.kitt` (module role `bootpkg`) in its own raw partition, right after the
+  bootloader. One per board.
+- It holds the board's quirks it needs and the **boot menu**: starting the display, reading
+  the board's keys or buttons, and drawing the menu.
+- **On modular boards it also loads the system.** It reads the root filesystem with a
+  read-only LittleFS reader, verifies the kernel file with the same rules as any image, loads
+  it into PSRAM and runs it. Before doing so it increments `boot_fail_count`.
+- **On monolithic boards it only shows the menu** and returns the choice to the bootloader,
+  which loads the packed image.
+- **It is only for boot.** The drivers and hardware description for the kernel and CoreOS are a
+  separate bundle (`PurrOS/components/kernel/SPEC.md` section 13).
+- It is small, tens of KB to be measured, so it does not repeat the bootloader's size problem.
+
+**How it is loaded**
+
+1. The bootloader verifies the package like any other image (signature, chip, role). An
+   unsigned package is only accepted when `secure_mode` is off.
+2. It copies the package into a fixed RAM window that the bootloader reserves. The package is
+   linked for that address, so it needs no relocation.
+3. It calls the package with a small service table (flash read, delay, GPIO, log). The package
+   offers a small set of calls back: start the display, run the menu with a timeout, read a
+   key, and return the choice.
+
+**Boot menu**
+
+- Shown for a short, configurable time at power-on, like a PC's "press a key for setup".
+- **If ignored, the system boots normally.**
+- Entries are open. At least: boot normally, and boot KittenOS (recovery).
+- The bootloader acts on the returned choice: it sets the boot target and continues.
+
+**Fallback.** If the package is missing, invalid, or crashed the last time (a crash counter in
+`purrcfg`), the bootloader skips the menu. On a modular board it then starts KittenOS, which
+has its own filesystem reader, because without the package nothing can read the filesystem. If
+KittenOS fails too, it prints a prompt on the serial console.
+
+**Updating the package.** It changes rarely. KittenOS writes it into its raw partition from a
+verified file.
+
+## 10. Open questions
 
 - Header-first container vs. trailer, pending the IDF loader check (section 3).
 - Recovery failing verification in enforce mode: reset loop or halt.
 - Which role's key may sign each kind of request (key update, `secure_mode`
   change, eFuse request). The obvious rule is that only the KittenOS role can,
-  so a compromised kernel-signing key cannot touch trust state.
+  so a compromised OS-signing key cannot touch trust state.
 - Whether KittenOS may replace the PURR OS image and edit `purrcfg` directly
   when secure boot is disabled, or whether that also needs a request.
+- The boot menu's timeout and entries, and the key or button per board.
+- The addresses of the RAM window, and the package's size limit.
+- Where the package crash counter lives in `purrcfg`.
+- The exact service table the bootloader offers the package.
+- Whether the boot package is one program with two modes (menu only on monolithic boards,
+  loader on modular ones).
+- How the boot target is recorded in `purrcfg` and how KittenOS is started.
