@@ -58,7 +58,7 @@ bool purr_bootcfg_load(purr_cfg_t *out)
     return purr_cfg_load(&fl, out, NULL) == 0;
 }
 
-bool purr_bootcfg_take_recovery(void)
+bool purr_bootcfg_take_flag(uint32_t flag)
 {
     uint32_t off = 0, size = 0;
     if (!purr_find_partition("purrcfg", &off, &size) || size < PURR_CFG_SECTORS * SECTOR) {
@@ -70,12 +70,12 @@ bool purr_bootcfg_take_recovery(void)
     if (purr_cfg_load(&fl, &cfg, NULL) != 0) {
         return false;                       // unreadable, or nothing written yet: no request
     }
-    if (!purr_cfg_take_flag(&cfg, PURR_CFGF_FORCE_RECOVERY)) {
+    if (!purr_cfg_take_flag(&cfg, flag)) {
         return false;
     }
-    // Clear the request before acting on it, so a crash in KittenOS cannot loop here.
+    // Clear the request before acting on it, so a crash in what it starts cannot loop here.
     if (purr_cfg_store(&fl, &cfg) != 0) {
-        ESP_LOGW(TAG, "purrcfg: could not clear the recovery request");
+        ESP_LOGW(TAG, "purrcfg: could not clear a one-shot boot request");
     }
     return true;
 }

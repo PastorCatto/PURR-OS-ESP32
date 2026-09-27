@@ -8,7 +8,6 @@ Uses the `cryptography` package, a requirement of this subscript alone.
 
 import getpass
 import glob
-import hashlib
 import os
 import struct
 import sys
@@ -16,13 +15,19 @@ import sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 
+from lib import image as pimg
 from lib.model import Action, Param, Script
 
-# Layout of purr_image_header_t (PurrOS/components/coreos/include/purr_abi.h). Keep in sync.
-IMAGE_MAGIC = 0x50555252
-HEADER_FORMAT = "<IBHHBBH32s12s12sII32s64s"
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-SIGNED_LEN = HEADER_SIZE - 64                      # everything before the signature field
+# The container layout lives in lib/image.py, shared with bootpkg and coreos. Aliased here
+# under their original names, since other modules (test_keys.py) reference them this way.
+IMAGE_MAGIC = pimg.MAGIC
+HEADER_FORMAT = pimg.HEADER_FORMAT
+HEADER_SIZE = pimg.HEADER_SIZE
+SIGNED_LEN = pimg.SIGNED_LEN
+sha256 = pimg.sha256
+parse_header = pimg.parse_header
+header_fields = pimg.header_fields
+is_purr_image = pimg.is_purr_image
 
 ROLES = {"boot": 1, "system": 2, "owner": 3, "developer": 4, "vendor": 5}
 
@@ -75,32 +80,6 @@ def raw_sig_to_der(raw_sig):
 def der_sig_to_raw(der_sig):
     r, s = utils.decode_dss_signature(der_sig)
     return r.to_bytes(32, "big") + s.to_bytes(32, "big")
-
-
-def sha256(data):
-    return hashlib.sha256(data).digest()
-
-
-def parse_header(buf):
-    return struct.unpack(HEADER_FORMAT, buf[:HEADER_SIZE])
-
-
-def header_fields(h):
-    (magic, ver, hsize, chip, itype, key_id, flags, name, version, min_boot,
-     payload_off, payload_size, payload_hash, sig) = h
-    return {
-        "magic": magic, "header_version": ver, "header_size": hsize, "chip_id": chip,
-        "image_type": itype, "key_id": key_id, "flags": flags,
-        "name": name.rstrip(b"\0").decode("ascii", "replace"),
-        "version": version.rstrip(b"\0").decode("ascii", "replace"),
-        "min_boot_version": min_boot.rstrip(b"\0").decode("ascii", "replace"),
-        "payload_offset": payload_off, "payload_size": payload_size,
-        "payload_sha256": payload_hash, "signature": sig,
-    }
-
-
-def is_purr_image(data):
-    return len(data) >= 4 and struct.unpack_from("<I", data, 0)[0] == IMAGE_MAGIC
 
 
 # -- generate --------------------------------------------------------------

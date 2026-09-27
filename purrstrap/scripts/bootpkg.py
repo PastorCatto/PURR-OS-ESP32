@@ -6,11 +6,11 @@ See bootloader/SPEC.md section 9.
 """
 
 import glob
-import hashlib
 import os
 import shutil
 import struct
 
+from lib import image as pimg
 from lib.model import Action, Param, Script
 
 PKG_DIR = "bootpkg"
@@ -18,12 +18,10 @@ PKG_DIR = "bootpkg"
 BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld")}
 VERSION = "0.1.0"
 
-# Layout of purr_image_header_t in PurrOS/components/coreos/include/purr_abi.h.
-IMAGE_MAGIC = 0x50555252
-HEADER_FORMAT = "<IBHHBBH32s12s12sII32s64s"
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+# Re-exported under their original names: purrstrap/tests/test_bootpkg.py reads these.
+HEADER_FORMAT = pimg.HEADER_FORMAT
+HEADER_SIZE = pimg.HEADER_SIZE
 PREAMBLE_FORMAT = "<IIII"          # purr_pkg_preamble_t
-IMG_MODULE, MOD_BOOTPKG = 3, 6
 TEXT_MAX = DATA_MAX = 0x8000
 
 
@@ -40,11 +38,7 @@ def make_image(text, data, bss_size, entry, chip_id, version=VERSION):
         raise ValueError(f"package too big for its window: text {len(text)} of "
                          f"{TEXT_MAX}, data+bss {len(data) + bss_size} of {DATA_MAX}")
     payload = pack_preamble(len(text), len(data), bss_size, entry) + text + data
-    header = struct.pack(HEADER_FORMAT, IMAGE_MAGIC, 1, HEADER_SIZE, chip_id, IMG_MODULE,
-                         0, MOD_BOOTPKG, b"bootpkg", version.encode(), b"",
-                         HEADER_SIZE, len(payload), hashlib.sha256(payload).digest(),
-                         b"\0" * 64)
-    return header + payload
+    return pimg.make_image("bootpkg", version, pimg.IMG_MODULE, pimg.MOD_BOOTPKG, payload, chip_id)
 
 
 # -- tools -------------------------------------------------------------

@@ -15,12 +15,19 @@
 #include "purr_cli.h"
 #include "purr_console.h"
 #include "purr_kernel.h"
+#include "recovery_loader.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "purros";
 
 void app_main(void)
 {
     ESP_LOGI(TAG, "%s starting", purr_system_name());
+
+#if CONFIG_PURR_PROFILE_MINIMAL
+    purr_recovery_loader_main();   /* no shell: connects, recovers KittenOS, restarts */
+    return;                        /* not reached; kept so the function's shape stays plain */
+#endif
 
     if (purr_kernel_init() != ESP_OK || purr_kernel_display() == NULL) {
         /* No display: there is nothing to draw on, so say so on the serial console. */

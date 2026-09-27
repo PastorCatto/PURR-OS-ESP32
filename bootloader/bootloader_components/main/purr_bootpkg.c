@@ -265,6 +265,15 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
     ESP_LOGI(TAG, "starting the boot menu");
     flush_log();
     int choice = ((purr_pkg_entry_fn)entry)(&s_services, parts, n, menu_preferred);
+    if (choice == PURR_PKG_CHOICE_INTERNET_RECOVERY) {
+        if (bs->test.size == 0) {
+            ESP_LOGW(TAG, "internet recovery requested, but there is no recovery loader");
+            return false;
+        }
+        ESP_LOGI(TAG, "internet recovery: starting the recovery loader");
+        *boot_index = TEST_APP_INDEX;
+        return true;
+    }
     if (choice < 0 || choice >= n) {
         return false;
     }

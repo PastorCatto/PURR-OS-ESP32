@@ -140,8 +140,7 @@ int purr_pkg_entry(const purr_boot_services_t *svc, const purr_boot_part_t *part
             svc->log("bootpkg: booting the chosen slot");
             return r.index;
         }
-        /* Internet recovery is not built yet (Milestone 2): say so, then show the menu again. */
-        draw_list(&m, "Recovery: not built yet");
-        hw_delay_ms(2500);
+        svc->log("bootpkg: starting internet recovery");
+        return PURR_PKG_CHOICE_INTERNET_RECOVERY;
     }
 }

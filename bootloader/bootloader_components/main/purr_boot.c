@@ -33,10 +33,14 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     }
 
     /* A recovery request (the shell's "reboot recovery") skips the menu and starts KittenOS
-     * once. If KittenOS is not there, fall through to the menu as usual. */
-    if (purr_bootcfg_take_recovery() && bs.factory.size != 0) {
+     * once. "reboot loader" does the same for the recovery loader (the "test" slot,
+     * RecoveryLoader/SPEC.md). If the target is not there, fall through to the menu as usual. */
+    if (purr_bootcfg_take_flag(PURR_CFGF_FORCE_RECOVERY) && bs.factory.size != 0) {
         ESP_LOGI(TAG, "recovery requested: starting KittenOS");
         boot_index = FACTORY_INDEX;
+    } else if (purr_bootcfg_take_flag(PURR_CFGF_FORCE_LOADER) && bs.test.size != 0) {
+        ESP_LOGI(TAG, "internet recovery requested: starting the recovery loader");
+        boot_index = TEST_APP_INDEX;
     } else {
         /* The boot package shows the menu and may pick another slot. Without one, boot normally. */
         int chosen;

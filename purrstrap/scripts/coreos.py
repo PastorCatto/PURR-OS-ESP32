@@ -7,6 +7,7 @@ import shlex
 import shutil
 from dataclasses import dataclass
 
+from lib import image as pimg
 from lib.model import Action, Param, Script
 
 IDF_VERSION = "5.3.5"
@@ -15,6 +16,13 @@ IDF_VERSION = "5.3.5"
 BOARDS = {"tdeck_plus": "esp32s3", "cyd_24c": "esp32"}
 PROFILES = ("minimal", "recovery", "full")
 PROJECT_DIR = "PurrOS"
+
+# Chip name (as BOARDS gives it) -> the numeric chip id purr_abi.h uses.
+CHIP_IDS = {"esp32s3": pimg.CHIP_ESP32S3, "esp32": pimg.CHIP_ESP32}
+# profile -> (image type, the name embedded in the header). Only profiles meant to be
+# fetched and installed as a PURR image are here; "minimal" (the recovery loader itself)
+# is flashed directly, never downloaded, so it has no packaged form.
+PACKAGE_KIND = {"recovery": (pimg.IMG_RECOVERY, "kittenos"), "full": (pimg.IMG_OS, "purros")}
 
 
 # -- finding ESP-IDF ---------------------------------------------------
@@ -245,6 +253,34 @@ def size(ctx, board, profile):
                    env=child_env())
 
 
+def package(ctx, board, profile, version, out):
+    """Wrap an already-built profile's binary into an unsigned PURR image container, ready
+    for `keys sign`, so it can be published as a release asset (OTA/SPEC.md section 5)."""
+    if profile not in PACKAGE_KIND:
+        ctx.error(f"{profile}: nothing to package (it is flashed directly, never downloaded)")
+        return 1
+    project = _project(ctx)
+    bdir = os.path.join(project, build_dir_name(board, profile))
+    binpath = os.path.join(bdir, "purros.bin")
+    if not os.path.isfile(binpath):
+        ctx.error(f"no build for {board}/{profile}. Run 'coreos build' first.")
+        return 1
+    with open(binpath, "rb") as fh:
+        payload = fh.read()
+
+    image_type, name = PACKAGE_KIND[profile]
+    chip_id = CHIP_IDS[BOARDS[board]]
+    image = pimg.make_image(name, version, image_type, 0, payload, chip_id)
+
+    dest = out or os.path.join(bdir, f"{name}.kitt")
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(image)
+    ctx.ok(f"{dest}: {len(image)} bytes ({name} {version}, unsigned)")
+    ctx.info(f"sign it: purrstrap keys sign --key <role>.key --image {dest} --key-id <id>")
+    return 0
+
+
 _BOARD = Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
                help="the board to build for (it decides the chip)")
 _PROFILE = Param("profile", "choice", default="full", choices=PROFILES,
@@ -267,5 +303,11 @@ SCRIPT = Script(
         Action("size", "Size", size,
                help="show memory use of an existing build",
                params=(_BOARD, _PROFILE)),
+        Action("package", "Package", package,
+               help="wrap a built recovery/full binary into an unsigned PURR image, ready to sign",
+               params=(_BOARD, _PROFILE,
+                       Param("version", "str", required=True, help='e.g. "1.2.0"'),
+                       Param("out", "path", default="",
+                             help="output file (default: <board>-<profile> build dir)"))),
     ),
 )

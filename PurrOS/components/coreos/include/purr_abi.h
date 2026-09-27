@@ -104,6 +104,7 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
 #define PURR_CFGF_UPDATE_KEY       (1u << 1)
 #define PURR_CFGF_SECURE_OFF_ONCE  (1u << 2)
 #define PURR_CFGF_FORCE_RECOVERY   (1u << 3)
+#define PURR_CFGF_FORCE_LOADER     (1u << 4)
 
 /* boot_target */
 #define PURR_TARGET_NORMAL         0
@@ -256,9 +257,12 @@ typedef struct {
     void (*gpio_setup)(int pin, int mode);
 } purr_boot_services_t;
 
+#define PURR_PKG_CHOICE_NORMAL             (-1)   /* leave the choice to the bootloader */
+#define PURR_PKG_CHOICE_INTERNET_RECOVERY  (-2)   /* start the recovery loader (the "test" slot) */
+
 /*
- * The package's entry. Returns the index in `parts` to boot, or -1 to leave the
- * choice to the bootloader (the normal boot).
+ * The package's entry. Returns the index in `parts` to boot, or one of the
+ * PURR_PKG_CHOICE_* sentinels above.
  */
 typedef int (*purr_pkg_entry_fn)(const purr_boot_services_t *svc,
                                  const purr_boot_part_t *parts, int nparts, int preferred);

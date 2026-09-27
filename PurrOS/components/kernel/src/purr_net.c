@@ -14,6 +14,7 @@
 #include "nvs_flash.h"
 
 #include "purr_fs.h"
+#include "purr_netrec.h"
 #include "purr_wifi.h"
 
 static const char *TAG = "net";
@@ -133,6 +134,9 @@ static esp_err_t do_connect(const char *ssid, const char *pass, uint32_t timeout
         if (r == PURR_WIFI_ADDED || r == PURR_WIFI_UPDATED) {
             save_list();
         }
+        /* Also the recovery loader's own record: it has no filesystem, so it cannot read
+         * /etc/wifi. Every profile that connects keeps this up to date. */
+        purr_netrec_save(ssid, pass ? pass : "");
     }
     return ESP_OK;
 }

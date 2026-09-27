@@ -435,23 +435,31 @@ static int load_cfg(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg)
 
 static int cmd_reboot(purr_cli_t *cli, int argc, char **argv)
 {
-    if (argc > 2 || (argc == 2 && strcmp(argv[1], "recovery") != 0)) {
-        purr_cli_puts(cli, "usage: reboot [recovery]\n");
+    uint32_t flag = 0;
+    const char *what = NULL;
+    if (argc == 2 && strcmp(argv[1], "recovery") == 0) {
+        flag = PURR_CFGF_FORCE_RECOVERY;
+        what = "recovery";
+    } else if (argc == 2 && strcmp(argv[1], "loader") == 0) {
+        flag = PURR_CFGF_FORCE_LOADER;
+        what = "the recovery loader";
+    } else if (argc > 1) {
+        purr_cli_puts(cli, "usage: reboot [recovery|loader]\n");
         return 1;
     }
-    if (argc == 2) {
-        /* The one-shot request: the bootloader clears it and starts KittenOS once. */
+    if (flag != 0) {
+        /* The one-shot request: the bootloader clears it and starts the target once. */
         purr_flash_t fl;
         purr_cfg_t cfg;
         if (load_cfg(cli, &fl, &cfg) < 0) {
             return 1;
         }
-        purr_cfg_set_flag(&cfg, PURR_CFGF_FORCE_RECOVERY);
+        purr_cfg_set_flag(&cfg, flag);
         if (purr_cfg_store(&fl, &cfg) != 0) {
             purr_cli_puts(cli, "purrcfg: could not write the request\n");
             return 1;
         }
-        purr_cli_puts(cli, "restarting into recovery...\n");
+        purr_cli_printf(cli, "restarting into %s...\n", what);
     } else {
         purr_cli_puts(cli, "restarting...\n");
     }
@@ -498,7 +506,7 @@ static const purr_cmd_t s_cmds[] = {
     {"net",     "connection status",             cmd_net},
     {"echo",    "print the arguments",           cmd_echo},
     {"clear",   "clear the screen",              cmd_clear},
-    {"reboot",  "restart (reboot recovery)",     cmd_reboot},
+    {"reboot",  "restart (or recovery|loader)",  cmd_reboot},
     {"purrcfg", "show the boot config",          cmd_purrcfg},
 };
 
