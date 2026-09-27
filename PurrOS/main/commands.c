@@ -10,6 +10,7 @@
 #include "esp_timer.h"
 #include "sdkconfig.h"
 
+#include "purr_cfgstore.h"
 #include "purr_console.h"
 #include "purr_fs.h"
 #include "purr_kernel.h"
@@ -276,16 +277,64 @@ static int cmd_clear(purr_cli_t *cli, int argc, char **argv)
     return 0;
 }
 
+/* Load purrcfg, or say why not. */
+static int load_cfg(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg)
+{
+    if (purr_cfgstore_open(fl) != 0) {
+        purr_cli_puts(cli, "purrcfg: no such partition\n");
+        return -1;
+    }
+    int r = purr_cfg_load(fl, cfg, NULL);
+    if (r < 0) {
+        purr_cli_puts(cli, "purrcfg: read error\n");
+        return -1;
+    }
+    return r;                                     /* 0 = read, 1 = blank, defaults used */
+}
+
 static int cmd_reboot(purr_cli_t *cli, int argc, char **argv)
 {
-    if (argc > 1) {
-        /* Needs the boot target in purrcfg, which does not exist yet. */
-        purr_cli_puts(cli, "reboot: options are not built yet (use the boot menu)\n");
+    if (argc > 2 || (argc == 2 && strcmp(argv[1], "recovery") != 0)) {
+        purr_cli_puts(cli, "usage: reboot [recovery]\n");
         return 1;
     }
-    purr_cli_puts(cli, "restarting...\n");
+    if (argc == 2) {
+        /* The one-shot request: the bootloader clears it and starts KittenOS once. */
+        purr_flash_t fl;
+        purr_cfg_t cfg;
+        if (load_cfg(cli, &fl, &cfg) < 0) {
+            return 1;
+        }
+        purr_cfg_set_flag(&cfg, PURR_CFGF_FORCE_RECOVERY);
+        if (purr_cfg_store(&fl, &cfg) != 0) {
+            purr_cli_puts(cli, "purrcfg: could not write the request\n");
+            return 1;
+        }
+        purr_cli_puts(cli, "restarting into recovery...\n");
+    } else {
+        purr_cli_puts(cli, "restarting...\n");
+    }
     purr_console_flush();
     esp_restart();
+    return 0;
+}
+
+static int cmd_purrcfg(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    int r = load_cfg(cli, &fl, &cfg);
+    if (r < 0) {
+        return 1;
+    }
+    static const char *const modes[] = {"off", "warn", "enforce"};
+    purr_cli_printf(cli, "copy:        %s\n", r == 0 ? "stored" : "none yet (defaults)");
+    purr_cli_printf(cli, "seq:         %u\n", (unsigned)cfg.seq);
+    purr_cli_printf(cli, "secure mode: %s\n", cfg.secure_mode < 3 ? modes[cfg.secure_mode] : "?");
+    purr_cli_printf(cli, "flags:       0x%x%s\n", (unsigned)cfg.flags,
+                    (cfg.flags & PURR_CFGF_FORCE_RECOVERY) ? " (recovery requested)" : "");
+    purr_cli_printf(cli, "boot count:  %u, fails %u\n", (unsigned)cfg.boot_seq, (unsigned)cfg.boot_fail_count);
     return 0;
 }
 
@@ -306,7 +355,8 @@ static const purr_cmd_t s_cmds[] = {
     {"format",  "erase and create the fs",       cmd_format},
     {"echo",    "print the arguments",           cmd_echo},
     {"clear",   "clear the screen",              cmd_clear},
-    {"reboot",  "restart the device",            cmd_reboot},
+    {"reboot",  "restart (reboot recovery)",     cmd_reboot},
+    {"purrcfg", "show the boot config",          cmd_purrcfg},
 };
 
 const purr_cmd_t *purr_commands(int *count)

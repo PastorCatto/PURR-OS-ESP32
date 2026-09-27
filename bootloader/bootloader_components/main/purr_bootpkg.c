@@ -75,7 +75,7 @@ static const purr_boot_services_t s_services = {
 
 /* ------------------------------------------------------------ finding it */
 
-static bool find_partition(uint32_t *offset, uint32_t *size)
+bool purr_find_partition(const char *name, uint32_t *offset, uint32_t *size)
 {
     const esp_partition_info_t *table = bootloader_mmap(ESP_PARTITION_TABLE_OFFSET,
                                                         ESP_PARTITION_TABLE_MAX_LEN);
@@ -88,7 +88,7 @@ static bool find_partition(uint32_t *offset, uint32_t *size)
             break;
         }
         if (table[i].type == PART_TYPE_DATA && table[i].subtype == PKG_PART_SUBTYPE &&
-            strncmp((const char *)table[i].label, PKG_PART_NAME, sizeof(table[i].label)) == 0) {
+            strncmp((const char *)table[i].label, name, sizeof(table[i].label)) == 0) {
             *offset = table[i].pos.offset;
             *size = table[i].pos.size;
             found = true;
@@ -109,7 +109,7 @@ static uint32_t load_package(void)
     return 0;
 #else
     uint32_t off = 0, part_size = 0;
-    if (!find_partition(&off, &part_size)) {
+    if (!purr_find_partition(PKG_PART_NAME, &off, &part_size)) {
         ESP_LOGW(TAG, "bootpkg: no \"%s\" partition", PKG_PART_NAME);
         return 0;
     }

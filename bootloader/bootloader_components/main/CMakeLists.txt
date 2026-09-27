@@ -1,4 +1,6 @@
-idf_component_register(SRCS "purr_boot.c" "purr_bootpkg.c"
+idf_component_register(SRCS "purr_boot.c" "purr_bootpkg.c" "purr_bootcfg.c"
+                            "${CMAKE_CURRENT_LIST_DIR}/../../../PurrOS/components/coreos/src/purr_cfg.c"
+                            "${CMAKE_CURRENT_LIST_DIR}/../../../PurrOS/components/coreos/src/purr_util.c"
                        INCLUDE_DIRS "." "${CMAKE_CURRENT_LIST_DIR}/../../../PurrOS/components/coreos/include"
                        REQUIRES bootloader bootloader_support hal esp_rom soc spi_flash)
 

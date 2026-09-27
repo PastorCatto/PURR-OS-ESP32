@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "bootloader_init.h"
 #include "bootloader_utility.h"
+#include "purr_bootcfg.h"
 #include "purr_bootpkg.h"
 
 static const char *TAG = "purr_boot";
@@ -31,10 +32,17 @@ void __attribute__((noreturn)) call_start_cpu0(void)
         bootloader_reset();
     }
 
-    /* The boot package shows the menu and may pick another slot. Without one, boot normally. */
-    int chosen;
-    if (purr_bootpkg_run(&bs, boot_index, &chosen)) {
-        boot_index = chosen;
+    /* A recovery request (the shell's "reboot recovery") skips the menu and starts KittenOS
+     * once. If KittenOS is not there, fall through to the menu as usual. */
+    if (purr_bootcfg_take_recovery() && bs.factory.size != 0) {
+        ESP_LOGI(TAG, "recovery requested: starting KittenOS");
+        boot_index = FACTORY_INDEX;
+    } else {
+        /* The boot package shows the menu and may pick another slot. Without one, boot normally. */
+        int chosen;
+        if (purr_bootpkg_run(&bs, boot_index, &chosen)) {
+            boot_index = chosen;
+        }
     }
 
     ESP_LOGI(TAG, "booting app slot %d", boot_index);

@@ -50,6 +50,13 @@ int purr_cfg_load(const purr_flash_t *fl, purr_cfg_t *out, int *which);
  */
 int purr_cfg_store(const purr_flash_t *fl, purr_cfg_t *cfg);
 
+/*
+ * One-shot flags (PURR_CFGF_*). Both return nonzero if the change was made, zero if the
+ * flag was already in that state. Neither writes flash: the caller stores afterwards.
+ */
+int purr_cfg_set_flag(purr_cfg_t *cfg, uint32_t flag);
+int purr_cfg_take_flag(purr_cfg_t *cfg, uint32_t flag);   /* clears it, and says it was set */
+
 #ifdef __cplusplus
 }
 #endif

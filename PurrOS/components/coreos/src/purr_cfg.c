@@ -115,3 +115,21 @@ int purr_cfg_store(const purr_flash_t *fl, purr_cfg_t *cfg)
     }
     return 0;
 }
+
+int purr_cfg_set_flag(purr_cfg_t *cfg, uint32_t flag)
+{
+    if (cfg->flags & flag) {
+        return 0;
+    }
+    cfg->flags |= flag;
+    return 1;
+}
+
+int purr_cfg_take_flag(purr_cfg_t *cfg, uint32_t flag)
+{
+    if (!(cfg->flags & flag)) {
+        return 0;
+    }
+    cfg->flags &= ~flag;
+    return 1;
+}

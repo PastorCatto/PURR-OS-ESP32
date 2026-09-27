@@ -235,6 +235,50 @@ static void test_readback_failure(void)
     CHECK_EQ(purr_cfg_store(&fl, &c), -1);
 }
 
+/* The one-shot flags, and the round trip `reboot recovery` and the bootloader make. */
+static void test_flags(void)
+{
+    purr_cfg_t c;
+    purr_cfg_defaults(&c);
+    CHECK_EQ(purr_cfg_take_flag(&c, PURR_CFGF_FORCE_RECOVERY), 0);   /* not set: nothing to take */
+
+    CHECK_EQ(purr_cfg_set_flag(&c, PURR_CFGF_FORCE_RECOVERY), 1);
+    CHECK_EQ(purr_cfg_set_flag(&c, PURR_CFGF_FORCE_RECOVERY), 0);    /* already set */
+    CHECK(c.flags & PURR_CFGF_FORCE_RECOVERY);
+
+    /* Other flags are not disturbed. */
+    purr_cfg_set_flag(&c, PURR_CFGF_IGNORE_ONCE);
+    CHECK_EQ(purr_cfg_take_flag(&c, PURR_CFGF_FORCE_RECOVERY), 1);
+    CHECK_EQ(purr_cfg_take_flag(&c, PURR_CFGF_FORCE_RECOVERY), 0);   /* only once */
+    CHECK(!(c.flags & PURR_CFGF_FORCE_RECOVERY));
+    CHECK(c.flags & PURR_CFGF_IGNORE_ONCE);
+}
+
+static void test_recovery_round_trip(void)
+{
+    fake_t f;
+    fake_init(&f);
+    purr_flash_t fl = flash_of(&f);
+
+    /* The shell: load, set the flag, store. */
+    purr_cfg_t c;
+    CHECK_EQ(purr_cfg_load(&fl, &c, NULL), 1);        /* blank: defaults */
+    CHECK_EQ(purr_cfg_set_flag(&c, PURR_CFGF_FORCE_RECOVERY), 1);
+    CHECK_EQ(purr_cfg_store(&fl, &c), 0);
+
+    /* The bootloader, after a restart: load, see the flag, clear it, store. */
+    purr_cfg_t b;
+    CHECK_EQ(purr_cfg_load(&fl, &b, NULL), 0);
+    CHECK_EQ(purr_cfg_take_flag(&b, PURR_CFGF_FORCE_RECOVERY), 1);
+    CHECK_EQ(purr_cfg_store(&fl, &b), 0);
+
+    /* The next boot finds nothing to do: recovery was for one boot only. */
+    purr_cfg_t n;
+    CHECK_EQ(purr_cfg_load(&fl, &n, NULL), 0);
+    CHECK_EQ(purr_cfg_take_flag(&n, PURR_CFGF_FORCE_RECOVERY), 0);
+    CHECK(n.seq > b.seq - 1 && b.seq > c.seq - 1);    /* seq only goes up */
+}
+
 int main(void)
 {
     test_defaults_and_valid();
@@ -243,5 +287,7 @@ int main(void)
     test_corrupt_newest_falls_back();
     test_power_loss();
     test_readback_failure();
+    test_flags();
+    test_recovery_round_trip();
     TK_DONE("test_cfg");
 }

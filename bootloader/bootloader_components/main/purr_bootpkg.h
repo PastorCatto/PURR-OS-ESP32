@@ -13,4 +13,7 @@
  */
 bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index);
 
+/* Find a custom raw data partition (subtype 0x40) by name in the partition table. */
+bool purr_find_partition(const char *name, uint32_t *offset, uint32_t *size);
+
 #endif

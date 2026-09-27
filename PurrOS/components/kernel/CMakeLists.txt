@@ -3,6 +3,7 @@ set(srcs
     "src/st7789.c"
     "src/purr_gfx.c"
     "src/purr_console.c"
+    "src/purr_cfgstore.c"
     "src/purr_fs.c"
     "src/purr_fs_flash.c"
     "src/purr_font_data.c")
