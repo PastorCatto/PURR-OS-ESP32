@@ -1,0 +1,16 @@
+# home/ui/main.pui — MiniWin's own "startx" screen: a small window
+# listing every real app_manager entry, pick one to launch. Deliberately
+# minimal (Program-Manager-style, not a full desktop/taskbar) — see
+# home.c's own top comment for the fuller framing.
+
+screen main {
+    root  = true
+    title = "PURR OS"
+
+    widget apps {
+        type       = list
+        source     = "app_list"
+        empty_text = "No apps"
+        on activate { action = launch_app; target = "$item" }
+    }
+}

@@ -1,0 +1,24 @@
+# modules/purr_quirk/module.pcat
+# purr_quirk — loads and serves a .purr v2 device quirk-data package (see
+# purr_quirk_pkg.h). Generalizes this codebase's existing "generic driver +
+# a <driver>_configure(pins...) override a device's boot.c calls with
+# literal values" pattern (confirmed across st7789, gt911, sx1262_rl,
+# sx1262, ssd1306, ili9341, adc_battery) into a loadable, swappable data
+# source, the way postmarketOS bundles a per-device package alongside a
+# shared, generic base OS. Every existing device keeps working unchanged —
+# a caller checks for a named quirk block and falls back to its own
+# hardcoded defaults when none is loaded.
+#
+# NOT the Gen-1 .purr code-loading format (see purr_quirk_pkg.h's own top
+# comment) — data only, no relocation, no execute permission ever needed.
+# Like purr_console and claw_loader, this is a plain library a kernel boot
+# calls directly, not something device.pcat toggles under [modules].
+
+name            = "purr_quirk"
+version         = "0.1.0"
+module_type     = "PURR_MOD_SYSTEM"
+kernel_min      = "1.0.0-dp10"
+kernel_max      = ""
+
+provides        = ["device_quirk_package"]
+required_catcalls = []

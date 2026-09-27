@@ -1,0 +1,36 @@
+# diagnostics/ui/main.pui — first-pass scope per the approved plan: one
+# read-only screen (loaded modules + free RAM/uptime), not the five merged
+# tabs (Hardware I/O, Services, Mesh diag, Tasks) the old diagnostics.c
+# carried — those come back gradually in a later pass.
+#
+# No dedicated hardware Back button on tdeck/tdeck_plus/tab5 (keyboard +
+# trackball, or touch on tab5) — unlike waveshare154's PWR button, so Back
+# here is a real on-screen selectable row (cycled to with everything
+# else), with `exit_app` telling app_manager this single-screen app is
+# done rather than `open_screen`-ing somewhere that doesn't exist.
+
+screen main {
+    root  = true
+    title = "Diagnostics"
+
+    widget ram {
+        type   = text
+        bind   = "free_ram_kb"
+        format = "RAM: %dKB"
+    }
+    widget uptime {
+        type   = text
+        bind   = "uptime_ms"
+        format = "Up: %dms"
+    }
+    widget modules {
+        type       = list
+        source     = "module_list"
+        empty_text = "No modules"
+    }
+    widget back {
+        type  = button
+        label = "< Back"
+        on select { action = exit_app }
+    }
+}

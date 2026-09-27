@@ -1,0 +1,2 @@
+# CYD 2.4C: original ESP32, 4 MB flash, no PSRAM
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

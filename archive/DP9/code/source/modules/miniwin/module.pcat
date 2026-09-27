@@ -1,0 +1,19 @@
+# modules/miniwin/module.pcat
+# MiniWin — windowed UI framework for PURR OS.
+# Loaded as a .purr kernel module. Registers itself as the active UI layer.
+# Calls catcall_display and catcall_touch exclusively — no driver calls directly.
+
+name            = "miniwin"
+version         = "0.1.0"
+module_type     = "PURR_MOD_UI"
+kernel_min      = "0.9.0"
+kernel_max      = ""
+
+provides        = ["ui_windowed"]
+required_catcalls = ["display"]
+# touch is optional — graceful degradation if no touch catcall registered
+
+upstream_source  = "github.com/miniwinwm/MiniWinWM (vendored in MiniWin/)"
+patches          = "hal/purr_os/ — routes hal_lcd/hal_touch/hal_delay/hal_timer/hal_non_vol through catcalls"
+
+notes = "MiniWin source is upstream-clean. All PURR OS integration lives in hal/purr_os/ only. miniwin_config.h is unified (runtime dimensions via catcall). No per-device forks."

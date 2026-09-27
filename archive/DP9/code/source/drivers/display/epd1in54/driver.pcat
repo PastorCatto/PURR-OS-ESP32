@@ -1,0 +1,23 @@
+# drivers/display/epd1in54/driver.pcat
+
+name            = "epd1in54"
+version         = "0.1.0"
+type            = "display"
+catcall_version = 3
+idf_min         = "5.3.0"
+chip            = ["esp32s3"]
+kernel_min      = "0.11.1"
+kernel_max      = ""
+
+module_type     = "PURR_MOD_DRIVER"
+provides        = ["display"]
+
+required_catcalls = [
+    "catcall_display_t.init",
+    "catcall_display_t.push_pixels",
+    "catcall_display_t.fill_rect",
+    "catcall_display_t.set_brightness",
+    "catcall_display_t.deinit",
+]
+
+notes = "SSD1681-family 200x200 1.54\" e-paper (Waveshare ESP32-S3-ePaper-1.54, non-touch). Partial refresh (~0.3s) after the initial full-refresh baseline, re-baselining every 10 updates to clear ghosting — see epd1in54.c's own top comment (measured best on real hardware among the variants tried). No coalescing of rapid successive writes into one flush yet."

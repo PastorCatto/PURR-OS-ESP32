@@ -1,0 +1,19 @@
+menu "PURR OS profile"
+
+    choice PURR_PROFILE
+        prompt "CoreOS profile"
+        default PURR_PROFILE_FULL
+        help
+            What this build is. Set by the sdkconfig.profile.<name> file that purrstrap passes.
+
+        config PURR_PROFILE_FULL
+            bool "full: the normal system"
+
+        config PURR_PROFILE_RECOVERY
+            bool "recovery: KittenOS"
+
+        config PURR_PROFILE_MINIMAL
+            bool "minimal: the recovery loader"
+    endchoice
+
+endmenu

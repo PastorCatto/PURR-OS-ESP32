@@ -1,0 +1,2 @@
+# CoreOS profile: full (the normal system)
+CONFIG_PURR_PROFILE_FULL=y

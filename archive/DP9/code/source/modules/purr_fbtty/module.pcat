@@ -1,0 +1,19 @@
+# modules/purr_fbtty/module.pcat
+# A purr_console_io_t binding that draws to the physical display and reads
+# from the physical keyboard, instead of a serial transport — the actual
+# point of "console mode": a device with no UI backend installed is still
+# a fully usable standalone computer, no cable to another machine required.
+# See purr_fbtty.h's own top comment and archive/ui_backends_v1/README.md.
+#
+# Not a PURR_MODULE_REGISTER() module — same shape as purr_console itself:
+# a plain library a kernel boot calls directly, not something device.pcat
+# toggles under [modules]. No lifecycle to declare here.
+
+name            = "purr_fbtty"
+version         = "0.1.0"
+module_type     = "PURR_MOD_SYSTEM"
+kernel_min      = "1.0.0-dp10"
+kernel_max      = ""
+
+provides        = ["framebuffer_console"]
+required_catcalls = ["display"]

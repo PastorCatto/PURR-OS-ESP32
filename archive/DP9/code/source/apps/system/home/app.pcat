@@ -1,0 +1,14 @@
+# apps/system/home/app.pcat
+# MiniWin's own "startx" — a small window listing installed apps, pick
+# one to launch. The failsafe UI: reachable from the console (see the
+# console's own `startx` command, purr_console.c) whether or not the full
+# LVGL graphical session (systemui/launcher sysclaw packages) loads.
+# Deliberately minimal for this first pass — see home.c's own top comment.
+
+name        = "home"
+version     = "0.1.0"
+tier        = "claw"
+author      = "PURR OS"
+description = "MiniWin app list — the console-launchable failsafe UI."
+
+idf_requires = "esp_common driver freertos"

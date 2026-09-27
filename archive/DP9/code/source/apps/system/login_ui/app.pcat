@@ -1,0 +1,13 @@
+# apps/system/login_ui/app.pcat
+
+name        = "login_ui"
+version     = "0.1.0"
+tier        = "sysclaw"
+author      = "PURR OS"
+description = "Local login screen — loaded via claw_loader's CLAW_POOL_SYSTEM, not statically linked. Two render backends (framebuffer/LVGL) built from the same login_core.c state machine; see purrstrap.py's _stage_sysclaw_packages() for per-device selection."
+
+# No idf_requires — a sysclaw package is never an IDF component at all
+# (catstrap.py's own comment on this tier). Nothing here goes through
+# idf_component_register(); it's compiled standalone by catstrap's
+# _build_sysclaw_variant() with the same restricted flags every
+# claw_loader_selftest.c guest object uses.

@@ -1,0 +1,26 @@
+# modules/purr_console_login/module.pcat
+# The shared login_fn/exec_fn pair for purr_console — lifted out of
+# kernel_tdeck_plus/kernel_tdp_boot.c's own tdp_console_login()/
+# tdp_console_exec() (the first, and until this module existed, only real
+# implementation) so every kernel_*_boot.c can register it with one call
+# instead of reimplementing the same user_mgr/app_manager glue per device.
+#
+# A SEPARATE component from purr_console itself, deliberately: purr_console
+# must stay linkable with ZERO dependency on user_mgr/app_manager (see
+# purr_console.h's own purr_console_login_fn doc comment — the same
+# reasoning rnode_module.c reaches pairing.c through a kernel callback
+# instead of a direct #include). This module exists purely to pull those
+# two in, for the kernel boot files that already link both anyway.
+#
+# Not a PURR_MODULE_REGISTER() module — same shape as purr_console itself:
+# a plain library a kernel boot calls directly, not something device.pcat
+# toggles under [modules]. No lifecycle to declare here.
+
+name            = "purr_console_login"
+version         = "0.1.0"
+module_type     = "PURR_MOD_SYSTEM"
+kernel_min      = "1.0.0-dp10"
+kernel_max      = ""
+
+provides        = ["console_login"]
+required_catcalls = []

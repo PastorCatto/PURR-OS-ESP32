@@ -1,0 +1,17 @@
+# apps/system/launcher/app.pcat
+
+name        = "launcher"
+version     = "0.1.0"
+tier        = "sysclaw"
+author      = "PURR OS"
+description = "Home screen — a basic LVGL tile grid talking to app_manager (local and remote), loaded via claw_loader's CLAW_POOL_SYSTEM once loginUI unlocks the registry. Not bundled with systemUI (status bar/chrome) — that stays a separate, later package."
+
+# LVGL only — this is a tap-driven tile grid, not something a plain
+# framebuffer/keyboard UI (loginUI's other backend) can meaningfully be.
+# See catstrap.py's _build_sysclaw()'s own comment on this key.
+variants    = "lvgl"
+
+# No idf_requires — a sysclaw package is never an IDF component at all
+# (catstrap.py's own comment on this tier). Compiled standalone by
+# catstrap's _build_sysclaw_variant() with the same restricted flags every
+# claw_loader_selftest.c guest object uses.
