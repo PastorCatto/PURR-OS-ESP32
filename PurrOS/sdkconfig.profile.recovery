@@ -1,0 +1,2 @@
+# CoreOS profile: recovery (KittenOS)
+CONFIG_PURR_PROFILE_RECOVERY=y

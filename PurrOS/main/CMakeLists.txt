@@ -1,2 +1,2 @@
-idf_component_register(SRCS "main.c"
-                       REQUIRES kernel coreos esp_partition app_update)
+idf_component_register(SRCS "main.c" "commands.c"
+                       REQUIRES kernel coreos esp_partition esp_system esp_timer heap)

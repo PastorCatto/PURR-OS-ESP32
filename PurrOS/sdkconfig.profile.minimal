@@ -1,0 +1,2 @@
+# CoreOS profile: minimal (recovery loader)
+CONFIG_PURR_PROFILE_MINIMAL=y

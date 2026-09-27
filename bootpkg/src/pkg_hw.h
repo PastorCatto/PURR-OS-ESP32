@@ -17,6 +17,7 @@ void hw_fill(int x, int y, int w, int h, uint16_t rgb565);
 void hw_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int scale);
 int  hw_text_width(const char *s, int scale);
 char hw_key(void);                          /* next key, or 0 */
+int  hw_kbd_ok(void);                       /* did the keyboard answer its last poll */
 void hw_delay_ms(uint32_t ms);
 
 #endif

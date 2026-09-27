@@ -176,32 +176,62 @@ static uint32_t load_package(void)
 #endif
 }
 
-int purr_bootpkg_run(const bootloader_state_t *bs, int preferred)
+static void set_name(purr_boot_part_t *p, const char *name)
 {
-    ESP_LOGI(TAG, "bootpkg: looking");
-    flush_log();
+    memset(p, 0, sizeof(*p));
+    for (size_t i = 0; i < sizeof(p->name) - 1 && name[i]; i++) {
+        p->name[i] = name[i];
+    }
+}
+
+static uint8_t looks_bootable(const esp_partition_pos_t *pos)
+{
+    uint32_t first = 0;   /* the flash reader takes whole words */
+    if (pos->size == 0) {
+        return 0;
+    }
+    return bootloader_flash_read(pos->offset, &first, sizeof(first), false) == ESP_OK &&
+           (first & 0xFF) == 0xE9;   /* an ESP app image */
+}
+
+bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index)
+{
     uint32_t entry = load_package();
-    flush_log();
     if (entry == 0) {
-        return -1;
+        return false;
     }
 
+    /* The menu's list: the PURR OS slots first, then KittenOS (the factory slot). */
     purr_boot_part_t parts[PURR_PKG_MAX_PARTS];
-    int n = bs->app_count < PURR_PKG_MAX_PARTS ? bs->app_count : PURR_PKG_MAX_PARTS;
-    for (int i = 0; i < n; i++) {
-        memset(&parts[i], 0, sizeof(parts[i]));
-        strcpy(parts[i].name, "ota_");
-        parts[i].name[4] = (char)('0' + (i % 10));
-        uint32_t first = 0;   /* the flash reader takes whole words */
-        parts[i].bootable = bootloader_flash_read(bs->ota[i].offset, &first, sizeof(first), false) == ESP_OK &&
-                            (first & 0xFF) == 0xE9;   /* an ESP app image */
+    int map[PURR_PKG_MAX_PARTS];          /* menu index -> the bootloader's slot index */
+    int n = 0, menu_preferred = -1;
+    for (int i = 0; i < bs->app_count && n < PURR_PKG_MAX_PARTS - 1; i++) {
+        char name[16] = "PURR OS ota_0";   /* no snprintf: it drags newlib's printf in */
+        name[12] = (char)('0' + (i % 10));
+        set_name(&parts[n], name);
+        parts[n].bootable = looks_bootable(&bs->ota[i]);
+        map[n] = i;
+        if (i == preferred) {
+            menu_preferred = n;
+        }
+        n++;
+    }
+    if (bs->factory.size != 0 && n < PURR_PKG_MAX_PARTS) {
+        set_name(&parts[n], "KittenOS");
+        parts[n].bootable = looks_bootable(&bs->factory);
+        map[n] = FACTORY_INDEX;
+        if (preferred == FACTORY_INDEX) {
+            menu_preferred = n;
+        }
+        n++;
     }
 
     ESP_LOGI(TAG, "starting the boot menu");
     flush_log();
-    int choice = ((purr_pkg_entry_fn)entry)(&s_services, parts, n, preferred);
+    int choice = ((purr_pkg_entry_fn)entry)(&s_services, parts, n, menu_preferred);
     if (choice < 0 || choice >= n) {
-        return -1;
+        return false;
     }
-    return choice;
+    *boot_index = map[choice];
+    return true;
 }

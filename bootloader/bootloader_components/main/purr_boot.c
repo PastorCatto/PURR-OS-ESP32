@@ -32,8 +32,8 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     }
 
     /* The boot package shows the menu and may pick another slot. Without one, boot normally. */
-    int chosen = purr_bootpkg_run(&bs, boot_index);
-    if (chosen >= 0) {
+    int chosen;
+    if (purr_bootpkg_run(&bs, boot_index, &chosen)) {
         boot_index = chosen;
     }
 

@@ -168,8 +168,18 @@ int hw_display_init(void)
 static inline void sda_lo(void) { pin_drive(PIN_KBD_SDA); }
 static inline void sda_hi(void) { pin_release(PIN_KBD_SDA); }
 static inline void scl_lo(void) { pin_drive(PIN_KBD_SCL); }
-static inline void scl_hi(void) { pin_release(PIN_KBD_SCL); }
-#define QUARTER() delay_us(3)
+/* Letting SCL go, then waiting while the device holds it low (clock stretching). */
+static void scl_hi(void)
+{
+    pin_release(PIN_KBD_SCL);
+    for (int i = 0; i < 2000 && !pin_read(PIN_KBD_SCL); i++) {
+        delay_us(1);
+    }
+}
+#define QUARTER() delay_us(5)
+
+static int s_kbd_ok;                        /* the keyboard answered its last poll */
+int hw_kbd_ok(void) { return s_kbd_ok; }
 
 static void i2c_start(void)
 {
@@ -215,8 +225,10 @@ char hw_key(void)
     i2c_start();
     if (!i2c_write((KBD_ADDR << 1) | 1)) {
         i2c_stop();
+        s_kbd_ok = 0;
         return 0;
     }
+    s_kbd_ok = 1;
     uint8_t c = i2c_read_nack();
     i2c_stop();
     return (char)c;

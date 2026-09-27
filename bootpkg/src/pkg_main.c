@@ -31,6 +31,16 @@ static void draw_header(void)
     hw_text(16, 48, "boot menu", GREY, BLACK, 1);
 }
 
+static void draw_kbd(void)
+{
+    hw_fill(120, 48, 200, 8, BLACK);
+    if (hw_kbd_ok()) {
+        hw_text(120, 48, "keyboard ok", GREY, BLACK, 1);
+    } else {
+        hw_text(120, 48, "keyboard not answering", 0xF800, BLACK, 1);
+    }
+}
+
 static void draw_list(const purr_menu_t *m, const char *message)
 {
     hw_fill(0, 70, LCD_W, 130, BLACK);
@@ -98,15 +108,22 @@ int purr_pkg_entry(const purr_boot_services_t *svc, const purr_boot_part_t *part
         purr_menu_t m;
         purr_menu_init(&m, mp, n, preferred);
         draw_header();
+        hw_key();
+        draw_kbd();
         draw_list(&m, NULL);
         draw_footer(&m);
 
         int last_sel = m.selected, last_secs = purr_menu_seconds_left(&m);
         int last_vis = purr_menu_visible(&m);
+        int last_kbd = hw_kbd_ok();
         purr_menu_result_t r = {PURR_MENU_ACT_NONE, -1};
         while (r.action == PURR_MENU_ACT_NONE) {
             hw_delay_ms(TICK_MS);
             r = purr_menu_step(&m, TICK_MS, purr_key_from_char(hw_key()));
+            if (hw_kbd_ok() != last_kbd) {
+                last_kbd = hw_kbd_ok();
+                draw_kbd();
+            }
             int secs = purr_menu_seconds_left(&m), vis = purr_menu_visible(&m);
             if (m.selected != last_sel || vis != last_vis) {
                 draw_list(&m, NULL);

@@ -91,9 +91,28 @@ the bootloader skips the menu.
 - **Monolithic boards** (the CYD): there is no filesystem copy of the system. KittenOS is the
   only safety net. If a new image does not start, KittenOS is still there to write it again.
 
-## 7. Open questions
+## 7. First cut (T-Deck Plus)
 
-- **The boot menu's entries and timeout,** and which key or button on each board opens it.
+What is built first, so the rest of CoreOS can be built on the same pieces.
+
+- **A normal ESP-IDF app in the `factory` slot.** The bootloader already knows how to start it,
+  so no loader of our own is needed. It has its own 1 MB partition (`kittenos`, type app,
+  subtype factory, at `0x20000`) and is not overwritten by PURR OS updates. This replaces the
+  "raw partition" wording above; the effect is the same.
+- **The same project as PURR OS** (`PurrOS/`), built with the `recovery` profile, so the shell
+  engine, console and commands are shared. The `full` profile adds to them.
+- **The boot menu lists it.** The bootloader gives the boot package the app slots and the
+  factory slot. When no PURR OS slot can boot but KittenOS can, the menu counts down into
+  KittenOS, which is the fallback in section 5.
+- **What it does at first:** a text console on the display, a keyboard, and the shell. The
+  commands are the basics (help, version, info, parts, mem, clear, echo, reboot). Reading
+  the filesystem, applying updates and Wi-Fi come after.
+- **`reboot recovery` is not done yet.** It needs the boot target in `purrcfg` (section 2). For
+  now KittenOS is reached from the boot menu.
+
+## 8. Open questions
+
+- **Which key or button opens the boot menu on boards without a keyboard** (the CYD).
 - **What a mini-app is in KittenOS:** the same `.cat` apps run by the same runtime, or
   something smaller.
 - **The minimal driver set per board:** display and keyboard, and what else (storage, USB)
