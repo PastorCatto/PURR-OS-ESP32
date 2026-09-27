@@ -6,6 +6,7 @@ set(srcs
     "src/purr_cfgstore.c"
     "src/purr_fs.c"
     "src/purr_fs_flash.c"
+    "src/purr_net.c"
     "src/purr_font_data.c")
 
 if(CONFIG_PURR_BOARD_TDECK_PLUS)
@@ -14,4 +15,4 @@ endif()
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "include"
-                       REQUIRES coreos littlefs esp_partition driver esp_driver_gpio esp_driver_spi esp_driver_i2c esp_driver_ledc heap log)
+                       REQUIRES coreos littlefs esp_partition esp_wifi esp_netif esp_event nvs_flash driver esp_driver_gpio esp_driver_spi esp_driver_i2c esp_driver_ledc heap log)

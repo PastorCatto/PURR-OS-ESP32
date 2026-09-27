@@ -8,11 +8,14 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "sdkconfig.h"
 
 #include "purr_cfgstore.h"
 #include "purr_console.h"
 #include "purr_fs.h"
+#include "purr_net.h"
+#include "purr_wifi.h"
 #include "purr_kernel.h"
 
 #define VERSION "0.1.0"
@@ -198,6 +201,144 @@ static int cmd_format(purr_cli_t *cli, int argc, char **argv)
     return 0;
 }
 
+
+/* ---------------------------------------------------------------- Wi-Fi */
+
+void purr_net_setup(purr_cli_t *cli)
+{
+    esp_err_t e = purr_net_init(&s_fs);
+    if (e != ESP_OK) {
+        purr_cli_printf(cli, "wifi: did not start (%s)\n", esp_err_to_name(e));
+    }
+}
+
+static int cmd_net(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    purr_net_status_t st;
+    purr_net_status(&st);
+    if (st.connected) {
+        purr_cli_printf(cli, "wifi:    %s (%d dBm)\n", st.ssid, st.rssi);
+        purr_cli_printf(cli, "ip:      %s\n", st.ip);
+    } else {
+        purr_cli_puts(cli, "wifi:    not connected\n");
+    }
+    return 0;
+}
+
+static int cmd_wifi_scan(purr_cli_t *cli)
+{
+    purr_cli_puts(cli, "scanning...\n");
+    purr_console_flush();
+    purr_net_ap_t aps[16];
+    int n = 0;
+    esp_err_t e = purr_net_scan(aps, 16, &n);
+    if (e != ESP_OK) {
+        purr_cli_printf(cli, "scan failed: %s\n", esp_err_to_name(e));
+        return 1;
+    }
+    int shown = n > 16 ? 16 : n;
+    for (int i = 0; i < shown; i++) {
+        purr_cli_printf(cli, "  %-32s %4d dBm  %s\n", aps[i].ssid, aps[i].rssi,
+                        aps[i].open ? "open" : "secured");
+    }
+    if (n > shown) {
+        purr_cli_printf(cli, "  (%d more not shown)\n", n - shown);
+    }
+    return 0;
+}
+
+/* Words a person reads, not an ESP-IDF error name. */
+static const char *net_reason_text(uint8_t reason)
+{
+    switch (reason) {
+    case WIFI_REASON_NO_AP_FOUND:
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+    case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+    case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+        return "network not found";
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_AUTH_EXPIRE:
+    case WIFI_REASON_MIC_FAILURE:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        return "likely a wrong password";
+    default:
+        return NULL;
+    }
+}
+
+static void print_connect_error(purr_cli_t *cli, esp_err_t e)
+{
+    const char *why = e == ESP_ERR_TIMEOUT ? net_reason_text(purr_net_last_disconnect_reason()) : NULL;
+    if (e == ESP_ERR_TIMEOUT) {
+        purr_cli_puts(cli, "connection timed out. Could not connect.");
+    } else {
+        purr_cli_printf(cli, "could not connect (%s).", esp_err_to_name(e));
+    }
+    purr_cli_printf(cli, why ? " (%s)\n" : "\n", why ? why : "");
+}
+
+static int cmd_wifi_connect(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2) {
+        purr_cli_puts(cli, "usage: wifi connect <ssid> [password]\n");
+        return 1;
+    }
+    const char *pass = argc > 2 ? argv[2] : "";
+    purr_cli_printf(cli, "connecting to %s...\n", argv[1]);
+    purr_console_flush();
+    esp_err_t e = purr_net_connect(argv[1], pass, 15000);
+    if (e != ESP_OK) {
+        print_connect_error(cli, e);
+        return 1;
+    }
+    purr_net_status_t st;
+    purr_net_status(&st);
+    purr_cli_printf(cli, "connected, ip %s\n", st.ip);
+    return 0;
+}
+
+static int cmd_wifi_forget(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2) {
+        purr_cli_puts(cli, "usage: wifi forget <ssid>\n");
+        return 1;
+    }
+    purr_net_forget(argv[1]);
+    purr_cli_puts(cli, "forgotten (if it was saved)\n");
+    return 0;
+}
+
+static int cmd_wifi_list(purr_cli_t *cli)
+{
+    purr_net_ap_t saved[PURR_WIFI_MAX_SAVED];
+    int n = purr_net_saved(saved, PURR_WIFI_MAX_SAVED);
+    if (n == 0) {
+        purr_cli_puts(cli, "no saved networks\n");
+        return 0;
+    }
+    for (int i = 0; i < n; i++) {
+        purr_cli_printf(cli, "  %-32s %s\n", saved[i].ssid, saved[i].open ? "(open)" : "");
+    }
+    return 0;
+}
+
+static int cmd_wifi(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2) {
+        purr_cli_puts(cli, "usage: wifi scan|connect|forget|list|status\n");
+        return 1;
+    }
+    if (strcmp(argv[1], "scan") == 0) return cmd_wifi_scan(cli);
+    if (strcmp(argv[1], "connect") == 0) return cmd_wifi_connect(cli, argc - 1, argv + 1);
+    if (strcmp(argv[1], "forget") == 0) return cmd_wifi_forget(cli, argc - 1, argv + 1);
+    if (strcmp(argv[1], "list") == 0) return cmd_wifi_list(cli);
+    if (strcmp(argv[1], "status") == 0) return cmd_net(cli, 0, NULL);
+    purr_cli_printf(cli, "wifi: unknown subcommand '%s'\n", argv[1]);
+    return 1;
+}
+
 static int cmd_version(purr_cli_t *cli, int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -353,6 +494,8 @@ static const purr_cmd_t s_cmds[] = {
     {"write",   "write text to a file",          cmd_write},
     {"df",      "filesystem space",              cmd_df},
     {"format",  "erase and create the fs",       cmd_format},
+    {"wifi",    "scan|connect|forget|list|status", cmd_wifi},
+    {"net",     "connection status",             cmd_net},
     {"echo",    "print the arguments",           cmd_echo},
     {"clear",   "clear the screen",              cmd_clear},
     {"reboot",  "restart (reboot recovery)",     cmd_reboot},
