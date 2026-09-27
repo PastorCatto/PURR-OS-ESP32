@@ -32,6 +32,9 @@ static const purr_board_t s_board = {
         .invert = 1,               /* this panel needs inversion for correct colours */
         .spi_hz = 40 * 1000 * 1000,
     },
+    /* The keyboard is a small controller of its own: one byte read gives the next
+     * key as ASCII, or 0 for none. */
+    .keyboard = {.port = 0, .sda = 18, .scl = 8, .addr = 0x55, .hz = 100 * 1000},
 };
 
 const purr_board_t *purr_board(void)

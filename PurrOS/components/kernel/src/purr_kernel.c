@@ -1,6 +1,7 @@
 #include "purr_kernel.h"
 
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -8,6 +9,7 @@
 
 static const char *TAG = "kernel";
 static const purr_display_v2_t *s_display;
+static i2c_master_dev_handle_t s_kbd;
 
 static void pin_out(int pin, int level)
 {
@@ -49,6 +51,25 @@ esp_err_t purr_kernel_init(void)
         return e;
     }
 
+    const purr_keyboard_cfg_t *k = &b->keyboard;
+    if (k->addr != 0) {
+        i2c_master_bus_config_t bc = {
+            .i2c_port = k->port, .sda_io_num = k->sda, .scl_io_num = k->scl,
+            .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
+        };
+        i2c_master_bus_handle_t bus_h;
+        i2c_device_config_t dc = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = k->addr,
+            .scl_speed_hz = k->hz,
+        };
+        if (i2c_new_master_bus(&bc, &bus_h) != ESP_OK ||
+            i2c_master_bus_add_device(bus_h, &dc, &s_kbd) != ESP_OK) {
+            s_kbd = NULL;
+            ESP_LOGW(TAG, "keyboard bus did not start");
+        }
+    }
+
     e = purr_st7789_init(&b->display, b->spi.host, &s_display);
     if (e != ESP_OK) {
         s_display = NULL;
@@ -60,4 +81,13 @@ esp_err_t purr_kernel_init(void)
 const purr_display_v2_t *purr_kernel_display(void)
 {
     return s_display;
+}
+
+char purr_kernel_key(void)
+{
+    uint8_t c = 0;
+    if (s_kbd == NULL || i2c_master_receive(s_kbd, &c, 1, 20) != ESP_OK) {
+        return 0;
+    }
+    return (char)c;
 }

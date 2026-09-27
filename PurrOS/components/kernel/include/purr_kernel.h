@@ -27,6 +27,9 @@ const purr_display_v2_t *purr_kernel_display(void);
 esp_err_t purr_st7789_init(const purr_display_cfg_t *cfg, int spi_host,
                            const purr_display_v2_t **out);
 
+/* The next key as a character, or 0 if none is waiting (or there is no keyboard). */
+char purr_kernel_key(void);
+
 #ifdef __cplusplus
 }
 #endif

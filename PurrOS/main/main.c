@@ -1,96 +1,142 @@
 /*
- * PURR OS - display bring-up.
+ * PURR OS - boot menu preview.
  *
- * Brings up the board and the display, draws a test screen (colour bars, edges,
- * text at two sizes) and animates a square, so size, orientation, colour order
- * and updates can be checked by eye on the real panel.
+ * Runs the boot menu's logic (coreos purr_menu.c) on the real screen and keyboard,
+ * built from the real partition table. It runs as the app for now, so it does not
+ * boot anything: a choice is shown on screen. Every other round it pretends there
+ * is nothing to boot, to show the "Internet recovery" case. The bootloader-side
+ * version comes after this is checked by eye.
  */
+#include <stdio.h>
+
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "purr_gfx.h"
 #include "purr_kernel.h"
+#include "purr_menu.h"
 
 static const char *TAG = "purros";
 
 #define BLACK   PURR_RGB565(0, 0, 0)
 #define WHITE   PURR_RGB565(255, 255, 255)
+#define GREY    PURR_RGB565(150, 150, 150)
+#define ORANGE  PURR_RGB565(255, 180, 0)
+#define TICK_MS 50
 
-static void draw_test_screen(const purr_display_v2_t *d, int w, int h)
+#define MAX_PARTS 8
+
+/* The app partitions from the table. One is bootable if it starts with an ESP image. */
+static int read_parts(purr_menu_part_t *parts, int max, int *preferred)
 {
-    static const uint16_t bars[8] = {
-        PURR_RGB565(255, 0, 0),   PURR_RGB565(0, 255, 0),   PURR_RGB565(0, 0, 255),
-        PURR_RGB565(255, 255, 0), PURR_RGB565(0, 255, 255), PURR_RGB565(255, 0, 255),
-        PURR_RGB565(255, 255, 255), PURR_RGB565(128, 128, 128),
-    };
-
-    d->fill(0, 0, w, h, BLACK);
-    for (int i = 0; i < 8; i++) {
-        d->fill(i * (w / 8), 0, w / 8, 40, bars[i]);
+    int n = 0;
+    *preferred = -1;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    for (; it != NULL && n < max; it = esp_partition_next(it)) {
+        const esp_partition_t *p = esp_partition_get(it);
+        uint8_t first = 0;
+        esp_partition_read(p, 0, &first, 1);
+        snprintf(parts[n].label, sizeof(parts[n].label), "%s", p->label);
+        parts[n].bootable = (first == 0xE9);     /* ESP image magic */
+        if (p == running) {
+            *preferred = n;
+        }
+        n++;
     }
+    esp_partition_iterator_release(it);
+    return n;
+}
 
-    /* A one pixel frame shows any cropping at the edges. */
-    d->fill(0, 0, w, 1, WHITE);
-    d->fill(0, h - 1, w, 1, WHITE);
-    d->fill(0, 0, 1, h, WHITE);
-    d->fill(w - 1, 0, 1, h, WHITE);
+static void draw(const purr_display_v2_t *d, int w, int h, const purr_menu_t *m,
+                 const char *message)
+{
+    d->fill(0, 0, w, h, BLACK);
+    purr_gfx_text(d, 16, 16, "PURR OS", ORANGE, BLACK, 3);
+    purr_gfx_text(d, 16, 48, "boot menu", GREY, BLACK, 1);
 
-    const char *title = "PURR OS";
-    int tw = purr_gfx_text_width(title, 4);
-    purr_gfx_text(d, (w - tw) / 2, 64, title, PURR_RGB565(255, 180, 0), BLACK, 4);
-
-    const char *l1 = "T-Deck Plus  ST7789 320x240";
-    purr_gfx_text(d, (w - purr_gfx_text_width(l1, 1)) / 2, 116, l1, WHITE, BLACK, 1);
-    const char *l2 = "display bring-up: colours, edges, motion";
-    purr_gfx_text(d, (w - purr_gfx_text_width(l2, 1)) / 2, 130, l2, PURR_RGB565(160, 160, 160), BLACK, 1);
-    const char *l3 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789";
-    purr_gfx_text(d, (w - purr_gfx_text_width(l3, 1)) / 2, 150, l3, WHITE, BLACK, 1);
-    const char *l4 = "abcdefghijklmnopqrstuvwxyz !?#@%&*()";
-    purr_gfx_text(d, (w - purr_gfx_text_width(l4, 1)) / 2, 162, l4, WHITE, BLACK, 1);
-
-    purr_gfx_text(d, 6, 48, "TOP-LEFT", WHITE, BLACK, 1);
-    purr_gfx_text(d, w - 6 - purr_gfx_text_width("BOTTOM-RIGHT", 1), h - 16, "BOTTOM-RIGHT", WHITE, BLACK, 1);
+    if (message) {
+        purr_gfx_text(d, 16, 100, message, WHITE, BLACK, 2);
+        return;
+    }
+    if (!purr_menu_visible(m)) {
+        purr_gfx_text(d, 16, 100, "No system found...", GREY, BLACK, 2);
+        return;
+    }
+    if (m->no_boot_options) {
+        purr_gfx_text(d, 16, 76, "Nothing to boot.", WHITE, BLACK, 1);
+    }
+    for (int i = 0; i < m->count; i++) {
+        int y = 100 + i * 28;
+        bool sel = (i == m->selected);
+        d->fill(12, y - 4, w - 24, 24, sel ? ORANGE : BLACK);
+        char line[40];
+        snprintf(line, sizeof(line), "%s%s", m->no_boot_options ? "" : "Boot ", m->entries[i].label);
+        purr_gfx_text(d, 20, y, line, sel ? BLACK : WHITE, sel ? ORANGE : BLACK, 2);
+    }
+    int s = purr_menu_seconds_left(m);
+    char foot[48];
+    if (s >= 0) {
+        snprintf(foot, sizeof(foot), "Booting in %d...  any key stops", s);
+    } else {
+        snprintf(foot, sizeof(foot), "W up   S down   D or Enter select");
+    }
+    purr_gfx_text(d, 16, h - 24, foot, GREY, BLACK, 1);
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "PURR OS display bring-up");
-
+    ESP_LOGI(TAG, "PURR OS boot menu preview");
     if (purr_kernel_init() != ESP_OK || purr_kernel_display() == NULL) {
-        ESP_LOGE(TAG, "no display, staying up on the serial console");
         for (;;) {
             vTaskDelay(pdMS_TO_TICKS(2000));
             ESP_LOGE(TAG, "display did not come up");
         }
     }
-
     const purr_display_v2_t *d = purr_kernel_display();
     purr_display_info_t info;
     d->get_info(&info);
-    ESP_LOGI(TAG, "display: %s %dx%d, features 0x%x", info.name, info.width, info.height,
-             (unsigned)d->features);
-
     if (d->set_brightness) {
         d->set_brightness(255);
     }
-    draw_test_screen(d, info.width, info.height);
-    ESP_LOGI(TAG, "test screen drawn");
 
-    /* A square bouncing along the bottom, to show updates and motion. */
-    int x = 8, dx = 4;
-    const int y = info.height - 40, size = 16;
-    uint16_t colour = PURR_RGB565(255, 0, 255);
-    for (int frame = 0;; frame++) {
-        d->fill(x, y, size, size, BLACK);
-        x += dx;
-        if (x <= 4 || x >= info.width - size - 4) {
-            dx = -dx;
+    for (int round = 0;; round++) {
+        purr_menu_part_t parts[MAX_PARTS];
+        int preferred, n = read_parts(parts, MAX_PARTS, &preferred);
+        if (round % 2 == 1) {
+            n = 0;                       /* pretend nothing is there */
         }
-        d->fill(x, y, size, size, colour);
-        if (frame % 100 == 0) {
-            ESP_LOGI(TAG, "alive, frame %d", frame);
+        purr_menu_t m;
+        purr_menu_init(&m, parts, n, preferred);
+        ESP_LOGI(TAG, "round %d: %d partitions, %d entries", round, n, m.count);
+
+        draw(d, info.width, info.height, &m, NULL);
+        int last_sel = m.selected, last_secs = purr_menu_seconds_left(&m), last_vis = purr_menu_visible(&m);
+        purr_menu_result_t r = {PURR_MENU_ACT_NONE, -1};
+        while (r.action == PURR_MENU_ACT_NONE) {
+            vTaskDelay(pdMS_TO_TICKS(TICK_MS));
+            char c = purr_kernel_key();
+            r = purr_menu_step(&m, TICK_MS, purr_key_from_char(c));
+            if (m.selected != last_sel || purr_menu_seconds_left(&m) != last_secs ||
+                purr_menu_visible(&m) != last_vis) {
+                last_sel = m.selected;
+                last_secs = purr_menu_seconds_left(&m);
+                last_vis = purr_menu_visible(&m);
+                draw(d, info.width, info.height, &m, NULL);
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(30));
+
+        char msg[48];
+        if (r.action == PURR_MENU_ACT_BOOT) {
+            snprintf(msg, sizeof(msg), "Would boot %s", parts[r.index].label);
+        } else {
+            snprintf(msg, sizeof(msg), "Recovery: not built yet");
+        }
+        ESP_LOGI(TAG, "%s", msg);
+        draw(d, info.width, info.height, &m, msg);
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
 }

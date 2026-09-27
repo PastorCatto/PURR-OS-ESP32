@@ -35,6 +35,13 @@ typedef struct {
 } purr_display_cfg_t;
 
 typedef struct {
+    int port;                     /* an i2c port number */
+    int sda, scl;
+    uint8_t addr;                 /* 7-bit address; 0 if the board has no keyboard */
+    uint32_t hz;
+} purr_keyboard_cfg_t;
+
+typedef struct {
     const char *name;             /* the board's codename */
     /* A GPIO that switches the peripheral power rail. PURR_PIN_NONE if there is none. */
     int power_pin;
@@ -43,6 +50,7 @@ typedef struct {
     int idle_high_pins[PURR_MAX_IDLE_PINS];
     purr_spi_bus_t spi;
     purr_display_cfg_t display;
+    purr_keyboard_cfg_t keyboard;
 } purr_board_t;
 
 /* The profile compiled in for this build. */
