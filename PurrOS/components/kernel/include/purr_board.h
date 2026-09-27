@@ -28,7 +28,8 @@ typedef struct {
     int cs, dc, rst, backlight;
     uint16_t width, height;       /* in the orientation the panel is used in */
     uint16_t col_off, row_off;
-    uint8_t  madctl;              /* memory access control byte (orientation, colour order) */
+    uint8_t  madctl;              /* memory access control byte (orientation) */
+    uint8_t  bgr;                 /* nonzero if the panel is wired blue-green-red */
     uint8_t  invert;              /* nonzero if the panel needs display inversion on */
     uint32_t spi_hz;
 } purr_display_cfg_t;

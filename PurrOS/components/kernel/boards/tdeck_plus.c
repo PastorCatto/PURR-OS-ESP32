@@ -27,7 +27,8 @@ static const purr_board_t s_board = {
         .cs = 12, .dc = 11, .rst = PURR_PIN_NONE, .backlight = 42,
         .width = 320, .height = 240,
         .col_off = 0, .row_off = 0,
-        .madctl = 0x70,            /* MX|MY|MV: landscape, RGB order */
+        .madctl = 0x70,            /* MX|MY|MV: landscape */
+        .bgr = 1,                  /* wired BGR: without this red and blue are swapped */
         .invert = 1,               /* this panel needs inversion for correct colours */
         .spi_hz = 40 * 1000 * 1000,
     },

@@ -269,7 +269,7 @@ esp_err_t purr_st7789_init(const purr_display_cfg_t *cfg, int spi_host, const pu
         uint8_t data[14];
         memcpy(data, s_init[i].data, sizeof(data));
         if (i == MADCTL_STEP_INDEX) {
-            data[0] = cfg->madctl;
+            data[0] = cfg->madctl | (cfg->bgr ? 0x08 : 0x00);   /* bit 3 = BGR order */
         }
         e = cmd_data(s_init[i].cmd, data, s_init[i].len);
         if (s_init[i].delay_ms) {
