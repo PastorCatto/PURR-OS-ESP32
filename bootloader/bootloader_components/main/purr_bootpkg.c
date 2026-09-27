@@ -1,15 +1,14 @@
 // Loads and runs the boot package (bootloader/SPEC.md section 9).
 //
-// The package is a PURR image in its own raw partition, named "bootpkg". This checks
-// it (magic, chip, type, size, SHA-256 of the payload), copies it into the reserved
-// RAM window and calls it. The signature is not checked yet: that needs the key bag
-// and purrcfg, so for now the package is accepted unsigned, as the spec allows while
-// secure mode is off.
+// The package is a PURR image in its own raw partition, named "bootpkg". This verifies it
+// (magic, chip, type, layout, payload hash, and now the ECDSA P-256 signature against the
+// key bag) then copies it into the reserved RAM window and calls it. An unsigned or
+// unverified package is only accepted while secure_mode is off, per bootloader/SPEC.md
+// section 9.
 #include <stdint.h>
 #include <string.h>
 
 #include "bootloader_flash_priv.h"
-#include "bootloader_sha.h"
 #include "bootloader_utility.h"
 #include "esp_flash_partitions.h"
 #include "esp_log.h"
@@ -19,7 +18,14 @@
 #include "soc/gpio_sig_map.h"
 
 #include "purr_abi.h"
+#include "purr_bootcfg.h"
 #include "purr_bootpkg.h"
+#include "purr_crypto_uecc.h"
+#include "purr_keybag.h"
+#include "purr_verify.h"
+
+extern const purr_key_t purr_default_keys[];
+extern const size_t purr_default_keys_count;
 
 static const char *TAG = "purr_boot";
 
@@ -101,6 +107,21 @@ bool purr_find_partition(const char *name, uint32_t *offset, uint32_t *size)
 
 /* ------------------------------------------------------------ loading it */
 
+typedef struct {
+    const uint8_t *base;
+    uint32_t size;
+} mmap_read_ctx_t;
+
+static int mmap_read(void *ctx, uint32_t offset, void *buf, uint32_t len)
+{
+    mmap_read_ctx_t *m = ctx;
+    if ((uint64_t)offset + len > m->size) {
+        return -1;
+    }
+    memcpy(buf, m->base + offset, len);
+    return 0;
+}
+
 // Returns the entry address, or 0 with a reason logged.
 static uint32_t load_package(void)
 {
@@ -124,35 +145,49 @@ static uint32_t load_package(void)
         return 0;
     }
 
-    uint32_t entry = 0;
+    purr_cfg_t cfg;
+    purr_bootcfg_load(&cfg);      /* defaults (secure_mode = warn) if unreadable */
+
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
+
+    purr_verify_env_t env = {
+        .chip_id = THIS_CHIP,
+        .bag = &bag,
+        .crypto = &purr_crypto_uecc,
+        .bootloader_version = 0,  /* the bootloader has no version scheme yet */
+        .version_floor = 0,
+        .enforce_floor = 0,
+    };
+    mmap_read_ctx_t rdctx = {base, part_size};
     purr_image_header_t h;
-    memcpy(&h, base, sizeof(h));
+    purr_verify_result_t vr = purr_image_verify(&env, mmap_read, &rdctx, part_size, &h);
+
+    uint32_t entry = 0;
     const char *why = NULL;
 
+    /* purr_image_verify checks the signature is valid for whatever subtype the header
+     * claims; it does not know this partition is only ever supposed to hold a boot
+     * package. That check is ours, and it applies whether or not the image verified. */
     if (h.magic != PURR_IMAGE_MAGIC) {
         why = "no PURR image (partition empty?)";
-    } else if (h.header_version != PURR_IMAGE_HEADER_VERSION || h.header_size < sizeof(h)) {
-        why = "unknown header version";
-    } else if (h.chip_id != THIS_CHIP) {
-        why = "built for another chip";
     } else if (h.image_type != PURR_IMG_MODULE || PURR_FLAGS_SUBTYPE(h.flags) != PURR_MOD_BOOTPKG) {
         why = "not a boot package";
-    } else if (h.payload_size < sizeof(purr_pkg_preamble_t) || (h.payload_size % 4) != 0 ||
-               h.payload_offset > part_size || h.payload_size > part_size - h.payload_offset) {
-        why = "payload size out of range or not a multiple of 4";
+    } else if (vr != PURR_V_OK && cfg.secure_mode != PURR_SECURE_OFF) {
+        why = purr_verify_name(vr);
+        ESP_LOGW(TAG, "bootpkg: rejected (%s), secure mode is %s", why,
+                 cfg.secure_mode == PURR_SECURE_WARN ? "warn" : "enforce");
     } else {
+        if (vr != PURR_V_OK) {
+            ESP_LOGW(TAG, "bootpkg: unverified (%s), accepted because secure mode is off",
+                     purr_verify_name(vr));
+        }
         const uint8_t *payload = base + h.payload_offset;
         purr_pkg_preamble_t p;
         memcpy(&p, payload, sizeof(p));
-        uint8_t digest[PURR_SHA256_LEN];
-        bootloader_sha256_handle_t sha = bootloader_sha256_start();
-        bootloader_sha256_data(sha, payload, h.payload_size);
-        bootloader_sha256_finish(sha, digest);
-
-        if (memcmp(digest, h.payload_sha256, sizeof(digest)) != 0) {
-            why = "payload hash does not match";
-        } else if (p.text_size > PURR_PKG_S3_TEXT_MAX ||
-                   p.data_size > PURR_PKG_S3_DATA_MAX ||
+        if (h.payload_size < sizeof(p)) {
+            why = "payload smaller than its own preamble";
+        } else if (p.text_size > PURR_PKG_S3_TEXT_MAX || p.data_size > PURR_PKG_S3_DATA_MAX ||
                    p.bss_size > PURR_PKG_S3_DATA_MAX - p.data_size ||
                    sizeof(p) + (uint64_t)p.text_size + p.data_size > h.payload_size) {
             why = "does not fit its RAM window";
@@ -164,8 +199,9 @@ static uint32_t load_package(void)
             memset((void *)(PURR_PKG_S3_DATA + p.data_size), 0, p.bss_size);
             __asm__ __volatile__("memw; isync");
             entry = p.entry;
-            ESP_LOGI(TAG, "bootpkg %.12s loaded: code %u, data %u, bss %u bytes",
-                     h.version, (unsigned)p.text_size, (unsigned)p.data_size, (unsigned)p.bss_size);
+            ESP_LOGI(TAG, "bootpkg %.12s loaded (key id %u, %s): code %u, data %u, bss %u bytes",
+                     h.version, (unsigned)h.key_id, purr_verify_name(vr),
+                     (unsigned)p.text_size, (unsigned)p.data_size, (unsigned)p.bss_size);
         }
     }
     bootloader_munmap(base);

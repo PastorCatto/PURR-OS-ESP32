@@ -315,9 +315,21 @@ board that happens before the kernel lives in the **boot package**.
 - **Payload:** a 16-byte preamble (code size, data size, bss size, entry address), the code,
   then the data. The payload length is a multiple of 4, because the bootloader's hardware SHA
   only takes whole words.
-- **Checks:** magic, header version, chip, type and subtype, size, and the SHA-256 of the
-  payload. The signature is **not checked yet**, so an unsigned package is accepted. That is
-  allowed only while secure mode is off, and checking it comes with the key bag.
+- **Checks:** the bootloader loads `purrcfg` (defaults to `secure_mode = warn` if it cannot),
+  builds the key bag (the compiled-in defaults plus any valid `purrcfg` overrides), and calls
+  `purr_image_verify` (magic, header version, chip, layout, payload SHA-256, and the ECDSA
+  P-256 signature against the key bag; a boot-role key only) over `PurrOS/components/coreos`'s
+  shared `purr_verify.c`/`purr_keybag.c`, with `uECC_verify` (the `micro-ecc` component ESP-IDF's
+  own secure boot already vendors) as the P-256 backend. The bootloader separately checks the
+  header claims to be a boot package (`PURR_MOD_BOOTPKG`) before trusting the payload as one,
+  since a validly-signed image of a different subtype must not be run as if it were this one. An
+  image that fails verification is only accepted while `secure_mode` is off; otherwise the
+  package is treated as missing (the fallback below). Checked on the T-Deck Plus: an unsigned
+  package is rejected under the default `warn` mode, and a package signed with the boot-role
+  dev key (generated and applied with `purrstrap keys`, `../Keys/SPEC.md` section 3) loads and
+  runs. The default key bag's C source lives at `PurrOS/components/coreos/keys/` (public keys
+  only, tracked in git; the matching private keys are generated locally into the gitignored
+  `signing_keys/`).
 - **Service table** (`purr_boot_services_t`): a version, `log`, `delay_us` and `gpio_setup`.
   Flash reads are not offered, because the bootloader reads the partition table itself and hands
   the package the list of app slots and which of them start with a valid image.

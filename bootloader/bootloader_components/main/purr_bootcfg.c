@@ -47,6 +47,17 @@ static int fl_write(void *ctx, uint32_t addr, const void *buf, uint32_t len)
     return bootloader_flash_write(addr, s_bounce, len, false) == ESP_OK ? 0 : -1;
 }
 
+bool purr_bootcfg_load(purr_cfg_t *out)
+{
+    uint32_t off = 0, size = 0;
+    if (!purr_find_partition("purrcfg", &off, &size) || size < PURR_CFG_SECTORS * SECTOR) {
+        purr_cfg_defaults(out);
+        return false;
+    }
+    purr_flash_t fl = {fl_read, fl_erase, fl_write, NULL, off};
+    return purr_cfg_load(&fl, out, NULL) == 0;
+}
+
 bool purr_bootcfg_take_recovery(void)
 {
     uint32_t off = 0, size = 0;
