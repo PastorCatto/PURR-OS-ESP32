@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-set(SDKCONFIG_DEFAULTS "sdkconfig.defaults")
+if(NOT SDKCONFIG_DEFAULTS)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults")
+endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(purr_bootloader)

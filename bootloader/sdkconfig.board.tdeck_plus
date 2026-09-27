@@ -1,0 +1,2 @@
+# T-Deck Plus: ESP32-S3, 16 MB quad flash, 8 MB PSRAM (read from the board with esptool)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
