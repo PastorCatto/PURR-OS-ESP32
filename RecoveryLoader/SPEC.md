@@ -20,7 +20,7 @@ section 5).
   the partition table and this loader (`../Install/SPEC.md`).
 - **Wi-Fi credentials come from two places:** a **remembered recovery network** that the
   running system saved, and **typing it in** on the keyboard or serial console as the fallback.
-- **It takes the newest KittenOS** listed in the release manifest. The version rule follows Secure
+- **It takes the newest KittenOS** listed in the recovery manifest (../OTA/SPEC.md section 5). The version rule follows Secure
   Boot: in `enforce` mode **only the latest version is accepted** (nothing older than the newest
   the device has confirmed). In `warn` and `off` modes an older version is allowed to boot with a
   warning.
@@ -30,7 +30,7 @@ section 5).
 1. Show or print why it started.
 2. Get a network: use the remembered recovery network, or ask the user to type the network and
    password.
-3. Connect, and fetch the release manifest from the main repo's Releases.
+3. Connect, and fetch the recovery manifest (../OTA/SPEC.md section 5) from the main repo's Releases.
 4. Pick the newest KittenOS for this board.
 5. Download it into PSRAM, then verify it before touching flash: container, chip, type, key role,
    signature, and hash. An unsigned image is only accepted when `secure_mode` is off. In `enforce` mode a

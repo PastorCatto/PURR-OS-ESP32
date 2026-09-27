@@ -68,7 +68,7 @@ or broken system file itself during recovery.
 - Check free space before starting.
 - Progress is printed on the console.
 
-## 5. The manifest for system releases
+## 5. Two manifests, two formats
 
 Attached to each release, small and readable. Per component (OS image, kernel,
 AppManager, runtimes, drivers bundle, boot package, KittenOS):
@@ -79,7 +79,40 @@ AppManager, runtimes, drivers bundle, boot package, KittenOS):
 - which key role signed it
 - the minimum bootloader and CoreOS versions it needs
 
-The exact format is open (section 9).
+**There are two manifests, not one, because their readers have very different means:**
+
+- **The recovery manifest.** Read by the **recovery loader** (no filesystem, only what fits
+  in its own small image) and by **KittenOS** doing a network install (`../Install/SPEC.md`),
+  both size-constrained. **Flat text**, dependency-free to parse: stanzas of `key=value`
+  lines separated by a blank line, `#` starts a comment, one stanza per component. Unknown
+  keys are ignored, so it can grow. An entry missing a required field, or with a malformed
+  size or hash, is dropped rather than trusted with a guessed value. `chip` and `board` may
+  be `any`. Implemented in `PurrOS/components/coreos/{src,include}/purr_manifest.{c,h}`
+  (`../RecoveryLoader/SPEC.md`). Example:
+
+  ```
+  release=1.2.0
+  released=2026-09-27
+
+  component=coreos
+  version=1.2.0
+  chip=esp32s3
+  board=tdeck_plus
+  file=coreos-tdeck_plus-1.2.0.kitt
+  size=245760
+  sha256=3b1c2f...(64 hex characters)
+  key=system
+  min_bootloader=1.0.0
+  min_coreos=1.0.0
+  ```
+
+- **The system manifest.** Read by the **full, running system's own `update` commands**
+  (section 7), which already carry plenty of flash, RAM and a JSON library. **JSON**, not
+  yet designed — it can carry more (a changelog, channels) since nothing tiny has to parse
+  it. Built when the `update` commands are, not part of this pass.
+
+The two can list the same releases; they are separate documents for separate readers, not
+separate content.
 
 ## 6. The app index
 
@@ -137,8 +170,9 @@ Every user-facing feature needs a fallback.
 
 - **An SD card is required for Wi-Fi updates on 4 MB boards,** since the apps area cannot stage a
   whole image and KittenOS has no network stack there.
-- **Format of the system manifest,** and the version naming scheme (semantic versions
-  plus names such as `1.0.0-dp10`), and whether there are channels (stable, preview).
+- **The recovery manifest's format is settled** (section 5). **The system manifest's JSON
+  shape is still open,** along with the version naming scheme (semantic versions plus names
+  such as `1.0.0-dp10`) and whether there are channels (stable, preview).
 - **Who signs releases,** and whether that happens in CI.
 - **Certificate handling:** the bundled certificate authorities, or pinning GitHub's.
 - **How the app repo is trusted:** which keys may sign apps published there.

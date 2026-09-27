@@ -18,7 +18,7 @@ in `../Boards/SPEC.md`, and the drivers and the pin registry in
    (`../Drivers/SPEC.md`). It formats
    the filesystem and boots normally.
 
-Everything is verified by signature. The release manifest can list an **install profile** per board,
+Everything is verified by signature. The recovery manifest (`../OTA/SPEC.md` section 5) can list an **install profile** per board,
 so one plan builds the whole system. The same path recovers a device that has been bricked.
 
 **Catches**
@@ -104,6 +104,6 @@ console. From there the tools above can teach it its hardware. *(Proposed.)*
 - **Power enable pins** for known boards, so discovery works on boards that gate their peripherals.
 - **Sharing a discovered profile** back to the repo, so the next person with that board gets a driver pack.
 - **The SPI probe's command set** and how it chooses candidate chip-select pins.
-- **The install profile format** in the release manifest.
+- **The install profile format** in the recovery manifest.
 - **What a user sees during the install,** which is text on the serial console at first.
 - **Whether the serial-only fallback is the right last step,** and how a board leaves it.
