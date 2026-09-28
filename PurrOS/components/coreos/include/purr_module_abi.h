@@ -20,6 +20,7 @@
 #ifndef PURR_MODULE_ABI_H
 #define PURR_MODULE_ABI_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "purr_appmgr.h"
@@ -29,11 +30,30 @@
 extern "C" {
 #endif
 
-/* Bumped from 1: the table grew (printf, apps_scan). Appending fields is offset-compatible
- * with a module built against a smaller table (it only ever reads the fields it knows the
- * name of), but the version is bumped anyway so a stale module is refused rather than
- * silently running against a table shape its author never saw -- rebuild and replant it. */
-#define PURR_MODULE_ABI_VERSION 2u
+/* Bumped from 2: the table grew (net_*). Appending fields is offset-compatible with a module
+ * built against a smaller table (it only ever reads the fields it knows the name of), but
+ * the version is bumped anyway so a stale module is refused rather than silently running
+ * against a table shape its author never saw -- rebuild and replant it. */
+#define PURR_MODULE_ABI_VERSION 3u
+
+/* purr_net.h's own purr_net_ap_t/purr_net_status_t aren't used here on purpose: that header
+ * pulls in esp_err_t, whose own header chain ends at sdkconfig.h -- a real ESP-IDF project's
+ * generated config, which a module's standalone compile doesn't have. Same shapes, so the
+ * core's wrappers just assign field by field; no conversion logic needed. */
+#define PURR_MODULE_NET_SSID_LEN 33
+
+typedef struct {
+    char ssid[PURR_MODULE_NET_SSID_LEN];
+    int rssi;
+    uint8_t open;                  /* no password needed */
+} purr_module_net_ap_t;
+
+typedef struct {
+    int connected;
+    char ssid[PURR_MODULE_NET_SSID_LEN];
+    int rssi;
+    char ip[16];
+} purr_module_net_status_t;
 
 typedef struct {
     /* Writes to the shell the module was invoked from. A module cannot call purr_cli_puts
@@ -51,6 +71,16 @@ typedef struct {
      * security-sensitive and stays entirely inside the core (a module never gets a purr_fs_t
      * or a signing key bag), so a module can only ever see the read-only scan result. */
     void (*apps_scan)(purr_app_registry_t *out_reg);
+
+    /* Wi-Fi, all domain-level: a module never sees esp_err_t, a wifi_err_reason_t, or
+     * anything else ESP-IDF-specific -- net_scan/net_connect already turn a failure into
+     * words a person reads (into err/err_cap), the same text the old inline shell commands
+     * built, just moved behind the table instead of calling purr_net_* directly. */
+    int (*net_scan)(purr_module_net_ap_t *out, int max, int *out_n, char *err, size_t err_cap);
+    int (*net_connect)(const char *ssid, const char *pass, char *err, size_t err_cap);
+    void (*net_forget)(const char *ssid);
+    int (*net_saved)(purr_module_net_ap_t *out, int max);
+    void (*net_status)(purr_module_net_status_t *out);
 } purr_core_table_t;
 
 typedef struct {
