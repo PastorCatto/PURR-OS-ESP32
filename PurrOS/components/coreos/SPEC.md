@@ -1,4 +1,4 @@
-# CoreOS spec (draft 0.3)
+# CoreOS spec (draft 0.4)
 
 CoreOS is the **generic base platform** that every image is built on: the normal system,
 KittenOS and, in a minimal form, the recovery loader. It is one source tree, built as a
@@ -37,11 +37,16 @@ for a board or a case is a matter of choosing the profile and the board.
 | **recovery** | KittenOS | minimal, plus a filesystem reader, the shell, the file-swap routine, a small driver set and mini-apps |
 | **full** | the normal system | recovery's platform, plus everything on the kernel: AppManager, the runtimes, the runtime manager and the memory pressure service |
 
-**Each image carries its own copy** of the CoreOS code. The normal system's copy is a file in
-`/boot` and updates often. KittenOS's copy stays frozen and is refreshed through the recovery
-loader, which downloads the newest KittenOS (the boot menu gets an "update KittenOS" entry). The
-loader's copy almost never changes. Keeping the copies separate means recovery never depends on
-what it might be recovering.
+**Each image carries its own copy** of the CoreOS code. KittenOS's copy stays frozen and is
+refreshed through the recovery loader, which downloads the newest KittenOS (the boot menu
+gets an "update KittenOS" entry); the loader's own copy almost never changes. Both stay
+monolithic, linked straight into their own raw partition, same as always. Keeping the copies
+separate means recovery never depends on what it might be recovering.
+
+**The normal system's copy is different on modular boards** (`PurrOS/SPEC.md` section 1,
+updated 2026-09-28): it is a file in `/boot`, loaded into PSRAM by the **kernel** -- no longer
+baked into the same flashed image as the kernel. See section 4.1. On monolithic boards
+nothing changes here: kernel and CoreOS are still linked into one packed image.
 
 ## 2. Shared ABI
 
@@ -237,6 +242,74 @@ If any step fails, the function still returns a summary marked degraded and does
 panic. If it cannot continue at all, it records KittenOS as the boot target in `purrcfg`
 and restarts. It starts no tasks except the guarded module starts in section 6.
 
+### 4.1 The kernel table (modular boards)
+
+`purr_coreos_boot()` on a modular board doesn't just get called by the kernel -- it's
+handed a table, `purr_kernel_table_t`, the same shape of contract section 6 already uses
+one layer up (CoreOS to AppManager/modules): CoreOS never calls the kernel by name, only
+through this table. Settled by `CoreOSSpike/SPEC.md` passing: this has to be true because
+CoreOS is now a freestanding, relocated PSRAM file (`-nostdlib -ffreestanding`, no libc or
+FreeRTOS linkage of its own), and everything it needs that depends on the kernel's
+already-running state -- the heap, the task scheduler, real hardware, the mounted
+filesystem -- has to be reached through a table for the same reason a module reaches
+CoreOS's services through `purr_core_table_t`.
+
+**Not everything needs to cross this boundary.** Pure, self-contained computation that
+doesn't touch the kernel's runtime state can be compiled straight into CoreOS's own
+freestanding blob, the same way a module's own local `streq()`-style helpers already are
+today: `purr_relocate`/`purr_module` (already plain, host-tested C), string formatting
+(CoreOS needs its own small freestanding `snprintf`-equivalent, not libc's), and the
+manifest parser. **Genuinely open, not yet decided:** whether the crypto stack
+(`mbedtls`, used by `purr_verify`/`purr_keybag`) can compile freestanding as-is or needs
+its own libc shims/table entries -- real work to find out, not assumed either way.
+
+**What has to cross the table** (first cut, grows as real call sites convert, the same
+way `purr_core_table_t` grew field by field this rewrite): a representative shape, not
+exhaustive --
+
+```c
+typedef struct {
+    /* Heap: proven by CoreOSSpike -- a relocated blob calling into the kernel's
+     * already-running heap works. */
+    void *(*heap_alloc)(size_t n);
+    void (*heap_free)(void *p);
+
+    /* Tasks and locks: proven by CoreOSSpike for task_create; mutexes/semaphores are the
+     * same idea, not yet built. */
+    int (*task_create)(void (*entry)(void *arg), const char *name, uint32_t stack_words,
+                       void *arg, int priority);
+    void (*task_delay)(uint32_t ms);
+
+    /* The mounted root filesystem -- the kernel owns the flash/LittleFS driver
+     * (responsibility #1), CoreOS never touches it directly. Same shape purr_fs_t's
+     * calls already have today, reached through the table instead. */
+    int (*fs_read)(const char *path, void *ctx, purr_fs_read_cb cb);
+    int (*fs_write)(const char *path, const void *data, uint32_t len);
+    /* ...list/mkdir/rename/stat, same set purr_fs.h already defines */
+
+    /* Raw flash/partition access, for the kernel's own update path and (once retargeted)
+     * netinstall. */
+    int (*partition_read)(const char *label, uint32_t off, void *buf, uint32_t len);
+    int (*partition_write)(const char *label, uint32_t off, const void *buf, uint32_t len);
+    int (*partition_erase)(const char *label, uint32_t off, uint32_t len);
+
+    /* Hardware the kernel already owns display/keyboard drivers for
+     * (purr_kernel_display()/purr_kernel_key() today) -- CoreOS reaches them here instead
+     * of calling into kernel code directly. */
+    const purr_display_v2_t *(*display)(void);
+    char (*key)(void);
+
+    /* Wi-Fi: responsibility #2 lists this as CoreOS's job, but the actual esp_wifi_*
+     * driver calls are ESP-IDF/kernel-side -- CoreOS drives the connection *policy*
+     * (purr_net.c today) through calls the kernel exposes here. */
+    int (*wifi_scan)(/* ... */);
+    int (*wifi_connect)(/* ... */);
+} purr_kernel_table_t;
+```
+
+This is a design placeholder, not a frozen ABI -- it gets filled in properly, field by
+field, as CoreOS's real call sites actually convert (section 10).
+
 ## 5. Self-check and the bootloader's result
 
 **Inputs**
@@ -339,6 +412,12 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
 - Each public function documents whether it is thread-safe.
 - Builds for `esp32` and `esp32s3` on ESP-IDF v5.3.5. Chip-specific code is not
   allowed here. It goes in the per-board sdkconfig or the kernel.
+- **On a modular board, the `full`-profile CoreOS build is freestanding** (`-nostdlib
+  -ffreestanding`, section 4.1) -- no direct libc, FreeRTOS or ESP-IDF driver linkage.
+  Everything needing the kernel's runtime state goes through `purr_kernel_table_t`; pure
+  computation can still be linked straight in. This does not apply to the `minimal` or
+  `recovery` profiles (the recovery loader, KittenOS), which stay normal linked binaries,
+  or to any profile on a monolithic board.
 
 ## 9. Testing
 
@@ -364,6 +443,40 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
 
 ## 10. Open questions
 
+- **`purr_kernel_table_t`'s real shape** (section 4.1): today's sketch is a placeholder.
+  Filling it in for real means converting CoreOS's actual call sites (today's direct
+  `malloc`/`vTaskDelay`/`esp_partition_*`/display-kernel calls throughout `commands.c`,
+  `purr_appmgr.c`, `purr_net.c`, etc.) one subsystem at a time, the same incremental way
+  `purr_core_table_t` grew field by field as `about`/`apps`/`wifi`/`netinstall` each
+  became real modules -- not a single big-bang rewrite.
+- **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
+  (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
+  ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,
+  `ecp_curves.c`, `constant_time.c`, `platform_util.c`) compiles `-nostdlib -ffreestanding
+  -fno-builtin` cleanly with no language-level blocker, once the right ESP-IDF include
+  paths and the project's generated `sdkconfig.h` are supplied. What it actually needs:
+  - **Memory already goes through mbedtls's own pluggable hooks**
+    (`mbedtls_calloc`/`mbedtls_free`), not raw libc `malloc` -- these map onto the kernel
+    table's `heap_alloc`/`heap_free` with zero mbedtls source changes.
+  - Basic `memcpy`/`memset`/`memcmp`/`memmove`/`strcmp`/`strlen` need local freestanding
+    implementations, same as a module's own `streq()` today.
+  - `__udivdi3` needs `libgcc` linked -- compiler-support, not libc, a build-flag fix.
+  - Randomness needs an RNG source (`mbedtls_hardware_poll`) -- a `rng_bytes`-style kernel
+    table entry, backed by the real HWRNG.
+  - **The one real finding:** this project builds with `CONFIG_MBEDTLS_HARDWARE_MPI=1`,
+    so the actual big-number math (`mbedtls_mpi_mul_mpi`/`exp_mod`/etc.) is compiled out of
+    `bignum.c` (`#if !defined(MBEDTLS_BIGNUM_ALT)`) in favor of the ESP32's hardware
+    MPI/RSA accelerator peripheral -- a real hardware dependency needing exclusive-access
+    locking, exactly the kind of thing the kernel table exists to mediate. Two ways
+    forward, not yet decided: expose the hardware MPI accelerator through the table too
+    (keeps the speed, more table surface), or build CoreOS's mbedtls with hardware MPI
+    turned off (pure software bignum, fully self-contained, no table entry -- verification
+    isn't a hot path, so the slowdown likely doesn't matter).
+  
+  Not yet tried: an actual successful link+run (only individual compiles and one `ld`
+  attempt with stub symbols were done) -- this answers "is it fundamentally freestanding-
+  compatible" (yes), not "does it verify a real signature correctly from a relocated
+  PSRAM blob."
 - Whether the boot button (GPIO0) held at startup should start KittenOS.
 - Whether the `safe` command is needed in v1 or is a later addition.
 - The exact threshold and timeout defaults for kernel start.
