@@ -36,10 +36,9 @@
 extern "C" {
 #endif
 
-/* Bumped from 2: the table grew (login_*) for the accounts command sweep
- * (`whoami`/`id`/`su`/`passwd`/`useradd`/`userdel`/`usermod`/`logout`,
- * Modules/coreos/login_module.c). */
-#define PURR_KERNEL_TABLE_ABI_VERSION 3u
+/* Bumped from 3: the table grew (app_*) for the app-management command sweep
+ * (`appinfo`/`appinstall`/`appremove`/`appformat`, Modules/coreos/appmgr_module.c). */
+#define PURR_KERNEL_TABLE_ABI_VERSION 4u
 
 /* Read-only, for whoami/id -- the only two account commands that are pure display, not a
  * security operation (see purr_kernel_table_t's login_* fields for the rest). */
@@ -109,6 +108,15 @@ typedef struct {
     int (*login_useradd)(purr_cli_t *cli, const char *name, int as_admin);
     int (*login_userdel)(purr_cli_t *cli, const char *name);
     int (*login_usermod)(purr_cli_t *cli, const char *name, int as_admin);
+
+    /* App management (AppManager/SPEC.md). Same shape as login_*, net_install and fs_format:
+     * one opaque, cli-aware call each. These touch the signing key bag (purr_appmgr_scan/add/
+     * remove verify against it) and the raw per-user apps filesystem, neither of which a
+     * module is ever handed. */
+    int (*app_info)(purr_cli_t *cli, const char *name);
+    int (*app_install)(purr_cli_t *cli, const char *file_or_url);
+    int (*app_remove)(purr_cli_t *cli, const char *name);
+    int (*app_format)(purr_cli_t *cli);
 } purr_kernel_table_t;
 
 typedef struct {

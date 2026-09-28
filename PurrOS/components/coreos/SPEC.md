@@ -502,6 +502,19 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
   module code. Confirmed working end to end on real hardware, all 8 commands plus the
   earlier two sweeps together (18 real commands total now off the monolith and onto the
   kernel table).
+
+  **A fourth sweep, same evening: app management.** `appinfo`/`appinstall`/`appremove`/
+  `appformat` (`Modules/coreos/appmgr_module.c`), growing the table to ABI 4
+  (`app_info`/`app_install`/`app_remove`/`app_format`). Same shape as the accounts sweep --
+  every one of these touches the signing key bag (installing/removing an app verifies
+  against it) or the raw per-user apps filesystem, so all four stay one opaque, `cli`-aware
+  call each, same reasoning as `net_install`/`fs_format`/`login_*`. Confirmed working end to
+  end on real hardware alongside all three earlier sweeps. **22 real commands total** now
+  converted off the monolith and onto the kernel table (`mem`/`uptime`, the 8-command
+  filesystem cluster, the 8-command accounts cluster, the 4-command app-management
+  cluster) -- what remains in the built-in table is mostly `help`/`version`/`info`/`parts`/
+  `echo`/`clear`/`reboot`/`purrcfg` and the temporary scaffolding
+  (`plantmodules`/`spikecoreos`/`testrelocmulti`).
 - **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
   (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
   ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,
