@@ -111,6 +111,7 @@ void app_main(void)
     purr_cli_init(&boot_cli, NULL, 0, purr_console_put, NULL, "");
     purr_cli_printf(&boot_cli, "%s starting\n", purr_system_name());
     purr_fs_setup(&boot_cli);
+    purr_apps_setup(&boot_cli);
     purr_net_setup(&boot_cli);
     purr_console_flush();
     vTaskDelay(pdMS_TO_TICKS(1200));   /* long enough to read before the login prompt clears it */

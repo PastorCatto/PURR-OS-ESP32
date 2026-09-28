@@ -195,6 +195,30 @@ def check(ctx):
     return 1 if bad else 0
 
 
+# The base version embedded in dev builds' version string (not the signed release version --
+# see `coreos package --version` for that). Bump by hand when it's actually worth bumping;
+# the trailing build number below is what actually changes on every build.
+DEV_VERSION_BASE = "0.2.0"
+
+
+def next_build_number(project):
+    """A counter that goes up by one every build, so a serial log's version string alone
+    says which attempt it came from. Local to this machine (PurrOS/build/ is gitignored),
+    not meant to mean anything across machines or clones."""
+    path = os.path.join(project, "build", ".build_number")
+    n = 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            n = int(fh.read().strip() or "0")
+    except (OSError, ValueError):
+        n = 0
+    n += 1
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(str(n))
+    return n
+
+
 def build(ctx, board, profile, clean):
     project = _project(ctx)
     problems = project_problems(project, board, profile)
@@ -210,8 +234,11 @@ def build(ctx, board, profile, clean):
     if clean and os.path.isdir(bdir):
         ctx.info(f"removing {bdir}")
         shutil.rmtree(bdir)
-    ctx.info(f"building {board}/{profile} into {bdir}")
-    code = ctx.run(wrap(idf, idf_args(board, profile) + ["build"]), cwd=project,
+    build_number = next_build_number(project)
+    project_ver = f"internaldirty{DEV_VERSION_BASE}-{build_number}"
+    ctx.info(f"building {board}/{profile} into {bdir} (version {project_ver})")
+    code = ctx.run(wrap(idf, idf_args(board, profile) +
+                        ["-D", f"PROJECT_VER={project_ver}", "build"]), cwd=project,
                    env=child_env(),
                    log_path=os.path.join(bdir, "purrstrap-build.log"))
     if code != 0:

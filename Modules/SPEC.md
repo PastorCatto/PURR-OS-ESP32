@@ -1,0 +1,221 @@
+# Modules (draft 0.1)
+
+The real core/module system: a tiny fixed core plus loadable, relocatable modules from a
+LittleFS system folder. `ModuleSpike/SPEC.md` proved the underlying mechanism works on real
+hardware; this is the design for the real thing, not a throwaway test. See the pinned
+module-loader project memory for how this got here, and `CatFormat/SPEC.md` for the sibling
+format this borrows its relocation method from.
+
+## 1. Scope
+
+Modular boards only (`PurrOS/SPEC.md` section 1.1), same as the spike. This spec covers the
+module container, its relocation, and the core/module call table. It does not cover which
+real subsystems move into modules first (a separate decision once this exists) or the core's
+own OTA update path (already decided in `ModuleSpike/SPEC.md` section 0.1: reuse the existing
+BOOT-role signing gate, nothing new).
+
+## 2. Container
+
+A module is a `PURR_IMG_MODULE` image (`bootloader/SPEC.md` section 3, `purr_image_header_t`)
+— the same container every other signed thing in this codebase uses. No new header format.
+
+**Correction from draft 0.1's first pass:** that draft said the relocation list would ship in
+"the container's existing manifest area (`CatFormat/SPEC.md` section 5)". Checked against the
+actual code before building anything on top of it: `CatFormat/SPEC.md`'s payload table and
+manifest block are still aspirational — `purr_appmgr.c` doesn't implement any of it today,
+and neither does anything else. A module's payload is just the one flat payload the common
+header already points to (`payload_offset`/`payload_size`), like every other image type. The
+relocation list and entry point live inside that payload, in a small prefix purrstrap writes
+(section 4), not in infrastructure that doesn't exist yet.
+
+## 3. One segment, not several
+
+`CatFormat/SPEC.md` section 6 left segment tags open ("keeps both loading models possible...
+because the loading model is still open"). The spike settled the loading model: PSRAM copy,
+one contiguous buffer, one base address. So a module's payload is built as **one merged
+segment** — code, literals, rodata, and initialized data all placed together by a dedicated
+linker script, instead of GCC's normal separate `.text`/`.rodata`/`.data` layout. This means
+every relocatable word in the payload needs the exact same fix-up: add the buffer's actual
+runtime address. No segment tags, no per-kind handling.
+
+Zero-initialized data (`.bss`) is not stored in the file, same as CatFormat — just a size the
+loader clears after copying.
+
+## 4. Relocation
+
+- The module is linked twice by purrstrap, once at base address `0x00000000` and once at a
+  second base far enough away that a real address difference is unambiguous (e.g.
+  `0x00100000`), using the same merged-segment linker script both times.
+- The two flat binaries are compared word by word (32-bit aligned). A word that differs by
+  exactly the base difference is a relocation: record its offset. Any other difference is a
+  build error — it means something in the module isn't relocatable this way (inline assembly
+  with a hardcoded address, for instance) and purrstrap refuses to package it.
+- Because the link base was `0x00000000`, a to-be-relocated word's stored value **is already
+  the target offset from the start of the module**. Applying a relocation at load time is
+  just: `word += actual_load_address`. No per-relocation base lookup.
+- `purr_relocate()` (`PurrOS/components/coreos/`) is the pure function that applies a
+  relocation list to a loaded buffer — built and host-tested (26 checks): given a buffer, an
+  array of 4-byte-aligned offsets, and a base value, it adds the base to the word at each
+  offset, or fails leaving the buffer completely untouched if any offset is bad.
+
+**Two lists, not one (revised after building the first real module — section 11's postmortem
+has the full story).** A first version used one list and one base for everything, on the
+theory that "a word that needs the load address added" covers every case uniformly. It
+doesn't: a word holding a **function's** address must resolve to wherever the module ends up
+mapped *executable*, since that's the only alias anything is ever called through, and that
+mapping is typically exec+read only, not writable. A word holding an **object's** address — a
+global that gets written to, a string, a const table, read or written — must resolve to the
+plain *writable* copy instead, since it supports both, and the executable alias might not
+support writes at all. A module with a global it initializes at load time crashed the device
+(a real ESP32 hardware cache-safety trap) the instant it tried, because a single-base scheme
+had put that global's address on the executable alias.
+
+purrstrap tells the two apart per relocation using the compiler's own symbol types
+(`readelf -s`'s FUNC/OBJECT column) — not `nm`'s section-letter classification, which the
+merged single-segment layout (section 3) makes unreliable: a `const` struct or string placed
+in `.text` by `-mtext-section-literals` still shows up as a "text" symbol even though it's
+data, never executed. A relocation whose pre-fixup value exactly matches a known `FUNC`
+symbol's address goes in the **code** list; everything else goes in the **data** list.
+
+## 5. Payload layout (replaces the spike's hardcoded entry offset)
+
+The spike hardcoded "the entry function is at payload offset 8" in a comment. The real thing
+can't do that, and (per section 2's correction) there's no manifest block to carry it in
+either. So purrstrap prepends a small, self-contained prefix to the payload — no cooperation
+needed from the module's own source, no custom linker section for it:
+
+```
+[ entry_offset      : u32 ]                    -- offset of the entry function, into the code blob
+[ data_reloc_count  : u32 ]
+[ data_reloc_offsets: u32 * data_reloc_count ]  -- relocate against the writable base
+[ code_reloc_count  : u32 ]
+[ code_reloc_offsets: u32 * code_reloc_count ]  -- relocate against the executable base
+[ code blob ]                                   -- the base-0 linked flat binary, byte for byte
+```
+
+`entry_offset` and every offset in both tables are relative to the start of the code blob (the
+byte right after the last `code_reloc_offsets` entry), not the start of the payload — purrstrap
+finds `entry_offset` from the base-0 build's symbol table (the same way a human read it off
+`objdump` in the spike; this is that lookup automated) and it needs no alignment of its own,
+since Xtensa's 16-bit "narrow" instructions can start on a 2-byte boundary.
+
+Every fixed-size field is read with a byte-safe access (`memcpy`, not a struct overlay) since
+the payload buffer's alignment isn't guaranteed — same caution `purr_relocate` itself already
+takes. `purr_module_parse_layout()` (`PurrOS/components/coreos/purr_module.c`) does this,
+host-tested (38 checks): rejects a truncated prefix, a reloc count over `PURR_RELOC_MAX`, a
+reloc table that doesn't fit the payload, or an `entry_offset` outside the code blob, before
+any of it is trusted.
+
+## 6. The call table
+
+Two-way, unlike `.cat`'s one-way `catcall_get`:
+
+- The **core → module** direction is the payload prefix's `entry_offset`, called once at load
+  time as `const void *module_entry(const purr_core_table_t *core);` — the module gets a pointer to
+  the core's own table (log, alloc, driver/pin access, whatever the real core ends up
+  exposing) and returns a pointer to its own table for the core to keep and call through
+  later. Both tables are plain structs of function pointers, versioned by `abi_version`.
+- The **module → core** direction is just calling through the function pointers in the table
+  the module was handed. No relocation involved (it's a runtime argument, not a compiled-in
+  address), proven directly in the spike.
+- A module's returned table is itself sitting in the module's relocated memory. Its non-`fn`
+  fields (if any) are data relocations; any function pointers inside it (a table of
+  sub-commands, say) are code relocations — same split as everything else (section 4).
+
+The real shape of `purr_core_table_t` (what the core actually exposes) is a separate decision
+for whenever a real subsystem is the one being ported — not fixed here.
+
+## 7. Loading
+
+Implemented in `commands.c`'s `load_one_module_file()`, proven on hardware (section 11):
+
+1. Read the file from its LittleFS path, verify it (`purr_image_verify`, exactly the path
+   already proven in the spike).
+2. Parse the payload's prefix (`purr_module_parse_layout`), bounds-checked against
+   `payload_size` before trusting any of it (section 5).
+3. Allocate a load buffer 64KB-aligned (`esp_mmu_map`'s real constraint, found in the spike)
+   and large enough for the code blob, rounded up to `CONFIG_MMU_PAGE_SIZE`. Copy just the
+   code blob in (the payload minus the prefix); the rest starts zeroed (covers `.bss`).
+4. **Data pass:** `purr_relocate(load_buffer, ..., data_offsets, data_count,
+   (uint32_t)load_buffer)` — needs only the buffer's own address, available immediately.
+5. `esp_cache_msync` the buffer (writeback), then map the same physical range executable via
+   `esp_mmu_map` to get the executable alias's address.
+6. **Code pass:** `purr_relocate(load_buffer, ..., code_offsets, code_count,
+   (uint32_t)exec_alias)` — writes still go through the writable buffer; only the computed
+   *value* uses the executable alias's address.
+7. `esp_cache_msync` the buffer again (writeback the code-pass fixups), then the executable
+   alias (invalidate, instruction type) — the sequence the spike proved works.
+8. Call `((entry_t)(exec_alias + entry_offset))(&core_table)`, keep the returned module table.
+
+## 8. Building (purrstrap)
+
+`purrstrap modules build` (`purrstrap/scripts/modules.py`), built and proven (section 11):
+compiles the module source against the merged-segment linker script twice (the two base
+addresses), diffs to find every relocatable word, classifies each one as data or code against
+the base-0 build's `readelf -s` FUNC symbol addresses (section 4), looks up the entry symbol's
+address, writes the prefix (section 5), packages as `PURR_IMG_MODULE`. Refuses to package a
+module that has any non-relocatable word rather than silently miscompiling it.
+
+## 9. Testing
+
+- Relocation apply/detect logic (`purr_relocate`, `purr_module`): pure C, host-tested with
+  hand-built buffers and offset lists (26 + 38 checks), same pattern as
+  `purr_verify`/`purr_appmgr`'s host tests.
+- purrstrap's link-twice-diff-and-classify step: proven against two real compiled modules
+  (`hello_module.c`, a string only; `about_module.c`, a written global *and* a stored,
+  callable function pointer — the case that first exposed the two-base bug).
+- The real pipeline end to end, on hardware: `about_module.c` loads automatically at boot and
+  its command runs correctly from the actual shell dispatch table — not a spike diagnostic,
+  the real `purr_commands()`/`load_one_module_file()` path.
+
+## 10. Open questions
+
+- What `purr_core_table_t` actually exposes, and whether it's one table or grows per-subsystem
+  as more things become modules.
+- Whether a module can depend on another module's table (a chain), or only ever the core's —
+  not needed for a first module, but worth deciding before more than one real module exists.
+
+Resolved while building this: the relocation count cap (`PURR_RELOC_MAX`, 4096) already lives
+in `purr_relocate.h` and is enforced before any offset is even read.
+
+## 11. Real bugs found building the first real module — both resolved
+
+Building the first genuine module (`about`, a real shell command loaded from LittleFS at
+boot, `Modules/test/about_module.c`) hit two real bugs, both since fixed. The first real
+module now loads automatically at boot and its command runs correctly, confirmed on hardware.
+
+**Bug 1, fixed:** the loader relocated using the writable `databuf` pointer's address as the
+base instead of the executable alias (`exec_ptr`)'s address. A string, read through the wrong
+(but still readable) alias, worked by accident — a stored function pointer, relocated to that
+same wrong alias, is an instruction-fetch fault the instant anything calls it.
+
+**Bug 2, initially misdiagnosed as a boot-timing issue, actually the real one:** with bug 1's
+fix in place, calling the module's entry point still panicked every time with `Cache disabled
+but cached memory region accessed`, at the same instruction — a few bytes into the entry
+function, right where it stores its argument into a `.bss` global. Two hypotheses (a WiFi/NVS
+timing race; something specific to booting early) were tested and both ruled out: a 3-second
+settling delay just shifted the crash by 3 seconds, and disabling WiFi entirely (confirmed
+zero `wifi:` log activity that boot) didn't stop it either. A third test — triggering the
+identical load manually, well after boot settled, via a `loadmodules` shell command — *also*
+crashed, identically, ruling out boot-timing altogether.
+
+The real cause, found by disassembling the module and cross-referencing real ELF symbol types
+(`readelf -s`, not `nm`, whose section-letter classification wrongly tags read-only data
+placed in `.text` by `-mtext-section-literals` as if it were code): **relocating everything
+against one base is wrong.** A word holding a function's address needs the executable alias
+(exec+read only); a word holding an object's address — a global that gets *written* to, in
+particular — needs the plain writable copy, since the executable mapping has no write
+permission. Writing a global's value through the executable alias is exactly what produced
+this specific hardware trap. `hellomod`'s single relocation (a string, read-only) and the
+spike's call-table test (a runtime argument, not a stored address) both happened to never
+exercise this path — `about` was the first module with a *written* global.
+
+**The fix:** two relocation lists, not one (revising section 4-5 below and `purr_module.h`'s
+payload layout accordingly). purrstrap classifies each relocation by checking whether its
+pre-relocation value exactly matches a `FUNC`-type symbol's address (from the base-0 build's
+`readelf -s` output) — function addresses go in the code list (relocated against the
+executable alias), everything else (globals, strings, const tables) goes in the data list
+(relocated against the writable copy, which supports both reading and writing). For `about`:
+6 data relocations, 1 code relocation (`s_cmds[0].fn`, the one stored, callable function
+pointer) — found and split automatically, verified by hand against the disassembly before
+trusting it.

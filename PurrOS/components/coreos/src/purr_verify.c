@@ -129,3 +129,13 @@ const char *purr_verify_name(purr_verify_result_t r)
     }
     return "unknown";
 }
+
+int purr_mem_read(void *ctx, uint32_t offset, void *buf, uint32_t len)
+{
+    purr_mem_read_ctx_t *m = ctx;
+    if ((uint64_t)offset + len > m->size) {
+        return -1;
+    }
+    memcpy(buf, m->base + offset, len);
+    return 0;
+}

@@ -67,6 +67,15 @@ purr_verify_result_t purr_image_verify(const purr_verify_env_t *env,
 
 const char *purr_verify_name(purr_verify_result_t r);
 
+/* A purr_read_fn over a plain in-memory buffer, for the several callers that already have
+ * the whole image in RAM (a download, a file read off disk) rather than streaming it. */
+typedef struct {
+    const uint8_t *base;
+    uint32_t size;
+} purr_mem_read_ctx_t;
+
+int purr_mem_read(void *ctx, uint32_t offset, void *buf, uint32_t len);
+
 #ifdef __cplusplus
 }
 #endif

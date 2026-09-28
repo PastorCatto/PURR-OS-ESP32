@@ -1,10 +1,14 @@
 #include "commands.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "esp_cache.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_mmu_map.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
@@ -15,6 +19,10 @@
 #include "sdkconfig.h"
 
 #include "login.h"
+#include "purr_appmgr.h"
+#include "purr_module.h"
+#include "purr_module_abi.h"
+#include "purr_relocate.h"
 #include "purr_cfgstore.h"
 #include "purr_console.h"
 #include "purr_crypto_mbedtls.h"
@@ -37,6 +45,9 @@ extern const size_t purr_default_keys_count;
 #endif
 
 #define VERSION "0.1.0"
+
+/* Where real modules (Modules/SPEC.md) live on the root filesystem. */
+#define PURR_MODULES_DIR "/modules"
 
 #if CONFIG_PURR_PROFILE_RECOVERY
 #define SYSTEM_NAME  "KittenOS"
@@ -224,6 +235,216 @@ static int cmd_format(purr_cli_t *cli, int argc, char **argv)
     return 0;
 }
 
+/* ---------------------------------------------------------------- apps */
+
+static purr_fs_t s_apps_fs;
+#define APP_SCRATCH_CAP (512 * 1024)
+static uint8_t *s_app_scratch;                /* allocated on first use; apps is rarely touched */
+
+static uint8_t *app_scratch(void)
+{
+    if (s_app_scratch == NULL) {
+        s_app_scratch = heap_caps_malloc(APP_SCRATCH_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_app_scratch == NULL) {
+            s_app_scratch = malloc(APP_SCRATCH_CAP);
+        }
+    }
+    return s_app_scratch;
+}
+
+static int need_apps_fs(purr_cli_t *cli)
+{
+    if (purr_fs_mounted(&s_apps_fs)) {
+        return 1;
+    }
+    purr_cli_puts(cli, "no apps filesystem mounted (run: appformat --yes)\n");
+    return 0;
+}
+
+void purr_apps_setup(purr_cli_t *cli)
+{
+    purr_bd_t bd;
+    if (purr_fs_flash_bd("apps", &bd) != 0) {
+        purr_cli_puts(cli, "apps: no such partition\n");
+        return;
+    }
+    int e = purr_fs_mount(&s_apps_fs, &bd);
+    if (e == 0) {
+        purr_appmgr_recover(&s_apps_fs);
+        uint32_t used = 0, total = 0;
+        purr_fs_usage(&s_apps_fs, &used, &total);
+        purr_cli_printf(cli, "apps: mounted, %uK of %uK used\n", (unsigned)(used * 4), (unsigned)(total * 4));
+    } else {
+        purr_cli_printf(cli, "apps: not mounted (%s)\nrun: appformat --yes\n", purr_fs_strerror(e));
+    }
+}
+
+static purr_appmgr_env_t apps_env(purr_cfg_t *cfg_out)
+{
+    purr_flash_t fl;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, cfg_out, NULL) < 0) {
+        purr_cfg_defaults(cfg_out);
+    }
+    static purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, cfg_out);
+    purr_appmgr_env_t env = {NET_INSTALL_CHIP, &bag, &purr_crypto_mbedtls};
+    return env;
+}
+
+static int cmd_apps(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (!need_apps_fs(cli)) return 1;
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_app_registry_t reg;
+    purr_appmgr_scan(&s_apps_fs, &env, app_scratch(), APP_SCRATCH_CAP, &reg);
+    if (reg.count == 0) {
+        purr_cli_puts(cli, "no apps installed\n");
+    }
+    for (int i = 0; i < reg.count; i++) {
+        const purr_app_entry_t *e = &reg.apps[i];
+        purr_cli_printf(cli, "  %-16s %-10s %6uK  %s%s\n", e->name, e->version, (unsigned)(e->size / 1024),
+                        e->verified ? "verified" : "unverified", e->chip_ok ? "" : "  (wrong chip)");
+    }
+    if (reg.dropped) {
+        purr_cli_printf(cli, "  (%d app folder(s) skipped: unreadable or not a valid package)\n", reg.dropped);
+    }
+    return 0;
+}
+
+static int cmd_appinfo(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2) {
+        purr_cli_puts(cli, "usage: appinfo <name>\n");
+        return 1;
+    }
+    if (!need_apps_fs(cli)) return 1;
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_app_registry_t reg;
+    purr_appmgr_scan(&s_apps_fs, &env, app_scratch(), APP_SCRATCH_CAP, &reg);
+    const purr_app_entry_t *e = purr_appmgr_find(&reg, argv[1]);
+    if (e == NULL) {
+        purr_cli_printf(cli, "appinfo: no such app '%s'\n", argv[1]);
+        return 1;
+    }
+    purr_cli_printf(cli, "name:     %s\n", e->name);
+    purr_cli_printf(cli, "version:  %s\n", e->version);
+    purr_cli_printf(cli, "size:     %uK\n", (unsigned)(e->size / 1024));
+    purr_cli_printf(cli, "chip:     %s\n", e->chip_ok ? "matches this device" : "WRONG for this device");
+    purr_cli_printf(cli, "verified: %s (signer role %u)\n", e->verified ? "yes" : "no", (unsigned)e->signer_role);
+    return 0;
+}
+
+typedef struct {
+    uint8_t *buf;
+    uint32_t cap, len;
+} appinstall_read_ctx_t;
+
+static int appinstall_accumulate(void *vctx, const void *data, uint32_t n)
+{
+    appinstall_read_ctx_t *c = vctx;
+    if (c->len + n > c->cap) {
+        return -1;
+    }
+    memcpy(c->buf + c->len, data, n);
+    c->len += n;
+    return 0;
+}
+
+static int is_url(const char *s)
+{
+    return strncmp(s, "http://", 7) == 0 || strncmp(s, "https://", 8) == 0;
+}
+
+static int cmd_appinstall(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2) {
+        purr_cli_puts(cli, "usage: appinstall <file on root, or a URL>\n");
+        return 1;
+    }
+    if (!need_apps_fs(cli)) return 1;
+    if (!is_url(argv[1]) && !need_fs(cli)) return 1;
+
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        purr_cli_puts(cli, "appinstall: out of memory\n");
+        return 1;
+    }
+
+    /* Scan first, while `scratch` is free to use for reading each existing app; the
+     * result is what add() needs to apply the update-must-be-newer rule. */
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_app_registry_t reg;
+    purr_appmgr_scan(&s_apps_fs, &env, scratch, APP_SCRATCH_CAP, &reg);
+
+    /* Now read the package to install into the same buffer, either from a URL (there is
+     * no other way onto the device yet, with no MTP transport built) or from root. */
+    uint32_t len = 0;
+    if (is_url(argv[1])) {
+        purr_cli_printf(cli, "fetching %s...\n", argv[1]);
+        purr_console_flush();
+        size_t got = 0;
+        esp_err_t err = purr_fetch_into(argv[1], scratch, APP_SCRATCH_CAP, &got);
+        if (err != ESP_OK) {
+            purr_cli_printf(cli, "appinstall: fetch failed (%s)\n", esp_err_to_name(err));
+            return 1;
+        }
+        len = (uint32_t)got;
+    } else {
+        char path[80];
+        appinstall_read_ctx_t rc = {scratch, APP_SCRATCH_CAP, 0};
+        int e = purr_fs_read(&s_fs, abs_path(argv[1], path, sizeof(path)), appinstall_accumulate, &rc);
+        if (e < 0) {
+            fail(cli, argv[1], e);
+            return 1;
+        }
+        len = rc.len;
+    }
+
+    purr_app_result_t r = purr_appmgr_add(&s_apps_fs, &env, &cfg, &reg, scratch, len);
+    if (r != PURR_APP_OK) {
+        purr_cli_printf(cli, "appinstall: %s\n", purr_app_result_name(r));
+        return 1;
+    }
+    purr_cli_puts(cli, "installed\n");
+    return 0;
+}
+
+static int cmd_appremove(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2) {
+        purr_cli_puts(cli, "usage: appremove <name>\n");
+        return 1;
+    }
+    if (!need_apps_fs(cli)) return 1;
+    if (purr_appmgr_remove(&s_apps_fs, argv[1]) != 0) {
+        purr_cli_printf(cli, "appremove: no such app '%s'\n", argv[1]);
+        return 1;
+    }
+    purr_cli_printf(cli, "%s removed\n", argv[1]);
+    return 0;
+}
+
+static int cmd_appformat(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "--yes") != 0) {
+        purr_cli_puts(cli, "this erases every installed app.\nrun: appformat --yes\n");
+        return 1;
+    }
+    purr_bd_t bd;
+    if (purr_fs_flash_bd("apps", &bd) != 0) {
+        purr_cli_puts(cli, "apps: no such partition\n");
+        return 1;
+    }
+    purr_fs_unmount(&s_apps_fs);
+    int e = purr_fs_format(&s_apps_fs, &bd);
+    if (e < 0) { fail(cli, "appformat", e); return 1; }
+    purr_cli_puts(cli, "done.\n");
+    return 0;
+}
 
 /* ---------------------------------------------------------------- Wi-Fi */
 
@@ -957,6 +1178,11 @@ static const purr_cmd_t s_cmds[] = {
     {"write",   "write text to a file",          cmd_write},
     {"df",      "filesystem space",              cmd_df},
     {"format",  "erase and create the fs",       cmd_format},
+    {"apps",       "list installed apps",           cmd_apps},
+    {"appinfo",    "show one app's details",        cmd_appinfo},
+    {"appinstall", "install a .cat package",        cmd_appinstall},
+    {"appremove",  "remove an app",                 cmd_appremove},
+    {"appformat",  "erase and create the apps fs",  cmd_appformat},
     {"wifi",    "scan|connect|forget|list|status", cmd_wifi},
     {"net",       "connection status",             cmd_net},
     {"netinstall", "install [component] over the network", cmd_net_install},
@@ -974,8 +1200,266 @@ static const purr_cmd_t s_cmds[] = {
     {"logout",  "end the session",               cmd_logout},
 };
 
+/* ---------------------------------------------------------------- Modules (real) */
+/*
+ * The first real module (Modules/SPEC.md): loads every `.cat` file in /modules on the root
+ * filesystem at boot: verify -> parse layout -> relocate (two passes, one per base -- section
+ * 4) -> map executable -> call entry, merging each module's exported commands into the
+ * shell's dispatch table. This is permanent: it is how a module actually becomes usable.
+ */
+#define PURR_MODULE_MAX 8
+#define PURR_MODULE_READ_CAP (128 * 1024)
+
+typedef struct {
+    uint8_t *databuf;                  /* kept forever: modules are never unloaded (yet) */
+    const purr_module_table_t *table;
+} loaded_module_t;
+
+static loaded_module_t s_loaded_modules[PURR_MODULE_MAX];
+static int s_loaded_module_count = 0;
+
+static void core_table_puts(purr_cli_t *cli, const char *s)
+{
+    purr_cli_puts(cli, s);
+}
+
+static const purr_core_table_t s_core_table = {.puts = core_table_puts};
+
+typedef struct {
+    char names[PURR_MODULE_MAX][48];
+    int is_dir[PURR_MODULE_MAX];
+    int count;
+} module_listing_t;
+
+static void collect_module_row(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)size;
+    module_listing_t *l = ctx;
+    if (l->count < PURR_MODULE_MAX) {
+        strncpy(l->names[l->count], name, sizeof(l->names[l->count]) - 1);
+        l->names[l->count][sizeof(l->names[l->count]) - 1] = '\0';
+        l->is_dir[l->count] = is_dir;
+        l->count++;
+    }
+}
+
+static int load_one_module_file(const char *path)
+{
+    uint8_t *rb = malloc(PURR_MODULE_READ_CAP);
+    if (rb == NULL) {
+        return -1;
+    }
+    appinstall_read_ctx_t rc = {rb, PURR_MODULE_READ_CAP, 0};
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
+        free(rb);
+        return -1;
+    }
+
+    purr_cfg_t cfg;
+    purr_flash_t fl;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
+    purr_verify_env_t env = {.chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls};
+    purr_mem_read_ctx_t mrc = {rb, rc.len};
+    purr_image_header_t hdr;
+    purr_verify_result_t vr = purr_image_verify(&env, purr_mem_read, &mrc, rc.len, &hdr);
+    if (vr != PURR_V_OK || hdr.image_type != PURR_IMG_MODULE) {
+        ESP_LOGW("modules", "%s: %s", path, vr != PURR_V_OK ? purr_verify_name(vr) : "not a module image");
+        free(rb);
+        return -1;
+    }
+    if ((uint64_t)hdr.payload_offset + hdr.payload_size > rc.len) {
+        ESP_LOGW("modules", "%s: payload runs past the file", path);
+        free(rb);
+        return -1;
+    }
+
+    const uint8_t *payload = rb + hdr.payload_offset;
+    purr_module_layout_t layout;
+    purr_module_layout_result_t lr = purr_module_parse_layout(payload, hdr.payload_size, &layout);
+    if (lr != PURR_MOD_LAYOUT_OK) {
+        ESP_LOGW("modules", "%s: bad layout: %s", path, purr_module_layout_result_name(lr));
+        free(rb);
+        return -1;
+    }
+
+    /* Two relocation passes against two different bases, not one (Modules/SPEC.md section
+     * 4, revised): a word holding a FUNCTION's address (the entry point, or -- found the
+     * hard way, on real hardware -- a function pointer sitting in an exported table) must
+     * resolve to wherever the module ends up mapped EXECUTABLE, since that's the only alias
+     * anything will ever be called through. A word holding an OBJECT's address (a global,
+     * written to or just read; a string; a const table) must resolve to the plain WRITABLE
+     * copy instead: the executable mapping is exec+read only, not writable, so a global
+     * relocated to it can be read but never written -- a first version of this relocated
+     * everything the same way and a module with one writable global crashed the device with
+     * a hardware cache-safety trap the instant it tried to initialize that global. purrstrap
+     * tells the two apart using the compiler's own FUNC/OBJECT symbol types (readelf, not
+     * nm's section letters), not anything guessed here. */
+    uint32_t *data_offsets = NULL;
+    if (layout.data_reloc_count > 0) {
+        data_offsets = malloc(layout.data_reloc_count * sizeof(uint32_t));
+        if (data_offsets == NULL) {
+            free(rb);
+            return -1;
+        }
+        purr_module_read_data_relocs(payload, &layout, data_offsets);
+    }
+    uint32_t *code_offsets = NULL;
+    if (layout.code_reloc_count > 0) {
+        code_offsets = malloc(layout.code_reloc_count * sizeof(uint32_t));
+        if (code_offsets == NULL) {
+            free(data_offsets);
+            free(rb);
+            return -1;
+        }
+        purr_module_read_code_relocs(payload, &layout, code_offsets);
+    }
+
+    size_t want = CONFIG_MMU_PAGE_SIZE;
+    if (layout.code_size > want) {
+        ESP_LOGW("modules", "%s: too big for one page (%u bytes)", path, (unsigned)layout.code_size);
+        free(data_offsets);
+        free(code_offsets);
+        free(rb);
+        return -1;
+    }
+    uint8_t *databuf = heap_caps_aligned_alloc(CONFIG_MMU_PAGE_SIZE, want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (databuf == NULL) {
+        free(data_offsets);
+        free(code_offsets);
+        free(rb);
+        return -1;
+    }
+    memset(databuf, 0, want);
+    memcpy(databuf, payload + layout.code_offset, layout.code_size);
+
+    /* Data relocations only need databuf's own address, available immediately. */
+    purr_reloc_result_t rr = purr_relocate(databuf, want, data_offsets, layout.data_reloc_count,
+                                          (uint32_t)(uintptr_t)databuf);
+    free(data_offsets);
+    if (rr != PURR_RELOC_OK) {
+        ESP_LOGW("modules", "%s: data relocation failed: %s", path, purr_reloc_result_name(rr));
+        free(code_offsets);
+        free(rb);
+        free(databuf);
+        return -1;
+    }
+
+    /* Code relocations need the executable alias's address, which only exists after mapping. */
+    esp_err_t ee = esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    esp_paddr_t paddr = 0;
+    mmu_target_t target = 0;
+    if (ee == ESP_OK) ee = esp_mmu_vaddr_to_paddr(databuf, &paddr, &target);
+    void *exec_ptr = NULL;
+    if (ee == ESP_OK) {
+        ee = esp_mmu_map(paddr, want, MMU_TARGET_PSRAM0, MMU_MEM_CAP_EXEC | MMU_MEM_CAP_READ,
+                         ESP_MMU_MMAP_FLAG_PADDR_SHARED, &exec_ptr);
+    }
+    if (ee != ESP_OK) {
+        ESP_LOGW("modules", "%s: PSRAM exec mapping failed: %s", path, esp_err_to_name(ee));
+        free(code_offsets);
+        free(rb);
+        free(databuf);
+        return -1;
+    }
+
+    rr = purr_relocate(databuf, want, code_offsets, layout.code_reloc_count,
+                       (uint32_t)(uintptr_t)exec_ptr);
+    free(code_offsets);
+    free(rb);
+    if (rr != PURR_RELOC_OK) {
+        ESP_LOGW("modules", "%s: code relocation failed: %s", path, purr_reloc_result_name(rr));
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+
+    ee = esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    if (ee == ESP_OK) {
+        ee = esp_cache_msync(exec_ptr, want,
+                            ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+    }
+    if (ee != ESP_OK) {
+        ESP_LOGW("modules", "%s: post-relocation cache sync failed: %s", path, esp_err_to_name(ee));
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+
+    if (s_loaded_module_count >= PURR_MODULE_MAX) {
+        ESP_LOGW("modules", "%s: too many modules already loaded", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+
+    purr_module_entry_fn entry = (purr_module_entry_fn)(uintptr_t)((uint8_t *)exec_ptr + layout.entry_offset);
+    const purr_module_table_t *table = entry(&s_core_table);
+    if (table == NULL || table->abi_version != PURR_MODULE_ABI_VERSION) {
+        ESP_LOGW("modules", "%s: bad module table (abi mismatch or NULL)", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+
+    s_loaded_modules[s_loaded_module_count].databuf = databuf;
+    s_loaded_modules[s_loaded_module_count].table = table;
+    s_loaded_module_count++;
+    ESP_LOGI("modules", "%s: loaded, %u command(s)", path, (unsigned)table->cmd_count);
+    return 0;
+}
+
+static void load_modules_from(const char *dir)
+{
+    module_listing_t l = {.count = 0};
+    if (purr_fs_list(&s_fs, dir, collect_module_row, &l) != 0) {
+        return; /* no modules folder yet: nothing to load, not an error */
+    }
+    for (int i = 0; i < l.count; i++) {
+        if (l.is_dir[i]) {
+            continue;
+        }
+        size_t n = strlen(l.names[i]);
+        if (n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0) {
+            continue;
+        }
+        char path[80];
+        snprintf(path, sizeof(path), "%s/%s", dir, l.names[i]);
+        load_one_module_file(path);
+    }
+}
+
 const purr_cmd_t *purr_commands(int *count)
 {
-    *count = (int)(sizeof(s_cmds) / sizeof(s_cmds[0]));
-    return s_cmds;
+    static purr_cmd_t *combined = NULL;
+    static int combined_count = 0;
+
+    if (combined == NULL) {
+        int base_n = (int)(sizeof(s_cmds) / sizeof(s_cmds[0]));
+        if (purr_fs_mounted(&s_fs)) {
+            load_modules_from(PURR_MODULES_DIR);
+        }
+        int total = base_n;
+        for (int i = 0; i < s_loaded_module_count; i++) {
+            total += (int)s_loaded_modules[i].table->cmd_count;
+        }
+        combined = malloc(sizeof(purr_cmd_t) * (size_t)total);
+        if (combined == NULL) {
+            *count = base_n;
+            return s_cmds;             /* out of memory: fall back to just the built-ins */
+        }
+        memcpy(combined, s_cmds, sizeof(purr_cmd_t) * (size_t)base_n);
+        int pos = base_n;
+        for (int i = 0; i < s_loaded_module_count; i++) {
+            const purr_module_table_t *t = s_loaded_modules[i].table;
+            memcpy(combined + pos, t->cmds, sizeof(purr_cmd_t) * t->cmd_count);
+            pos += (int)t->cmd_count;
+        }
+        combined_count = total;
+    }
+    *count = combined_count;
+    return combined;
 }

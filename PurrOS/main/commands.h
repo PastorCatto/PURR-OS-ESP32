@@ -17,6 +17,9 @@ const char *purr_system_name(void);
 /* Mount the root filesystem and say how it went. */
 void purr_fs_setup(purr_cli_t *cli);
 
+/* Mount the apps filesystem and say how it went. */
+void purr_apps_setup(purr_cli_t *cli);
+
 /* Start the Wi-Fi service, sharing the mounted root filesystem for saved networks. */
 void purr_net_setup(purr_cli_t *cli);
 
