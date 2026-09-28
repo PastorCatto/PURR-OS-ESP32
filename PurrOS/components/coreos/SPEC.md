@@ -458,6 +458,18 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
   itself uses to load it) loaded and ran correctly. This also directly confirms section
   4.1's "not everything needs to cross the table" claim with real code, not just an
   assertion: pure computation links straight into the blob with zero table entries needed.
+
+  **The first real slice of the table itself is now built and proven too, 2026-09-28:**
+  `purr_kernel_table.h` (permanent, not a placeholder sketch), backed by a real
+  implementation in `commands.c`'s `s_kernel_table` (real `heap_caps_*`/`esp_timer_get_time`
+  calls) and loaded via a dedicated `/kernelmods` folder, kept separate from `/system`
+  (the CoreOS-to-module boundary) so the two stay conceptually distinct even though one
+  binary hosts both roles until a real kernel binary exists. The first two real commands
+  converted onto it: `mem` and `uptime` (`Modules/coreos/sysinfo_module.c`) -- their old
+  inline `commands.c` versions are gone, not duplicated. Confirmed working end to end on
+  real hardware. Found and fixed along the way: 64-bit division (`uptime`'s
+  `/ 1000000`) needs `__udivdi3` from `libgcc` -- compiler-support, not libc, so
+  `purrstrap modules build` now links `-lgcc` for every module, not just this one.
 - **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
   (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
   ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,

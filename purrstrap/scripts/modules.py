@@ -132,9 +132,12 @@ def build_one(ctx, gcc, objcopy, nm, readelf, sources, out_dir, tag, base, entry
         fh.write(linker_script(base, entry))
 
     elf = os.path.join(out_dir, f"module_{tag}.elf")
+    # -lgcc: compiler-support helpers (64-bit division/shift on a 32-bit target, e.g.
+    # __udivdi3) that gcc emits calls to regardless of -ffreestanding -- found building the
+    # first real kernel-table module (`uptime`'s divide). Not libc: still fine under -nostdlib.
     code = ctx.run([gcc, "-nostdlib", "-Wl,--gc-sections", "-T", ld,
                     f"-Wl,-Map={os.path.join(out_dir, f'module_{tag}.map')}",
-                    *objs, "-o", elf])
+                    *objs, "-lgcc", "-o", elf])
     if code != 0:
         ctx.error(f"link failed ({tag})")
         return None

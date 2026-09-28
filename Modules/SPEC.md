@@ -223,6 +223,12 @@ hardware: a module built from four files -- new test code, a shared freestanding
 and two pieces of real, unmodified CoreOS code (`purr_relocate.c`/`purr_module.c`) -- loaded
 and ran correctly through the same production loader every real module uses.
 
+**Links `-lgcc`** (added 2026-09-28, found building the first real kernel-table module,
+`mem`/`uptime`): a plain 64-bit divide (`uptime_us() / 1000000`) compiles to a call to
+`__udivdi3`, a compiler-support helper for 32-bit targets -- not libc, so still fine under
+`-nostdlib`, but not linked by default either. Every module build links it now, not just
+ones that happen to need it; unused helpers are dropped by `--gc-sections` regardless.
+
 ## 9. Testing
 
 - Relocation apply/detect logic (`purr_relocate`, `purr_module`): pure C, host-tested with
