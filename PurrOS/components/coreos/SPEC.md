@@ -448,7 +448,16 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
   `malloc`/`vTaskDelay`/`esp_partition_*`/display-kernel calls throughout `commands.c`,
   `purr_appmgr.c`, `purr_net.c`, etc.) one subsystem at a time, the same incremental way
   `purr_core_table_t` grew field by field as `about`/`apps`/`wifi`/`netinstall` each
-  became real modules -- not a single big-bang rewrite.
+  became real modules -- not a single big-bang rewrite. **A real prerequisite for this is
+  now built and proven, 2026-09-28:** `purrstrap modules build --source a.c,b.c,...`
+  (comma-separated) links several source files into one relocatable blob -- needed since
+  CoreOS will span many files, unlike every module built so far. Proven on real hardware
+  through the unmodified production loader: a module built from four files (a new test
+  file, a shared freestanding `memcpy`, and two pieces of real, unmodified CoreOS
+  component code -- `purr_relocate.c` and `purr_module.c`, the very functions the loader
+  itself uses to load it) loaded and ran correctly. This also directly confirms section
+  4.1's "not everything needs to cross the table" claim with real code, not just an
+  assertion: pure computation links straight into the blob with zero table entries needed.
 - **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
   (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
   ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,

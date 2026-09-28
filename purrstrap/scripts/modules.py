@@ -113,14 +113,19 @@ def _function_addresses(readelf_output):
     return addrs
 
 
-def build_one(ctx, gcc, objcopy, nm, readelf, source, out_dir, tag, base, entry):
-    """Compiles and links `source` at `base`. Returns (flat_bytes, entry_symbol_table,
-    function_addresses) or None on failure (ctx.error already called)."""
-    obj = os.path.join(out_dir, f"module_{tag}.o")
-    code = ctx.run([gcc] + compile_args(ctx.repo_root) + ["-c", source, "-o", obj])
-    if code != 0:
-        ctx.error(f"compile failed ({tag})")
-        return None
+def build_one(ctx, gcc, objcopy, nm, readelf, sources, out_dir, tag, base, entry):
+    """Compiles and links `sources` (one or more files -- CoreOS itself will eventually
+    span many, unlike every single-file module built so far) at `base`. Returns
+    (flat_bytes, entry_symbol_table, function_addresses) or None on failure (ctx.error
+    already called)."""
+    objs = []
+    for i, source in enumerate(sources):
+        obj = os.path.join(out_dir, f"module_{tag}_{i}.o")
+        code = ctx.run([gcc] + compile_args(ctx.repo_root) + ["-c", source, "-o", obj])
+        if code != 0:
+            ctx.error(f"compile failed ({tag}): {source}")
+            return None
+        objs.append(obj)
 
     ld = os.path.join(out_dir, f"module_{tag}.ld")
     with open(ld, "w", encoding="utf-8", newline="\n") as fh:
@@ -129,7 +134,7 @@ def build_one(ctx, gcc, objcopy, nm, readelf, source, out_dir, tag, base, entry)
     elf = os.path.join(out_dir, f"module_{tag}.elf")
     code = ctx.run([gcc, "-nostdlib", "-Wl,--gc-sections", "-T", ld,
                     f"-Wl,-Map={os.path.join(out_dir, f'module_{tag}.map')}",
-                    obj, "-o", elf])
+                    *objs, "-o", elf])
     if code != 0:
         ctx.error(f"link failed ({tag})")
         return None
@@ -213,9 +218,16 @@ def build(ctx, board, source, entry, kind, name, version, out):
     if kind not in KINDS:
         ctx.error(f"unknown module kind {kind!r}. Known: {', '.join(KINDS)}")
         return 1
-    if not os.path.isfile(source):
-        ctx.error(f"{source}: no such file")
+    # --source takes one path, same as always, or a comma-separated list -- CoreOS will
+    # need many files linked into one relocatable blob, unlike every module built so far.
+    sources = [s.strip() for s in source.split(",") if s.strip()]
+    if not sources:
+        ctx.error("--source: no files given")
         return 1
+    for s in sources:
+        if not os.path.isfile(s):
+            ctx.error(f"{s}: no such file")
+            return 1
 
     prefix, chip_id = BOARDS[board]
     gcc, objcopy, nm, readelf = (find_tool(prefix, t) for t in ("gcc", "objcopy", "nm", "readelf"))
@@ -226,10 +238,10 @@ def build(ctx, board, source, entry, kind, name, version, out):
     out_dir = os.path.join(ctx.repo_root, "Modules", "build", name)
     os.makedirs(out_dir, exist_ok=True)
 
-    a = build_one(ctx, gcc, objcopy, nm, readelf, source, out_dir, "a", BASE_A, entry)
+    a = build_one(ctx, gcc, objcopy, nm, readelf, sources, out_dir, "a", BASE_A, entry)
     if a is None:
         return 1
-    b = build_one(ctx, gcc, objcopy, nm, readelf, source, out_dir, "b", BASE_B, entry)
+    b = build_one(ctx, gcc, objcopy, nm, readelf, sources, out_dir, "b", BASE_B, entry)
     if b is None:
         return 1
     code_a, syms_a, func_addrs_a = a
@@ -270,7 +282,8 @@ SCRIPT = Script(
                params=(
                    Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
                          help="the board to build for (it decides the chip and compiler)"),
-                   Param("source", "path", required=True, help="the module's C source file"),
+                   Param("source", "path", required=True,
+                         help="the module's C source file, or several comma-separated"),
                    Param("entry", "str", required=True,
                          help="the C symbol the core calls to enter the module"),
                    Param("kind", "choice", default="driver", choices=tuple(KINDS),

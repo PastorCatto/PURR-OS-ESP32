@@ -215,6 +215,14 @@ the base-0 build's `readelf -s` FUNC symbol addresses (section 4), looks up the 
 address, writes the prefix (section 5), packages as `PURR_IMG_MODULE`. Refuses to package a
 module that has any non-relocatable word rather than silently miscompiling it.
 
+**`--source` takes a comma-separated list**, not just one file (added 2026-09-28, needed
+before CoreOS itself -- which will span many files -- can build this way,
+`PurrOS/components/coreos/SPEC.md` section 10): each file compiles to its own object, then
+all of them link together at each base address, same as before from there on. Proven on real
+hardware: a module built from four files -- new test code, a shared freestanding `memcpy`,
+and two pieces of real, unmodified CoreOS code (`purr_relocate.c`/`purr_module.c`) -- loaded
+and ran correctly through the same production loader every real module uses.
+
 ## 9. Testing
 
 - Relocation apply/detect logic (`purr_relocate`, `purr_module`): pure C, host-tested with
