@@ -1,4 +1,4 @@
-# PurrOS base system spec (draft 0.5)
+# PurrOS base system spec (draft 0.6)
 
 Overview of `PurrOS/`, the base system: how it boots, how it is layered, where things
 live, and in what order it gets built. Each part has its own spec:
@@ -34,10 +34,22 @@ is not repeated here.
 ## 1. The model
 
 The layout follows Linux. A small **boot area** in raw flash holds just enough to start
-and to recover, like an EFI partition. **Everything else lives in one root
-filesystem** (LittleFS): the kernel, CoreOS, the drivers bundle, AppManager, the
-runtimes, apps, configuration, logs, and the backup and staged copies used for
-updates. Anything in the root filesystem can be replaced independently.
+and to recover, like an EFI partition. **Almost everything else lives in one root
+filesystem** (LittleFS): CoreOS, the drivers bundle, AppManager, the runtimes, apps,
+configuration, logs, and the backup and staged copies used for updates. Anything in the
+root filesystem can be replaced independently.
+
+**Updated 2026-09-28 (draft 0.6):** the kernel moved back into the boot area, as its own
+flash partition, alongside KittenOS and the recovery loader. Earlier drafts of this
+document (and `ModuleSpike`/`Modules` SPEC.md, when they were written) assumed the kernel
+itself could be a relocatable PSRAM-loaded file like CoreOS and every module built since
+— it can't: the kernel's job is bringing up FreeRTOS and the hardware in the first place,
+and a full FreeRTOS/ESP-IDF app cannot execute from a PSRAM copy the way a module can
+(settled earlier in the rewrite; see `Modules/SPEC.md`). CoreOS is not affected by this —
+it already only ever loads *after* the kernel has FreeRTOS and hardware running, the same
+precondition every module already relies on, so CoreOS-as-a-PSRAM-blob stays exactly the
+plan, just now explicitly built on the same mechanism `Modules/SPEC.md` proved on
+hardware, not a separate unproven idea.
 
 | Thing | Where it lives | Loaded by | Updated |
 |-------|----------------|-----------|---------|
@@ -45,7 +57,7 @@ updates. Anything in the root filesystem can be replaced independently.
 | Boot package | boot area | bootloader | rarely |
 | KittenOS | boot area | bootloader, when triggered | not in normal use |
 | Recovery loader | boot area (modular boards) | bootloader, when KittenOS fails | almost never |
-| Kernel | root filesystem, `/boot` | boot package | independently |
+| Kernel | boot area (modular boards), its own flash partition | boot package | rarely; by KittenOS, like the boot package (section 6.1) |
 | CoreOS | root filesystem, `/boot` | kernel | independently |
 | Device config bundle | root filesystem, `/boot` | kernel and CoreOS | with the drivers it holds; locked to the release keys (`components/kernel/SPEC.md` section 13) |
 | AppManager | root filesystem, `/boot` | CoreOS | rarely |
@@ -53,7 +65,9 @@ updates. Anything in the root filesystem can be replaced independently.
 | Apps (`.cat`) | root filesystem, `/apps` | app runtime | independently, and copied between devices |
 
 Every file in the root filesystem that holds code is a signed container
-(`bootloader/SPEC.md` section 3) with a type, and is verified before it is used.
+(`bootloader/SPEC.md` section 3) with a type, and is verified before it is used. The
+kernel partition holds the same kind of signed container, verified by the boot package
+the same way any image is, just read from a flash partition instead of a file.
 
 Why apps are separate: they are meant to move between PURR OS devices, so they use only
 catcalls, which are the same on every device. They are pre-compiled, so what limits them
@@ -64,8 +78,9 @@ is the instruction set, not the board.
 The same source builds for two kinds of board. The difference is how it is packaged.
 
 - **Modular board:** at least 4 MB of flash, at least 2 MB of PSRAM, and MTP support
-  (native USB). It boots the Linux way: the kernel and CoreOS are files in the root
-  filesystem, loaded into PSRAM. The T-Deck Plus is the primary example.
+  (native USB). The kernel is a small flashed partition (hardware, drivers, FreeRTOS,
+  mounting the root filesystem); CoreOS is a file in the root filesystem that the kernel
+  loads into PSRAM. The T-Deck Plus is the primary example.
 - **Monolithic board:** anything that does not meet that bar, such as the CYD 2.4C (no
   PSRAM, no native USB). It cannot load code from a file into RAM, and code must run in
   place from contiguous flash. So **everything is packed into one image** (kernel, CoreOS,
@@ -77,6 +92,13 @@ The same source builds for two kinds of board. The difference is how it is packa
 **Every user-facing feature needs a fallback.** Failure of the normal system leads to
 KittenOS. Failure of KittenOS leads to the recovery loader on boards that have one (Wi-Fi
 and TLS, it downloads a new KittenOS), and then to a serial prompt (section 3).
+
+**The `kernel` partition needs no fallback of its own** -- it already falls into this same
+chain for free. It is just another bootloader-verified image slot (`bootloader/SPEC.md`
+section 6), so a `kernel` that fails verification in `enforce` mode already falls back to
+KittenOS the same way a bad `kittenos` or packed image would. KittenOS can already write
+straight into `kernel` if it needs repairing, the same way it already writes `bootpkg`
+(section 4.1) -- no separate recovery partition needed for it.
 
 **Design style: Unix-like.** Small single-purpose parts, text-first interfaces (a shell
 with pipes before any graphical UI), processes with ids that can be listed and stopped,
@@ -90,13 +112,19 @@ and builds on the same services.
 ```
   bootloader        verifies and loads the boot package
       |
-  boot package      the boot menu; reads the root filesystem; verifies and loads
-      |             the kernel. Starts KittenOS instead if triggered.
+  boot package      the boot menu; verifies and jumps into the kernel partition
+      |             (a normal flash-resident image boot, no relocation needed).
+      |             Starts KittenOS or the recovery loader instead if triggered.
       |
-  kernel            hardware, drivers, the filesystem; starts CoreOS
+  kernel            hardware, drivers, FreeRTOS, mounts the root filesystem; then
+      |             verifies CoreOS from the root filesystem, relocates it into
+      |             PSRAM, maps it executable and starts it -- the same
+      |             mechanism `Modules/SPEC.md` proves for every module, just for
+      |             something kernel-sized instead of one command's worth
       |
   CoreOS            handoff, self-verification, decisions, the shell engine,
-      |             the memory pressure service; hosts the runtime manager
+      |             the memory pressure service; hosts the runtime manager and
+      |             the module loader
       |
   appmanager        installs, removes and updates apps; the command-line
       |             shell (launcher and task manager commands)
@@ -121,13 +149,19 @@ the keys and a very minimal CoreOS, and downloads a new KittenOS if KittenOS its
 Rules for the boundaries:
 
 - **The kernel comes first and knows hardware and the filesystem, nothing else.** No
-  security decisions, no policy, no UI. It reports what it found and what failed.
+  security decisions, no policy, no UI. It reports what it found and what failed. On
+  modular boards it is the only layer besides the boot area itself that lives in its own
+  flash partition, not a file -- it has to, since it is what brings FreeRTOS and the
+  hardware up in the first place, and nothing can load a file into executable memory
+  before that has happened.
 - **CoreOS runs on the kernel and owns the decisions.** It reads the boot package's
   result, verifies its own files, decides whether to continue, warn or fall back to
-  recovery, and loads the rest.
+  recovery, and loads the rest. It is a file, not a partition, because by the time it
+  loads, FreeRTOS and hardware are already running -- the same precondition every
+  module already needs.
 - **Recovery must not depend on what it recovers.** KittenOS carries its own drivers and
-  filesystem reader and never loads the kernel or CoreOS files, so it works when they are
-  missing or broken.
+  filesystem reader and never loads the kernel partition or the CoreOS file, so it works
+  when they are missing or broken.
 - **KittenOS is only recovery, and it applies updates.** It is not updated in normal use.
 - **Apps use catcalls and nothing else.** They never touch hardware, the OS or ESP-IDF
   directly.
@@ -137,10 +171,12 @@ Rules for the boundaries:
 **Modular board, normal**
 
 1. The bootloader verifies and loads the boot package and writes the handoff.
-2. The boot package shows the boot menu for a short time. If nothing is pressed, it goes
-   on.
-3. It reads the root filesystem, verifies the kernel file, loads it into PSRAM and runs it.
-4. The kernel brings up the hardware and the filesystem and starts CoreOS.
+2. The boot package shows the boot menu for a short time. If nothing is pressed, it
+   verifies and jumps into the `kernel` partition (a normal image boot; no PSRAM
+   relocation at this stage, since the kernel is flash-resident).
+3. The kernel brings up the hardware, FreeRTOS and the filesystem.
+4. The kernel reads the root filesystem, verifies the CoreOS file, relocates it into
+   PSRAM, maps it executable and starts it (`Modules/SPEC.md`'s mechanism).
 5. CoreOS verifies itself, decides, then loads AppManager and the runtimes.
 
 **Monolithic board, normal:** the bootloader loads the boot package for the menu, then
@@ -172,10 +208,22 @@ Per board, with its own partition file. Sizes are proposals until real images ex
 | `bootpkg` (raw) | the boot package | ~64 KB |
 | `kittenos` (raw) | KittenOS, recovery only | 1 MB |
 | `rescue` (raw) | the recovery loader: Wi-Fi, TLS, keys, minimal CoreOS | ~1 MB, to be sized |
-| `root` | LittleFS: everything else | the rest |
+| `kernel` (app, single slot, no A/B) | hardware, drivers, FreeRTOS, mounts `root`, loads CoreOS | to be sized |
+| `root` | LittleFS: CoreOS and everything else | the rest |
 
-Directories in the root filesystem (proposed): `/boot` for the kernel, CoreOS and the
-other system files with their backups, `/apps` for `.cat` apps, `/data` for their data,
+No `ota_0`/`ota_1`: that pattern (an OTA-selected app slot) is the monolithic-board
+fallback (section 4.2), not the modular-board design. `kernel` is a single slot on
+purpose -- the boot package picks it directly (`purrcfg`, not `esp_ota_*`), and it's
+meant to change about as rarely as `bootpkg`/`rescue` do. When it does need updating,
+that's KittenOS writing a verified image straight into the partition, the same way it
+already updates `bootpkg` (`bootloader/SPEC.md` section 9, "Updating the package") --
+not the `.new`/`.bak` LittleFS rename dance section 6.1 uses for CoreOS and everything
+above it, since `kernel` isn't a LittleFS file. The exact partition subtype (distinct
+from `factory`/`ota_*`, similar to how `rescue` already uses a plain, non-OTA subtype)
+is a `partitions/<board>.csv` decision, not fixed here.
+
+Directories in the root filesystem (proposed): `/boot` for CoreOS and the other system
+files with their backups, `/apps` for `.cat` apps, `/data` for their data,
 `/etc` for configuration, `/var/log` for logs and `/tmp` for scratch space.
 
 ### 4.2 Monolithic board: CYD 2.4C (4 MB)
@@ -216,30 +264,42 @@ The `os` slot is one slot with no backup. The packed image has to fit in whateve
     space, so a faulty app can corrupt another app or the OS. Safety comes from signing, the
     catcall-only rule enforced by the toolchain, and watchdogs, not from hardware isolation.
 
-## 6. Loading the system from files (modular boards)
+## 6. Loading CoreOS from a file (modular boards)
 
-The boot package reads the kernel from the root filesystem, and the kernel starts CoreOS.
-Code has to run from memory the CPU can execute, so this depends on the module loading
-spike (`../ModuleSpike/SPEC.md`). Two methods, in this order:
+The kernel reads CoreOS from the root filesystem, once it has hardware, FreeRTOS and the
+filesystem itself up. Code has to run from memory the CPU can execute, and this is now
+proven, not an open question: it's the exact mechanism `Modules/SPEC.md` builds and
+`ModuleSpike/SPEC.md` originally spiked, applied to CoreOS instead of a command module.
 
-- **Load into PSRAM (first choice).** Copy the file into PSRAM, relocate it with the same
-  loader design as apps, map it executable and run it. It needs no fixed address. Whether
-  ESP-IDF allows executable PSRAM on the ESP32-S3 has to be checked.
-- **A raw cache (fallback).** If PSRAM execution fails, the kernel and CoreOS run in place
-  from raw flash slots, and the files in the root filesystem stay the master copy. The boot
-  package or KittenOS refreshes a slot whenever a newer file is there. This is how the
-  monolithic tier works, and the mapping API (`spi_flash_mmap` with `SPI_FLASH_MMAP_INST`, or
-  `esp_mmu_map` with `MMU_MEM_CAP_EXEC`) is public but chooses the virtual address itself, so
-  that route needs a fixed-window scheme.
+- **Load into PSRAM.** Copy the file into PSRAM, relocate it against the two bases
+  (`Modules/SPEC.md` section 4 -- data relocations against the writable alias, code
+  relocations against the executable one), map it executable and run it. It needs no
+  fixed address. Proven working on real ESP32-S3 hardware for the module system; the
+  open part for CoreOS specifically is size, not mechanism (below).
+- **The kernel does not need a raw-flash fallback for this.** The earlier idea of running
+  CoreOS in place from a raw flash slot if PSRAM execution failed is dropped along with
+  the kernel-as-a-file idea it was attached to -- PSRAM execution is proven, and if
+  CoreOS genuinely can't load this way for some board, that board doesn't get the
+  no-OTA modular design at all and stays on the monolithic tier's single packed slot
+  (section 4.2) instead of inventing a third loading method.
+
+**Open, real scope, not mechanism:** today's module loader (`load_one_module_file()`,
+`purr_relocate.h`'s `PURR_RELOC_MAX`) caps a module at one 64 KB page
+(`CONFIG_MMU_PAGE_SIZE`) and a bounded relocation count. CoreOS is far bigger than
+anything built as a module so far, so both caps need to become multi-page /
+appropriately sized before CoreOS can actually load this way -- real work, not a design
+question.
 
 Between the layers there is a small versioned table of calls: the boot package gives the
-kernel the boot information and a few services, and the kernel gives CoreOS its API. The
-details are in the kernel and CoreOS specs.
+kernel the boot information and a few services, and the kernel gives CoreOS its API
+(the same shape as `purr_core_table_t` already is for CoreOS-to-module, one layer up).
+The details are in the kernel and CoreOS specs.
 
 ### 6.1 Updating the system files
 
-Apps are updated by AppManager. This is for the system files: the kernel, CoreOS, the
-drivers bundle, AppManager, the runtimes and the boot package.
+Apps are updated by AppManager. This is for the system files above the kernel: CoreOS,
+the drivers bundle, AppManager, the runtimes and the boot package. The kernel itself is
+not a system *file* -- see section 4.1 for how it updates instead.
 
 **KittenOS performs the swap.** It is never overwritten in normal use, so it can safely
 replace anything else, including CoreOS itself.
@@ -259,6 +319,11 @@ replace anything else, including CoreOS itself.
 7. **Roll back.** If the new version does not come up healthy after N attempts (default 3),
    KittenOS renames the bad file to `<name>.bad`, renames `<name>.bak` back, and marks the
    update `failed`.
+
+Since CoreOS updates are now a plain LittleFS file swap, not a flash-partition
+operation, iterating on CoreOS itself -- which is most of what this rewrite has actually
+been doing -- stops needing a reflash at all once the kernel partition is stable. That
+was the whole motivation for the module system in the first place.
 
 **Power loss.** LittleFS renames are atomic. Each step is recorded in `update_state`
 (`bootloader/SPEC.md` section 5), so KittenOS resumes from wherever a restart caught it.
@@ -288,8 +353,11 @@ PurrOS/
 
 One project builds every image. The **CoreOS profile** (`minimal`, `recovery` or `full`) is a
 Kconfig option (`PURR_PROFILE`) and the board another (`PURR_BOARD`). On modular boards the
-kernel and CoreOS are built as separate files. On monolithic boards they are linked into one
-image. KittenOS uses a small built-in driver set either way.
+kernel builds to its own flashed image (a normal ESP-IDF app) and CoreOS builds to a
+relocatable file for the root filesystem (`purrstrap`, the same way a module builds --
+`Modules/SPEC.md` section 8 -- just bigger). On monolithic boards kernel and CoreOS are
+linked into one image, same as before. KittenOS uses a small built-in driver set either
+way.
 
 ## 8. Shared formats, tooling, first boards
 
@@ -344,8 +412,8 @@ image. KittenOS uses a small built-in driver set either way.
 
 **After that**
 
-7. Loading the system from files on the T-Deck Plus (`../ModuleSpike/SPEC.md`), the bootloader's
-   verification and moved partition table.
+7. Loading CoreOS from a file on the T-Deck Plus (section 6, proven by `../Modules/SPEC.md`),
+   the new `kernel` partition, and the resulting partition table changes.
 8. The `console` catcall, the runtime manager and `catrt`, the app SDK, then AppManager with its
    command-line shell and its transports.
 9. The network install and driver packs (`../Install/SPEC.md`, `../Drivers/SPEC.md`).
@@ -354,11 +422,29 @@ image. KittenOS uses a small built-in driver set either way.
 
 ## 11. Open questions
 
-- **Who starts CoreOS:** the kernel (the working assumption, like a Linux kernel running
-  init) or the boot package loading both.
-- **The boot package's role:** on monolithic boards it only shows the menu and returns to the
-  bootloader. On modular boards it also reads the filesystem and loads the kernel. Whether that
-  is one program with two modes needs settling.
+**Resolved 2026-09-28** (see section 1's update note and sections 2/3/4.1/6): who starts
+CoreOS is the kernel, settled -- the kernel is its own flash partition (like a Linux
+kernel running init), not a file the boot package loads. The boot package's role is
+correspondingly simpler on modular boards than once thought: it verifies and jumps into
+the kernel partition directly, the same plain image-boot it already does for
+KittenOS/rescue, not a second relocate-into-PSRAM path -- so it is one program either
+way, monolithic or modular, just with a different target.
+
+- **Not yet built:** the actual `kernel` partition, `partitions/<board>.csv` changes to
+  add it and drop `ota_0`/`ota_1`, `purrstrap` support for building CoreOS as a
+  relocatable root-filesystem file instead of linking it into the kernel image, the boot
+  package's simplified jump-to-kernel logic, and the module loader's page-size/
+  relocation-count caps growing to fit something CoreOS-sized (section 6). `netinstall`
+  (`Modules/netinstall/netinstall_module.c`) also needs retargeting: it currently writes
+  straight to `ota_0` via `esp_ota_set_boot_partition`, which no longer exists here --
+  it needs to become a CoreOS-file stage-and-swap (section 6.1) instead, and a way to
+  push a new `kernel` image too, on the rare occasion that needs updating. Today's build
+  still links kernel and CoreOS into one flashed image on the T-Deck Plus, same as the
+  monolithic tier -- a practical shortcut during this rewrite's early iteration, not the
+  intended final shape.
+- **The `kernel` partition's own update path** (section 4.1: KittenOS writes it directly,
+  like `bootpkg`) is a design decision, not yet implemented or tested against a real
+  power-cut-mid-write case.
 - **How KittenOS is started:** the assumption is a target recorded in `purrcfg` that the
   bootloader honours.
 - **How many backups to keep** (`.bak`) and when to delete them.

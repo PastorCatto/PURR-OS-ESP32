@@ -1,4 +1,4 @@
-# PURR OS bootloader spec (draft 0.1)
+# PURR OS bootloader spec (draft 0.2)
 
 Single source of truth for the bootloader, the image container and the boot
 flow. If code and this document disagree, fix one of them in the same commit.
@@ -6,10 +6,14 @@ flow. If code and this document disagree, fix one of them in the same commit.
 ## 1. Purpose and threat model
 
 The bootloader loads exactly two things: the **boot package**, and **KittenOS** when the
-boot target says so. On monolithic boards it also loads the packed OS image after the boot
-package's menu. It verifies each against a public key it holds, applies a small policy from
-flags in flash, and hands off. Everything else (kernel, CoreOS, drivers, apps) is a file in
-the root filesystem, loaded later and not by the bootloader. See `PurrOS/SPEC.md` section 1.
+boot target says so. On monolithic boards, and on modular boards' normal path, it also
+loads the packed OS image or the **kernel** (respectively) after the boot package's menu
+returns a choice -- the same mechanism either way (section 6, step 8). It verifies each
+against a public key it holds, applies a small policy from flags in flash, and hands off.
+Everything above the kernel (CoreOS, drivers, apps) is a file in the root filesystem,
+loaded later and not by the bootloader. The kernel itself is loaded by the bootloader,
+not a root-filesystem file -- see `PurrOS/SPEC.md` section 1 (updated 2026-09-28: the
+kernel moved back into the boot area, its own partition).
 
 **What this is:** an authenticity and integrity check with a recovery policy.
 It catches corrupted images, wrong-vendor builds, bad updates and accidental
@@ -43,8 +47,9 @@ bootloader knows about:
 | bootpkg    | data/0x44    | ~64 KB | The boot package, right after the bootloader. |
 | kittenos   | app/factory  | 1 MB   | KittenOS, recovery only. Not updated in normal use. |
 | rescue     | app/test     | ~1 MB  | Modular boards: the recovery loader (Wi-Fi, TLS, keys, minimal CoreOS). Almost never changed. |
+| kernel     | app, single slot | to be sized | Modular boards only: hardware, drivers, FreeRTOS, mounts `root`, loads CoreOS from it (`PurrOS/SPEC.md` sections 1, 6). A distinct subtype from `factory`/`ota_*` -- picked by the boot package like any other slot (section 6 step 8), never through `esp_ota_*`. |
 | os         | app/ota_0    | rest   | Monolithic boards only: the packed OS image, one slot. |
-| root       | data/littlefs | rest  | The root filesystem on modular boards (the apps filesystem, 1 MB, on monolithic ones). |
+| root       | data/littlefs | rest  | The root filesystem: CoreOS and everything else on modular boards (the apps filesystem, 1 MB, on monolithic ones). |
 
 The bootloader binary must fit before the partition table, so budget its size and move the
 table if it grows. There is no OTA slot switching: which target boots is recorded in
@@ -194,8 +199,10 @@ requests) depend on whether secure boot is enabled. Here "enabled" means
    without one, in `off` and `warn` boot KittenOS with the warning, and in `enforce` print the
    serial prompt and wait. Open item: decide whether "wait" means a reset loop or a halt.
 7. Clear one-shot flags, write `purrcfg` if it changed, write the handoff struct, jump.
-8. **Monolithic boards:** when the boot package returns its menu choice, verify and load the
-   packed image the same way (steps 4 and 5).
+8. When the boot package returns its menu choice, verify and load the chosen slot the same
+   way (steps 4 and 5) -- the packed image on monolithic boards, the **kernel** partition on
+   modular ones. Same mechanism both tiers; only which slot the package is allowed to
+   choose differs.
 
 The boot package verifies the kernel and CoreOS files it loads with the same rules
 (`PurrOS/components/coreos/SPEC.md` section 3.5).
@@ -277,11 +284,15 @@ board that happens before the kernel lives in the **boot package**.
   bootloader. One per board.
 - It holds the board's quirks it needs and the **boot menu**: starting the display, reading
   the board's keys or buttons, and drawing the menu.
-- **On modular boards it also loads the system.** It reads the root filesystem with a
-  read-only LittleFS reader, verifies the kernel file with the same rules as any image, loads
-  it into PSRAM and runs it. Before doing so it increments `boot_fail_count`.
+- **On modular boards it picks the `kernel` slot** the same way monolithic boards pick their
+  packed image (below): it returns the choice from the app-slot list the bootloader already
+  handed it, and the bootloader verifies and jumps into it (section 6 step 8). No LittleFS
+  read and no PSRAM relocation happen inside the package itself -- that machinery belongs to
+  the kernel, one layer up, loading CoreOS (`PurrOS/SPEC.md` section 6). Before returning its
+  choice it increments `boot_fail_count`.
 - **On monolithic boards it only shows the menu** and returns the choice to the bootloader,
-  which loads the packed image.
+  which loads the packed image. Modular and monolithic boards now share this exact
+  mechanism -- the only difference is which slot is on offer.
 - **It is only for boot.** The drivers and hardware description for the kernel and CoreOS are a
   separate bundle (`PurrOS/components/kernel/SPEC.md` section 13).
 - It is small, tens of KB to be measured, so it does not repeat the bootloader's size problem.
