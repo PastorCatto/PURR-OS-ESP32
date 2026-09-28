@@ -470,6 +470,21 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
   real hardware. Found and fixed along the way: 64-bit division (`uptime`'s
   `/ 1000000`) needs `__udivdi3` from `libgcc` -- compiler-support, not libc, so
   `purrstrap modules build` now links `-lgcc` for every module, not just this one.
+
+  **A much bigger sweep followed the same day: the whole filesystem command cluster.**
+  `ls`/`cat`/`mkdir`/`rm`/`mv`/`write`/`df`/`format` -- 8 real commands, not one --
+  converted in a single pass (`Modules/coreos/fs_module.c`), growing the table with
+  `fs_list`/`fs_read`/`fs_write`/`fs_mkdir`/`fs_remove`/`fs_rename`/`fs_usage`/
+  `fs_mounted`/`fs_strerror`/`fs_format`/`console_flush` (ABI 1 -> 2). `fs_list`/`fs_read`
+  reuse `purr_fs.h`'s own `purr_fs_list_fn`/`purr_fs_read_fn` callback types directly --
+  already proven safe in a freestanding build, since `purr_module_abi.h` already pulls in
+  `purr_fs.h` transitively and every real module already compiles against it. `fs_format`
+  stays one opaque call, not decomposed (same reasoning as `netinstall`'s `net_install`,
+  `Modules/SPEC.md`): formatting needs the raw block device and an unmount first, real
+  low-level access a module is never handed. Confirmed working end to end on real
+  hardware, the full cluster at once. This is the proof that the incremental-conversion
+  pattern scales past one command at a time to a whole coherent subsystem in one sweep,
+  not just single trivial commands.
 - **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
   (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
   ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,
