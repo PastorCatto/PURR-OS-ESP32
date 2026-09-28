@@ -64,35 +64,45 @@ typedef enum {
 
 const char *purr_app_result_name(purr_app_result_t r);
 
-/* Deletes any "<name>.tmp" folder left over from a cut install. Call once at boot, before
- * purr_appmgr_scan. Never fails outright; a folder it cannot remove is just left for the
- * next boot to try again. */
-void purr_appmgr_recover(purr_fs_t *fs);
+/* Every function below takes `root`: the folder apps live under, one subfolder per app
+ * inside it. Originally always "/" (a dedicated apps-only filesystem); now that apps live
+ * per-user (Users/SPEC.md's home folders, on the shared root filesystem), it is typically
+ * "/home/<name>/apps". Pass it without a trailing slash except for the literal root itself
+ * ("/"), which is handled as a special case so callers never produce a doubled "//". A
+ * caller-owned string; not copied or retained past the call. */
+
+#define PURR_APPMGR_ROOT_MAX 64  /* generous for "/home/<name>/apps"; checked, not assumed */
+
+/* Deletes any "<name>.tmp" folder left over from a cut install. Call once at boot (or once
+ * per user's home, wherever apps live), before purr_appmgr_scan. Never fails outright; a
+ * folder it cannot remove is just left for the next boot to try again. */
+void purr_appmgr_recover(purr_fs_t *fs, const char *root);
 
 /*
- * Rebuilds the registry by scanning the filesystem's root: one subfolder per app, each
- * expected to hold "package.cat". A folder that does not parse as an app image, or whose
- * package is bigger than `scratch_cap`, is skipped (reg->dropped counts it), not fatal to
- * the scan. `scratch` is used to read one package at a time for verification; how big to
- * make it is a caller decision (PSRAM lets it be generous, a board with none does not).
+ * Rebuilds the registry by scanning `root`: one subfolder per app, each expected to hold
+ * "package.cat". A folder that does not parse as an app image, or whose package is bigger
+ * than `scratch_cap`, is skipped (reg->dropped counts it), not fatal to the scan. `scratch`
+ * is used to read one package at a time for verification; how big to make it is a caller
+ * decision (PSRAM lets it be generous, a board with none does not).
  */
-void purr_appmgr_scan(purr_fs_t *fs, const purr_appmgr_env_t *env, uint8_t *scratch,
-                      uint32_t scratch_cap, purr_app_registry_t *reg);
+void purr_appmgr_scan(purr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
+                      uint8_t *scratch, uint32_t scratch_cap, purr_app_registry_t *reg);
 
 /*
- * Installs a package already read into memory. Verifies it, checks its chip has a usable
- * payload, and, if a version of the same name is already installed, requires the new one
- * to be newer. Stages at "<name>.tmp/package.cat", checks the copy's hash, then renames
- * into place (replacing an older version atomically). `cfg` supplies secure_mode for the
- * accept-unsigned rule, same as everywhere else.
+ * Installs a package already read into memory, under `root`. Verifies it, checks its chip
+ * has a usable payload, and, if a version of the same name is already installed, requires
+ * the new one to be newer. Stages at "<root>/<name>.tmp/package.cat", checks the copy's
+ * hash, then renames into place (replacing an older version atomically). `cfg` supplies
+ * secure_mode for the accept-unsigned rule, same as everywhere else.
  */
-purr_app_result_t purr_appmgr_add(purr_fs_t *fs, const purr_appmgr_env_t *env, const purr_cfg_t *cfg,
-                                  const purr_app_registry_t *reg, const uint8_t *data, uint32_t len);
+purr_app_result_t purr_appmgr_add(purr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
+                                  const purr_cfg_t *cfg, const purr_app_registry_t *reg,
+                                  const uint8_t *data, uint32_t len);
 
-/* Removes "<name>/" entirely. 0 on success, nonzero if there is no such app or it could
- * not be fully removed (a partial removal is safe: the next scan just drops it as
+/* Removes "<root>/<name>/" entirely. 0 on success, nonzero if there is no such app or it
+ * could not be fully removed (a partial removal is safe: the next scan just drops it as
  * incomplete, the same as a cut install). */
-int purr_appmgr_remove(purr_fs_t *fs, const char *name);
+int purr_appmgr_remove(purr_fs_t *fs, const char *root, const char *name);
 
 const purr_app_entry_t *purr_appmgr_find(const purr_app_registry_t *reg, const char *name);
 

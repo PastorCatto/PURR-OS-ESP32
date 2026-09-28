@@ -77,6 +77,17 @@ static int hash_accumulate(void *ctx, const void *data, uint32_t len)
     return 0;
 }
 
+/* Joins root + "/" + suffix without ever doubling the slash when root is the literal
+ * filesystem root ("/"). Every path this file builds goes through this. */
+static void join(char *out, size_t outcap, const char *root, const char *suffix)
+{
+    if (root[0] == '/' && root[1] == '\0') {
+        snprintf(out, outcap, "/%s", suffix);
+    } else {
+        snprintf(out, outcap, "%s/%s", root, suffix);
+    }
+}
+
 /* ---------------------------------------------------------------- scanning */
 
 typedef struct {
@@ -101,19 +112,19 @@ static void collect_row(void *ctx, const char *name, int is_dir, uint32_t size)
     }
 }
 
-void purr_appmgr_recover(purr_fs_t *fs)
+void purr_appmgr_recover(purr_fs_t *fs, const char *root)
 {
     listing_t l = {.count = 0};
-    if (purr_fs_list(fs, "/", collect_row, &l) != 0) {
+    if (purr_fs_list(fs, root, collect_row, &l) != 0) {
         return;
     }
     for (int i = 0; i < l.count; i++) {
         size_t n = strlen(l.rows[i].folder);
         if (l.rows[i].is_dir && n > 4 && strcmp(l.rows[i].folder + n - 4, TMP_SUFFIX) == 0) {
-            char path[PURR_APP_NAME_LEN + 2];
-            snprintf(path, sizeof(path), "/%s", l.rows[i].folder);
+            char path[PURR_APPMGR_ROOT_MAX + PURR_APP_NAME_LEN + 2];
+            join(path, sizeof(path), root, l.rows[i].folder);
             /* Remove the package file first (purr_fs_remove needs an empty directory). */
-            char inner[PURR_APP_NAME_LEN + 16];
+            char inner[sizeof(path) + 16];
             snprintf(inner, sizeof(inner), "%s/%s", path, PACKAGE_FILE);
             purr_fs_remove(fs, inner);
             purr_fs_remove(fs, path);
@@ -121,12 +132,12 @@ void purr_appmgr_recover(purr_fs_t *fs)
     }
 }
 
-void purr_appmgr_scan(purr_fs_t *fs, const purr_appmgr_env_t *env, uint8_t *scratch,
-                      uint32_t scratch_cap, purr_app_registry_t *reg)
+void purr_appmgr_scan(purr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
+                      uint8_t *scratch, uint32_t scratch_cap, purr_app_registry_t *reg)
 {
     memset(reg, 0, sizeof(*reg));
     listing_t l = {.count = 0};
-    if (purr_fs_list(fs, "/", collect_row, &l) != 0) {
+    if (purr_fs_list(fs, root, collect_row, &l) != 0) {
         return;
     }
     for (int i = 0; i < l.count && reg->count < PURR_APP_MAX; i++) {
@@ -141,8 +152,10 @@ void purr_appmgr_scan(purr_fs_t *fs, const purr_appmgr_env_t *env, uint8_t *scra
             continue;                          /* the transport drop folder, not an app */
         }
 
-        char path[PURR_APP_NAME_LEN + 16];
-        snprintf(path, sizeof(path), "%s/%s", l.rows[i].folder, PACKAGE_FILE);
+        char entry[PURR_APPMGR_ROOT_MAX + PURR_APP_NAME_LEN + 2];
+        join(entry, sizeof(entry), root, l.rows[i].folder);
+        char path[sizeof(entry) + 16];
+        snprintf(path, sizeof(path), "%s/%s", entry, PACKAGE_FILE);
         int is_dir = 0;
         uint32_t size = 0;
         if (purr_fs_stat(fs, path, &is_dir, &size) != 0 || is_dir || size < sizeof(purr_image_header_t)) {
@@ -185,8 +198,9 @@ void purr_appmgr_scan(purr_fs_t *fs, const purr_appmgr_env_t *env, uint8_t *scra
 
 /* ---------------------------------------------------------------- add and remove */
 
-purr_app_result_t purr_appmgr_add(purr_fs_t *fs, const purr_appmgr_env_t *env, const purr_cfg_t *cfg,
-                                  const purr_app_registry_t *reg, const uint8_t *data, uint32_t len)
+purr_app_result_t purr_appmgr_add(purr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
+                                  const purr_cfg_t *cfg, const purr_app_registry_t *reg,
+                                  const uint8_t *data, uint32_t len)
 {
     if (len < sizeof(purr_image_header_t)) {
         return PURR_APP_BAD_MAGIC;
@@ -230,10 +244,14 @@ purr_app_result_t purr_appmgr_add(purr_fs_t *fs, const purr_appmgr_env_t *env, c
         return PURR_APP_REGISTRY_FULL;
     }
 
-    char tmp_dir[PURR_APP_NAME_LEN + 8], tmp_file[PURR_APP_NAME_LEN + 24], final_dir[PURR_APP_NAME_LEN + 2];
-    snprintf(tmp_dir, sizeof(tmp_dir), "/%s%s", hdr.name, TMP_SUFFIX);
+    char tmp_name[PURR_APP_NAME_LEN + 8];
+    snprintf(tmp_name, sizeof(tmp_name), "%s%s", hdr.name, TMP_SUFFIX);
+    char tmp_dir[PURR_APPMGR_ROOT_MAX + sizeof(tmp_name) + 1];
+    char tmp_file[sizeof(tmp_dir) + 16];
+    char final_dir[PURR_APPMGR_ROOT_MAX + PURR_APP_NAME_LEN + 1];
+    join(tmp_dir, sizeof(tmp_dir), root, tmp_name);
     snprintf(tmp_file, sizeof(tmp_file), "%s/%s", tmp_dir, PACKAGE_FILE);
-    snprintf(final_dir, sizeof(final_dir), "/%s", hdr.name);
+    join(final_dir, sizeof(final_dir), root, hdr.name);
 
     purr_fs_remove(fs, tmp_file);              /* in case a previous attempt left one */
     purr_fs_remove(fs, tmp_dir);
@@ -259,7 +277,7 @@ purr_app_result_t purr_appmgr_add(purr_fs_t *fs, const purr_appmgr_env_t *env, c
     }
 
     if (existing != NULL) {
-        char old_file[PURR_APP_NAME_LEN + 16];
+        char old_file[sizeof(final_dir) + 16];
         snprintf(old_file, sizeof(old_file), "%s/%s", final_dir, PACKAGE_FILE);
         purr_fs_remove(fs, old_file);
         purr_fs_remove(fs, final_dir);
@@ -270,11 +288,12 @@ purr_app_result_t purr_appmgr_add(purr_fs_t *fs, const purr_appmgr_env_t *env, c
     return PURR_APP_OK;
 }
 
-int purr_appmgr_remove(purr_fs_t *fs, const char *name)
+int purr_appmgr_remove(purr_fs_t *fs, const char *root, const char *name)
 {
-    char file[PURR_APP_NAME_LEN + 16], dir[PURR_APP_NAME_LEN + 2];
-    snprintf(file, sizeof(file), "/%s/%s", name, PACKAGE_FILE);
-    snprintf(dir, sizeof(dir), "/%s", name);
+    char dir[PURR_APPMGR_ROOT_MAX + PURR_APP_NAME_LEN + 1];
+    join(dir, sizeof(dir), root, name);
+    char file[sizeof(dir) + 16];
+    snprintf(file, sizeof(file), "%s/%s", dir, PACKAGE_FILE);
     int had_file = purr_fs_remove(fs, file) == 0;
     int had_dir = purr_fs_remove(fs, dir) == 0;
     return (had_file || had_dir) ? 0 : -1;

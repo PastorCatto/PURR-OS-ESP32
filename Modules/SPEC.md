@@ -1,10 +1,11 @@
 # Modules (draft 0.1)
 
 The real core/module system: a tiny fixed core plus loadable, relocatable modules from a
-LittleFS system folder. `ModuleSpike/SPEC.md` proved the underlying mechanism works on real
-hardware; this is the design for the real thing, not a throwaway test. See the pinned
-module-loader project memory for how this got here, and `CatFormat/SPEC.md` for the sibling
-format this borrows its relocation method from.
+LittleFS system folder — `/system` on the root filesystem, every `.cat` file in it loaded at
+boot. `ModuleSpike/SPEC.md` proved the underlying mechanism works on real hardware; this is
+the design for the real thing, not a throwaway test. See the pinned module-loader project
+memory for how this got here, and `CatFormat/SPEC.md` for the sibling format this borrows its
+relocation method from.
 
 ## 1. Scope
 
@@ -122,8 +123,31 @@ Two-way, unlike `.cat`'s one-way `catcall_get`:
   fields (if any) are data relocations; any function pointers inside it (a table of
   sub-commands, say) are code relocations — same split as everything else (section 4).
 
-The real shape of `purr_core_table_t` (what the core actually exposes) is a separate decision
-for whenever a real subsystem is the one being ported — not fixed here.
+**The real shape of `purr_core_table_t`, as of the first real subsystem port:**
+
+```c
+typedef struct {
+    void (*puts)(purr_cli_t *cli, const char *s);
+    void (*printf)(purr_cli_t *cli, const char *fmt, ...);
+    void (*apps_scan)(purr_app_registry_t *out_reg);
+} purr_core_table_t;
+```
+
+- `puts`/`printf` are how a module produces any output at all: it can't call
+  `purr_cli_puts`/`snprintf` itself (no libc, no linkage to the core's own copies). Calling a
+  variadic function through a pointer works exactly like calling one directly — same ABI
+  either way — so `printf` is just `purr_cli_printf` reached indirectly.
+- `apps_scan` is deliberately a **domain-level** call, not raw `purr_fs`/`purr_appmgr` access:
+  a module never gets a `purr_fs_t` or a signing key bag. Installing and removing apps is
+  security-sensitive and stays entirely inside the core; a module only ever sees the
+  read-only scan result. This is the pattern for anything else that moves into a module later
+  — the core exposes what a module needs to *do*, not the primitives it would need to do it
+  unsupervised.
+- Grows as more subsystems move out of the monolith. `PURR_MODULE_ABI_VERSION` gets bumped
+  whenever the table's shape changes (2, for this addition) so a module built against an
+  older shape is refused rather than silently misreading fields — appending fields is
+  offset-compatible in practice, but the version check makes that guarantee explicit rather
+  than relying on it by luck.
 
 ## 7. Loading
 
@@ -167,13 +191,18 @@ module that has any non-relocatable word rather than silently miscompiling it.
 - The real pipeline end to end, on hardware: `about_module.c` loads automatically at boot and
   its command runs correctly from the actual shell dispatch table — not a spike diagnostic,
   the real `purr_commands()`/`load_one_module_file()` path.
+- The first real subsystem port: `Modules/appmanager/apps_module.c` (the `apps` command,
+  previously `cmd_apps` inline in `commands.c`) grows the core table (`apps_scan`, section 6)
+  and confirms the domain-level-call pattern on hardware — `apps` correctly reports "no apps
+  installed" through a loaded module, not the monolith.
 
 ## 10. Open questions
 
-- What `purr_core_table_t` actually exposes, and whether it's one table or grows per-subsystem
-  as more things become modules.
 - Whether a module can depend on another module's table (a chain), or only ever the core's —
-  not needed for a first module, but worth deciding before more than one real module exists.
+  not needed so far, but worth deciding before more than one real module exists.
+- How a module gets onto the device for real (a `modinstall`-style URL fetch, or MTP once it
+  exists) — every module so far has landed there via a temporary, hand-embedded `plantmodules`
+  shell command, the same stopgap AppManager's `appinstall` has for now via URL fetch.
 
 Resolved while building this: the relocation count cap (`PURR_RELOC_MAX`, 4096) already lives
 in `purr_relocate.h` and is enforced before any offset is even read.

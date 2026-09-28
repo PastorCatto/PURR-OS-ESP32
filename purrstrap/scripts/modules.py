@@ -49,10 +49,15 @@ def find_tool(prefix, name):
 
 
 def compile_args(repo_root):
+    # kernel/include and littlefs are needed only for TYPES a coreos header transitively
+    # pulls in (purr_appmgr.h's purr_fs_t parameters need purr_fs.h, which embeds an lfs_t) --
+    # never for linkage, same as coreos's own CMakeLists reaching into them the same way.
     return ["-O2", "-std=gnu11", "-ffreestanding", "-fno-builtin", "-mlongcalls",
             "-mtext-section-literals", "-ffunction-sections", "-fdata-sections",
             "-Wall", "-Wextra", "-Werror",
-            "-I", os.path.join(repo_root, "PurrOS", "components", "coreos", "include")]
+            "-I", os.path.join(repo_root, "PurrOS", "components", "coreos", "include"),
+            "-I", os.path.join(repo_root, "PurrOS", "components", "kernel", "include"),
+            "-I", os.path.join(repo_root, "PurrOS", "components", "littlefs")]
 
 
 def linker_script(base, entry):
