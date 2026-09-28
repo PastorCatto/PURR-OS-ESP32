@@ -30,11 +30,11 @@
 extern "C" {
 #endif
 
-/* Bumped from 2: the table grew (net_*). Appending fields is offset-compatible with a module
- * built against a smaller table (it only ever reads the fields it knows the name of), but
- * the version is bumped anyway so a stale module is refused rather than silently running
+/* Bumped from 3: the table grew (net_install). Appending fields is offset-compatible with a
+ * module built against a smaller table (it only ever reads the fields it knows the name of),
+ * but the version is bumped anyway so a stale module is refused rather than silently running
  * against a table shape its author never saw -- rebuild and replant it. */
-#define PURR_MODULE_ABI_VERSION 3u
+#define PURR_MODULE_ABI_VERSION 4u
 
 /* purr_net.h's own purr_net_ap_t/purr_net_status_t aren't used here on purpose: that header
  * pulls in esp_err_t, whose own header chain ends at sdkconfig.h -- a real ESP-IDF project's
@@ -81,6 +81,18 @@ typedef struct {
     void (*net_forget)(const char *ssid);
     int (*net_saved)(purr_module_net_ap_t *out, int max);
     void (*net_status)(purr_module_net_status_t *out);
+
+    /* Deliberately NOT decomposed into primitives, unlike apps_scan/net_*: the operation this
+     * wraps (fetch the recovery manifest, download and verify a signed image against the key
+     * bag, erase and write ota_0, set the boot target) touches exactly what a module is never
+     * handed -- purr_fs_t, the signing key bag, esp_err_t/esp_partition_t. Breaking it into
+     * smaller calls would mean exposing that machinery piece by piece through the ABI for no
+     * real benefit, since no module has a reason to build a different install flow. Progress
+     * is printed straight to `cli` from inside the core (it has real purr_cli_* linkage, no
+     * need to route through puts/printf above), same messages the old inline cmd_net_install
+     * printed before this moved into a module. Returns 0 on success, nonzero on failure --
+     * the core has already told the user why on `cli`. */
+    int (*net_install)(purr_cli_t *cli, const char *component);
 } purr_core_table_t;
 
 typedef struct {

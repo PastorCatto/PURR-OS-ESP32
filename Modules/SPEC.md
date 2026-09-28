@@ -171,6 +171,41 @@ Implemented in `commands.c`'s `load_one_module_file()`, proven on hardware (sect
    alias (invalidate, instruction type) — the sequence the spike proved works.
 8. Call `((entry_t)(exec_alias + entry_offset))(&core_table)`, keep the returned module table.
 
+## 7.1 Boot-time integrity sweep and quarantine
+
+The user's own framing: a "secondary loader" that mounts the filesystem and watches `/system`
+so nothing unsigned can end up running there. That thing already exists in spirit — CoreOS
+(shared by KittenOS and PURR OS) is the only code that ever mounts LittleFS and holds the key
+bag, and `load_one_module_file()` already refuses anything that doesn't verify, with no
+bypass. What was missing was *eagerness* and *visibility*: verification only ran lazily, on
+the first shell command after login, and a failure was one `ESP_LOGW` line nobody sees outside
+a serial capture, then a silent skip. Decided (2026-09-28): strengthen CoreOS's own boot
+sequence rather than add a second boot-stage binary/partition — a separate stage wouldn't add
+a new trust boundary, since CoreOS is already the root of trust doing the verifying; it would
+just be more flash and duplicated key-bag/verify code for the same guarantee.
+
+**The sweep, called once during boot setup (right after LittleFS mounts, before login runs —
+not lazily on first shell command anymore):**
+
+1. List every file directly under `/system`.
+2. Attempt to load each one exactly as `load_one_module_file()` already does (verify, parse
+   layout, relocate, map executable, call `entry()`, check the returned ABI version).
+3. **On success:** register its commands, same as today.
+4. **On failure** (bad hash/signature/chip/role, or a bad/mismatched ABI table from `entry()`):
+   print one clear line to the actual screen the user is looking at (the same console the boot
+   banner uses, not just the serial log), then move the file into `/system/.rejected/<name>`
+   (creating that directory if needed) so it is never retried or loaded again on a later boot.
+   Quarantined, not deleted — it stays there as evidence of what was rejected and why, so
+   "someone tried to inject something" is distinguishable after the fact from "a module build
+   went stale." No command reads `.rejected` back yet; a later `system` or `modules` command
+   listing what's quarantined is a natural follow-up, not required for this pass.
+5. One bad file never blocks anything else: the sweep continues past it, other valid modules
+   still load, and the shell still comes up. This is a backstop, not a gate on any single write
+   path — it catches a bad file in `/system` regardless of how it got there (a future
+   install command's mistake, a bug, or someone using the raw `write`/`mv`/`cp` shell commands
+   at the physical keyboard), rather than trying to police every possible way onto the
+   filesystem individually.
+
 ## 8. Building (purrstrap)
 
 `purrstrap modules build` (`purrstrap/scripts/modules.py`), built and proven (section 11):
@@ -202,7 +237,18 @@ module that has any non-relocatable word rather than silently miscompiling it.
   not needed so far, but worth deciding before more than one real module exists.
 - How a module gets onto the device for real (a `modinstall`-style URL fetch, or MTP once it
   exists) — every module so far has landed there via a temporary, hand-embedded `plantmodules`
-  shell command, the same stopgap AppManager's `appinstall` has for now via URL fetch.
+  shell command, the same stopgap AppManager's `appinstall` has for now via URL fetch. Whenever
+  this is built, it must verify before writing to `/system` (fail fast, at install time, with a
+  clear message), same as `appinstall` already does for apps — the boot-time sweep (section
+  7.1) is the backstop regardless, but a good install path should not rely on the backstop
+  alone to catch its own mistakes.
+- Whether currently-permissive `MOD_DRIVER` signing (any of `SYSTEM`/`VENDOR`/`DEVELOPER`/
+  `OWNER`) is right for subsystems the user considers core and wants hardened, like `wifi` — it
+  is loose on purpose for third-party/downloadable drivers, but today it also covers `wifi`,
+  `apps`, `about`, and `netinstall` since a `SYSTEM` key doesn't exist yet, only `boot.key` and
+  the dev-only `developer.key`. A real key rollout (generating `system.key`, deciding which
+  modules should require it instead of the permissive `driver` gate, retiring the dev-only
+  key/password from anything that isn't a dev build) is real work, not yet scheduled.
 
 Resolved while building this: the relocation count cap (`PURR_RELOC_MAX`, 4096) already lives
 in `purr_relocate.h` and is enforced before any offset is even read.

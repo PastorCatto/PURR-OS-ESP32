@@ -20,6 +20,13 @@ void purr_fs_setup(purr_cli_t *cli);
 /* Mount the apps filesystem and say how it went. */
 void purr_apps_setup(purr_cli_t *cli);
 
+/* Sweep /system, verify every file there, and load the ones that pass (Modules/SPEC.md
+ * section 7.1). Anything that fails verification or carries an incompatible ABI is quarantined
+ * (moved to /system/.rejected, never retried) and reported on `cli`. Must run before
+ * purr_commands() is first called -- it used to load modules lazily on that first call;
+ * now it expects the sweep already done. */
+void purr_modules_setup(purr_cli_t *cli);
+
 /* Start the Wi-Fi service, sharing the mounted root filesystem for saved networks. */
 void purr_net_setup(purr_cli_t *cli);
 
