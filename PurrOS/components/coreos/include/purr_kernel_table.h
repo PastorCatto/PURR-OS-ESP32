@@ -28,14 +28,27 @@
                           * transitively via purr_appmgr.h, and all four real modules build
                           * fine today), so fs_list/fs_read below just reuse its callback
                           * types instead of redeclaring them. */
+#include "purr_users.h" /* purr_user_role_t, PURR_USER_NAME_LEN -- plain C, no crypto/fs
+                          * dependency of its own, same tier as purr_fs.h; reused directly for
+                          * the same reason. */
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Bumped from 1: the table grew (fs_*, console_flush) for the filesystem command sweep
- * (`ls`/`cat`/`mkdir`/`rm`/`mv`/`write`/`df`/`format`, Modules/coreos/fs_module.c). */
-#define PURR_KERNEL_TABLE_ABI_VERSION 2u
+/* Bumped from 2: the table grew (login_*) for the accounts command sweep
+ * (`whoami`/`id`/`su`/`passwd`/`useradd`/`userdel`/`usermod`/`logout`,
+ * Modules/coreos/login_module.c). */
+#define PURR_KERNEL_TABLE_ABI_VERSION 3u
+
+/* Read-only, for whoami/id -- the only two account commands that are pure display, not a
+ * security operation (see purr_kernel_table_t's login_* fields for the rest). */
+typedef struct {
+    char name[PURR_USER_NAME_LEN];
+    uint8_t uid;
+    purr_user_role_t role;
+    int is_root;
+} purr_klogin_who_t;
 
 typedef struct {
     void (*puts)(purr_cli_t *cli, const char *s);
@@ -78,6 +91,24 @@ typedef struct {
     /* Flushing the display before a slow, blocking call (format) -- kernel owns the
      * console/display, same as the filesystem. */
     void (*console_flush)(void);
+
+    /* Accounts (Users/SPEC.md). Read-only identity snapshot for whoami/id -- the only two
+     * account commands that are pure display, not a security operation. */
+    void (*login_whoami)(purr_klogin_who_t *out);
+    /* Ends the session. No real secret involved, kept opaque anyway so a module never
+     * touches session state directly. */
+    void (*login_logout)(void);
+    /* Every other account command is one opaque, cli-aware call, same shape as
+     * net_install/fs_format: all I/O (password prompts, via the kernel's own raw keyboard
+     * access -- a module never gets that either) and all permission/shadow-file logic stay
+     * inside. A module's own pre-check (say, "already root") is only ever a UX nicety; the
+     * real enforcement is re-checked in here regardless of what the caller already knew.
+     * Returns 0 on success -- the call has already told the user why on failure. */
+    int (*login_su)(purr_cli_t *cli);
+    int (*login_passwd)(purr_cli_t *cli, const char *target_or_null);
+    int (*login_useradd)(purr_cli_t *cli, const char *name, int as_admin);
+    int (*login_userdel)(purr_cli_t *cli, const char *name);
+    int (*login_usermod)(purr_cli_t *cli, const char *name, int as_admin);
 } purr_kernel_table_t;
 
 typedef struct {

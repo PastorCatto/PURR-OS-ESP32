@@ -485,6 +485,23 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
   hardware, the full cluster at once. This is the proof that the incremental-conversion
   pattern scales past one command at a time to a whole coherent subsystem in one sweep,
   not just single trivial commands.
+
+  **A third sweep, the same day again: the accounts cluster.** `whoami`/`id`/`su`/`passwd`/
+  `useradd`/`userdel`/`usermod`/`logout` -- another 8 real commands at once
+  (`Modules/coreos/login_module.c`), growing the table to ABI 3. Unlike the filesystem
+  sweep, only `whoami`/`id` are plain read-only queries (`login_whoami`, into a
+  module-safe `purr_klogin_who_t`, reusing `purr_users.h`'s `purr_user_role_t` directly --
+  same safe tier as `purr_fs.h`). Every other command is security-sensitive (a password, an
+  admin check, the shadow file), so each stays one opaque, `cli`-aware call
+  (`login_su`/`login_passwd`/`login_useradd`/`login_userdel`/`login_usermod`) -- the same
+  shape as `net_install`/`fs_format`: all I/O, including the masked password prompt (which
+  needs the kernel's own raw keyboard read), and all permission/shadow-file logic stay
+  kernel-side, unconditionally re-checked there regardless of what the module's own
+  pre-check (e.g. "already root") already believed. The module ends up pure argument
+  parsing and dispatch -- no password, admin check, or shadow-file access ever reaches
+  module code. Confirmed working end to end on real hardware, all 8 commands plus the
+  earlier two sweeps together (18 real commands total now off the monolith and onto the
+  kernel table).
 - **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
   (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
   ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,
