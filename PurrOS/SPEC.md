@@ -430,18 +430,28 @@ the kernel partition directly, the same plain image-boot it already does for
 KittenOS/rescue, not a second relocate-into-PSRAM path -- so it is one program either
 way, monolithic or modular, just with a different target.
 
-- **Not yet built:** the actual `kernel` partition, `partitions/<board>.csv` changes to
-  add it and drop `ota_0`/`ota_1`, `purrstrap` support for building CoreOS as a
-  relocatable root-filesystem file instead of linking it into the kernel image, the boot
-  package's simplified jump-to-kernel logic, and the module loader's page-size/
+- **Built, 2026-09-28:** the actual `kernel` partition exists now (`partitions/tdeck_plus.csv`
+  and `bootloader/partitions.csv`, kept identical): `ota_0` renamed to `kernel` -- kept on the
+  `ota_0` *subtype* only so ESP-IDF's stock bootloader-image loader can still jump to it, not
+  because `esp_ota_*` selection is used (it isn't; `ota_1` was already gone). The bootloader's
+  own fallback chain (`bootloader/SPEC.md` section 6) tries `kernel` first, then `kittenos`,
+  then the recovery loader, automatically -- proven on real hardware, including the
+  kernel-fails-over-to-kittenos case.
+- **Still not built:** `purrstrap` support for building CoreOS as a relocatable root-filesystem
+  file instead of linking it into the kernel image, and the module loader's page-size/
   relocation-count caps growing to fit something CoreOS-sized (section 6). `netinstall`
   (`Modules/netinstall/netinstall_module.c`) also needs retargeting: it currently writes
-  straight to `ota_0` via `esp_ota_set_boot_partition`, which no longer exists here --
-  it needs to become a CoreOS-file stage-and-swap (section 6.1) instead, and a way to
-  push a new `kernel` image too, on the rare occasion that needs updating. Today's build
-  still links kernel and CoreOS into one flashed image on the T-Deck Plus, same as the
-  monolithic tier -- a practical shortcut during this rewrite's early iteration, not the
-  intended final shape.
+  straight to whatever partition has the `ota_0` subtype -- which is now `kernel`, not a
+  spare OTA slot -- via `esp_ota_set_boot_partition`; it needs to become a CoreOS-file
+  stage-and-swap (section 6.1) instead, and a way to push a new `kernel` image too, on the
+  rare occasion that needs updating (as its own real PURR-signed image, not the raw dev build
+  `netinstall` currently fetches). Today's build still links kernel and CoreOS into one
+  flashed image on the T-Deck Plus, same as the monolithic tier -- a practical shortcut during
+  this rewrite's early iteration, not the intended final shape. The bootloader's own
+  fallback chain also still only checks that a slot looks like a real app image (a magic
+  byte), not a real PURR signature -- real per-image verification (`bootloader/SPEC.md`
+  section 6, steps 4-5) is designed but not built for `kernel`/`kittenos`/`loader`, only for
+  the boot package itself.
 - **The `kernel` partition's own update path** (section 4.1: KittenOS writes it directly,
   like `bootpkg`) is a design decision, not yet implemented or tested against a real
   power-cut-mid-write case.

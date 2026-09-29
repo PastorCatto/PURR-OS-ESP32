@@ -220,7 +220,7 @@ static void set_name(purr_boot_part_t *p, const char *name)
     }
 }
 
-static uint8_t looks_bootable(const esp_partition_pos_t *pos)
+uint8_t purr_looks_bootable(const esp_partition_pos_t *pos)
 {
     uint32_t first = 0;   /* the flash reader takes whole words */
     if (pos->size == 0) {
@@ -237,15 +237,22 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
         return false;
     }
 
-    /* The menu's list: the PURR OS slots first, then KittenOS (the factory slot). */
+    /* The menu's list: the kernel slot first (PurrOS/SPEC.md's fallback chain), then KittenOS
+     * (the factory slot). Only ever one kernel-style slot now -- the whole point of
+     * consolidating the old ota_0/ota_1 pair into a single named "kernel" partition -- but
+     * the loop stays general in case that ever changes. */
     purr_boot_part_t parts[PURR_PKG_MAX_PARTS];
     int map[PURR_PKG_MAX_PARTS];          /* menu index -> the bootloader's slot index */
     int n = 0, menu_preferred = -1;
     for (int i = 0; i < bs->app_count && n < PURR_PKG_MAX_PARTS - 1; i++) {
-        char name[16] = "PURR OS ota_0";   /* no snprintf: it drags newlib's printf in */
-        name[12] = (char)('0' + (i % 10));
+        char name[16] = "Kernel";   /* no snprintf: it drags newlib's printf in */
+        if (i > 0) {
+            name[6] = ' ';
+            name[7] = (char)('0' + (i % 10));
+            name[8] = '\0';
+        }
         set_name(&parts[n], name);
-        parts[n].bootable = looks_bootable(&bs->ota[i]);
+        parts[n].bootable = purr_looks_bootable(&bs->ota[i]);
         map[n] = i;
         if (i == preferred) {
             menu_preferred = n;
@@ -254,7 +261,7 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
     }
     if (bs->factory.size != 0 && n < PURR_PKG_MAX_PARTS) {
         set_name(&parts[n], "KittenOS");
-        parts[n].bootable = looks_bootable(&bs->factory);
+        parts[n].bootable = purr_looks_bootable(&bs->factory);
         map[n] = FACTORY_INDEX;
         if (preferred == FACTORY_INDEX) {
             menu_preferred = n;

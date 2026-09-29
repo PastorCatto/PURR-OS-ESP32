@@ -3,15 +3,15 @@
 Custom second-stage bootloader for ESP32 and ESP32-S3, built on ESP-IDF v5.3.5.
 
 It does the minimum: initialise hardware, load the partition table, pick an
-app slot (otadata-aware) and jump to it. Everything else belongs in the OS.
+app slot and jump to it. Everything else belongs in the OS.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
-| `bootloader_components/main/` | The bootloader itself (`purr_boot.c`). ESP-IDF builds this in place of its stock bootloader. |
+| `bootloader_components/main/` | The bootloader itself (`purr_boot.c`, `purr_bootpkg.c`). ESP-IDF builds this in place of its stock bootloader. |
 | `main/` | Stub app so the project builds and flashes. Replaced by the OS later. |
-| `partitions.csv` | Two OTA slots (`ota_0`, `ota_1`) plus `otadata`, `nvs`, `phy_init`. |
+| `partitions.csv` | The real, current T-Deck Plus layout (kept identical to `PurrOS/partitions/tdeck_plus.csv`): `kernel` (single slot, kept on the `ota_0` subtype so the stock ESP-IDF loader can still jump to it -- not an OTA A/B pair anymore), `kittenos`, `loader` (rescue), `bootpkg`, `purrcfg`, `root`, plus `nvs`/`otadata`/`phy_init`. |
 | `sdkconfig.defaults` | Shared defaults for both targets. |
 
 ## Build
@@ -31,11 +31,18 @@ from inside the build directory.
 
 ## Status
 
-Builds for both chips. **Flashed and running on a T-Deck Plus** (ESP32-S3, 16 MB): it logs
-`PURR OS bootloader`, reads the partition table, boots slot 0, and hands off to the stub app.
-Not yet tested on the CYD 2.4C.
+Builds for both chips. **Flashed and running on a T-Deck Plus** (ESP32-S3, 16 MB) against the
+real, current partition table -- not just the stub app. Not yet tested on the CYD 2.4C.
 
-On the T-Deck Plus it now also loads the **boot package** (`bootpkg` partition, see SPEC.md section 9),
-which shows the boot menu on the screen and returns the slot to boot. Built with
-`python purrstrap/purrstrap.py bootpkg build`. The package is checked by hash only; signatures
-come with the key bag.
+Loads and verifies the **boot package** (`bootpkg` partition, SPEC.md section 9) by its real
+PURR signature (not hash-only anymore -- signed with the boot-role key), which shows the real
+boot menu on the real display and returns a chosen slot.
+
+**The `kernel` -> `kittenos` -> recovery-loader fallback chain (SPEC.md section 6) is real and
+proven on hardware, 2026-09-28:** with no menu interaction, it boots `kernel` by default; with
+`kernel`'s first word corrupted, it correctly falls back to `kittenos` and boots that instead.
+The third level (both dead -> the recovery loader) is written the same way but untested on
+this device, since the recovery loader has never actually been flashed onto it. That fallback
+still only checks that a slot *looks* like a real app image (a magic byte), not a real PURR
+signature -- extending it to real per-image signature verification is tracked, real future
+work (SPEC.md section 6, steps 4-5), not yet built.

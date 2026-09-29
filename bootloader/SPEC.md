@@ -47,7 +47,7 @@ bootloader knows about:
 | bootpkg    | data/0x44    | ~64 KB | The boot package, right after the bootloader. |
 | kittenos   | app/factory  | 1 MB   | KittenOS, recovery only. Not updated in normal use. |
 | rescue     | app/test     | ~1 MB  | Modular boards: the recovery loader (Wi-Fi, TLS, keys, minimal CoreOS). Almost never changed. |
-| kernel     | app, single slot | to be sized | Modular boards only: hardware, drivers, FreeRTOS, mounts `root`, loads CoreOS from it (`PurrOS/SPEC.md` sections 1, 6). A distinct subtype from `factory`/`ota_*` -- picked by the boot package like any other slot (section 6 step 8), never through `esp_ota_*`. |
+| kernel     | app, single slot, `ota_0` subtype | 0x1E0000 (T-Deck Plus) | Modular boards only: hardware, drivers, FreeRTOS, mounts `root`, loads CoreOS from it (`PurrOS/SPEC.md` sections 1, 6). Built and flashed 2026-09-28: it keeps the `ota_0` *subtype* (not a genuinely distinct one, despite the original plan here) purely so ESP-IDF's own stock `bootloader_utility_load_boot_image()` -- which only knows `factory`/`test`/`ota_0..15` -- can actually jump to it; `esp_ota_*` selection semantics (otadata, `esp_ota_set_boot_partition`) are still never used. The bootloader picks it by trying it first in its own fallback chain (section 6), not through otadata. |
 | os         | app/ota_0    | rest   | Monolithic boards only: the packed OS image, one slot. |
 | root       | data/littlefs | rest  | The root filesystem: CoreOS and everything else on modular boards (the apps filesystem, 1 MB, on monolithic ones). |
 
@@ -181,12 +181,26 @@ requests) depend on whether secure boot is enabled. Here "enabled" means
 1. Init, load the partition table, read `purrcfg`. If both copies are invalid, use defaults
    (secure_mode = warn) and continue.
 2. If `UPDATE_KEY` is set, validate and apply the key update, then clear it.
-3. Choose the target: KittenOS if `FORCE_RECOVERY` is set or the recorded boot target says so,
-   the recovery loader if that is what was asked for, otherwise the boot package.
-4. Verify the chosen image: chip ID, magic and version, payload SHA-256, signature against
-   its `key_id`, revoked bit, IDF's own image check, and, in `enforce` mode, that its version is not below the
-   version floor.
-5. Apply the policy:
+3. Pick a default target -- **built and proven on hardware, 2026-09-28, modular boards:** try
+   `kernel` first; if it doesn't even look like a real app image, fall back to `kittenos`; if
+   that doesn't either, fall back to the recovery loader (`loader`/rescue) automatically, the
+   same target "internet recovery" already uses. "Looks like a real app image" today means
+   only the shallow check the boot menu already used to gray out a dead slot (the first word
+   is an ESP app-image magic byte) -- **not yet built:** the richer check steps 4-5 below
+   describe (real PURR signature verification with an off/warn/enforce policy) for this
+   app-image level. That richer check is real today only for the boot package itself (section
+   9's `load_package()`), not for `kernel`/`kittenos`/`loader`. Extending it here is real,
+   tracked future work, not a design change -- this fallback chain is deliberately built on
+   the weaker check that already existed and was already proven, rather than left unbuilt
+   until the stronger one is ready.
+4. `FORCE_RECOVERY`/`FORCE_LOADER` (the shell's `reboot recovery`/`reboot loader`) override
+   that default once, unconditionally, without even the shallow check -- built already,
+   unchanged by the above.
+5. Otherwise the boot package's menu can override the default with an explicit choice,
+   including "internet recovery" regardless of what the default fallback picked.
+6. **Still just the design, for when real per-image PURR verification is built:** verify the
+   chosen image (chip ID, magic and version, payload SHA-256, signature against its `key_id`,
+   revoked bit, and in `enforce` mode a version-floor check), then apply this policy:
 
 | Result | off | warn | enforce |
 |--------|-----|------|---------|
@@ -194,15 +208,24 @@ requests) depend on whether secure boot is enabled. Here "enabled" means
 | Failed | boot | boot, warning state set | boot KittenOS |
 | Failed, and `IGNORE_ONCE` set | boot | boot, warning state set | boot, warning state set |
 
-6. If KittenOS is the target and is missing, damaged or fails verification: on a modular board start
+7. If KittenOS is the target and is missing, damaged or fails verification: on a modular board start
    the recovery loader, which downloads a new KittenOS (`RecoveryLoader/SPEC.md`). On a board
    without one, in `off` and `warn` boot KittenOS with the warning, and in `enforce` print the
    serial prompt and wait. Open item: decide whether "wait" means a reset loop or a halt.
-7. Clear one-shot flags, write `purrcfg` if it changed, write the handoff struct, jump.
-8. When the boot package returns its menu choice, verify and load the chosen slot the same
-   way (steps 4 and 5) -- the packed image on monolithic boards, the **kernel** partition on
-   modular ones. Same mechanism both tiers; only which slot the package is allowed to
-   choose differs.
+8. Clear one-shot flags, write `purrcfg` if it changed, write the handoff struct, jump.
+9. When the boot package returns its menu choice, load the chosen slot through the same stock
+   ESP-IDF `bootloader_utility_load_boot_image()` every slot already goes through -- the
+   packed image on monolithic boards, the **kernel** partition on modular ones. Same
+   mechanism both tiers; only which slot the package is allowed to choose differs.
+
+**Tested for real, 2026-09-28, on a T-Deck Plus:** planted a real signed image at both
+`kernel` and `kittenos`. Booted `kernel` by default with no menu interaction needed
+(`booting app slot 0`). Zeroed `kernel`'s first word (simulating a dead slot) and rebooted:
+correctly logged `kernel not bootable: falling back to KittenOS` and booted `kittenos`
+instead (`Loaded app from partition at offset 0x20000`). The third level (both dead ->
+`loader`) is written the same way but untested on this device, because `loader` is currently
+blank (`0xFF`) -- the real RecoveryLoader has never actually been flashed onto it, a separate,
+already-known gap, not a flaw in this chain.
 
 The boot package verifies the kernel and CoreOS files it loads with the same rules
 (`PurrOS/components/coreos/SPEC.md` section 3.5).

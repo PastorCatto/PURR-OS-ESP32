@@ -26,7 +26,27 @@ void __attribute__((noreturn)) call_start_cpu0(void)
         bootloader_reset();
     }
 
-    int boot_index = bootloader_utility_get_selected_boot_partition(&bs);
+    /* The default chain, PurrOS/SPEC.md's design: prefer the kernel slot (ota_0-subtype,
+     * named "kernel" -- kept on that subtype so the stock ESP-IDF loader below still knows
+     * how to jump to it; there is no A/B pair anymore, just this one slot); if it doesn't
+     * even look like a real app image, fall back to KittenOS; if that's gone too, fall back
+     * to the recovery loader (internet recovery) automatically, not just on request. This
+     * replaces the old otadata-based bootloader_utility_get_selected_boot_partition() pick,
+     * which had nothing left to select between once ota_1 was reclaimed and now ota_0 is
+     * renamed -- it would have just always defaulted to factory. purr_looks_bootable() is the
+     * same shallow "is this an ESP app image" check the boot menu already uses to gray out a
+     * dead slot; a real PURR-signature check before boot here is designed (bootloader/SPEC.md
+     * section 6) but not yet built. */
+    int boot_index = INVALID_INDEX;
+    if (bs.app_count > 0 && purr_looks_bootable(&bs.ota[0])) {
+        boot_index = 0;
+    } else if (bs.factory.size != 0 && purr_looks_bootable(&bs.factory)) {
+        boot_index = FACTORY_INDEX;
+        ESP_LOGW(TAG, "kernel not bootable: falling back to KittenOS");
+    } else if (bs.test.size != 0 && purr_looks_bootable(&bs.test)) {
+        boot_index = TEST_APP_INDEX;
+        ESP_LOGW(TAG, "kernel and KittenOS both not bootable: falling back to internet recovery");
+    }
     if (boot_index == INVALID_INDEX) {
         ESP_LOGE(TAG, "no bootable app found");
         bootloader_reset();
