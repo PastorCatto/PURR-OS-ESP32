@@ -1,14 +1,23 @@
 /*
- * sysinfo_module.c: `mem` and `uptime` -- the first real CoreOS commands ported onto the
- * prototype kernel table (PurrOS/components/coreos/include/purr_kernel_table.h), one layer
- * below purr_module_abi.h's CoreOS-to-module table every other module so far has used. Same
- * freestanding discipline (-nostdlib -ffreestanding, no libc/FreeRTOS linkage of its own,
- * everything through the table); the difference is which boundary it proves. These replace
- * the old inline cmd_mem/cmd_uptime in commands.c -- a real conversion, not a duplicate.
+ * sysinfo_module.c: `mem`, `uptime`, `version`, `info`, `parts`, `echo`, `clear`, `reboot`,
+ * and `purrcfg` -- the fifth and last sweep of the built-in command table onto the prototype
+ * kernel table (PurrOS/components/coreos/include/purr_kernel_table.h). Same freestanding
+ * discipline (-nostdlib -ffreestanding, no libc/FreeRTOS linkage of its own, everything
+ * through the table) as every module before it. These replace the old inline commands in
+ * commands.c -- a real conversion, not a duplicate.
  */
 #include "purr_kernel_table.h"
 
 static const purr_kernel_table_t *s_k;
+
+static int streq(const char *a, const char *b)
+{
+    while (*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
 
 static int cmd_mem(purr_cli_t *cli, int argc, char **argv)
 {
@@ -30,15 +39,81 @@ static int cmd_uptime(purr_cli_t *cli, int argc, char **argv)
     return 0;
 }
 
+static int cmd_version(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    s_k->print_version(cli);
+    return 0;
+}
+
+static int cmd_info(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    s_k->print_info(cli);
+    return 0;
+}
+
+static int cmd_parts(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    s_k->print_parts(cli);
+    return 0;
+}
+
+static int cmd_echo(purr_cli_t *cli, int argc, char **argv)
+{
+    for (int i = 1; i < argc; i++) {
+        s_k->printf(cli, "%s%s", i > 1 ? " " : "", argv[i]);
+    }
+    s_k->puts(cli, "\n");
+    return 0;
+}
+
+static int cmd_clear(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)cli; (void)argc; (void)argv;
+    s_k->console_clear();
+    return 0;
+}
+
+static int cmd_reboot(purr_cli_t *cli, int argc, char **argv)
+{
+    const char *target = NULL;
+    if (argc == 2 && streq(argv[1], "recovery")) {
+        target = "recovery";
+    } else if (argc == 2 && streq(argv[1], "loader")) {
+        target = "loader";
+    } else if (argc > 1) {
+        s_k->puts(cli, "usage: reboot [recovery|loader]\n");
+        return 1;
+    }
+    s_k->reboot_system(cli, target);
+    return 0;   /* not reached on success -- reboot_system() never returns then */
+}
+
+static int cmd_purrcfg(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    s_k->print_purrcfg(cli);
+    return 0;
+}
+
 static const purr_cmd_t s_cmds[] = {
-    {"mem",    "memory usage",           cmd_mem},
-    {"uptime", "time since power on",    cmd_uptime},
+    {"mem",     "memory usage",                  cmd_mem},
+    {"uptime",  "time since power on",           cmd_uptime},
+    {"version", "show the system and profile",   cmd_version},
+    {"info",    "board, chip and display",       cmd_info},
+    {"parts",   "the partition table",           cmd_parts},
+    {"echo",    "print the arguments",           cmd_echo},
+    {"clear",   "clear the screen",              cmd_clear},
+    {"reboot",  "restart (or recovery|loader)",  cmd_reboot},
+    {"purrcfg", "show the boot config",          cmd_purrcfg},
 };
 
 static const purr_kernel_module_table_t s_table = {
     .abi_version = PURR_KERNEL_TABLE_ABI_VERSION,
     .cmds = s_cmds,
-    .cmd_count = 2,
+    .cmd_count = 9,
 };
 
 __attribute__((used))

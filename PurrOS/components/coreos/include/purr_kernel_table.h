@@ -36,9 +36,10 @@
 extern "C" {
 #endif
 
-/* Bumped from 3: the table grew (app_*) for the app-management command sweep
- * (`appinfo`/`appinstall`/`appremove`/`appformat`, Modules/coreos/appmgr_module.c). */
-#define PURR_KERNEL_TABLE_ABI_VERSION 4u
+/* Bumped from 4: the table grew (print_*, console_clear, reboot_system) for the last sweep
+ * of the built-in table (`version`/`info`/`parts`/`clear`/`reboot`/`purrcfg`, folded into
+ * Modules/coreos/sysinfo_module.c alongside mem/uptime). */
+#define PURR_KERNEL_TABLE_ABI_VERSION 5u
 
 /* Read-only, for whoami/id -- the only two account commands that are pure display, not a
  * security operation (see purr_kernel_table_t's login_* fields for the rest). */
@@ -117,6 +118,24 @@ typedef struct {
     int (*app_install)(purr_cli_t *cli, const char *file_or_url);
     int (*app_remove)(purr_cli_t *cli, const char *name);
     int (*app_format)(purr_cli_t *cli);
+
+    /* Read-only info/display commands: no real reason to decompose into structured data
+     * (nothing else in this project consumes "version" or "the partition table" as data), so
+     * each just prints directly onto `cli`, the same way net_install/fs_format print their
+     * own progress. */
+    void (*print_version)(purr_cli_t *cli);
+    void (*print_info)(purr_cli_t *cli);
+    void (*print_parts)(purr_cli_t *cli);
+    void (*print_purrcfg)(purr_cli_t *cli);
+
+    /* Kernel owns the console/display, same as fs_format's console_flush above. */
+    void (*console_clear)(void);
+
+    /* Requests a restart, optionally into recovery or the loader (writes the one-shot
+     * purrcfg flag first) -- raw boot-config partition access a module is never handed.
+     * `target` is "recovery", "loader", or NULL for a normal restart. Never returns on
+     * success (esp_restart()). */
+    void (*reboot_system)(purr_cli_t *cli, const char *target);
 } purr_kernel_table_t;
 
 typedef struct {

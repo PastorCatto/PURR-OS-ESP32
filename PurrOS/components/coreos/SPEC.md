@@ -512,9 +512,31 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
   end on real hardware alongside all three earlier sweeps. **22 real commands total** now
   converted off the monolith and onto the kernel table (`mem`/`uptime`, the 8-command
   filesystem cluster, the 8-command accounts cluster, the 4-command app-management
-  cluster) -- what remains in the built-in table is mostly `help`/`version`/`info`/`parts`/
-  `echo`/`clear`/`reboot`/`purrcfg` and the temporary scaffolding
+  cluster).
+
+  **A fifth and last sweep, same evening: everything else in the built-in table.**
+  `version`/`info`/`parts`/`echo`/`clear`/`reboot`/`purrcfg` -- folded into
+  `Modules/coreos/sysinfo_module.c` alongside `mem`/`uptime` (growing it from 2 to 9
+  commands), ABI 4 -> 5. `version`/`info`/`parts`/`purrcfg` are read-only display commands
+  with no reason to decompose into structured data, so each `print_*` entry just prints
+  directly onto `cli`, same as `net_install`/`fs_format`'s own progress messages. `reboot`
+  touches the raw `purrcfg` partition (the one-shot boot-target flag), so it stays one
+  opaque `reboot_system` call. **31 real commands total** now converted off the monolith --
+  everything that was inline in `commands.c` is now either a real module
+  (`about`/`apps`/`wifi`/`netinstall`, the CoreOS-to-module boundary) or a kernelmod (the
+  kernel-to-CoreOS boundary), except the login gate itself and the temporary scaffolding
   (`plantmodules`/`spikecoreos`/`testrelocmulti`).
+
+  **Confirmed working end to end on real hardware, with one separate, pre-existing finding
+  along the way (not caused by this sweep):** `reboot`/`purrcfg` themselves work correctly,
+  but `reboot recovery`/`reboot loader` don't actually show a boot menu or land anywhere,
+  because the device has never had the real custom bootloader (`../bootloader/`, its own
+  separate build producing `purr_bootloader.bin` with the actual menu/recovery-dispatch
+  logic) flashed during this whole rewrite's fast dev-loop -- every flash all session has
+  been `PurrOS/build/tdeck_plus-<profile>`'s own auto-generated stock ESP-IDF bootloader,
+  which has no menu and doesn't act on the `purrcfg` flag at all. Not a regression: nothing
+  in any sweep touched partitions, the bootloader, or the boot package. Real follow-up work,
+  tracked separately from the kernel-table conversion.
 - **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
   (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
   ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,
