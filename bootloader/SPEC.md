@@ -92,9 +92,30 @@ Signature is ECDSA P-256 with SHA-256, using micro-ecc and the bootloader's
 SHA support, both already linked into the bootloader. The image keeps IDF's own
 checksum and SHA-256 too; that check stays on in every mode.
 
-Open item: the IDF loader normally expects the app image at the start of a
-partition. Loading it at `payload_offset` needs `esp_image_load` with a custom
-position. Confirm this works before freezing the header layout.
+**Open item, sharpened 2026-09-28 while building the real `kernel`/`kittenos`/`loader`
+fallback chain (section 6):** this is the actual reason real per-image signature
+verification (section 6 steps 4-5) still isn't built for those three slots, only for
+`bootpkg`. `bootpkg` gets away with custom loading (mmap, verify, copy into a fixed RAM
+window, jump) because it's small and not a real ESP app image. `kernel`/`kittenos`/`loader`
+are real ESP-IDF apps -- the stock `bootloader_utility_load_boot_image()` is what actually
+knows how to set up the MMU and load segments, and it insists on finding the ESP app magic
+byte at the very start of the partition it's given. Today's flashed images have no PURR
+header at all (plain ESP images, magic at offset 0) -- that's *why* the stock loader can
+load them, and also why there is currently nothing for a signature check to even read.
+Two real designs, neither built, picked between next time this is picked up:
+
+1. **A separate metadata slot** per app partition (or one shared one, indexed by which
+   partition), holding just the header + signature, verified before handing off to the
+   stock loader -- the app partition's own bytes stay untouched, plain, at offset 0.
+2. **Load the ESP image at a byte offset** inside a real PURR container occupying the
+   whole partition -- the original idea here, still unconfirmed: does `esp_image_load`
+   (or an equivalent stock function) actually support loading and correctly memory-mapping
+   an app image that doesn't start at its partition's offset 0? Has to be tried on real
+   hardware before this option is chosen over option 1.
+
+Option 1 is very likely the lower-risk path (no dependency on an unconfirmed stock-loader
+capability), but this needs settling with real code, not just a preference, before either
+is built.
 
 ## 4. Keys and the virtual key bag
 
