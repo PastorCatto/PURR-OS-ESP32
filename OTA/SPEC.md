@@ -36,18 +36,55 @@ Installing apps is AppManager's job (`../AppManager/SPEC.md`).
 
 ## 3. Staging and handoff
 
-**System files** (modular boards: the kernel, CoreOS, the drivers bundle, AppManager, the
-runtimes and the boot package):
+System files split into two mechanisms, not one, since the kernel/CoreOS split
+(`../PurrOS/SPEC.md`): the kernel is its own raw, directly-bootable partition now, not a file a
+running system swaps in.
 
-- **Stage.** The new file is written into `/boot` as `<name>.new` as it arrives, with its hash
-  computed on the way in. The running system is not touched.
-- **Verify.** When complete, the running system checks the container, chip, version (must be
-  newer), signature, and that it suits this device.
-- **Hand off.** A verified file is handed to KittenOS: the running system records the request
-  in `purrcfg` and restarts into it. Nothing else replaces system files.
-- **Swap.** KittenOS renames the current file to `<name>.bak`, renames `<name>.new` into place,
-  and restarts. If the new version does not come up healthy it rolls back
-  (`../PurrOS/SPEC.md` section 6.1).
+**Partition-level components** (`kernel`, `loader`, `bootpkg`): a raw `esp_partition` erase and
+write, straight from whichever system is running (full PURR OS or KittenOS -- both carry
+`net_install`, `PurrOS/main/commands.c`). Each is a `PURR_IMG_MODULE` image with its own subtype
+(`PURR_MOD_KERNEL`, `PURR_MOD_LOADER`, `PURR_MOD_BOOTPKG`), and every one of those subtypes
+requires a `PURR_ROLE_BOOT` signature (`purr_keybag.c`) -- the same trust tier as the boot
+package itself, regardless of which system happened to run the install.
+
+- Fetch and verify in memory first: container, chip, type and subtype, signature, hash.
+- Erase and write the target partition, then read it back and compare the hash rather than trust
+  the write.
+- `kernel` also becomes the boot target immediately (no reboot needed to select it); `loader` and
+  `bootpkg` are read directly by the bootloader's own fallback chain
+  (`../bootloader/SPEC.md`), so the write above is the whole install.
+- **`kittenos` is never written this way.** Only the recovery loader's own `install_kittenos()`
+  (`../RecoveryLoader/SPEC.md`) may write it, and that only runs from the `minimal` profile, which
+  never shares a boot with a general shell -- so the fallback tier can't be overwritten by
+  whatever's running above it, even a compromised or buggy one.
+
+**File-staged components** (CoreOS, AppManager, the runtimes, the drivers bundle) -- built
+2026-09-29, `net_install`'s `s_net_install_staged` table and `purr_swap_setup()`
+(`PurrOS/main/commands.c`), decision logic in `purr_swap_decide()`
+(`PurrOS/components/coreos/{include,src}/purr_swap.{h,c}`, host-tested):
+
+- **Stage.** The new file is written into `/boot` as `<name>.new` as it arrives (`net_install
+  coreos`/`appmanager`/`runtime`/`devbundle`), verified the same way partition-level components
+  are (container, chip, type and subtype, signature, hash, and now also a version-floor check
+  against `purrcfg`'s `floors[]` -- the one thing the partition-level path still doesn't enforce).
+  The running system is not touched.
+- **Hand off.** A verified file staged this way records the request in `purrcfg` (`update.state
+  = REQUESTED`) and sets `FORCE_RECOVERY`, the same one-shot flag `reboot recovery` already
+  used. Nothing else replaces system files.
+- **Swap.** KittenOS re-verifies the staged file by itself (never trusting a file just because
+  it verified once before landing on flash), records `MOVING` before touching anything (crash
+  safety: a power cut here resumes correctly next boot instead of restarting from scratch),
+  renames the current file to `<name>.bak`, renames `<name>.new` into place, sets
+  `UNCONFIRMED`, and restarts.
+- **Confirm.** `purr_mark_boot_healthy()` (the same function that resets the boot-failure
+  ladder, `bootloader/SPEC.md` section 6) now also confirms an `UNCONFIRMED` update once a
+  normal boot reaches healthy: raises that component's floor, sets `CONFIRMED`.
+- **Roll back.** Retries up to 3 times (`update.attempts`) before giving up: renames the bad
+  file to `<name>.bad`, restores `<name>.bak`, marks `FAILED`.
+- **What "swapped" doesn't mean yet:** the kernel/CoreOS split (`../PurrOS/SPEC.md` section 6)
+  that would actually *load* `/boot/coreos.kitt` isn't built -- `full`/`recovery` are still one
+  monolithic binary each. This mechanism correctly stages, verifies, swaps, confirms and rolls
+  back the file itself; nothing yet reads it back out and runs it.
 
 **Monolithic boards** keep no filesystem copy of the system, and their 1 MB apps area is too
 small to stage a whole packed image. The running system downloads the image to the **SD card**
@@ -70,8 +107,8 @@ or broken system file itself during recovery.
 
 ## 5. Two manifests, two formats
 
-Attached to each release, small and readable. Per component (OS image, kernel,
-AppManager, runtimes, drivers bundle, boot package, KittenOS):
+Attached to each release, small and readable. Per component (kernel, loader, boot package,
+AppManager, runtimes, drivers bundle, CoreOS, KittenOS):
 
 - component name and version
 - which chip and board it is for
@@ -94,17 +131,23 @@ AppManager, runtimes, drivers bundle, boot package, KittenOS):
   release=1.2.0
   released=2026-09-27
 
-  component=coreos
+  component=loader
   version=1.2.0
   chip=esp32s3
   board=tdeck_plus
-  file=coreos-tdeck_plus-1.2.0.kitt
+  file=loader-tdeck_plus-1.2.0.kitt
   size=245760
   sha256=3b1c2f...(64 hex characters)
-  key=system
+  key=boot
   min_bootloader=1.0.0
   min_coreos=1.0.0
   ```
+
+  `key` names the role that must have signed the image (`../Keys/SPEC.md`), and it has to match
+  what `purr_role_may_sign()` (`purr_keybag.c`) actually requires for that component's image type
+  and subtype -- a wrong `key` here just means the device rejects a correctly-signed download, not
+  a way to loosen the requirement. `kernel`, `loader`, `bootpkg`, `coreos` and `kittenos` all need
+  `key=boot`; `appmanager`, the runtimes and the drivers bundle need `key=system` (section 3).
 
 - **The system manifest.** Read by the **full, running system's own `update` commands**
   (section 7), which already carry plenty of flash, RAM and a JSON library. **JSON**, not

@@ -20,7 +20,8 @@ shell, built on the same services.
   `ui` (which widget, what happened) in the same queue as key and pointer events
   (`../Catcalls/SPEC.md` section 2). The app has one loop and one place to wait, and no callbacks
   run on the UI's own thread.
-- **Themes belong to the system** and are plain-text config files (section 3).
+- **Themes are signed binary packages** (`.kit` files, section 3), not text config. They're read
+  straight from a dedicated flash partition, never dumped into PSRAM.
 - **Full-screen apps with a system status bar.** Only the foreground app is visible. Switching
   goes through the task manager.
 - **Screen size and orientation are reported to the app,** with an event when they change, so it
@@ -41,25 +42,46 @@ shell, built on the same services.
 
 ## 3. Themes
 
-Themes are written as config files in the Hyprland style: simple `key = value` lines with
-comments, in `/etc/themes`. The user can edit them, and they **reload live** when they change.
+A theme is a single signed `.kit` package -- a PURR container holding colors, fonts, spacing,
+corner radius, animations, an icon set and images -- not a text config file. **A theme is data,
+not code**: the UI engine only ever reads a `.kit`, it never executes one.
 
-A theme controls:
+**Where it lives:**
 
-- colors: background, text, accent, borders, and the states of widgets (normal, pressed, disabled)
-- fonts and sizes
-- spacing and padding
-- corner radius and border width
-- the icon set
-- animations: on or off, and speed
+- The user-facing copy sits in LittleFS like any other file (fixed path TBD, e.g.
+  `/etc/themes/active.kit`). This is what the user drops in or swaps out.
+- The system also carves out a dedicated **`themes` partition** -- raw flash, not LittleFS --
+  sized to the device's tier (500KB on smaller-PSRAM boards, 1MB on 8MB+ boards). That partition
+  *is* the flash-storage budget for a theme; there's no separate number to track.
+- At runtime the UI engine reads assets straight out of the `themes` partition (memory-mapped raw
+  flash), not out of LittleFS and not into PSRAM. This is what makes a theme execute-in-place:
+  LittleFS files aren't guaranteed to sit in contiguous flash blocks, so a dedicated partition is
+  the only way to read a theme's assets directly without paying a PSRAM cost for it.
+
+**Boot-time sync.** Once, at boot, the system compares the LittleFS `.kit`'s header -- which
+carries a signature/hash, the same convention as modules, kernelmods and the bootpkg -- against
+what's currently burned into the `themes` partition.
+
+- Match: the partition is left alone; no flash write.
+- Mismatch: the LittleFS file is verified (the same signature check everything else PURR signs
+  goes through), then burned whole into the `themes` partition, replacing what was there.
+- No `.kit` in LittleFS, or it fails verification: whatever's already burned in the partition
+  stays active. A device with nothing burned yet falls back to a built-in default theme baked
+  into the firmware image itself (not going through the partition at all), so there's always
+  something to render.
+
+**Applying a new theme takes a reboot,** the same shape as the kernel/kittenos fallback chain
+(`../bootloader/SPEC.md`). Drop the new `.kit` into LittleFS and reboot; there's no apply-now path
+that hot-swaps the UI service while it's running.
 
 Rules:
 
 - The theme is **system-wide.** Apps get the current one automatically for every widget.
-- The user changes it in one place, with the `system-settings` permission.
+- The user changes it in one place, with the `system-settings` permission (replace the file, then
+  reboot).
 - An app can draw its own colors on a canvas, but it **cannot restyle the standard widgets.**
-- The old system's default look was a Windows CE Classic theme. Whether that stays the default is
-  open.
+- The old system's default look was a Windows CE Classic theme. Whether that stays the built-in
+  default is open.
 
 ## 4. Testing
 
@@ -67,7 +89,9 @@ Rules:
   backend and a fake MiniWin backend.
 - Events: a `ui` event lands in the same queue in the right order relative to key and pointer
   events, and the queue drops the oldest when full.
-- Theme files: parsing, a bad line, a missing key falling back to the default, and a live reload.
+- Themes: `.kit` parsing, a corrupt or unsigned package being rejected, the boot-time sync
+  (match leaves the partition alone, mismatch burns it, a missing/invalid LittleFS copy falls
+  back to what's already burned or to the built-in default).
 - Rotation and different screen sizes: the size event arrives, and layouts stay inside the screen.
 - The threading rule: no app call reaches LVGL outside the service.
 
@@ -77,9 +101,10 @@ Rules:
   or close to all of it.
 - **The canvas drawing calls.**
 - **Fonts and Unicode,** since each font costs flash and RAM.
-- **The icon set format.**
-- **The theme file syntax** in detail: sections, variables, and how one theme handles different
-  screen sizes and densities.
+- **The `.kit` container layout** in detail: binary format for colors, fonts, the icon set and
+  images, versioning, and how one theme handles different screen sizes and densities.
+- **Where the `themes` partition goes** in the partition table, and the exact LittleFS path for
+  the active `.kit` file.
 - **An on-screen keyboard,** which the CYD needs for typing a Wi-Fi password, and a text-entry
   component in general.
 - **Memory accounting.** The widgets an app creates live in the UI service's memory. Whether they

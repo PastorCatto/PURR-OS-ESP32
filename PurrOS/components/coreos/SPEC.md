@@ -338,7 +338,11 @@ just trust the handoff.
 "Recovery" means: set the `FORCE_RECOVERY` flag and reboot into KittenOS. Rules:
 
 - KittenOS never falls back to itself. If KittenOS fails its own check in
-  enforce mode it falls back to a serial prompt and does not restart.
+  enforce mode it falls back to a serial prompt and does not restart -- unless the
+  `boot_fail_count` ladder (`../../../bootloader/SPEC.md` section 6, not yet built) has already
+  climbed past its second threshold, in which case the boot package sends the *next* boot to
+  the recovery loader's silent auto mode instead
+  (`../../../RecoveryLoader/SPEC.md` section 2.1) rather than a prompt nobody may be watching.
 - Automatic recovery reboots are limited to one per boot sequence, so a
   verification failure cannot cause an endless reboot loop. The second time,
   the system stays in a degraded shell.
@@ -398,7 +402,11 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
 
 - **Failure counter.** The boot package increments `boot_fail_count` before it loads the
   kernel. CoreOS resets it when the boot is healthy (section 4, step 8). At the threshold
-  (default 3) the boot package starts KittenOS instead.
+  (default 3) the boot package starts KittenOS instead. If the count keeps climbing from there
+  -- meaning KittenOS itself is not reaching healthy either -- a second threshold (default 6)
+  sends the boot package to the recovery loader's silent auto mode instead
+  (`../../../bootloader/SPEC.md` section 6, `../../../RecoveryLoader/SPEC.md` section 2.1; not
+  yet built).
 - **Asking for KittenOS.** CoreOS records KittenOS as the boot target and restarts when
   the decision in section 5 says "recovery", or when it cannot continue.
 - **Shell commands.** The status and repair commands are ordinary commands in the shell
@@ -536,7 +544,35 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
   been `PurrOS/build/tdeck_plus-<profile>`'s own auto-generated stock ESP-IDF bootloader,
   which has no menu and doesn't act on the `purrcfg` flag at all. Not a regression: nothing
   in any sweep touched partitions, the bootloader, or the boot package. Real follow-up work,
-  tracked separately from the kernel-table conversion.
+  tracked separately from the kernel-table conversion. (This finding is now stale in its own
+  right: the real bootloader was built and flashed for real starting 2026-09-28, see
+  `bootloader/SPEC.md`.)
+
+  **A sixth sweep, 2026-09-30: the login gate itself, not a shell command.** ABI 5 -> 6,
+  `read_key`/`login_run`/`login_skip`/`login_take_logout` added (`login_whoami`, already in
+  the table, doubles as "who is currently logged in" for this too). Different in kind from
+  every earlier sweep: nothing here becomes a loaded module today -- `main.c`'s own
+  `run_login()`/`run_shell()` (PurrOS/SPEC.md section 6's future CoreOS boot orchestration)
+  now call through `purr_kernel_table()` instead of `purr_login_*()`/`purr_kernel_key()`
+  directly, so that code is already written the way it would have to be once it actually
+  moves into a separately loaded CoreOS, rather than needing a rewrite then. `purros_installed()`'s
+  raw `esp_partition_*` check and `login.c`'s own internals (still real keyboard/console/
+  shadow-file access, unchanged) deliberately stay outside this -- they're the *implementation*
+  of `login_run`/`login_skip`, kernel-side, same as `login_su`/`login_passwd`'s bodies always
+  were.
+
+  **A real bug found and fixed along the way, unrelated to the ABI change itself:** every ABI
+  bump this session requires the four kernelmods to be rebuilt, re-signed and re-embedded --
+  but re-flashing the app image never touches what's already sitting on the device's root
+  LittleFS, so the *old*, ABI-5-signed `/kernelmods/*.cat` files stayed in place and were
+  correctly rejected as an ABI mismatch after this bump, since nothing had ever re-planted
+  them. `plant_temp_modules()` (shared by the manual `plantmodules` command and, now,
+  `purr_modules_setup()` itself) fixed this by replanting every embedded temp module/kernelmod
+  automatically on every boot, not just on request -- acceptable only because this whole
+  mechanism is already explicitly temporary scaffolding with no real distribution path yet;
+  remove this call the same day a real one replaces it. Confirmed working end to end on real
+  hardware: all four `/system` modules and all four `/kernelmods` load clean after the bump,
+  with no further manual step needed.
 - **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
   (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
   ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,

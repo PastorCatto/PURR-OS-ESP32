@@ -219,9 +219,30 @@ module that has any non-relocatable word rather than silently miscompiling it.
 before CoreOS itself -- which will span many files -- can build this way,
 `PurrOS/components/coreos/SPEC.md` section 10): each file compiles to its own object, then
 all of them link together at each base address, same as before from there on. Proven on real
-hardware: a module built from four files -- new test code, a shared freestanding `memcpy`,
-and two pieces of real, unmodified CoreOS code (`purr_relocate.c`/`purr_module.c`) -- loaded
-and ran correctly through the same production loader every real module uses.
+hardware first with four files -- new test code, a shared freestanding `memcpy`, and two
+pieces of real, unmodified CoreOS code (`purr_relocate.c`/`purr_module.c`) -- and then, real
+scale, 2026-09-30: **15 of the 16 real files in `PurrOS/components/coreos/src`** (everything
+except `purr_appmgr.c`, which called the kernel's raw filesystem functions directly), built as
+one module with the new `coreos` kind, signed with the boot-role key `PURR_MOD_COREOS` requires,
+and loaded and run correctly through the same production loader every real module uses. That one
+exclusion is also resolved now, same day: `purr_appmgr.c` converted onto a `purr_appmgr_fs_t`
+function-pointer interface (`PurrOS/SPEC.md` section 6), and the retry proved it -- **all 16
+files, same day**, built and signed the same way, loaded and run on real hardware with every one
+of 16 address-taken representative functions resolving to a real, distinct, non-NULL symbol in
+the combined relocated binary (`PurrOS/SPEC.md` section 6 has the full result). Needed `purrstrap/freestanding/
+purr_freestanding_libc.c` (memcpy/memset/memcmp/memchr/strncmp/strtoul/strlen/strcmp/strcpy/
+strncpy/snprintf/vsnprintf -- every libc call these 15 files actually make) `--source`'d
+alongside them, and surfaced a real, previously-invisible bug: `purr_menu.h`'s `purr_key_t`
+(a keyboard-key enum) collided with `purr_keybag.h`'s (a signing key record), invisible until
+this was the first time anything included both headers together. Renamed to
+`purr_menu_key_t`.
+
+**Kinds:** `driver`, `appmanager`, `runtime`, `devbundle` (each `PURR_ROLE_*`-gated per
+`purr_role_may_sign()`, `purr_keybag.c`), plus **`coreos`** (added 2026-09-30, `PURR_MOD_COREOS`,
+`PURR_ROLE_BOOT`-only -- the same trust tier as `kernel`/`bootpkg`/`loader`). `kernel`, `loader`
+and `bootpkg` have no build kind here on purpose: they're real ESP app images or the boot
+package binary, not relocatable module payloads, and go through `coreos.py`'s packaging
+instead.
 
 **Links `-lgcc`** (added 2026-09-28, found building the first real kernel-table module,
 `mem`/`uptime`): a plain 64-bit divide (`uptime_us() / 1000000`) compiles to a call to

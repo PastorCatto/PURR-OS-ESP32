@@ -214,6 +214,22 @@ requests) depend on whether secure boot is enabled. Here "enabled" means
    tracked future work, not a design change -- this fallback chain is deliberately built on
    the weaker check that already existed and was already proven, rather than left unbuilt
    until the stronger one is ready.
+3a. **Not yet built: a two-tier failure-count ladder,** reusing `boot_fail_count`. This is the
+   part of `PurrOS/components/coreos/SPEC.md` section 7 ("at the threshold (default 3) the boot
+   package starts KittenOS instead") that this boot-flow section didn't reflect yet, extended one
+   rung further. The boot package increments `boot_fail_count` every single boot, before it
+   returns its choice (section 9), and CoreOS/KittenOS reset it to 0 once they mark themselves
+   healthy (`coreos/SPEC.md` section 4 step 8) -- so the count only climbs across boots where
+   nothing ever got that far, whether or not anything ever set a one-shot flag or made a clean
+   decision about it. Step 3's default becomes a three-rung ladder on that count instead of a
+   flat kernel-first preference: 0-2, prefer `kernel`; 3-5, prefer `kittenos`; 6+, prefer
+   `loader`. Both thresholds are defaults, expected to need tuning once real hardware failure
+   data exists. Reaching the `loader` rung this way -- through the count, not through a human
+   picking "internet recovery" from the menu or the shell's `reboot loader` -- sets a new handoff
+   `boot_state`, `auto_reinstall` (section 7), so the recovery loader can tell a repeated,
+   undetected failure apart from a deliberate request and run its silent auto mode instead of
+   showing a menu nobody is there to answer (`RecoveryLoader/SPEC.md` section 2.1).
+
 4. `FORCE_RECOVERY`/`FORCE_LOADER` (the shell's `reboot recovery`/`reboot loader`) override
    that default once, unconditionally, without even the shallow check -- built already,
    unchanged by the above.
@@ -261,7 +277,7 @@ the same option and size in both builds. It carries its own magic and CRC:
 | Field         | Meaning |
 |---------------|---------|
 | magic, crc    | Validity |
-| boot_state    | verified, failed_warned, forced_recovery, config_default |
+| boot_state    | verified, failed_warned, forced_recovery, auto_reinstall, config_default |
 | key_id_used   | Which key verified the image, or 0xFF |
 | flags_used    | Which one-shot flags were consumed |
 | bootloader_v  | Bootloader version |

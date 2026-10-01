@@ -57,7 +57,7 @@ hardware, not a separate unproven idea.
 | Boot package | boot area | bootloader | rarely |
 | KittenOS | boot area | bootloader, when triggered | not in normal use |
 | Recovery loader | boot area (modular boards) | bootloader, when KittenOS fails | almost never |
-| Kernel | boot area (modular boards), its own flash partition | boot package | rarely; by KittenOS, like the boot package (section 6.1) |
+| Kernel | boot area (modular boards), its own flash partition | boot package | rarely; a raw partition write from either full PURR OS or KittenOS (`net_install kernel`, `../OTA/SPEC.md` section 3), the same partition-level path the boot package and the recovery loader use, not the file-swap in section 6.1 |
 | CoreOS | root filesystem, `/boot` | kernel | independently |
 | Device config bundle | root filesystem, `/boot` | kernel and CoreOS | with the drivers it holds; locked to the release keys (`components/kernel/SPEC.md` section 13) |
 | AppManager | root filesystem, `/boot` | CoreOS | rarely |
@@ -274,8 +274,14 @@ proven, not an open question: it's the exact mechanism `Modules/SPEC.md` builds 
 - **Load into PSRAM.** Copy the file into PSRAM, relocate it against the two bases
   (`Modules/SPEC.md` section 4 -- data relocations against the writable alias, code
   relocations against the executable one), map it executable and run it. It needs no
-  fixed address. Proven working on real ESP32-S3 hardware for the module system; the
-  open part for CoreOS specifically is size, not mechanism (below).
+  fixed address. Proven working on real ESP32-S3 hardware for the module system, and
+  separately proven for the heavier, kernel-style calls CoreOS itself makes --
+  `CoreOSSpike/SPEC.md`, passed 2026-09-28: real FreeRTOS `xTaskCreate` and real heap
+  allocation, driven from relocated PSRAM code through a passed-in table, not just
+  `puts`/`printf`. What the spike explicitly did *not* prove: that CoreOS's actual call
+  sites -- every real `malloc`/`vTaskDelay`/`esp_partition_*`/`mbedtls_*` call across its
+  real source, not a small hand-picked set -- convert cleanly onto that table. That's
+  still real, unstarted work.
 - **The kernel does not need a raw-flash fallback for this.** The earlier idea of running
   CoreOS in place from a raw flash slot if PSRAM execution failed is dropped along with
   the kernel-as-a-file idea it was attached to -- PSRAM execution is proven, and if
@@ -283,12 +289,92 @@ proven, not an open question: it's the exact mechanism `Modules/SPEC.md` builds 
   no-OTA modular design at all and stays on the monolithic tier's single packed slot
   (section 4.2) instead of inventing a third loading method.
 
-**Open, real scope, not mechanism:** today's module loader (`load_one_module_file()`,
-`purr_relocate.h`'s `PURR_RELOC_MAX`) caps a module at one 64 KB page
-(`CONFIG_MMU_PAGE_SIZE`) and a bounded relocation count. CoreOS is far bigger than
-anything built as a module so far, so both caps need to become multi-page /
-appropriately sized before CoreOS can actually load this way -- real work, not a design
-question.
+**Built 2026-09-29: both loader caps that were blocking this.** `load_relocatable_file()`
+(pulled out of the module and kernelmod loaders, which duplicated the same ~170 lines twice,
+into one shared function both now call) takes a page budget instead of a hardcoded one
+`CONFIG_MMU_PAGE_SIZE` block, rounding a payload up to as many pages as its caller allows --
+existing callers still pass 1, so nothing about today's modules or kernelmods changed, proven
+on hardware (all four `/system` modules and all four `/kernelmods` still load identically after
+the refactor). `PURR_RELOC_MAX` rose from 4096 to 65536 (`purr_relocate.h`) -- applying a
+relocation is a trivial per-word add, so the new ceiling costs nothing at boot; it stays a
+safety bound against a corrupt file, not a performance limit.
+
+**Resolved, 2026-09-30: the multi-page path itself, proven on real hardware, not just in code
+review.** A signed, deliberately oversized (~90KB, needing 2 of the 64KB pages) test module,
+built the normal way through `purrstrap modules build`, was loaded through the real,
+unmodified `load_relocatable_file()` with a 4-page budget. Checked two independent ways: the
+90000-byte payload read straight back out of the writable alias (across the page boundary, not
+just the first page) checksummed to exactly what was compiled in, and the entry call through
+the executable alias returned a valid table and ran its command successfully. Temporary test
+code (`Modules/test/bigpage_test.c`, its embedded-blob file, and `commands.c`'s `testbigpage`
+block), deleted once the proof was recorded, the same discipline every other spike this session
+followed.
+
+**Resolved, 2026-09-30: `purrstrap` builds CoreOS's real source as one relocatable module,
+proven on real hardware.** 15 of the 16 files in `PurrOS/components/coreos/src` -- every one
+except `purr_appmgr.c` (below) -- were built together through the normal `purrstrap modules
+build --kind coreos` path (the new `coreos` kind, mapping to the already-existing
+`PURR_MOD_COREOS` subtype), signed with the boot-role key `PURR_MOD_COREOS` actually requires,
+loaded through `load_relocatable_file()`, and ran their entry point successfully. Two real bugs
+surfaced and were fixed, not test artifacts:
+
+- **`purr_key_t` collided.** `purr_keybag.h` (a signing key record) and `purr_menu.h` (a
+  keyboard-key enum) both defined a type by that name -- invisible until this was the first time
+  anything included both headers in one translation unit. `purr_menu.h`'s enum is now
+  `purr_menu_key_t`; nothing else needed to change, since every other call site used the enum
+  constants or the functions, never the type name itself.
+- **Freestanding builds need a real libc subset.** `-fno-builtin` with no libc linkage leaves
+  `memcpy`/`memset`/`memcmp`/`memchr`/`strncmp`/`strtoul`/`strlen`/`strcmp`/`strcpy`/`strncpy`/
+  `snprintf`/`vsnprintf` all unresolved -- real, shipping coreos/src files call every one of
+  these by name. `purrstrap/freestanding/purr_freestanding_libc.c` (moved there from
+  `Modules/test/`, since it's real reusable infrastructure now, not a throwaway) provides
+  correct, if scoped, implementations of exactly what these files call -- not a general-purpose
+  libc, and it says so in its own header.
+
+**Resolved, 2026-09-30: `purr_appmgr.c`'s direct kernel-filesystem calls.** It called
+`purr_fs_list()`/`purr_fs_read()`/`purr_fs_write()`/`purr_fs_mkdir()`/`purr_fs_remove()`/
+`purr_fs_rename()`/`purr_fs_stat()` -- the kernel's own raw filesystem functions -- directly,
+the one real architectural gap left in the 16 files (not a missing-libc problem, unlike
+everything else this section already fixed). Fixed by giving `purr_appmgr.h` a narrow
+`purr_appmgr_fs_t` function-pointer interface, the same path-based shape
+`purr_kernel_table_t`'s own `fs_*` entries already use, and converting all four public
+`purr_appmgr_*` functions to call through it instead of a raw `purr_fs_t*`. `commands.c` backs
+it with `s_appmgr_fs`, built from the same `kernel_table_fs_*` wrappers the kernel table itself
+uses; host tests back it with small adapters over the fake RAM-disk fixture. Proven on real
+hardware, not just via the 95 host-test checks that already covered `purr_appmgr.c`'s logic: a
+temporary boot-time check, added and deleted the same way every other proof in this section was,
+drove `purr_appmgr_add`/`scan`/`find`/`remove` end to end through `s_appmgr_fs` against the real
+device filesystem and logged
+`add=0 before=0 after_add=1 found=1 rm=0 after_remove=0 -> PASS`; all four `/system` modules and
+all four `/kernelmods` (including `appmgr.cat` itself) still load identically afterward.
+
+Beyond that, CoreOS's *other* source -- `commands.c`/`main.c`/`login.c`, none of it freestanding
+today -- still hasn't been converted, and nobody has picked which real files a genuine
+`coreos.kitt` build should even contain.
+
+**Resolved, 2026-09-30: the complete 16-file `purrstrap` build, proven on real hardware.** All
+16 files in `coreos/src` -- `purr_appmgr.c` included, now that the fix above landed -- built
+together through `purrstrap modules build --kind coreos`, alongside `purr_freestanding_libc.c`
+and a temporary entry file (`Modules/test/coreos_link_test.c`, deleted once this was recorded)
+that took the address of one real, representative function from each of the 16 files into a
+`volatile` array and read every one back (the same dead-store-elimination fix this session
+already needed once, section 6's first 15-file proof -- a write nothing reads is dead by `-O2`'s
+own logic, and `--gc-sections` strips the "referenced" function right back out). Signed with the
+boot key, loaded through the same `load_relocatable_file()` every real module and kernelmod
+uses, and run: the entry call returned `linked_count=16 checksum=00000860`, meaning every one of
+the 16 address-taken functions actually resolved to a real, non-NULL, distinct symbol in the
+combined, relocated binary -- not just a successful compile. All four `/system` modules and all
+four `/kernelmods` loaded identically alongside it, same boot.
+
+This also forced a real, previously-overdue step: both the boot and developer signing keys were
+rotated (the old boot key's passphrase was lost, and keys in this project are meant to be cheaply
+swappable -- whichever key is in `signing_keys/` *is* the trusted one, by design, not a fixed
+secret to protect indefinitely). The default key bag
+(`PurrOS/components/coreos/keys/purr_default_keys.c`) was regenerated from the two new public
+keys, and all eight real embedded modules/kernelmods (`commands.c`'s `s_about_module` etc.) were
+re-signed with the new developer key and their embedded bytes regenerated in place -- same
+payload bytes, new header/signature only. The old keys are kept at `signing_keys/old/` (not
+deleted) in case anything else still needs them.
 
 Between the layers there is a small versioned table of calls: the boot package gives the
 kernel the boot information and a few services, and the kernel gives CoreOS its API
@@ -298,8 +384,17 @@ The details are in the kernel and CoreOS specs.
 ### 6.1 Updating the system files
 
 Apps are updated by AppManager. This is for the system files above the kernel: CoreOS,
-the drivers bundle, AppManager, the runtimes and the boot package. The kernel itself is
-not a system *file* -- see section 4.1 for how it updates instead.
+the drivers bundle, AppManager and the runtimes. The kernel itself is
+not a system *file* -- see section 4.1 for how it updates instead. The boot package turned out
+to belong with the kernel's partition-level path instead (it lives in its own raw partition,
+never in LittleFS) -- see `../OTA/SPEC.md` section 3, which now also has the up-to-date split
+between the two mechanisms.
+
+**Built 2026-09-29** (`purr_swap.{h,c}`, host-tested; `purr_swap_setup()` in
+`PurrOS/main/commands.c`), steps 1-7 below exactly as speced, plus the crash-safety note in
+"Power loss" further down. **Still not built:** the kernel/CoreOS split (section 6) that would
+make a swapped `coreos.kitt` actually get loaded and run -- this mechanism correctly moves,
+verifies, confirms and rolls back the file itself, but nothing reads it back out yet.
 
 **KittenOS performs the swap.** It is never overwritten in normal use, so it can safely
 replace anything else, including CoreOS itself.
@@ -437,24 +532,25 @@ way, monolithic or modular, just with a different target.
   own fallback chain (`bootloader/SPEC.md` section 6) tries `kernel` first, then `kittenos`,
   then the recovery loader, automatically -- proven on real hardware, including the
   kernel-fails-over-to-kittenos case.
-- **Still not built:** `purrstrap` support for building CoreOS as a relocatable root-filesystem
-  file instead of linking it into the kernel image, and the module loader's page-size/
-  relocation-count caps growing to fit something CoreOS-sized (section 6). `netinstall`
-  (`Modules/netinstall/netinstall_module.c`) also needs retargeting: it currently writes
-  straight to whatever partition has the `ota_0` subtype -- which is now `kernel`, not a
-  spare OTA slot -- via `esp_ota_set_boot_partition`; it needs to become a CoreOS-file
-  stage-and-swap (section 6.1) instead, and a way to push a new `kernel` image too, on the
-  rare occasion that needs updating (as its own real PURR-signed image, not the raw dev build
-  `netinstall` currently fetches). Today's build still links kernel and CoreOS into one
-  flashed image on the T-Deck Plus, same as the monolithic tier -- a practical shortcut during
-  this rewrite's early iteration, not the intended final shape. The bootloader's own
-  fallback chain also still only checks that a slot looks like a real app image (a magic
-  byte), not a real PURR signature -- real per-image verification (`bootloader/SPEC.md`
-  section 6, steps 4-5) is designed but not built for `kernel`/`kittenos`/`loader`, only for
-  the boot package itself.
-- **The `kernel` partition's own update path** (section 4.1: KittenOS writes it directly,
-  like `bootpkg`) is a design decision, not yet implemented or tested against a real
-  power-cut-mid-write case.
+- **Resolved, 2026-09-29:** `netinstall`'s retargeting. It now writes `kernel` (and `loader`,
+  `bootpkg`) as a real, named, partition-level component -- `esp_ota_set_boot_partition` only
+  runs for `kernel` specifically, not unconditionally -- and stages CoreOS/AppManager/the
+  runtimes/the drivers bundle through the file-swap path instead (section 6.1, `OTA/SPEC.md`
+  section 3). The module loader's page-size and relocation-count caps have also grown (section
+  6, above) -- both real blockers this bullet used to list are cleared.
+- **Still not built:** `purrstrap` support for actually building CoreOS as a relocatable
+  root-filesystem file (the loader can now take something that size; nothing that size has been
+  built to hand it), and converting CoreOS's real source to call through a kernel table instead
+  of `malloc`/`vTaskDelay`/`esp_partition_*`/`mbedtls_*` directly (`CoreOSSpike/SPEC.md` proved
+  the mechanism on a small hand-picked set of calls, not CoreOS's actual breadth). Today's build
+  still links kernel and CoreOS into one flashed image on the T-Deck Plus, same as the
+  monolithic tier -- a practical shortcut during this rewrite's early iteration, not the
+  intended final shape. The bootloader's own fallback chain also still only checks that a slot
+  looks like a real app image (a magic byte), not a real PURR signature -- real per-image
+  verification (`bootloader/SPEC.md` section 6, steps 4-5) is designed but not built for
+  `kernel`/`kittenos`/`loader`, only for the boot package itself.
+- **The `kernel` partition's own update path** is built (`net_install kernel`, above) but not
+  yet tested against a real power-cut-mid-write case.
 - **How KittenOS is started:** the assumption is a target recorded in `purrcfg` that the
   bootloader honours.
 - **How many backups to keep** (`.bak`) and when to delete them.
