@@ -46,6 +46,14 @@ static void test_add_rejects(void)
     CHECK_EQ(purr_user_list_add(&l, "", 1, PURR_ROLE_USER_STANDARD), PURR_USER_INVALID);
     CHECK_EQ(purr_user_list_add(&l, "bad\tname", 1, PURR_ROLE_USER_STANDARD), PURR_USER_INVALID);
     CHECK_EQ(purr_user_list_add(&l, "root", 0, PURR_ROLE_USER_ADMIN), PURR_USER_INVALID);
+    /* F-11: "root" is rejected by name alone, not just because uid 0 is also invalid --
+     * that account's login is always refused, so creating it any other way would lock the
+     * device out until someone wiped it from the PC by hand. */
+    CHECK_EQ(purr_user_list_add(&l, "root", 7, PURR_ROLE_USER_ADMIN), PURR_USER_INVALID);
+    CHECK_EQ(purr_user_list_add(&l, "../../etc", 7, PURR_ROLE_USER_STANDARD), PURR_USER_INVALID);
+    CHECK_EQ(purr_user_list_add(&l, "has space", 7, PURR_ROLE_USER_STANDARD), PURR_USER_INVALID);
+    CHECK_EQ(purr_user_list_add(&l, "ok-name_7", 7, PURR_ROLE_USER_STANDARD), PURR_USER_ADDED);
+    CHECK_EQ(purr_user_list_remove(&l, "ok-name_7"), 1);
     CHECK_EQ(l.count, 0);
 
     for (int i = 0; i < PURR_USER_MAX; i++) {

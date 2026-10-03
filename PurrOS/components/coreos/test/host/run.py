@@ -88,6 +88,10 @@ def main(argv):
     # The filesystem layer is kernel code, but it is plain C over an abstract block device,
     # so it is tested here against a RAM disk. LittleFS itself is third-party.
     src.append(os.path.join(KERNEL, "src", "purr_fs.c"))
+    # The driver registry (F-02, kernel/SPEC.md sections 2/5/6) is plain C with no ESP-IDF
+    # dependency -- matching/pin-ownership logic tested here with fake drivers and a fake
+    # board, the real drivers' own ESP-IDF-coupled internals untouched by any of it.
+    src.append(os.path.join(KERNEL, "src", "purr_driver.c"))
     common = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
               "-I", os.path.join(CORE, "include"), "-I", os.path.join(KERNEL, "include"),
               "-I", LFS, "-I", HERE, "-I", uecc]

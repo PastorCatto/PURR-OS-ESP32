@@ -18,11 +18,19 @@ from lib.model import Action, Param, Script
 
 # board -> (cross compiler prefix, chip id). Reuses coreos.py's mapping conventions.
 BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
-          "cyd_24c": ("xtensa-esp32-elf", pimg.CHIP_ESP32)}
+          "cyd_24c": ("xtensa-esp32-elf", pimg.CHIP_ESP32),
+          "waveshare154": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3)}
 
 # name -> MOD_* subtype (purr_abi.h / purr_keybag.c's purr_role_may_sign).
+# "coreos" added 2026-09-29 (PurrOS/SPEC.md section 6): the relocatable-module mechanism is
+# the same one CoreOS-as-a-file will use, and PURR_MOD_COREOS already exists for it (it's
+# PURR_ROLE_BOOT-only, same tier as kernel/bootpkg/loader -- purr_keybag.c), it just had no
+# buildable kind here yet. kernel/bootpkg/loader stay out of this table on purpose: they are
+# real ESP app images or the boot package binary, not relocatable module payloads, and go
+# through coreos.py's packaging instead.
 KINDS = {"driver": pimg.MOD_DRIVER, "appmanager": pimg.MOD_APPMANAGER,
-         "runtime": pimg.MOD_RUNTIME, "devbundle": pimg.MOD_DEVBUNDLE}
+         "runtime": pimg.MOD_RUNTIME, "devbundle": pimg.MOD_DEVBUNDLE,
+         "coreos": pimg.MOD_COREOS}
 
 # Far enough apart that a real relocated address can't be mistaken for an unrelated
 # small integer constant that happens to differ between builds for some other reason.
@@ -275,6 +283,63 @@ def build(ctx, board, source, entry, kind, name, version, out):
     return 0
 
 
+def index(ctx, board, modules_dir, kernelmods_dir, coreos_version, key, out):
+    """Builds the module index (OTA/SPEC.md section 6.1): one stanza per already-built,
+    already-signed .cat file found in `modules_dir`/`kernelmods_dir`, using the same flat
+    key=value format and parser (`purr_manifest.c`) the recovery manifest uses. `type=module`
+    for files from `modules_dir` (-> /system), `type=kernelmod` for `kernelmods_dir`
+    (-> /kernelmods). Each file's own header supplies its name and version; this tool supplies
+    what the header doesn't carry (board, the signing role, and the CoreOS version it targets)."""
+    if board not in BOARDS:
+        ctx.error(f"unknown board {board}")
+        return 1
+
+    entries = []
+    for kind_name, d in (("module", modules_dir), ("kernelmod", kernelmods_dir)):
+        if not d:
+            continue
+        if not os.path.isdir(d):
+            ctx.error(f"{d}: no such directory")
+            return 1
+        for fname in sorted(os.listdir(d)):
+            if not fname.endswith(".cat"):
+                continue
+            path = os.path.join(d, fname)
+            with open(path, "rb") as fh:
+                data = fh.read()
+            if not pimg.is_purr_image(data):
+                ctx.error(f"{path}: not a PURR image, skipping")
+                continue
+            f = pimg.header_fields(pimg.parse_header(data))
+            entries.append((kind_name, fname, f, len(data), pimg.sha256(data)))
+
+    if not entries:
+        ctx.error("no .cat files found in the given directories")
+        return 1
+
+    lines = []
+    for kind_name, fname, f, size, digest in entries:
+        lines.append(f"component={f['name']}")
+        lines.append(f"type={kind_name}")
+        lines.append(f"version={f['version']}")
+        lines.append(f"board={board}")
+        lines.append(f"file={fname}")
+        lines.append(f"size={size}")
+        lines.append(f"sha256={digest.hex()}")
+        lines.append(f"key={key}")
+        if coreos_version:
+            lines.append(f"min_coreos={coreos_version}")
+        lines.append("")
+
+    dest = out or "modules.manifest"
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "w", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+    ctx.ok(f"{dest}: {len(entries)} entries ({sum(1 for e in entries if e[0] == 'module')} "
+           f"module(s), {sum(1 for e in entries if e[0] == 'kernelmod')} kernelmod(s))")
+    return 0
+
+
 SCRIPT = Script(
     name="modules",
     title="Modules",
@@ -295,6 +360,23 @@ SCRIPT = Script(
                    Param("version", "str", required=True, help='e.g. "0.1.0"'),
                    Param("out", "path", default="",
                          help="output file (default: Modules/build/<name>/<name>.cat)"),
+               )),
+        Action("index", "Build module index", index,
+               help="build the module index (OTA/SPEC.md section 6.1) from already-built, "
+                    "already-signed .cat files",
+               params=(
+                   Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
+                         help="the board these modules were built for"),
+                   Param("modules_dir", "path", default="",
+                         help="folder of .cat files for /system (type=module)"),
+                   Param("kernelmods_dir", "path", default="",
+                         help="folder of .cat files for /kernelmods (type=kernelmod)"),
+                   Param("coreos_version", "str", default="",
+                         help="the CoreOS version these modules target (min_coreos)"),
+                   Param("key", "str", default="developer",
+                         help="the role that signed these files, e.g. \"developer\""),
+                   Param("out", "path", default="",
+                         help="output file (default: modules.manifest)"),
                )),
     ),
 )

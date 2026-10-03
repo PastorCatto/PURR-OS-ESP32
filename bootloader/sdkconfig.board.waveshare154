@@ -1,0 +1,4 @@
+# Waveshare ESP32-S3-ePaper-1.54 ("InkyTuxedo"): ESP32-S3-PICO-1-N8R8, 8 MB flash
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/waveshare154.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions/waveshare154.csv"

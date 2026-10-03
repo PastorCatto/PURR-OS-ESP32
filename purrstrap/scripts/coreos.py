@@ -13,7 +13,7 @@ from lib.model import Action, Param, Script
 IDF_VERSION = "5.3.5"
 # A board decides the chip. Adding a board means adding a row here and a folder of
 # settings files in PurrOS/.
-BOARDS = {"tdeck_plus": "esp32s3", "cyd_24c": "esp32"}
+BOARDS = {"tdeck_plus": "esp32s3", "cyd_24c": "esp32", "waveshare154": "esp32s3"}
 PROFILES = ("minimal", "recovery", "full")
 PROJECT_DIR = "PurrOS"
 
@@ -308,6 +308,44 @@ def package(ctx, board, profile, version, out):
     return 0
 
 
+# component name -> PURR_MOD_* subtype (purr_abi.h / commands.c's s_net_install_components).
+# These are raw ESP app images (kernel) or the boot package's own blob format (bootpkg,
+# already wrapped by `bootpkg build`) -- plain opaque payload bytes either way, since
+# net_install's partition-level write path never parses the payload itself, only the
+# bootloader does, later, when it tries to boot the partition. All PURR_ROLE_BOOT-only.
+COMPONENT_KIND = {"kernel": pimg.MOD_KERNEL, "loader": pimg.MOD_LOADER}
+
+
+def package_component(ctx, component, file, version, board, out):
+    """Wraps an already-built raw binary (the standalone kernel, the recovery loader) into
+    an unsigned PURR_IMG_MODULE container with the matching PURR_MOD_* subtype, ready for
+    `keys sign` -- the same partition-level shape `netinstall <component>` already expects
+    (OTA/SPEC.md section 3), so it can be published in the recovery manifest alongside
+    kittenos/coreos. Unlike `coreos package` (IMG_OS/IMG_RECOVERY, the whole system), this is
+    for the components net_install writes straight into a raw partition."""
+    if component not in COMPONENT_KIND:
+        ctx.error(f"unknown component {component!r}. Known: {', '.join(COMPONENT_KIND)}")
+        return 1
+    if not os.path.isfile(file):
+        ctx.error(f"{file}: no such file")
+        return 1
+    with open(file, "rb") as fh:
+        payload = fh.read()
+
+    chip_id = CHIP_IDS[BOARDS[board]]
+    image = pimg.make_image(component, version, pimg.IMG_MODULE, COMPONENT_KIND[component],
+                            payload, chip_id)
+
+    dest = out or f"{component}.cat"
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(image)
+    ctx.ok(f"{dest}: {len(image)} bytes ({component} {version}, unsigned)")
+    ctx.info("sign it: purrstrap keys sign --key boot.key --image "
+             f"{dest} --key-id <id>")
+    return 0
+
+
 _BOARD = Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
                help="the board to build for (it decides the chip)")
 _PROFILE = Param("profile", "choice", default="full", choices=PROFILES,
@@ -336,5 +374,17 @@ SCRIPT = Script(
                        Param("version", "str", required=True, help='e.g. "1.2.0"'),
                        Param("out", "path", default="",
                              help="output file (default: <board>-<profile> build dir)"))),
+        Action("package-component", "Package a partition-level component", package_component,
+               help="wrap a built kernel/loader binary into an unsigned PURR_IMG_MODULE, "
+                    "ready to sign",
+               params=(Param("component", "choice", required=True,
+                             choices=tuple(COMPONENT_KIND),
+                             help="which component this file is"),
+                       Param("file", "path", required=True,
+                             help="the already-built raw binary to wrap"),
+                       Param("version", "str", required=True, help='e.g. "1.2.0"'),
+                       _BOARD,
+                       Param("out", "path", default="",
+                             help="output file (default: <component>.cat)"))),
     ),
 )

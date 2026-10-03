@@ -1,0 +1,14 @@
+# Name,   Type, SubType, Offset,  Size
+# Waveshare ESP32-S3-ePaper-1.54: 8 MB flash. Same shape as tdeck_plus.csv, scaled down --
+# see F-01/F-21 (documentation/FINDINGS.md): the 16 MB T-Deck layout does not fit a smaller
+# chip, a real per-board partition table, not a placeholder.
+nvs,      data, nvs,     0x9000,   0x6000
+otadata,  data, ota,     0xf000,   0x2000
+phy_init, data, phy,     0x11000,  0x1000
+bootpkg,  data, 0x40,    0x12000,  0xC000
+purrcfg,  data, 0x40,    0x1E000,  0x2000
+kittenos, app,  factory, 0x20000,  0x120000
+kernel,   app,  ota_0,   0x140000, 0x140000
+loader,   app,  test,    0x280000, 0x120000
+netrec,   data, 0x41,    0x3A0000, 0x1000
+root,     data, 0x83,    0x3A1000, 0x45F000

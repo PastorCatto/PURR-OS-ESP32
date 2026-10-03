@@ -83,9 +83,18 @@ def der_sig_to_raw(der_sig):
 
 
 # -- generate --------------------------------------------------------------
-def generate(ctx, role, out, key_id):
+def generate(ctx, role, out, key_id, force=False):
     if role not in ROLES:
         ctx.error(f"unknown role {role!r}. Known roles: {', '.join(ROLES)}")
+        return 1
+    key_path = os.path.join(out, f"{role}.key")
+    pub_path = os.path.join(out, f"{role}.pub")
+    # F-19: this used to overwrite an existing key pair with no warning -- the old private
+    # key (and anything only it could sign for) is gone the moment the new file lands,
+    # with no undo. --force is the explicit, typed-out way to mean it.
+    if not force and (os.path.exists(key_path) or os.path.exists(pub_path)):
+        ctx.error(f"{key_path} already exists. Pass --force to replace it (and its "
+                 "matching .pub) -- anything only the old key could sign for is lost.")
         return 1
     pw = get_password(ctx, f"Password for the new {role} key: ", confirm=True)
     if pw is None:
@@ -96,8 +105,6 @@ def generate(ctx, role, out, key_id):
 
     private_key = ec.generate_private_key(ec.SECP256R1())
     os.makedirs(out, exist_ok=True)
-    key_path = os.path.join(out, f"{role}.key")
-    pub_path = os.path.join(out, f"{role}.pub")
 
     with open(key_path, "wb") as fh:
         fh.write(private_key.private_bytes(
@@ -209,6 +216,16 @@ def sign(ctx, key, key_id, image_in, image_out):
     fields[PAYLOAD_SHA_IX] = sha256(payload)
     if key_id is not None:
         fields[KEY_ID_IX] = key_id & 0xFF
+
+    # F-19: id 0 means "no key" to the device (purr_keybag.c) -- it refuses any image whose
+    # header carries it. Signing one anyway used to succeed silently and produce a container
+    # the device would reject with no clue why; this catches it at the only point that knows
+    # a real id was never supplied, not just whatever --key-id happened to default to.
+    if fields[KEY_ID_IX] == 0:
+        ctx.error("key id 0 means \"no key\" to the device -- it would reject this image. "
+                 "Pass --key-id matching the id this key was exported under "
+                 "(keys export-public).")
+        return 1
 
     fields[SIG_IX] = b"\0" * 64                  # the signature covers everything before it
     unsigned_header = struct.pack(HEADER_FORMAT, *fields)
@@ -339,7 +356,10 @@ SCRIPT = Script(
                params=(Param("role", "choice", required=True, choices=tuple(ROLES),
                              help="who the key speaks for"),
                        Param("out", "path", required=True, help="directory to write the key files into"),
-                       Param("key_id", "int", default=0, help="the key id to remember it by (0-31)"))),
+                       Param("key_id", "int", default=0, help="the key id to remember it by (0-31)"),
+                       Param("force", "bool", default=False,
+                             help="replace an existing key pair of this role -- anything only "
+                                  "the old key could sign for is lost"))),
         Action("export-public", "Export a public key", export_public,
                help="write one key's raw bytes and regenerate the default key bag from "
                     "everything already exported to --out",

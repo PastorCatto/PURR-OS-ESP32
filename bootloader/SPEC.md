@@ -267,6 +267,22 @@ already-known gap, not a flaw in this chain.
 The boot package verifies the kernel and CoreOS files it loads with the same rules
 (`PurrOS/components/coreos/SPEC.md` section 3.5).
 
+**Dev-workflow trap, found 2026-09-30, costly enough to call out explicitly:** `bootloader/`
+is a fully separate ESP-IDF project from `PurrOS/` -- its own build directory, own
+`idf.py build`, own `bootloader.bin`. `purrstrap coreos build`/`idf.py flash` from inside
+`PurrOS/` only ever flashes **PurrOS's own auto-generated stock ESP-IDF bootloader**; it never
+touches this project at all. An entire session's worth of hardware testing (RecoveryLoader's
+fallback chain, `purrcfg` flags, `boot_fail_count`) ran against that stock bootloader without
+anyone noticing, because both bootloaders boot a plain app partition identically for the simple
+cases -- the difference only shows up for anything `purr_boot.c` actually owns (the ladder, the
+one-shot flags, the boot package/menu at all). Caught by the missing `purr_boot: PURR OS
+bootloader` log line, the one unambiguous tell. **To actually exercise this project's own boot
+logic, build it here (`idf.py -B build_<board> -D SDKCONFIG=... -D IDF_TARGET=... -D
+SDKCONFIG_DEFAULTS=... build`, section 9's own commands) and flash only
+`build_<board>/bootloader/bootloader.bin` at `0x0`** -- never the whole suggested `flash_args`,
+which would also overwrite whatever real app is in the `kittenos` slot with this project's
+placeholder stub `main/` app.
+
 ## 7. Handoff to the OS
 
 A small struct in the RTC FAST memory area that ESP-IDF reserves for custom
@@ -373,6 +389,14 @@ board that happens before the kernel lives in the **boot package**.
 - **If ignored, the system boots normally.**
 - Entries are open. At least: boot normally, and boot KittenOS (recovery).
 - The bootloader acts on the returned choice: it sets the boot target and continues.
+- **Secure Boot status line (built 2026-09-30).** Reads the ESP32-S3's own hardware Secure Boot
+  eFuse directly (`EFUSE_RD_REPEAT_DATA2_REG` bit 20, the same bit `esp_secure_boot_enabled()`
+  reads through the HAL -- not usable here since the boot package is a standalone freestanding
+  build with no ESP-IDF headers, so `pkg_hw.c` reads the register directly, matching its
+  existing bit-banged-register style). Read-only, never programs anything. Shown so "is it
+  enabled" always has a real, zero-risk answer, independent of whether the actual eFuse burn
+  (this section's armed, three-reboot procedure) is ever used. Confirmed on hardware: reports
+  `off` correctly (the eFuse has never been burned on the test device).
 
 **Decided for the first cut (T-Deck Plus, built and checked on hardware)**
 

@@ -6,6 +6,8 @@
 
 /* 64 hex characters: 32 bytes of 0xAB. */
 #define HASH64 "abababababababababababababababababababababababababababababababab"
+/* 64 hex characters: 32 bytes of 0xCD -- a second, distinct hash for payload_sha256 tests. */
+#define HASH64_B "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
 
 static void expect_hash(const uint8_t *got)
 {
@@ -61,6 +63,95 @@ static void test_basic_parse(void)
     CHECK(k != NULL);
     CHECK(strcmp(k->chip, "any") == 0);
     CHECK(strcmp(k->board, "any") == 0);
+}
+
+static void test_payload_fields(void)
+{
+    /* F-14: payload_size/payload_sha256 are optional -- a component whose partition holds
+     * only the stripped payload (kernel, kittenos) carries them so RecoveryLoader can check
+     * what's already installed without downloading it again; bootpkg (the whole signed
+     * container lands on its partition) has no reason to. */
+    const char *text =
+        "component=kernel\n"
+        "version=1.0.0\n"
+        "file=kernel.cat\n"
+        "size=1086941\n"
+        "sha256=" HASH64 "\n"
+        "key=boot\n"
+        "payload_size=233796\n"
+        "payload_sha256=" HASH64_B "\n"
+        "\n"
+        "component=bootpkg\n"
+        "version=1.0.0\n"
+        "file=bootpkg.cat\n"
+        "size=4361\n"
+        "sha256=" HASH64 "\n"
+        "key=boot\n";
+
+    purr_manifest_t m;
+    int n = purr_manifest_parse(&m, text, strlen(text));
+    CHECK_EQ(n, 2);
+    CHECK_EQ(m.dropped, 0);
+
+    const purr_manifest_entry_t *kernel = purr_manifest_find(&m, "kernel", NULL, NULL);
+    CHECK(kernel != NULL);
+    CHECK_EQ(kernel->payload_size, 233796u);
+    CHECK_EQ(kernel->have_payload_sha256, 1);
+    for (int i = 0; i < 32; i++) {
+        CHECK_EQ(kernel->payload_sha256[i], 0xCD);
+    }
+
+    /* An entry that never had the lines at all: absent, not a zeroed-out "match anything". */
+    const purr_manifest_entry_t *bootpkg = purr_manifest_find(&m, "bootpkg", NULL, NULL);
+    CHECK(bootpkg != NULL);
+    CHECK_EQ(bootpkg->payload_size, 0u);
+    CHECK_EQ(bootpkg->have_payload_sha256, 0);
+}
+
+static void test_module_index_entry(void)
+{
+    const char *text =
+        "component=fs\n"
+        "type=kernelmod\n"
+        "version=0.1.0\n"
+        "chip=esp32s3\n"
+        "board=tdeck_plus\n"
+        "file=fs-tdeck_plus-0.1.0.cat\n"
+        "size=2737\n"
+        "sha256=" HASH64 "\n"
+        "key=developer\n"
+        "min_coreos=1.2.0\n"
+        "\n"
+        "component=about\n"
+        "type=module\n"
+        "version=0.1.0\n"
+        "file=about-tdeck_plus-0.1.0.cat\n"
+        "size=453\n"
+        "sha256=" HASH64 "\n"
+        "key=developer\n";
+
+    purr_manifest_t m;
+    int n = purr_manifest_parse(&m, text, strlen(text));
+    CHECK_EQ(n, 2);
+    CHECK_EQ(m.dropped, 0);
+
+    const purr_manifest_entry_t *fs = purr_manifest_find(&m, "fs", "esp32s3", "tdeck_plus");
+    CHECK(fs != NULL);
+    CHECK(strcmp(fs->type, "kernelmod") == 0);
+    CHECK(strcmp(fs->min_coreos, "1.2.0") == 0);
+
+    const purr_manifest_entry_t *about = purr_manifest_find(&m, "about", NULL, NULL);
+    CHECK(about != NULL);
+    CHECK(strcmp(about->type, "module") == 0);
+
+    /* A whole-component entry (no `type=` line at all) still parses with an empty type,
+     * distinguishing it from either module shape -- existing recovery-manifest entries are
+     * unaffected by this field's addition. */
+    const char *plain =
+        "component=coreos\nversion=1.0.0\nfile=c.kitt\nsize=10\nsha256=" HASH64 "\n";
+    purr_manifest_t m2;
+    purr_manifest_parse(&m2, plain, strlen(plain));
+    CHECK(strcmp(m2.entries[0].type, "") == 0);
 }
 
 static void test_find_misses(void)
@@ -182,6 +273,8 @@ static void test_empty_input(void)
 int main(void)
 {
     test_basic_parse();
+    test_payload_fields();
+    test_module_index_entry();
     test_find_misses();
     test_comments_and_blank_runs();
     test_missing_required_fields_are_dropped();

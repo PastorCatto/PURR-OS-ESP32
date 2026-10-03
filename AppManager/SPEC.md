@@ -236,6 +236,10 @@ On monolithic boards it is linked into the packed image.
 
 ### 8.1 The shell (command line)
 
+**The pipes/redirection/variables/job-control style described below is designed, not built**
+([F-04](../documentation/FINDINGS.md#f-04), `PurrOS/components/coreos/SPEC.md` section 3.7). What
+runs today is tokenizing, line editing and a command table.
+
 The core system in AppManager is a **command-line shell** with a launcher and a
 task manager, in a Unix-like style. There is no graphical UI in this work. A
 graphical launcher comes later, on top of the same services (`../UI/SPEC.md`).

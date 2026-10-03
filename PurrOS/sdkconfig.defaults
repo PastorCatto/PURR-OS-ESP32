@@ -2,9 +2,24 @@
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# 16384 overflowed in real, live testing 2026-10-03 (first-ever real-network run of the
+# recovery path, "a stack overflow in task main has been detected", mid-download of
+# kernel_waveshare154.cat): purr_recovery_loader_main() runs directly on the "main" task,
+# with no task boundary between it and HTTPS (esp_http_client) + a full TLS handshake
+# (mbedtls, esp_crt_bundle's X.509 chain validation) + this project's own SHA-256/ECDSA
+# image verification (purr_verify/purr_crypto_mbedtls) all nested in one call stack --
+# KittenOS's own stage-2 continue-install and the shell's "netinstall" command hit the
+# identical call depth on their own main task too, so this is not loader-specific.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 
 # The recovery manifest (OTA/SPEC.md section 5): used by the recovery loader on its own,
 # and by KittenOS's "net install". Kept here (not just as the Kconfig default) so it is
 # not silently stuck on a stale value in an already-configured build directory.
-CONFIG_PURR_RECOVERY_MANIFEST_URL="https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/INTERN/recovery.manifest"
+#
+# IMPORTANT: this file overrides Kconfig.projbuild's own default and is NOT re-applied to a
+# build directory that already has a cached sdkconfig -- found the hard way, 2026-09-30, when
+# updating only Kconfig.projbuild silently left two already-built binaries pointing at the old
+# URL. Update both files together, and wipe or regenerate any existing build/<board>-<profile>
+# directory's sdkconfig after changing either.
+CONFIG_PURR_RECOVERY_MANIFEST_URL="https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar1/recovery.manifest"
+CONFIG_PURR_MODULE_INDEX_URL="https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar2/modules.manifest"

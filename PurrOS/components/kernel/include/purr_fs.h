@@ -69,6 +69,38 @@ int purr_fs_stat(purr_fs_t *fs, const char *path, int *is_dir, uint32_t *size);
 
 const char *purr_fs_strerror(int err);
 
+/*
+ * File ownership (documentation/FINDINGS.md F-10, PurrOS/components/coreos/SPEC.md 4.2):
+ * one LittleFS custom attribute per path, {owner_uid, mode}. mode is two bits -- there are
+ * no groups, so nothing richer is meaningful. Root (uid 0) and an admin acting on their own
+ * behalf always have full access regardless of mode; that check is account-aware and lives
+ * above this layer (commands.c), not here.
+ */
+#define PURR_FS_MODE_OREAD  (1u << 0)   /* others besides the owner may read */
+#define PURR_FS_MODE_OWRITE (1u << 1)   /* others besides the owner may write */
+
+/* Not a LittleFS error -- the account-aware layer above returns this when ownership
+ * refuses an access; purr_fs_strerror() still turns it into words since callers use that
+ * for every fs_* error uniformly, this one included. Chosen to not collide with any
+ * LFS_ERR_* value above (EACCES's usual POSIX number, -13, is free here). */
+#define PURR_FS_ERR_DENIED (-13)
+
+typedef struct {
+    uint8_t owner_uid;    /* 0 = root */
+    uint8_t mode;         /* PURR_FS_MODE_* bits */
+} purr_fs_owner_t;
+
+/* The owner/mode stored on exactly this path. LFS_ERR_NOATTR if this exact path has none
+ * of its own -- see purr_fs_effective_owner, which walks up to find one. */
+int purr_fs_get_owner(purr_fs_t *fs, const char *path, purr_fs_owner_t *out);
+
+/* Sets (or replaces) the owner/mode stored on exactly this path. */
+int purr_fs_set_owner(purr_fs_t *fs, const char *path, const purr_fs_owner_t *owner);
+
+/* path's own owner/mode if set, otherwise the nearest ancestor directory's, otherwise
+ * {0, 0} (root, no outside access) if nothing up to "/" has one set. Always fills *out. */
+void purr_fs_effective_owner(purr_fs_t *fs, const char *path, purr_fs_owner_t *out);
+
 /* The flash partition named `label` as a block device (device only, src/purr_fs_flash.c). */
 int purr_fs_flash_bd(const char *label, purr_bd_t *bd);
 

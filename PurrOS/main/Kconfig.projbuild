@@ -16,9 +16,20 @@ menu "PURR OS profile"
             bool "minimal: the recovery loader"
     endchoice
 
+    config PURR_VERBOSE_BOOT
+        bool "Verbose boot log (module/kernelmod loading) on screen"
+        default y
+        help
+            Prints each /system module and /kernelmods kernelmod's name as it's found,
+            verified and loaded (or rejected/quarantined) onto the actual boot screen, not
+            just the serial log -- lets a developer see what's happening during
+            purr_modules_setup() without a serial capture. Meant to be turned off for an
+            official/shipped build, which would show a splash screen here instead (not yet
+            built; this option is the switch point for it).
+
     config PURR_RECOVERY_MANIFEST_URL
         string "Recovery manifest URL"
-        default "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/INTERN/recovery.manifest"
+        default "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar1/recovery.manifest"
         help
             Where the recovery manifest (OTA/SPEC.md section 5) is fetched from, over HTTPS.
             The recovery loader (minimal profile) uses this on its own for KittenOS; KittenOS
@@ -26,5 +37,16 @@ menu "PURR OS profile"
             which installs PURR OS. Named images are fetched from the same URL's directory.
             Set this to a real release's manifest before building for a device that needs to
             recover or install over the internet.
+
+    config PURR_MODULE_INDEX_URL
+        string "Module index URL"
+        default "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar2/modules.manifest"
+        help
+            Where the module index (OTA/SPEC.md section 6.1) is fetched from, over HTTPS.
+            Lists the individual command modules and kernelmods for a specific CoreOS
+            release -- a separate, smaller file from the recovery manifest above, since the
+            recovery loader never reads it; only "netinstall modules" (Install/SPEC.md) does,
+            once Wi-Fi and the filesystem are both up. Named images are fetched from the same
+            URL's directory, same convention as the recovery manifest.
 
 endmenu

@@ -1,0 +1,8 @@
+# T-Deck Plus: ESP32-S3, 16 MB quad flash, 8 MB PSRAM. Same board settings as PurrOS/'s own
+# sdkconfig.board.tdeck_plus -- the kernel component's display/bus code needs them identically.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PURR_BOARD_TDECK_PLUS=y
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y

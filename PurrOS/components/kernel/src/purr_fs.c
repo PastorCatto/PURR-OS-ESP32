@@ -225,6 +225,64 @@ int purr_fs_stat(purr_fs_t *fs, const char *path, int *is_dir, uint32_t *size)
     return 0;
 }
 
+/* ---------------------------------------------------------------- ownership (F-10) */
+
+#define OWNER_ATTR_TYPE 0x01
+
+int purr_fs_get_owner(purr_fs_t *fs, const char *path, purr_fs_owner_t *out)
+{
+    NEED_MOUNT(fs);
+    uint8_t buf[2];
+    lfs_ssize_t n = lfs_getattr(&fs->lfs, path, OWNER_ATTR_TYPE, buf, sizeof(buf));
+    if (n < 0) {
+        return (int)n;
+    }
+    if (n != sizeof(buf)) {
+        return LFS_ERR_NOATTR;       /* a stale/short attribute is as good as none */
+    }
+    out->owner_uid = buf[0];
+    out->mode = buf[1];
+    return 0;
+}
+
+int purr_fs_set_owner(purr_fs_t *fs, const char *path, const purr_fs_owner_t *owner)
+{
+    NEED_MOUNT(fs);
+    uint8_t buf[2] = {owner->owner_uid, owner->mode};
+    return lfs_setattr(&fs->lfs, path, OWNER_ATTR_TYPE, buf, sizeof(buf));
+}
+
+void purr_fs_effective_owner(purr_fs_t *fs, const char *path, purr_fs_owner_t *out)
+{
+    char buf[128];
+    size_t len = strlen(path);
+    if (len >= sizeof(buf)) {
+        len = sizeof(buf) - 1;
+    }
+    memcpy(buf, path, len);
+    buf[len] = '\0';
+
+    for (;;) {
+        if (purr_fs_get_owner(fs, buf, out) == 0) {
+            return;
+        }
+        char *slash = strrchr(buf, '/');
+        if (slash == NULL) {
+            break;
+        }
+        if (slash == buf) {
+            /* buf is "/something" with no parent left except "/" itself. */
+            if (purr_fs_get_owner(fs, "/", out) == 0) {
+                return;
+            }
+            break;
+        }
+        *slash = '\0';
+    }
+    out->owner_uid = 0;
+    out->mode = 0;
+}
+
 const char *purr_fs_strerror(int err)
 {
     switch (err) {
@@ -243,6 +301,7 @@ const char *purr_fs_strerror(int err)
     case LFS_ERR_NOMEM:       return "out of memory";
     case LFS_ERR_NOATTR:      return "no such attribute";
     case LFS_ERR_NAMETOOLONG: return "name too long";
+    case PURR_FS_ERR_DENIED:  return "permission denied";
     default:                  return "filesystem error";
     }
 }

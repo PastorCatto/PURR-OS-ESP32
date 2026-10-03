@@ -33,19 +33,24 @@ typedef enum {
     PURR_MENU_ACT_INTERNET_RECOVERY
 } purr_menu_action_t;
 
+/* Named purr_menu_key_t, not purr_key_t: purr_keybag.h already uses purr_key_t for a signing
+ * key record, an unrelated type. The two never collided before because nothing had ever
+ * included both headers in the same translation unit -- found for real, 2026-09-30, the first
+ * time an attempt was made to build CoreOS's real source (verification and the boot menu both)
+ * as one relocatable file (PurrOS/SPEC.md section 6). */
 typedef enum {
     PURR_KEY_NONE = 0,
     PURR_KEY_UP,
     PURR_KEY_DOWN,
     PURR_KEY_ENTER
-} purr_key_t;
+} purr_menu_key_t;
 
 /*
  * The T-Deck keyboard has no arrow keys, so menus use WASD: w up, s down, enter or d
  * to choose. Only for navigation. A text field (the Wi-Fi password, say) takes the
  * raw character and must not go through this.
  */
-purr_key_t purr_key_from_char(char c);
+purr_menu_key_t purr_key_from_char(char c);
 
 typedef struct {
     char label[PURR_MENU_LABEL_LEN];   /* the partition's name */
@@ -73,7 +78,7 @@ typedef struct {
 void purr_menu_init(purr_menu_t *m, const purr_menu_part_t *parts, int nparts, int preferred);
 
 /* Advance by dt_ms and apply one key. Returns the choice once there is one. */
-purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_key_t key);
+purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_menu_key_t key);
 
 /* What to draw: false until the recovery entry has appeared. */
 int purr_menu_visible(const purr_menu_t *m);

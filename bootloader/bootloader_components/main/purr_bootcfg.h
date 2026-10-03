@@ -20,4 +20,13 @@ bool purr_bootcfg_load(purr_cfg_t *out);
  */
 bool purr_bootcfg_take_flag(uint32_t flag);
 
+/*
+ * Write cfg as the newest copy (bumping seq, sealing the CRC, reading back to check), the
+ * same way purr_bootcfg_take_flag already does internally -- exposed here so purr_boot.c can
+ * bump boot_fail_count and set flags that flow bootloader -> OS (PURR_CFGF_AUTO_REINSTALL),
+ * the opposite direction from the one-shot request flags purr_bootcfg_take_flag clears.
+ * Returns false if there is no purrcfg partition or the write failed; never blocks booting.
+ */
+bool purr_bootcfg_store(purr_cfg_t *cfg);
+
 #endif

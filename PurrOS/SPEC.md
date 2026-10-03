@@ -538,14 +538,50 @@ way, monolithic or modular, just with a different target.
   runtimes/the drivers bundle through the file-swap path instead (section 6.1, `OTA/SPEC.md`
   section 3). The module loader's page-size and relocation-count caps have also grown (section
   6, above) -- both real blockers this bullet used to list are cleared.
-- **Still not built:** `purrstrap` support for actually building CoreOS as a relocatable
-  root-filesystem file (the loader can now take something that size; nothing that size has been
-  built to hand it), and converting CoreOS's real source to call through a kernel table instead
-  of `malloc`/`vTaskDelay`/`esp_partition_*`/`mbedtls_*` directly (`CoreOSSpike/SPEC.md` proved
-  the mechanism on a small hand-picked set of calls, not CoreOS's actual breadth). Today's build
-  still links kernel and CoreOS into one flashed image on the T-Deck Plus, same as the
-  monolithic tier -- a practical shortcut during this rewrite's early iteration, not the
-  intended final shape. The bootloader's own fallback chain also still only checks that a slot
+- **Built, 2026-09-30: a genuinely standalone, separate kernel binary, proven on real
+  hardware.** New top-level project (`Kernel/`, same shape as `bootloader/`), reusing
+  `PurrOS/components/kernel` directly -- no `PurrOS/main` (no shell, login, modules, apps),
+  not another PurrOS profile. `app_main()` does exactly the kernel's job and nothing else:
+  `purr_kernel_init()` (board power, bus, display), mounts `root` via `purr_fs_flash_bd`/
+  `purr_fs_mount`, then idles -- there is nothing to hand off to yet. Flashed to the real
+  `kernel` partition and booted: `purr_boot: booting app slot 0`, `Project name: purr_kernel`,
+  `ST7789 320x240 up`, `root filesystem: mounted`. **267 KB vs. the monolith's ~1.08 MB** --
+  about a quarter the size, the real, measured proof that the separation is substantive, not
+  just a partition-table reservation.
+- **Built, same day, later: the kernel genuinely loads and runs real CoreOS code from a file,
+  proven on real hardware.** `Kernel/main/kernel_table.c` gives this kernel its own real
+  `purr_kernel_table_t` (console, filesystem, heap, uptime -- login/apps/reboot/etc. left
+  NULL on purpose, since that's real CoreOS content that hasn't moved into this kernel's
+  domain yet, not faked); `Kernel/main/loader.c` ports `load_relocatable_file()`'s exact
+  mechanism (this kernel doesn't link `PurrOS/main` at all); `Kernel/coreos_min/
+  coreos_min_entry.c` is the first real (not synthetic) CoreOS entry point -- no command
+  dispatch table yet (commands.c's real and much bigger content, a separate conversion), but
+  it genuinely uses the kernel table for console output and a real `fs_list` of the actual
+  root filesystem, not a self-contained checksum like the 16-file proof. Confirmed on the
+  physical display: the kernel mounts root, writes and loads `/coreos.cat` (embedded,
+  `plant_temp_modules()`-style temporary scaffolding), relocates it into PSRAM, calls the
+  real entry point with the real kernel table, and that code prints through it and lists the
+  real filesystem correctly. (Serial logging mysteriously stops right after the entry call,
+  cause not yet root-caused -- the display output is what actually confirms success.) Also
+  hit and fixed: `Kernel/`'s `sdkconfig.defaults` was missing `CONFIG_ESP_MAIN_TASK_STACK_SIZE
+  =16384`, causing a `StoreProhibited` crash inside ECDSA verification -- PurrOS's own
+  defaults already carry this for the same reason.
+
+  **Packaged for real distribution too:** `purrstrap coreos package-component` (new action)
+  wraps an already-built raw binary into a signed-ready `PURR_IMG_MODULE` with the matching
+  `PURR_MOD_KERNEL`/`PURR_MOD_LOADER` subtype -- the shape `netinstall kernel` already
+  expects. Used to sign the real kernel binary and add a `component=kernel` entry to a
+  published KittenOS release's recovery manifest; not yet tested against a live release
+  (no real network credentials available this session).
+
+  **Still not done:** nothing yet loads the full, real CoreOS -- only this one deliberately
+  minimal entry point -- and converting CoreOS's real source to call through a kernel table
+  instead of `malloc`/`vTaskDelay`/`esp_partition_*`/`mbedtls_*` directly
+  (`CoreOSSpike/SPEC.md` proved the mechanism on a small hand-picked set of calls, not
+  CoreOS's actual breadth) is still real, unstarted work. Today's `full`/`recovery` builds
+  still link kernel and CoreOS into one flashed image on the T-Deck Plus, same as the
+  monolithic tier -- the standalone kernel above is a real, working alternative path, not a
+  replacement yet. The bootloader's own fallback chain also still only checks that a slot
   looks like a real app image (a magic byte), not a real PURR signature -- real per-image
   verification (`bootloader/SPEC.md` section 6, steps 4-5) is designed but not built for
   `kernel`/`kittenos`/`loader`, only for the boot package itself.

@@ -22,8 +22,26 @@
  *   key=system
  *   min_bootloader=1.0.0
  *   min_coreos=1.0.0
+ *   payload_size=233796
+ *   payload_sha256=9f1a0c...(64 hex characters, F-14, optional)
  *
  * `chip` and `board` may be "any" to match every chip or board.
+ *
+ * This same format and parser also serve the module index (OTA/SPEC.md section 6.1) -- a
+ * separate file, not a new format: one stanza per individual command module or kernelmod
+ * (`about`, `fs`, ...), using `type=module` or `type=kernelmod` to say which folder it
+ * belongs in (`/system` or `/kernelmods`). `component` doubles as the module's name. Example:
+ *
+ *   component=fs
+ *   type=kernelmod
+ *   version=0.1.0
+ *   chip=esp32s3
+ *   board=tdeck_plus
+ *   file=fs-tdeck_plus-0.1.0.cat
+ *   size=2737
+ *   sha256=c2a9d0...(64 hex characters)
+ *   key=developer
+ *   min_coreos=1.2.0
  */
 #ifndef PURR_MANIFEST_H
 #define PURR_MANIFEST_H
@@ -43,9 +61,19 @@ extern "C" {
 #define PURR_MANIFEST_FILE_LEN     64
 #define PURR_MANIFEST_ROLE_LEN     16
 #define PURR_MANIFEST_DATE_LEN     16
+#define PURR_MANIFEST_TYPE_LEN     16
 
+/* `type`, added for the module index (OTA/SPEC.md section 6.1 -- a second, separate file
+ * using this same parser, not a new format): empty ("") for a whole-component entry (kernel,
+ * coreos, kittenos, ...), "module" or "kernelmod" for one of the individual command
+ * modules/kernelmods living in /system or /kernelmods. `component` doubles as that module's
+ * name ("about", "fs", ...) either way -- one less field, since nothing needs both at once.
+ * `min_coreos` on a module entry means what it already means on every other entry: the
+ * minimum CoreOS version it needs, not a required exact match -- the real compatibility gate
+ * is the ABI version baked into the .cat file's own header, already checked at load time. */
 typedef struct {
     char component[PURR_MANIFEST_NAME_LEN];
+    char type[PURR_MANIFEST_TYPE_LEN];
     char version[PURR_MANIFEST_VERSION_LEN];
     char chip[PURR_MANIFEST_CHIP_LEN];
     char board[PURR_MANIFEST_BOARD_LEN];
@@ -55,6 +83,15 @@ typedef struct {
     char key_role[PURR_MANIFEST_ROLE_LEN];
     char min_bootloader[PURR_MANIFEST_VERSION_LEN];
     char min_coreos[PURR_MANIFEST_VERSION_LEN];
+    /* F-14, optional (0/all-zero if absent -- older manifests, and bootpkg, which has no
+     * payload split, don't carry these): size and hash of just the PAYLOAD inside `file`'s
+     * container (purr_image_header_t's payload_offset/payload_size/payload_sha256), for a
+     * component whose target partition holds only the stripped payload, never the whole
+     * signed container (kernel, kittenos -- RecoveryLoader's own partition_matches_manifest()
+     * needs this to check what's already on the device without downloading it again). */
+    uint32_t payload_size;
+    uint8_t payload_sha256[32];
+    int have_payload_sha256;
 } purr_manifest_entry_t;
 
 typedef struct {

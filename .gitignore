@@ -1,12 +1,14 @@
 # Build artifacts
 build/
 build_*/
+dist/
 
 # Intermediate build scratch — never committed
 GHReleases/
 baked/
 prebuilt/
 cattobaked/
+rel/
 
 # releases/ IS tracked — distributable flash.bin artifacts per version
 

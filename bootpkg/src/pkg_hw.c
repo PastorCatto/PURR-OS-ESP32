@@ -29,6 +29,22 @@ static inline int pin_read(int p)
     return p < 32 ? (int)((REG(0x3C) >> p) & 1u) : (int)((REG(0x40) >> (p - 32)) & 1u);
 }
 
+/* ------------------------------------------------------------ eFuse (read-only) */
+
+/* The ESP32-S3's own hardware Secure Boot status (EFUSE_SECURE_BOOT_EN, eFuse block 0,
+ * EFUSE_RD_REPEAT_DATA2_REG bit 20 -- same bit esp_secure_boot_enabled() reads via the HAL,
+ * not available to this standalone freestanding build). Read-only: this never programs
+ * anything. Shown on the boot menu so "is it enabled" has a real, zero-risk answer, whether
+ * or not the fuse is ever actually burned (bootloader/SPEC.md section 6). */
+#define EFUSE_BASE 0x60007000u
+#define EFUSE_RD_REPEAT_DATA2 (*(volatile uint32_t *)(EFUSE_BASE + 0x38))
+#define EFUSE_SECURE_BOOT_EN_BIT (1u << 20)
+
+int hw_secure_boot_enabled(void)
+{
+    return (EFUSE_RD_REPEAT_DATA2 & EFUSE_SECURE_BOOT_EN_BIT) != 0;
+}
+
 static const purr_boot_services_t *g;
 
 static void delay_us(uint32_t us) { g->delay_us(us); }
@@ -89,6 +105,12 @@ void hw_fill(int x, int y, int w, int h, uint16_t c)
     }
     pin_hi(PIN_CS);
 }
+
+/* This panel already draws immediately -- nothing to batch. */
+void hw_flush(void) {}
+
+/* The keyboard reads immediately too -- nothing here needs a clock. */
+void hw_tick(uint32_t dt_ms) { (void)dt_ms; }
 
 int hw_text_width(const char *s, int scale)
 {

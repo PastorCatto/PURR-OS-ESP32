@@ -1,0 +1,15 @@
+# Name,   Type, SubType, Offset,  Size
+# Must match PurrOS/partitions/waveshare154.csv exactly -- the bootloader and PurrOS/kernel
+# both have to agree on where every partition lives. bootloader/partitions.csv (the default,
+# no per-board override file until now) is the 16 MB T-Deck layout -- doesn't fit this
+# board's 8 MB flash (F-01/F-21, documentation/FINDINGS.md).
+nvs,      data, nvs,     0x9000,   0x6000
+otadata,  data, ota,     0xf000,   0x2000
+phy_init, data, phy,     0x11000,  0x1000
+bootpkg,  data, 0x40,    0x12000,  0xC000
+purrcfg,  data, 0x40,    0x1E000,  0x2000
+kittenos, app,  factory, 0x20000,  0x120000
+kernel,   app,  ota_0,   0x140000, 0x140000
+loader,   app,  test,    0x280000, 0x120000
+netrec,   data, 0x41,    0x3A0000, 0x1000
+root,     data, 0x83,    0x3A1000, 0x45F000

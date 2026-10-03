@@ -105,6 +105,23 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
 #define PURR_CFGF_SECURE_OFF_ONCE  (1u << 2)
 #define PURR_CFGF_FORCE_RECOVERY   (1u << 3)
 #define PURR_CFGF_FORCE_LOADER     (1u << 4)
+/* The opposite direction from the flags above: set by the bootloader itself (bootloader/SPEC.md
+ * section 6's boot_fail_count ladder), not by a request the OS made, when it chose the loader
+ * because the failure count crossed the ladder's second threshold rather than because of
+ * FORCE_LOADER or a human picking it from the menu. Read and cleared by the recovery loader
+ * (RecoveryLoader/SPEC.md section 2.1), never by the bootloader. */
+#define PURR_CFGF_AUTO_REINSTALL   (1u << 5)
+/* Set by the recovery loader (never the bootloader) right before it restarts into a
+ * freshly-installed `kernel`/`kittenos`, alongside resetting `boot_fail_count` to 0 --
+ * otherwise the ladder's own count, unaffected by a successful flash, immediately
+ * re-escalates back to the loader on the very next boot before the fix ever gets a chance
+ * to run (found for real, 2026-09-30: a genuine auto-recovery loop, each cycle a real
+ * success, that could never reach a healthy boot). Read and cleared by KittenOS
+ * (`PurrOS/main/main.c`, `CONFIG_PURR_PROFILE_RECOVERY`) on the boot right after: stage 2
+ * of recovery, reusing the same saved network record to carry on installing `kernel` and
+ * the module index (`Install/SPEC.md` step 3) automatically, not just sitting at a normal
+ * login prompt as if nothing had just happened. */
+#define PURR_CFGF_CONTINUE_INSTALL (1u << 6)
 
 /* boot_target */
 #define PURR_TARGET_NORMAL         0

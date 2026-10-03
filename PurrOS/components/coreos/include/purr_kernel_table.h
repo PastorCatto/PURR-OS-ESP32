@@ -36,10 +36,10 @@
 extern "C" {
 #endif
 
-/* Bumped from 4: the table grew (print_*, console_clear, reboot_system) for the last sweep
- * of the built-in table (`version`/`info`/`parts`/`clear`/`reboot`/`purrcfg`, folded into
- * Modules/coreos/sysinfo_module.c alongside mem/uptime). */
-#define PURR_KERNEL_TABLE_ABI_VERSION 5u
+/* Bumped from 6: the table grew (serial_write/serial_read, and task_create -- added in the
+ * same pass, both for the optional debug module, so this one bump covers both instead of
+ * forcing a second full kernelmod rebuild for an addition nothing has shipped against yet). */
+#define PURR_KERNEL_TABLE_ABI_VERSION 7u
 
 /* Read-only, for whoami/id -- the only two account commands that are pure display, not a
  * security operation (see purr_kernel_table_t's login_* fields for the rest). */
@@ -136,6 +136,39 @@ typedef struct {
      * `target` is "recovery", "loader", or NULL for a normal restart. Never returns on
      * success (esp_restart()). */
     void (*reboot_system)(purr_cli_t *cli, const char *target);
+
+    /* The keyboard, same tier as the console/display above: the kernel owns the raw input
+     * driver. Returns one character, or 0 if none is waiting -- purr_kernel_key()'s own
+     * shape, reached through the table instead of called directly. */
+    char (*read_key)(void);
+
+    /* The login gate (Users/SPEC.md section 4, login.c), one opaque call each, same reasoning
+     * as login_su/login_passwd above: password prompts read straight off the keyboard through
+     * the kernel's own raw access, and all of it -- first-time setup, the login loop, the
+     * growing-delay lockout -- stays inside rather than being decomposed into primitives a
+     * caller could get wrong or skip a step of. login_whoami (above) already covers reading
+     * who is currently logged in; these are the rest of the session lifecycle. */
+    void (*login_run)(void);
+    void (*login_skip)(const char *name, purr_user_role_t role);
+    int (*login_take_logout)(void);        /* 1 if "logout" was run, and clears the request */
+
+    /* Raw serial (UART/USB-Serial-JTAG) read/write -- for the optional debug module
+     * (Modules/test/debug_module.c) only; nothing else in the table needs it, every other
+     * module already reaches the console/log through puts/printf. Deliberately not a
+     * general I/O path: this is a hardening lever as much as a feature -- a build that
+     * doesn't plant debug.cat into /kernelmods has no raw-serial surface at all, the module
+     * system itself is the on/off switch, not a config flag here. */
+    int (*serial_write)(const void *buf, int len);              /* bytes written, or <0 */
+    int (*serial_read)(void *buf, int max, int timeout_ms);     /* bytes read (0 = none), or <0 */
+
+    /* Spawns a background task that runs for as long as the device is up -- for the debug
+     * module's serial console loop, which has to be listening from boot, not only while a
+     * shell command is running. Matches the shape already sketched for the future kernel/
+     * CoreOS table (PurrOS/components/coreos/SPEC.md section 4.1's task_create), built now
+     * because the debug module needs it, not ahead of a real need. entry() never returns.
+     * Returns 0 on success. */
+    int (*task_create)(void (*entry)(void *arg), const char *name, uint32_t stack_words,
+                       void *arg, int priority);
 } purr_kernel_table_t;
 
 typedef struct {

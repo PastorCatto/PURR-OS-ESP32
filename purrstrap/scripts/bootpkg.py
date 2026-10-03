@@ -15,7 +15,16 @@ from lib.model import Action, Param, Script
 
 PKG_DIR = "bootpkg"
 # board -> (compiler prefix, chip id, linker script). Chip ids are esp_chip_id_t values.
-BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld")}
+BOARDS = {
+    "tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
+    "waveshare154": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
+}
+# Which pkg_hw_*.c backs a board's display/input -- the one real per-board source file
+# (the rest of sources() below is shared). "InkyTuxedo" is this project's own codename for
+# the waveshare154 bootpkg build (pkg_main.c's draw_header()), not an upstream term -- picked
+# so a device on the bench is identifiable by sight/log line, same reason the recovery
+# releases this repo publishes are named (JumpingJaguar1, ...).
+HW_SOURCE = {"tdeck_plus": "pkg_hw.c", "waveshare154": "pkg_hw_epd.c"}
 VERSION = "0.1.0"
 
 # Re-exported under their original names: purrstrap/tests/test_bootpkg.py reads these.
@@ -70,9 +79,9 @@ def compile_args(repo_root, board):
             "-I", os.path.join(repo_root, "PurrOS", "components", "kernel", "include")]
 
 
-def sources(repo_root):
+def sources(repo_root, board):
     return [os.path.join(repo_root, PKG_DIR, "src", "pkg_main.c"),
-            os.path.join(repo_root, PKG_DIR, "src", "pkg_hw.c"),
+            os.path.join(repo_root, PKG_DIR, "src", HW_SOURCE[board]),
             os.path.join(repo_root, "PurrOS", "components", "coreos", "src", "purr_menu.c"),
             os.path.join(repo_root, "PurrOS", "components", "kernel", "src",
                          "purr_font_data.c")]
@@ -111,7 +120,7 @@ def build(ctx, board):
         fh.write(f'#include "{board_header(root, board).replace(os.sep, "/")}"\n')
 
     objs = []
-    for src in sources(root):
+    for src in sources(root, board):
         obj = os.path.join(out, os.path.basename(src)[:-2] + ".o")
         code = ctx.run([gcc] + compile_args(root, board) + ["-I", out, "-c", src, "-o", obj])
         if code != 0:

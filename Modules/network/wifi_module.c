@@ -81,7 +81,9 @@ static int cmd_wifi_forget(purr_cli_t *cli, int argc, char **argv)
         s_core->puts(cli, "usage: wifi forget <ssid>\n");
         return 1;
     }
-    s_core->net_forget(argv[1]);
+    if (s_core->net_forget(cli, argv[1]) != 0) {
+        return 1;              /* the core already said why on cli (F-10) */
+    }
     s_core->puts(cli, "forgotten (if it was saved)\n");
     return 0;
 }

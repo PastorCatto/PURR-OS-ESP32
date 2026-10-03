@@ -168,6 +168,14 @@ the callbacks it was given.
 
 ### 3.7 purr_cli (command-line engine and shell syntax)
 
+**Designed, not built** ([F-04](../../../documentation/FINDINGS.md#f-04)). What `purr_cli.c` actually
+has today: tokenizing with quotes, line editing (backspace, Ctrl-U), and a command table -- real,
+tested, and in daily use. Everything else below -- pipes, redirection, `;`/`&&`/`||`/`&`, variables,
+scripts, `log`/`status`/`report`/`clear-failures`/`sh`/`ps`/`top`/`kill`/`run`, job control -- is the
+target shape, not the current one; `purr_cli.h` itself says "pipes come later." Read this section as
+a plan to build toward, not a description of what a command written against `purr_cli.c` can rely on
+existing yet.
+
 A small shell engine on the console, used by CoreOS's own shell, by KittenOS, and by the shell in
 AppManager (`AppManager/SPEC.md` section 8.1).
 
@@ -309,6 +317,69 @@ typedef struct {
 
 This is a design placeholder, not a frozen ABI -- it gets filled in properly, field by
 field, as CoreOS's real call sites actually convert (section 10).
+
+### 4.2 File ownership and permission enforcement
+
+Design for [F-10](../../../documentation/FINDINGS.md#f-10): today every file is a plain
+LittleFS path with no owner or mode at all, so any command a module can reach -- `cat
+/etc/shadow`, `write`/`rm` over `/etc/passwd` or `/system`, `format --yes`, `netinstall
+kernel` -- works for a standard user exactly as it would for root. The account-facing
+decisions are `../../../Users/SPEC.md` section 2; this is the mechanism underneath them.
+
+- **Storage: one LittleFS custom attribute per path**, using the attribute API `purr_fs.h`
+  doesn't use yet (`lfs_setattr`/`lfs_getattr`/`lfs_removeattr`, already in the bundled
+  `lfs.h`) -- no separate index file that could drift out of sync with the files it
+  describes. One attribute type holds `{owner_uid: u8, mode: u8}`. `mode` is two bits,
+  whether anyone other than the owner can read or write the file; there are no groups, so
+  nothing more than that is meaningful. Root (uid 0) and an admin acting on their own
+  behalf always have full access regardless of the stored mode, the same as `su`'s existing
+  escalation (`Users/SPEC.md` section 1).
+- **A path's effective owner/mode is its own attribute if set, otherwise the nearest
+  ancestor directory's, otherwise root-only.** This is what lets a fixed rule on `/boot` or
+  `/home/<name>` cover every file written under it later (`/boot/coreos.new`,
+  `/home/alice/apps/...`) without needing its own attribute set at creation time, though one
+  normally still is (below).
+- **The enforcement point is `purr_kernel_table_t`'s `fs_*` entries in `commands.c` --
+  nowhere else.** This is the one boundary every shell-command module already calls through
+  with no other path to the filesystem (section 4.1, confirmed by the fs/accounts sweeps in
+  section 10). Kernel-internal code that calls `purr_fs_*` directly instead of through the
+  table -- `login.c`, `purr_appmgr.c`, the mount/format logic in `purr_fs_setup()` itself --
+  never crosses this check. A wrong or corrupted permission can therefore never strand the
+  OS; it can only ever stop a standard user from reaching something they don't own, which is
+  the point.
+- **Unset is root-only, not open.** A file with no stored attribute -- true of every file
+  that exists before this ships -- is treated as owned by root with neither bit set.
+  Defaulting the other way would mean nothing is actually protected until something
+  remembers to lock it down by hand.
+- **A fixed baseline, corrected and re-verified on every mount.** A short list built into
+  firmware -- `/etc` and `/etc/passwd` (root, world-read), `/etc/shadow` and `/etc/wifi`
+  (root, no outside access), `/boot`, `/system`, `/kernelmods`, `/home` (root; `/system` and
+  `/kernelmods` world-read since every account's shell lists and runs from them, `/boot`
+  world-closed since it only ever holds in-progress component swaps) -- gets checked against
+  the file's actual attribute every time `root` mounts, in `purr_fs_setup()`
+  (`PurrOS/main/commands.c`, the same place the F-37 mount-retry-then-format-on-real-
+  corruption logic already runs). A mismatch is corrected with `lfs_setattr`, then read back
+  with `lfs_getattr` to confirm the correction took -- the same verify-after-write pattern
+  `purr_net_install_run` already uses for a downloaded image -- and logged, since a
+  correction is also tamper evidence. A device that has never seen this feature gets every
+  baseline path set for the first time through the exact same check: "missing" and "wrong"
+  are the same case. This is both the migration path for every device already running
+  (including real hardware already flashed) and the ongoing self-heal.
+- **Existing per-user files are not on that fixed list.** Anything already under
+  `/home/<name>/` is assigned to that account by the path itself during the same pass, not
+  left root-only -- the one-time upgrade is seamless for ordinary account data, only the
+  fixed system paths above are locked down by default.
+- **Destructive whole-device commands are a second, separate check, not a file.**
+  `format`, `netinstall`, `reboot recovery`/`reboot loader`, `wifi forget` and `appformat`
+  aren't really about which file is touched, so file ownership doesn't cover them; they need
+  the same admin check the accounts cluster already has. Today that check exists three
+  times, slightly differently, for `useradd`/`userdel`/`usermod` (`require_admin()`,
+  `commands.c`), `su` (its own inline pair) and `passwd` on another account (its own inline
+  triple) -- consolidating these into one shared helper and applying it to the five commands
+  above closes F-10's other half. One real wrinkle: `wifi`/`netinstall` are not on
+  `purr_kernel_table_t` yet, they're still on the older `purr_core_table_t`
+  (`purr_module_abi.h`), so the check has to land in both tables until that migration
+  happens, not just one.
 
 ## 5. Self-check and the bootloader's result
 
@@ -573,6 +644,15 @@ CoreOS no longer hosts the last-resort support mode. That is KittenOS's job
   remove this call the same day a real one replaces it. Confirmed working end to end on real
   hardware: all four `/system` modules and all four `/kernelmods` load clean after the bump,
   with no further manual step needed.
+
+  **The real replacement is now built, 2026-09-30:** `OTA/SPEC.md` sections 3 and 6.1 --
+  `netinstall modules` fetches the module index, then each module/kernelmod it lists for this
+  chip/board, verifies each the same way `appinstall` verifies an app, and writes it straight
+  to `/system/<name>.cat` or `/kernelmods/<name>.cat`. `purr_modules_setup()`'s automatic call
+  to `plant_temp_modules()` is now disabled; the function and the manual `plantmodules` command
+  stay as a no-network local-dev fallback. Host-tested and compiles clean on-device; not yet
+  run against a live device over real Wi-Fi (no network credentials or reachable server
+  available this session) -- a real, open follow-up, not a known bug.
 - **Whether `mbedtls` compiles freestanding as-is: tried, 2026-09-28, decisive result
   (exploratory only, not committed code -- CoreOSSpike/build, deleted after).** The actual
   ECDSA/ECP/ASN.1/HMAC-DRBG verify code (`ecdsa.c`, `ecp.c`, `asn1*.c`, `hmac_drbg.c`,

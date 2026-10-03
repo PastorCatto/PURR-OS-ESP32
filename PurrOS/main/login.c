@@ -97,7 +97,12 @@ static void first_time_setup(void)
     for (;;) {
         put_str("Name: ");
         read_line(name, sizeof(name), 0);
-        if (name[0] != '\0' && strchr(name, '\t') == NULL) {
+        /* F-11: letters, digits, '-', '_' only, not "root" -- that account's login is
+         * always refused, so creating it here would lock the device out until someone
+         * wiped it from the PC by hand. purr_user_list_add() would already have refused
+         * it (PURR_USER_INVALID), but checking here means a bad name never reaches
+         * create_account() at all, not just that it would have been rejected silently. */
+        if (purr_user_name_valid(name)) {
             break;
         }
         put_str("That name will not work. Try again.\n");

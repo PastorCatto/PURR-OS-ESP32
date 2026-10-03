@@ -19,6 +19,7 @@
 
 #include "purr_board.h"
 #include "purr_display.h"
+#include "purr_driver.h"
 #include "purr_kernel.h"
 
 static const char *TAG = "st7789";
@@ -139,6 +140,7 @@ static esp_err_t d_get_info(purr_display_info_t *out)
     out->width = s.cfg->width;
     out->height = s.cfg->height;
     out->max_chunk_pixels = (uint16_t)(s.dma_bytes / 2);
+    out->bits_per_pixel = 16;
     strncpy(out->name, s.cfg->name, sizeof(out->name) - 1);
     return ESP_OK;
 }
@@ -294,4 +296,22 @@ esp_err_t purr_st7789_init(const purr_display_cfg_t *cfg, int spi_host, const pu
     *out = &s_ops;
     ESP_LOGI(TAG, "%s up, %dx%d", cfg->name, cfg->width, cfg->height);
     return ESP_OK;
+}
+
+/* ------------------------------------------------------------ driver registry (F-02) */
+
+int purr_st7789_probe(const purr_device_t *dev, const purr_board_t *board, void **out_handle)
+{
+    const purr_display_v2_t *disp = NULL;
+    esp_err_t e = purr_st7789_init((const purr_display_cfg_t *)dev->cfg, board->spi.host, &disp);
+    if (e != ESP_OK) {
+        return (int)e;
+    }
+    *out_handle = (void *)disp;
+    return 0;
+}
+
+void purr_st7789_remove(void *handle)
+{
+    (void)handle;         /* purr_st7789_init() has never had a teardown path; unchanged here */
 }

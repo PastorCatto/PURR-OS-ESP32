@@ -19,8 +19,12 @@ extern "C" {
 
 /* A hard cap on how many relocations one module may carry, so a malformed or hostile
  * manifest can't force an unbounded amount of work before individual entries are even
- * checked. purrstrap-built modules will be nowhere near this. */
-#define PURR_RELOC_MAX 4096
+ * checked. Raised from 4096 (PurrOS/SPEC.md section 6, 2026-09-29): every module built so far
+ * was nowhere near that, but CoreOS -- many source files, potentially tens of thousands of
+ * global/function/string references once it's built this way -- needs real headroom. Applying
+ * a relocation is a trivial per-word add, so even the new ceiling costs nothing at boot; this
+ * stays a safety bound against a corrupt or hostile file, not a performance limit. */
+#define PURR_RELOC_MAX 65536
 
 typedef enum {
     PURR_RELOC_OK = 0,

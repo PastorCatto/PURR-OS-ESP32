@@ -67,6 +67,11 @@ enum {
     PURR_USER_FULL = -3,
 };
 
+/* F-11: letters, digits, '-', '_' only, bounded length, not "root". purr_user_list_add()
+ * already enforces this; exposed so a caller (first_time_setup, useradd) can re-prompt
+ * before trying to add, instead of finding out from the rejected result. */
+int purr_user_name_valid(const char *name);
+
 int purr_user_list_add(purr_user_list_t *l, const char *name, uint8_t uid, purr_user_role_t role);
 int purr_user_list_remove(purr_user_list_t *l, const char *name);   /* 1 removed, 0 not found */
 purr_user_t *purr_user_list_find(purr_user_list_t *l, const char *name);

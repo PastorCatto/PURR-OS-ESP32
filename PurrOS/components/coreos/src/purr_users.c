@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "purr_pbkdf2.h"
+#include "purr_util.h"
 
 /* ---------------------------------------------------------------- small helpers */
 
@@ -97,9 +98,18 @@ purr_user_t *purr_user_list_find_uid(purr_user_list_t *l, uint8_t uid)
     return NULL;
 }
 
+/* F-11: letters, digits, '-', '_' only (rules out "/", "..", and the tab/newline that would
+ * corrupt the saved list's own format), not "root" (its login is always refused -- Users/
+ * SPEC.md -- so that name can never be reached once created, locking the device out until
+ * someone wipes it from the PC by hand). */
+int purr_user_name_valid(const char *name)
+{
+    return purr_name_is_safe(name, PURR_USER_NAME_LEN) && strcmp(name, "root") != 0;
+}
+
 int purr_user_list_add(purr_user_list_t *l, const char *name, uint8_t uid, purr_user_role_t role)
 {
-    if (has_bad_char(name) || uid == 0) {
+    if (!purr_user_name_valid(name) || uid == 0) {
         return PURR_USER_INVALID;
     }
     if (purr_user_list_find(l, name) != NULL) {

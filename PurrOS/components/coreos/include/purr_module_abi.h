@@ -30,11 +30,12 @@
 extern "C" {
 #endif
 
-/* Bumped from 3: the table grew (net_install). Appending fields is offset-compatible with a
- * module built against a smaller table (it only ever reads the fields it knows the name of),
- * but the version is bumped anyway so a stale module is refused rather than silently running
- * against a table shape its author never saw -- rebuild and replant it. */
-#define PURR_MODULE_ABI_VERSION 4u
+/* Bumped from 4: net_forget's signature changed (documentation/FINDINGS.md F-10 -- it needs
+ * `cli` and a result now, to refuse a standard user and say why). This one is NOT offset-
+ * compatible like most additions here: an old module calling through the old void(ssid)
+ * shape against this table would read garbage as its two arguments, so the version bump is
+ * load-bearing this time, not just defensive -- rebuild and replant the wifi module. */
+#define PURR_MODULE_ABI_VERSION 5u
 
 /* purr_net.h's own purr_net_ap_t/purr_net_status_t aren't used here on purpose: that header
  * pulls in esp_err_t, whose own header chain ends at sdkconfig.h -- a real ESP-IDF project's
@@ -78,7 +79,13 @@ typedef struct {
      * built, just moved behind the table instead of calling purr_net_* directly. */
     int (*net_scan)(purr_module_net_ap_t *out, int max, int *out_n, char *err, size_t err_cap);
     int (*net_connect)(const char *ssid, const char *pass, char *err, size_t err_cap);
-    void (*net_forget)(const char *ssid);
+
+    /* F-10: unlike the rest of this cluster, forgetting a saved network is destructive
+     * enough (losing the only saved credentials can mean losing the only way back onto the
+     * network) to need the same admin check as format/netinstall/reboot recovery|loader,
+     * not just a plain Wi-Fi operation. Same convention as net_install: 0 on success,
+     * nonzero on failure, the core has already told the user why on `cli`. */
+    int (*net_forget)(purr_cli_t *cli, const char *ssid);
     int (*net_saved)(purr_module_net_ap_t *out, int max);
     void (*net_status)(purr_module_net_status_t *out);
 

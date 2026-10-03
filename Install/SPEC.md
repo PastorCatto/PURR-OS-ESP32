@@ -15,7 +15,9 @@ in `../Boards/SPEC.md`, and the drivers and the pin registry in
 2. **The recovery loader** connects to Wi-Fi and downloads the newest signed KittenOS.
 3. **KittenOS,** which has Wi-Fi on these boards, downloads the rest into the root filesystem: the
    kernel, CoreOS, AppManager, the runtimes, the boot package, the board's driver pack
-   (`../Drivers/SPEC.md`) and, so the device is actually usable and not just recovered, the apps
+   (`../Drivers/SPEC.md`), the individual command modules and kernelmods from the module index
+   (`../OTA/SPEC.md` section 6.1 -- what used to be `plant_temp_modules`'s embedded-firmware
+   stand-in) and, so the device is actually usable and not just recovered, the apps
    from the app repo (`../OTA/SPEC.md` section 8). It formats
    the filesystem and boots normally.
 

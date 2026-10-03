@@ -57,12 +57,33 @@ typedef enum {
     PURR_APP_BAD_CHIP,             /* no payload for this device */
     PURR_APP_BAD_VERIFY,           /* failed verification, and secure_mode is not off */
     PURR_APP_NAME_TOO_LONG,
+    PURR_APP_BAD_NAME,             /* F-11: not letters/digits/-/_ -- would escape the apps dir */
     PURR_APP_EXISTS_NEWER,         /* already installed at this version or newer */
     PURR_APP_REGISTRY_FULL,
     PURR_APP_IO_ERROR,
 } purr_app_result_t;
 
 const char *purr_app_result_name(purr_app_result_t r);
+
+/* The filesystem operations purr_appmgr needs, reached through function pointers instead of a
+ * raw purr_fs_t* -- found for real, 2026-09-30, trying to build this file into a relocatable
+ * module for the first time (PurrOS/SPEC.md section 6): purr_fs_t is a kernel-internal type
+ * (it embeds an lfs_t and the raw block device), and this file called purr_fs_list()/
+ * purr_fs_remove()/purr_fs_stat()/purr_fs_read()/purr_fs_write()/purr_fs_mkdir()/
+ * purr_fs_rename() directly by name -- exactly the kind of direct kernel linkage a freestanding
+ * build can never resolve. Path-shaped, not purr_fs_t-shaped, on purpose: this is the same
+ * shape purr_kernel_table_t's own fs_* entries already use, so a real caller backs it with
+ * those same functions (commands.c); host tests back it with a fake in-memory fs the same way
+ * they always have, just one call removed. */
+typedef struct {
+    int (*list)(const char *path, purr_fs_list_fn cb, void *ctx);
+    int (*read)(const char *path, purr_fs_read_fn cb, void *ctx);
+    int (*write)(const char *path, const void *data, uint32_t len);
+    int (*mkdir)(const char *path);
+    int (*remove)(const char *path);
+    int (*rename)(const char *from, const char *to);
+    int (*stat)(const char *path, int *is_dir, uint32_t *size);
+} purr_appmgr_fs_t;
 
 /* Every function below takes `root`: the folder apps live under, one subfolder per app
  * inside it. Originally always "/" (a dedicated apps-only filesystem); now that apps live
@@ -76,7 +97,7 @@ const char *purr_app_result_name(purr_app_result_t r);
 /* Deletes any "<name>.tmp" folder left over from a cut install. Call once at boot (or once
  * per user's home, wherever apps live), before purr_appmgr_scan. Never fails outright; a
  * folder it cannot remove is just left for the next boot to try again. */
-void purr_appmgr_recover(purr_fs_t *fs, const char *root);
+void purr_appmgr_recover(const purr_appmgr_fs_t *fs, const char *root);
 
 /*
  * Rebuilds the registry by scanning `root`: one subfolder per app, each expected to hold
@@ -85,7 +106,7 @@ void purr_appmgr_recover(purr_fs_t *fs, const char *root);
  * is used to read one package at a time for verification; how big to make it is a caller
  * decision (PSRAM lets it be generous, a board with none does not).
  */
-void purr_appmgr_scan(purr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
+void purr_appmgr_scan(const purr_appmgr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
                       uint8_t *scratch, uint32_t scratch_cap, purr_app_registry_t *reg);
 
 /*
@@ -95,14 +116,14 @@ void purr_appmgr_scan(purr_fs_t *fs, const char *root, const purr_appmgr_env_t *
  * hash, then renames into place (replacing an older version atomically). `cfg` supplies
  * secure_mode for the accept-unsigned rule, same as everywhere else.
  */
-purr_app_result_t purr_appmgr_add(purr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
+purr_app_result_t purr_appmgr_add(const purr_appmgr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
                                   const purr_cfg_t *cfg, const purr_app_registry_t *reg,
                                   const uint8_t *data, uint32_t len);
 
 /* Removes "<root>/<name>/" entirely. 0 on success, nonzero if there is no such app or it
  * could not be fully removed (a partial removal is safe: the next scan just drops it as
  * incomplete, the same as a cut install). */
-int purr_appmgr_remove(purr_fs_t *fs, const char *root, const char *name);
+int purr_appmgr_remove(const purr_appmgr_fs_t *fs, const char *root, const char *name);
 
 const purr_app_entry_t *purr_appmgr_find(const purr_app_registry_t *reg, const char *name);
 

@@ -36,6 +36,14 @@ int purr_version_parse(const char *text, size_t max_len, uint32_t *out);
 #define PURR_VERSION(maj, min, pat) \
     (((uint32_t)(maj) << 24) | ((uint32_t)(min) << 16) | (uint32_t)(pat))
 
+/*
+ * documentation/FINDINGS.md F-11: a name (account or app) is safe to paste into a path
+ * component -- letters, digits, '-', '_' only, non-empty, shorter than max_len. This alone
+ * rules out "/", "..", and the separators a path join would misread; callers add their own
+ * extra rules on top (an account name additionally can't be "root", Users/SPEC.md).
+ */
+int purr_name_is_safe(const char *name, size_t max_len);
+
 #ifdef __cplusplus
 }
 #endif

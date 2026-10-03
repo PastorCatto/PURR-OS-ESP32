@@ -2,7 +2,7 @@
 
 /* No libc: this also runs in the boot package, which links none. */
 
-purr_key_t purr_key_from_char(char c)
+purr_menu_key_t purr_key_from_char(char c)
 {
     switch (c) {
     case 'w': case 'W': return PURR_KEY_UP;
@@ -73,7 +73,7 @@ static purr_menu_result_t choose(const purr_menu_t *m)
     return r;
 }
 
-purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_key_t key)
+purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_menu_key_t key)
 {
     purr_menu_result_t none = {PURR_MENU_ACT_NONE, -1};
 

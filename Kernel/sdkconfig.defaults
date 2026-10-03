@@ -1,0 +1,14 @@
+# The standalone kernel binary: hardware bring-up and the root filesystem, nothing else
+# (PurrOS/components/kernel/SPEC.md). Shares its partition table with bootloader/ and PurrOS/
+# on purpose -- the real device has one layout, not one per project.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+# ECDSA verification (purr_image_verify, via mbedtls) uses real stack depth -- PurrOS's own
+# sdkconfig.defaults sets this for the same reason. Without it, app_main() crashes
+# (StoreProhibited, a near-NULL EXCVADDR) partway through loading the first real module --
+# found the hard way, 2026-09-30, missing here even though PurrOS already carries the fix.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

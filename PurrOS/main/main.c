@@ -5,6 +5,15 @@
  * section 4), then the shell: "KittenOS shell" in the recovery profile, "PURR OS shell" in
  * the full one. The commands are in commands.c; the engine and the terminal are in CoreOS;
  * the login gate and the session are in login.c.
+ *
+ * run_login()/run_shell() below call everything kernel/hardware-level through
+ * purr_kernel_table() (purr_kernel_table.h) instead of touching purr_login_*()/
+ * purr_kernel_key() directly -- PurrOS/SPEC.md section 6: this is the boot orchestration that
+ * would move into a separately loaded CoreOS once that split is real, so it's written now the
+ * way it would have to be written then, the same discipline every kernelmod already keeps.
+ * purros_installed()'s raw esp_partition_* check and the login.h include stay out of that:
+ * it's a profile-level boot decision (which of login_run/login_skip to call at all), not
+ * something CoreOS itself would ever need to make.
  */
 #include <stdio.h>
 
@@ -13,7 +22,6 @@
 #include "freertos/task.h"
 
 #include "commands.h"
-#include "login.h"
 #include "purr_cli.h"
 #include "purr_console.h"
 #include "purr_kernel.h"
@@ -48,35 +56,43 @@ static int purros_installed(void)
 
 static void run_login(void)
 {
+    const purr_kernel_table_t *k = purr_kernel_table();
 #if CONFIG_PURR_PROFILE_RECOVERY
     if (!purros_installed()) {
-        purr_login_skip("setup", PURR_ROLE_USER_ADMIN);
+        k->login_skip("setup", PURR_ROLE_USER_ADMIN);
         return;
     }
 #endif
-    purr_login_run();
+    k->login_run();
+    /* F-10: the account list only exists in memory from here on (purr_fs_setup() ran at
+     * boot, before any login) -- this is the first point /home/<name> ownership can
+     * actually be assigned by name. */
+    purr_fs_permissions_migrate();
 }
 
 static void run_shell(void)
 {
+    const purr_kernel_table_t *k = purr_kernel_table();
     static purr_cli_t cli;
     static char prompt[40];
     int n;
     const purr_cmd_t *cmds = purr_commands(&n);
-    snprintf(prompt, sizeof(prompt), "%s@%s> ", purr_login_current()->name, purr_system_name());
+    purr_klogin_who_t who;
+    k->login_whoami(&who);
+    snprintf(prompt, sizeof(prompt), "%s@%s> ", who.name, purr_system_name());
     purr_cli_init(&cli, cmds, n, purr_console_put, NULL, prompt);
 
-    purr_console_clear();
+    k->console_clear();
     purr_cli_printf(&cli, "%s shell\n", purr_system_name());
     purr_cli_puts(&cli, "Type help for the commands.\n\n");
     purr_cli_prompt(&cli);
-    purr_console_flush();
+    k->console_flush();
 
-    while (!purr_login_take_logout()) {
-        char c = purr_kernel_key();
+    while (!k->login_take_logout()) {
+        char c = k->read_key();
         if (c != 0) {
             purr_cli_feed(&cli, c);
-            purr_console_flush();
+            k->console_flush();
         } else {
             vTaskDelay(pdMS_TO_TICKS(15));
         }
@@ -111,14 +127,24 @@ void app_main(void)
     purr_cli_init(&boot_cli, NULL, 0, purr_console_put, NULL, "");
     purr_cli_printf(&boot_cli, "%s starting\n", purr_system_name());
     purr_fs_setup(&boot_cli);
+#if CONFIG_PURR_PROFILE_RECOVERY
+    /* KittenOS performs the swap for any pending system-file update (PurrOS/SPEC.md section
+     * 6.1) before anything else touches /boot -- reboots and never returns if there was one. */
+    purr_swap_setup(&boot_cli);
+#endif
     purr_modules_setup(&boot_cli);
     purr_apps_setup(&boot_cli);
     purr_net_setup(&boot_cli);
+    purr_continue_install(&boot_cli);
     purr_console_flush();
     vTaskDelay(pdMS_TO_TICKS(1200));   /* long enough to read before the login prompt clears it */
 
+    /* Reached a stable state: reset the bootloader's failure-count ladder
+     * (bootloader/SPEC.md section 6) so it doesn't keep climbing from here. */
+    purr_mark_boot_healthy(&boot_cli);
+
     for (;;) {
-        purr_console_clear();
+        purr_kernel_table()->console_clear();
         run_login();
         run_shell();
     }

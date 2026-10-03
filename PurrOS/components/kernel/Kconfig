@@ -12,6 +12,9 @@ menu "PURR OS"
 
         config PURR_BOARD_CYD_24C
             bool "CYD 2.4C (ESP32-2432S024C)"
+
+        config PURR_BOARD_WAVESHARE154
+            bool "Waveshare ESP32-S3-ePaper-1.54"
     endchoice
 
 endmenu

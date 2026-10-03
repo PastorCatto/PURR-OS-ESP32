@@ -55,6 +55,8 @@ static void apply_kv(purr_manifest_t *m, draft_t *d, const char *key, size_t kle
     } else if (klen == 9 && strncmp(key, "component", 9) == 0) {
         set_field(d->e.component, sizeof(d->e.component), val, vlen);
         d->have_component = 1;
+    } else if (klen == 4 && strncmp(key, "type", 4) == 0) {
+        set_field(d->e.type, sizeof(d->e.type), val, vlen);
     } else if (klen == 7 && strncmp(key, "version", 7) == 0) {
         set_field(d->e.version, sizeof(d->e.version), val, vlen);
         d->have_version = 1;
@@ -82,6 +84,16 @@ static void apply_kv(purr_manifest_t *m, draft_t *d, const char *key, size_t kle
         set_field(d->e.min_bootloader, sizeof(d->e.min_bootloader), val, vlen);
     } else if (klen == 10 && strncmp(key, "min_coreos", 10) == 0) {
         set_field(d->e.min_coreos, sizeof(d->e.min_coreos), val, vlen);
+    } else if (klen == 12 && strncmp(key, "payload_size", 12) == 0) {
+        char tmp[16];
+        set_field(tmp, sizeof(tmp), val, vlen);
+        char *end = NULL;
+        unsigned long n = strtoul(tmp, &end, 10);
+        if (end != tmp && *end == '\0') {
+            d->e.payload_size = (uint32_t)n;
+        }
+    } else if (klen == 14 && strncmp(key, "payload_sha256", 14) == 0) {
+        d->e.have_payload_sha256 = parse_sha256(val, vlen, d->e.payload_sha256);
     }
     /* Anything else is a newer field this reader does not know about yet: ignored. */
 }

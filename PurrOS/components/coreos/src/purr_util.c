@@ -2,6 +2,25 @@
 
 #include <string.h>
 
+/* ---------------------------------------------------------------- names (F-11) */
+
+int purr_name_is_safe(const char *name, size_t max_len)
+{
+    size_t len = strnlen(name, max_len);
+    if (len == 0 || len >= max_len) {
+        return 0;
+    }
+    for (size_t i = 0; i < len; i++) {
+        char c = name[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 /* ---------------------------------------------------------------- CRC-32 */
 
 uint32_t purr_crc32(uint32_t crc, const void *data, size_t len)

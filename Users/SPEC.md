@@ -40,6 +40,24 @@ Accounts, login, and how they meet apps and remote access. Permissions are in
   and iterations slow guessing but do not stop it. This is the same limit as the saved Wi-Fi passwords
   (`../Network/SPEC.md` section 1).
 
+### 2.1 File ownership ([F-10](../documentation/FINDINGS.md#f-10))
+
+Every file has an owner (a uid) and a tiny mode -- whether anyone other than the owner can read or write it.
+There are no groups, so nothing richer than that is meaningful. Root and an admin acting on their own behalf
+always have full access regardless of a file's mode, the same as `su`'s existing escalation (section 1). The
+mechanism -- storage, where it's enforced, the fixed baseline of system paths, and the one-time migration for
+devices that predate this -- is `../PurrOS/components/coreos/SPEC.md` section 4.2; this is only the part that
+touches accounts directly:
+
+- **A file with no owner is root's, not anyone's.** This only matters during the one-time upgrade (section
+  4.2) -- every file created from here on gets an owner the moment it's written.
+- **Existing per-user files are assigned to their account by their path,** not left root-only, so the upgrade
+  never locks anyone out of their own data. Only the fixed system paths (`/etc`, `/system`, `/boot`, and so on)
+  are root-only by default.
+- **The same separation applies between standard users, not just user vs. root.** Two accounts' `/home`
+  folders are mutually invisible by the same mechanism that keeps a standard user out of `/etc/shadow` --
+  neither is a special case of the other.
+
 ## 3. First-time setup
 
 - The first boot creates the first account, an admin.
@@ -51,7 +69,10 @@ Accounts, login, and how they meet apps and remote access. Permissions are in
 ## 4. Login and the shell
 
 At boot the console shows a login. Commands, with placeholder names: `login`, `logout`, `su`, `passwd`,
-`useradd`, `userdel`, `usermod`, `whoami` and `id`. Only admins can add, remove or change other accounts.
+`useradd`, `userdel`, `usermod`, `whoami` and `id`. Only admins can add, remove or change other accounts, and
+the same admin check gates `format`, `netinstall`, `reboot recovery`/`reboot loader`, `wifi forget` and
+`appformat` -- destructive commands no single file's ownership covers
+(`../PurrOS/components/coreos/SPEC.md` section 4.2).
 
 ## 5. How it meets apps and permissions
 
