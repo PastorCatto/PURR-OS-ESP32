@@ -26,6 +26,8 @@ CoreOS/dependencies.lock
 
 # IDF managed components — fetched at build time, not stored in VCS
 CoreOS/managed_components/
+PurrOS/managed_components/
+PurrOS/dependencies.lock
 
 # SDK config (contains local paths/ports, not for VCS)
 Builder/purr_build.cfg

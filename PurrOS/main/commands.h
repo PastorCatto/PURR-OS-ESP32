@@ -2,6 +2,7 @@
 #ifndef PURR_COMMANDS_H
 #define PURR_COMMANDS_H
 
+#include "purr_appmgr.h"
 #include "purr_cli.h"
 #include "purr_fs.h"
 #include "purr_kernel_table.h"
@@ -55,6 +56,14 @@ void purr_mark_boot_healthy(purr_cli_t *cli);
  * returns if it did anything; returns normally if there was nothing pending. Only meaningful
  * to call from the recovery profile -- "KittenOS performs the swap." */
 void purr_swap_setup(purr_cli_t *cli);
+
+/* The current user's installed-apps registry, freshly rescanned -- what
+ * Modules/appmanager/apps_module.c's `apps` command reaches through the core table
+ * (core_table_apps_scan(), commands.c), exposed here directly for code that's compiled
+ * straight into this binary rather than loaded as a module (purr_ui_config.c's app_grid
+ * widget, chunk F of memory/[[project_appruntime_fullstack_plan]]). Empty if no filesystem
+ * is mounted. */
+void purr_apps_scan_current_user(purr_app_registry_t *out_reg);
 
 /* The kernel<->CoreOS call table (purr_kernel_table.h), for main.c's own boot orchestration
  * (run_login()/run_shell()) to call through instead of touching purr_kernel_key()/

@@ -36,10 +36,13 @@
 extern "C" {
 #endif
 
-/* Bumped from 6: the table grew (serial_write/serial_read, and task_create -- added in the
- * same pass, both for the optional debug module, so this one bump covers both instead of
- * forcing a second full kernelmod rebuild for an addition nothing has shipped against yet). */
-#define PURR_KERNEL_TABLE_ABI_VERSION 7u
+/* Bumped from 9: login_setup_if_needed removed again -- chunk F (the app_grid widget,
+ * memory/[[project_appruntime_fullstack_plan]]) needs to know who is logged in before LVGL
+ * starts, which a create-only call never establishes for an already-provisioned device
+ * (purr_login_current() stays empty until something actually logs in). main.c now calls its
+ * own run_login() before LVGL instead -- a real login prompt every boot, not just on first
+ * use -- so this table doesn't need a second, narrower login entry point at all. */
+#define PURR_KERNEL_TABLE_ABI_VERSION 10u
 
 /* Read-only, for whoami/id -- the only two account commands that are pure display, not a
  * security operation (see purr_kernel_table_t's login_* fields for the rest). */
@@ -119,6 +122,12 @@ typedef struct {
     int (*app_remove)(purr_cli_t *cli, const char *name);
     int (*app_format)(purr_cli_t *cli);
 
+    /* AppRuntime/SPEC.md's minimal-first manager (chunk C): loads the named app's package
+     * and runs it synchronously (on_create(), then on_destroy() -- no event loop yet, see
+     * purr_app_abi.h). Same tier as the app_* calls above: it touches the signing key bag
+     * and the raw per-user apps filesystem to find and verify the package. */
+    int (*app_run)(purr_cli_t *cli, const char *name);
+
     /* Read-only info/display commands: no real reason to decompose into structured data
      * (nothing else in this project consumes "version" or "the partition table" as data), so
      * each just prints directly onto `cli`, the same way net_install/fs_format print their
@@ -151,6 +160,7 @@ typedef struct {
     void (*login_run)(void);
     void (*login_skip)(const char *name, purr_user_role_t role);
     int (*login_take_logout)(void);        /* 1 if "logout" was run, and clears the request */
+
 
     /* Raw serial (UART/USB-Serial-JTAG) read/write -- for the optional debug module
      * (Modules/test/debug_module.c) only; nothing else in the table needs it, every other

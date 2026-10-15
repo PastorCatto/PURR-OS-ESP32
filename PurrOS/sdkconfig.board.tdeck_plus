@@ -10,3 +10,9 @@ CONFIG_PURR_BOARD_TDECK_PLUS=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
+
+# LVGL (purr_lvgl.c/purr_ui_config.c): the color-LCD boards only, see PurrOS/main/CMakeLists.txt's
+# own comment on why. The larger built-in fonts back the UI config's "scale" property
+# (purr_ui_config.h) -- 14 (the default) always exists without asking.
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y

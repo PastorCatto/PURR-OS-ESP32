@@ -114,6 +114,21 @@ void __attribute__((noreturn)) call_start_cpu0(void)
         ESP_LOGI(TAG, "internet recovery requested: starting the recovery loader");
         boot_index = TEST_APP_INDEX;
         ladder_chose_loader = false;
+    } else if ((cfg.flags & PURR_CFGF_CONTINUE_INSTALL) != 0 && bs.factory.size != 0 &&
+               purr_looks_bootable(&bs.factory)) {
+        /* Peeked, not taken: commands.c's purr_continue_install() is the one that reads and
+         * clears this flag, once KittenOS actually gets to run (purr_abi.h's own comment on
+         * it). Without this override, the tier0 ladder above still prefers the kernel slot
+         * whenever boot_fail_count is low -- exactly the state mark_install_success() just
+         * put it in -- and restore_components()/run_auto_mode() installs kernel.cat *before*
+         * kittenos.kitt in that same run, so kernel now looks bootable too. Found for real,
+         * 2026-10: the device landed on the kernel slot's full-profile build instead of
+         * KittenOS right after a fresh recovery install, which never auto-formats a blank
+         * filesystem the way the recovery profile does -- half-installed, no accounts, no way
+         * to log in. */
+        ESP_LOGI(TAG, "continue-install pending: starting KittenOS to finish the install");
+        boot_index = FACTORY_INDEX;
+        ladder_chose_loader = false;
     } else if (ladder_chose_loader) {
         /* Skip the menu entirely, the same as an explicit FORCE_LOADER request above: nobody
          * may be there to answer one, and purr_bootpkg_run()'s menu has no way to offer the

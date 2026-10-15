@@ -1,5 +1,11 @@
 # AppSDK spec (draft 0.1)
 
+**Not built yet, 2026-10-10:** the first real `.cat` app (`Apps/hello/hello_app.c`,
+AppRuntime/SPEC.md's chunk C/D/E) is bare C against `purr_app_abi.h` directly -- no mini-
+library, no manifest, no privilege class, no starter template. It exists to prove the loader
+and lifecycle calls work on real hardware, not to exercise this spec. Everything below is
+still the real target once more than a loader-smoke-test app needs building.
+
 What a developer needs to write, build and package a `.cat` app. The format of
 the `.cat` file itself is a separate chunk (`../AppManager/SPEC.md` section 3
 holds the outline). Running apps is the runtime's job (`../AppRuntime/SPEC.md`).

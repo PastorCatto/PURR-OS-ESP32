@@ -28,6 +28,13 @@
 #include "recovery_loader.h"
 #include "sdkconfig.h"
 
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#include "purr_card_shell.h"
+#include "purr_lvgl.h"
+#include "purr_ui_assets.h"
+#include "purr_ui_config.h"
+#endif
+
 #if CONFIG_PURR_PROFILE_RECOVERY
 #include "esp_partition.h"
 #endif
@@ -135,6 +142,11 @@ void app_main(void)
     purr_modules_setup(&boot_cli);
     purr_apps_setup(&boot_cli);
     purr_net_setup(&boot_cli);
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+    purr_ui_config_setup(&boot_cli);
+    purr_ui_card_shell_config_setup(&boot_cli);
+    purr_ui_mode_setup(&boot_cli);
+#endif
     purr_continue_install(&boot_cli);
     purr_console_flush();
     vTaskDelay(pdMS_TO_TICKS(1200));   /* long enough to read before the login prompt clears it */
@@ -142,6 +154,76 @@ void app_main(void)
     /* Reached a stable state: reset the bootloader's failure-count ladder
      * (bootloader/SPEC.md section 6) so it doesn't keep climbing from here. */
     purr_mark_boot_healthy(&boot_cli);
+
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+    /* The real escape hatch: hold space right now, during login, to skip the LVGL shell for
+     * this boot and land in the text shell instead (plantmodules, appinstall, run, and
+     * everything else the graphical shell has no equivalent for yet) -- there was no way to
+     * reach it at all before this, found testing chunk C/D/E (AppRuntime/SPEC.md) on a
+     * freshly erased T-Deck Plus, 2026-10-11. Checked before login runs, so it is available
+     * at the exact moment a person would otherwise be typing a username or password, not a
+     * separate silent window with its own timing to learn. Polls for a fixed, short window
+     * rather than blocking, so a device nobody is touching proceeds exactly as before.
+     * Space, not a letter, because it is the one key unlikely to collide with whatever the
+     * keyboard driver reports for a key merely resting near a finger. */
+    purr_cli_printf(&boot_cli, "(hold space for the text shell instead of the graphical one)\n");
+    purr_console_flush();
+    int shell_escape = 0;
+    for (int i = 0; i < 70; i++) {         /* ~1s at 15ms/tick */
+        if (purr_kernel_table()->read_key() == ' ') {
+            shell_escape = 1;
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(15));
+    }
+
+    /* LVGL is the primary shell UI on boards with the flash budget for it (purr_lvgl.h's own
+     * comment on why only these two). purr_console's text login/shell loop below is the
+     * fallback: it runs if the space-bar escape above was held, if LVGL can't even start (no
+     * display, draw buffer alloc failure -- purr_lvgl_init()'s own checks), or once
+     * purr_lvgl_run() returns because something called purr_lvgl_report_critical_error().
+     * All leave the text console ready to take over immediately -- purr_console_init()
+     * already ran above, unconditionally, before any of these decisions are even made. */
+    if (shell_escape) {
+        ESP_LOGW(TAG, "shell escape held; skipping LVGL for this boot");
+    } else {
+        /* A real login here, not a create-only check: chunk F (the app_grid widget,
+         * memory/[[project_appruntime_fullstack_plan]]) needs to know who is logged in to
+         * know whose apps to show, and nothing before this point ever sets that for an
+         * already-provisioned device (run_login()'s own first-time-setup branch is the only
+         * thing that calls purr_login_current()'s setter, and only on a brand-new device).
+         * Deliberate behavior change from the first version of this fix: every boot now
+         * shows a real login prompt before the graphical shell, not just the very first
+         * one -- skipped entirely above if the shell escape was held, so this never runs
+         * twice in a row for that path. */
+        run_login();
+        if (purr_lvgl_init() == ESP_OK) {
+            /* Best-effort: a missing/corrupt ui_assets partition just means "image"
+             * properties in the config can't be found (purr_ui_assets.h's own comment) --
+             * never critical. */
+            purr_ui_assets_init();
+            /* Which screen actually boots is itself a choice now (/ui/mode.conf, planted by
+             * purr_ui_mode_setup() above) -- two real, compiled engines, not a general
+             * scripting format (memory/[[project_card_shell_ui_redesign]]'s own note on why
+             * only this much, not more, is a config decision). card_shell is the gesture-
+             * driven full-screen-card shell (its own separate /ui/cardshell.conf, loaded by
+             * purr_card_shell_start() itself); nav is this file's older declarative
+             * label/button/image/app_grid/navbar screen (/ui/shell.conf, planted above by
+             * purr_ui_config_setup()) -- real nav buttons already exist there, it just
+             * wasn't reachable from the normal boot path until now. */
+            if (purr_ui_mode_get() == PURR_UI_MODE_NAV) {
+                purr_ui_load_and_build("/ui/shell.conf");
+            } else {
+                purr_card_shell_start();
+            }
+            purr_lvgl_run();
+            ESP_LOGW(TAG, "LVGL stopped; falling back to the text shell");
+            purr_kernel_table()->console_clear();
+        } else {
+            ESP_LOGW(TAG, "LVGL did not start; falling back to the text shell");
+        }
+    }
+#endif
 
     for (;;) {
         purr_kernel_table()->console_clear();

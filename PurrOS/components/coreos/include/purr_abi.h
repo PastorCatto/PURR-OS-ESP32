@@ -122,6 +122,17 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
  * the module index (`Install/SPEC.md` step 3) automatically, not just sitting at a normal
  * login prompt as if nothing had just happened. */
 #define PURR_CFGF_CONTINUE_INSTALL (1u << 6)
+/* Set by the recovery loader alongside PURR_CFGF_CONTINUE_INSTALL above, but only on the
+ * unattended path (run_auto_mode(), PurrOS/main/recovery_loader.c) -- never on an attended
+ * install, where a human already sat through offer_menu()/get_connected() and is still right
+ * there for the login prompt that follows. Read and cleared by login.c's first_time_setup():
+ * blocking forever on a typed username (read_line(), no timeout) is fine when someone is
+ * known to be present, but on this path nothing summoned anyone to answer it -- same reasoning
+ * run_auto_mode() itself already applies to skip offer_menu(). A separate flag from
+ * CONTINUE_INSTALL because by the time login.c runs, main.c has already called
+ * purr_continue_install(), which has already consumed CONTINUE_INSTALL -- this one needs to
+ * survive one boot stage further. */
+#define PURR_CFGF_UNATTENDED_SETUP (1u << 7)
 
 /* boot_target */
 #define PURR_TARGET_NORMAL         0

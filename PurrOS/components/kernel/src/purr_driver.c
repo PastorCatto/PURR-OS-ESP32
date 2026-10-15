@@ -38,6 +38,15 @@ void purr_pins_reset(void)
     memset(s_pin_owner, 0, sizeof(s_pin_owner));
 }
 
+void purr_pins_release_owner(const char *owner)
+{
+    for (int i = 0; i < PIN_SLOTS; i++) {
+        if (s_pin_owner[i] != NULL && strcmp(s_pin_owner[i], owner) == 0) {
+            s_pin_owner[i] = NULL;
+        }
+    }
+}
+
 /* ---------------------------------------------------------------- binding */
 
 #define MAX_TRACKED_DEVICES 16
@@ -46,6 +55,7 @@ typedef struct {
     const char *name;
     purr_device_state_t state;
     void *handle;
+    const purr_driver_t *driver;
 } device_record_t;
 
 static device_record_t s_records[MAX_TRACKED_DEVICES];
@@ -63,6 +73,7 @@ static device_record_t *record_for(const char *name)
         r->name = name;
         r->state = PURR_DEV_UNBOUND;
         r->handle = NULL;
+        r->driver = NULL;
         return r;
     }
     return NULL;                  /* table full -- the device is simply never tracked */
@@ -79,6 +90,40 @@ static const purr_driver_t *find_driver(const char *compatible, const purr_drive
     return NULL;
 }
 
+/* Shared by purr_drivers_bind() (the cold-boot pass) and purr_driver_register() (the
+ * plug-and-play one): claim this device's pins, find a driver, probe it, record the outcome.
+ * Neither caller touches `rec` before this, so there is exactly one place this logic can
+ * drift between the two call sites. */
+static void bind_device(device_record_t *rec, const purr_device_t *dev, const purr_board_t *board,
+                        const purr_driver_t *const *table, int table_count)
+{
+    int conflict = 0;
+    for (int p = 0; p < PURR_MAX_EXTRA_PINS; p++) {
+        if (purr_pins_claim(dev->extra_pins[p], dev->name) != 0) {
+            conflict = 1;
+        }
+    }
+    if (conflict) {
+        rec->state = PURR_DEV_PIN_CONFLICT;
+        return;
+    }
+
+    const purr_driver_t *drv = find_driver(dev->compatible, table, table_count);
+    if (drv == NULL) {
+        rec->state = PURR_DEV_NO_DRIVER;
+        return;
+    }
+
+    void *handle = NULL;
+    if (drv->probe(dev, board, &handle) != 0) {
+        rec->state = PURR_DEV_PROBE_FAILED;
+        return;
+    }
+    rec->state = PURR_DEV_BOUND;
+    rec->handle = handle;
+    rec->driver = drv;
+}
+
 void purr_drivers_bind(const purr_board_t *board, const purr_driver_t *const *table, int table_count)
 {
     s_record_count = 0;
@@ -91,31 +136,7 @@ void purr_drivers_bind(const purr_board_t *board, const purr_driver_t *const *ta
         if (rec == NULL) {
             continue;
         }
-
-        int conflict = 0;
-        for (int p = 0; p < PURR_MAX_EXTRA_PINS; p++) {
-            if (purr_pins_claim(dev->extra_pins[p], dev->name) != 0) {
-                conflict = 1;
-            }
-        }
-        if (conflict) {
-            rec->state = PURR_DEV_PIN_CONFLICT;
-            continue;
-        }
-
-        const purr_driver_t *drv = find_driver(dev->compatible, table, table_count);
-        if (drv == NULL) {
-            rec->state = PURR_DEV_NO_DRIVER;
-            continue;
-        }
-
-        void *handle = NULL;
-        if (drv->probe(dev, board, &handle) != 0) {
-            rec->state = PURR_DEV_PROBE_FAILED;
-            continue;
-        }
-        rec->state = PURR_DEV_BOUND;
-        rec->handle = handle;
+        bind_device(rec, dev, board, table, table_count);
     }
 }
 
@@ -123,6 +144,65 @@ void purr_drivers_bind(const purr_board_t *board, const purr_driver_t *const *ta
  * which only the real kernel build provides (purr_kernel.c) -- a host test supplies its own
  * fake table straight to purr_drivers_bind() instead (see test_driver.c), so this
  * otherwise-ESP-IDF-free file never needs purr_driver_table() to exist to link. */
+
+/* ---------------------------------------------------------------- plug-and-play */
+
+#define MAX_REGISTERED_DRIVERS 8
+
+static const purr_driver_t *s_registered[MAX_REGISTERED_DRIVERS];
+static int s_registered_count;
+
+int purr_driver_register(const purr_board_t *board, const purr_driver_t *drv)
+{
+    if (s_registered_count >= MAX_REGISTERED_DRIVERS) {
+        return -1;
+    }
+    s_registered[s_registered_count++] = drv;
+
+    if (board == NULL) {
+        return 0;
+    }
+    for (int i = 0; i < board->device_count; i++) {
+        const purr_device_t *dev = &board->devices[i];
+        device_record_t *rec = record_for(dev->name);
+        if (rec == NULL || rec->state == PURR_DEV_BOUND) {
+            continue;                 /* never steal a device that already has a driver */
+        }
+        if (strcmp(dev->compatible, drv->compatible) != 0) {
+            continue;                 /* not what this device needs -- leave it for bind_device
+                                        * to keep reporting its real state (NO_DRIVER etc.) */
+        }
+        bind_device(rec, dev, board, &drv, 1);
+    }
+    return 0;
+}
+
+void purr_driver_registry_reset(void)
+{
+    s_registered_count = 0;
+}
+
+void purr_driver_unregister(const purr_driver_t *drv)
+{
+    for (int i = 0; i < s_record_count; i++) {
+        if (s_records[i].state == PURR_DEV_BOUND && s_records[i].driver == drv) {
+            drv->remove(s_records[i].handle);
+            purr_pins_release_owner(s_records[i].name);
+            s_records[i].state = PURR_DEV_UNBOUND;
+            s_records[i].handle = NULL;
+            s_records[i].driver = NULL;
+        }
+    }
+    for (int i = 0; i < s_registered_count; i++) {
+        if (s_registered[i] == drv) {
+            for (int j = i; j < s_registered_count - 1; j++) {
+                s_registered[j] = s_registered[j + 1];
+            }
+            s_registered_count--;
+            break;
+        }
+    }
+}
 
 purr_device_state_t purr_device_state(const char *device_name)
 {
@@ -142,4 +222,28 @@ void *purr_device_handle(const char *device_name)
         }
     }
     return NULL;
+}
+
+const purr_driver_t *purr_device_driver(const char *device_name)
+{
+    for (int i = 0; i < s_record_count; i++) {
+        if (strcmp(s_records[i].name, device_name) == 0) {
+            return s_records[i].state == PURR_DEV_BOUND ? s_records[i].driver : NULL;
+        }
+    }
+    return NULL;
+}
+
+int purr_device_read(const char *device_name, uint8_t *data, size_t len)
+{
+    for (int i = 0; i < s_record_count; i++) {
+        if (strcmp(s_records[i].name, device_name) == 0) {
+            if (s_records[i].state != PURR_DEV_BOUND || s_records[i].driver == NULL ||
+                s_records[i].driver->read == NULL) {
+                return -1;
+            }
+            return s_records[i].driver->read(s_records[i].handle, data, len);
+        }
+    }
+    return -1;
 }

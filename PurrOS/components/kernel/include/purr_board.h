@@ -41,6 +41,27 @@ typedef struct {
     uint32_t hz;
 } purr_keyboard_cfg_t;
 
+/* GT911 capacitive touch (T-Deck/T-Deck Plus), confirmed against the PURR-OS 0.11 archive's
+ * own hand-tuned driver (archive/DP9/code/source/drivers/touch/gt911/gt911.c) -- real values
+ * exercised on actual hardware, not guessed: shares the keyboard's I2C bus (same sda/scl),
+ * polling mode (int_pin = PURR_PIN_NONE; this board's INT line is unreliable/unused), and a
+ * reset pulse on rst_pin at probe time. native_x_max/native_y_max are this specific chip
+ * unit's own raw-coordinate range (NOT the usual assumed 0-4095 -- confirmed by direct
+ * capture), needed to rescale a raw point to real screen pixels; width/height are the panel's
+ * real pixel resolution, used once at probe time to correct the chip's own internal
+ * X/Y_OUTPUT_MAX config if it disagrees (seen shipped as portrait on a landscape panel).
+ * A board with no touch simply omits a "touch" entry from its device list -- same convention
+ * purr_display_cfg_t/epd_cfg_t already use, no separate presence flag needed here. */
+typedef struct {
+    int port;
+    int sda, scl;
+    int int_pin;                  /* PURR_PIN_NONE = polling mode, no GPIO interrupt */
+    int rst_pin;                  /* PURR_PIN_NONE = chip has no reset pin wired */
+    uint32_t hz;
+    uint16_t width, height;
+    uint16_t native_x_max, native_y_max;
+} purr_touch_cfg_t;
+
 /* F-02: the Waveshare 1.54" e-paper panel (SSD1681-family, src/epd1in54.c) -- its own SPI
  * device on the board's shared bus (cs/spi_hz), plus three pins no other display driver so
  * far has needed: rst (hardware reset), busy (polled, not interrupt-driven -- a refresh
@@ -91,6 +112,7 @@ typedef struct {
     purr_spi_bus_t spi;
     purr_display_cfg_t display;
     purr_keyboard_cfg_t keyboard;
+    purr_touch_cfg_t touch;
     /* A board with no keyboard (waveshare154/InkyTuxedo) still needs a way to drive
      * purr_menu_t-based UI (bootpkg's boot menu, and now purr_continue_install()'s install
      * confirm screen): two plain buttons instead. PURR_PIN_NONE on both (the default, e.g.

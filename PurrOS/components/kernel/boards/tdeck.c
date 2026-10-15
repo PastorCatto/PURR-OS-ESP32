@@ -1,0 +1,85 @@
+/*
+ * Board profile: LilyGO T-Deck, the original (BlackDeck) -- ESP32-S3, 16 MB flash, 8 MB
+ * PSRAM. Nearly identical hardware to T-Deck Plus (BlackDeck+, tdeck_plus.c): no GPS on this
+ * one, and nothing in this codebase talks to GPS yet, so there is no software difference to
+ * express here beyond the board name -- same pins, same display, same keyboard, same bus.
+ * If that ever changes (a GPS driver lands), this is the file that grows a difference from
+ * tdeck_plus.c; until then keep the two in sync by hand.
+ *
+ * Pins from the old archive profile (archive/DP9/code/source/devices/tdeck_plus/
+ * device.pcat), same as tdeck_plus.c -- see that file's own comment for the source and the
+ * peripheral-power/shared-bus reasoning, unchanged here.
+ */
+#include <stddef.h>
+
+#include "purr_board.h"
+#include "purr_driver.h"
+
+static purr_board_t s_board = {
+    .name = "tdeck",
+    .power_pin = 10,
+    .power_settle_ms = 50,
+    .idle_high_pins = {9, 39, PURR_PIN_NONE, PURR_PIN_NONE},
+    .spi = {.host = 1 /* SPI2_HOST */, .mosi = 41, .miso = 38, .sclk = 40},
+    .display = {
+        .name = "ST7789 320x240",
+        .compatible = "st7789",
+        .cs = 12, .dc = 11, .rst = PURR_PIN_NONE, .backlight = 42,
+        .width = 320, .height = 240,
+        .col_off = 0, .row_off = 0,
+        .madctl = 0x70,            /* MX|MY|MV: landscape */
+        .bgr = 1,                  /* wired BGR: without this red and blue are swapped */
+        .invert = 1,               /* this panel needs inversion for correct colours */
+        .spi_hz = 40 * 1000 * 1000,
+    },
+    /* The keyboard is a small controller of its own: one byte read gives the next
+     * key as ASCII, or 0 for none. */
+    .keyboard = {.port = 0, .sda = 18, .scl = 8, .addr = 0x55, .hz = 100 * 1000},
+    /* GT911 touch -- see tdeck_plus.c's own comment on these values; same hardware. */
+    .touch = {.port = 0, .sda = 18, .scl = 8, .int_pin = PURR_PIN_NONE, .rst_pin = 17,
+             .hz = 400 * 1000, .width = 320, .height = 240,
+             .native_x_max = 311, .native_y_max = 235},
+    /* No BOOT/PWR buttons on this board (it has a real keyboard) -- explicit, not left to
+     * default-zero-init, since GPIO0 is a real pin and btn_boot_pin==0 would be read as
+     * "GPIO0 is the boot button" rather than "no button" if this were left unset. */
+    .btn_boot_pin = PURR_PIN_NONE,
+    .btn_pwr_pin = PURR_PIN_NONE,
+    .btn_hold_ms = 0,
+    /* .devices/.device_count: installed by purr_board() below, once s_devices exists --
+     * a struct literal can't take the address of one of its own fields while it's still
+     * being built. */
+};
+
+/* F-02: the registry's view of this board's two devices, pointing at the same
+ * purr_display_cfg_t/purr_keyboard_cfg_t s_board already carries (not a second copy).
+ * extra_pins are each device's own pins beyond the shared SPI bus (display: cs, dc, rst,
+ * backlight) or beyond its own I2C bus entirely (keyboard: none -- sda/scl are the bus
+ * itself, not extra). */
+static const purr_device_t s_devices[] = {
+    {
+        .name = "display", .compatible = "st7789", .priority = PURR_PRI_REQUIRED,
+        .extra_pins = {12, 11, PURR_PIN_NONE, 42, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_board.display,
+    },
+    {
+        .name = "keyboard", .compatible = "kbd-i2c", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE,
+                      PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_board.keyboard,
+    },
+    {
+        .name = "touch", .compatible = "gt911", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {17, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE,
+                      PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_board.touch,
+    },
+};
+
+const purr_board_t *purr_board(void)
+{
+    if (s_board.devices == NULL) {
+        s_board.devices = s_devices;
+        s_board.device_count = sizeof(s_devices) / sizeof(s_devices[0]);
+    }
+    return &s_board;
+}

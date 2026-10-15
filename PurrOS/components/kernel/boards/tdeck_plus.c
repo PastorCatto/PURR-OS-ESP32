@@ -36,6 +36,13 @@ static purr_board_t s_board = {
     /* The keyboard is a small controller of its own: one byte read gives the next
      * key as ASCII, or 0 for none. */
     .keyboard = {.port = 0, .sda = 18, .scl = 8, .addr = 0x55, .hz = 100 * 1000},
+    /* GT911 touch -- same I2C bus as the keyboard (sda=18/scl=8), polling mode (int_pin
+     * unused on this board), reset on GPIO17. native_x_max/native_y_max and the
+     * swap+mirror+rescale math they feed are confirmed against the archive driver's own
+     * direct hardware capture (purr_board.h's own comment on why), not assumed. */
+    .touch = {.port = 0, .sda = 18, .scl = 8, .int_pin = PURR_PIN_NONE, .rst_pin = 17,
+             .hz = 400 * 1000, .width = 320, .height = 240,
+             .native_x_max = 311, .native_y_max = 235},
     /* No BOOT/PWR buttons on this board (it has a real keyboard) -- explicit, not left to
      * default-zero-init, since GPIO0 is a real pin and btn_boot_pin==0 would be read as
      * "GPIO0 is the boot button" rather than "no button" if this were left unset. */
@@ -63,6 +70,12 @@ static const purr_device_t s_devices[] = {
         .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE,
                       PURR_PIN_NONE, PURR_PIN_NONE},
         .cfg = &s_board.keyboard,
+    },
+    {
+        .name = "touch", .compatible = "gt911", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {17, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE,
+                      PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_board.touch,
     },
 };
 

@@ -40,48 +40,66 @@ shell, built on the same services.
   foreground app. It reads the same `system` values apps can.
 - **KittenOS's own screens** use MiniWin directly, not through the catcall.
 
-## 3. Themes
+## 3. Themes and screen layout
 
-A theme is a single signed `.kit` package -- a PURR container holding colors, fonts, spacing,
-corner radius, animations, an icon set and images -- not a text config file. **A theme is data,
-not code**: the UI engine only ever reads a `.kit`, it never executes one.
+**Superseded, 2026-10-10:** this section originally specced a theme as a single signed `.kit`
+binary package (colors, fonts, spacing, icons and images all in one container, "not a text
+config file"), read execute-in-place from a dedicated `themes` partition, boot-time-synced
+against a LittleFS copy the same way modules/kernelmods/bootpkg are. That was designed but
+never built. What got built instead, proven on real T-Deck Plus hardware the same day, is
+below -- deliberately not signed, and deliberately a text format, both explicit choices once
+it was clear what this actually needed to do.
 
-**Where it lives:**
+**A screen is declared in a small, hand-rolled, Hyprland-flavored text config**
+(`PurrOS/main/purr_ui_config.h`/`.c`), read from LittleFS (`/ui/shell.conf` is the first one,
+planted with a sane default on first boot if nothing is there yet -- same missing-only
+convention `purr_modules_setup()`'s auto-plant already uses). A screen is a block containing
+widgets (label, button, image so far), each with position/size/color/scale and at most one
+animation:
 
-- The user-facing copy sits in LittleFS like any other file (fixed path TBD, e.g.
-  `/etc/themes/active.kit`). This is what the user drops in or swaps out.
-- The system also carves out a dedicated **`themes` partition** -- raw flash, not LittleFS --
-  sized to the device's tier (500KB on smaller-PSRAM boards, 1MB on 8MB+ boards). That partition
-  *is* the flash-storage budget for a theme; there's no separate number to track.
-- At runtime the UI engine reads assets straight out of the `themes` partition (memory-mapped raw
-  flash), not out of LittleFS and not into PSRAM. This is what makes a theme execute-in-place:
-  LittleFS files aren't guaranteed to sit in contiguous flash blocks, so a dedicated partition is
-  the only way to read a theme's assets directly without paying a PSRAM cost for it.
+```
+screen "shell" {
+    background = #000000
+    label "title" { text = "PURR OS"; position = 16, 16; color = #fda000; scale = 3;
+                     animation = fade_in, 400, ease_out }
+}
+```
 
-**Boot-time sync.** Once, at boot, the system compares the LittleFS `.kit`'s header -- which
-carries a signature/hash, the same convention as modules, kernelmods and the bootpkg -- against
-what's currently burned into the `themes` partition.
+Unknown widget types, properties or animation names are logged and skipped, not fatal -- a
+config written against a newer parser should still mostly render on an older build. A missing
+or genuinely malformed config *is* treated as critical (`purr_lvgl_report_critical_error()`),
+falling back to the text shell (section on fallback behavior, `PurrOS/main/main.c`).
 
-- Match: the partition is left alone; no flash write.
-- Mismatch: the LittleFS file is verified (the same signature check everything else PURR signs
-  goes through), then burned whole into the `themes` partition, replacing what was there.
-- No `.kit` in LittleFS, or it fails verification: whatever's already burned in the partition
-  stays active. A device with nothing burned yet falls back to a built-in default theme baked
-  into the firmware image itself (not going through the partition at all), so there's always
-  something to render.
+**Images live on their own partition, separately from the config that references them** --
+the one part of the original design that did carry over. `ui_assets` (512KB, carved out of
+`root`; `PurrOS/partitions/tdeck.csv`/`tdeck_plus.csv`) holds raw RGB565 pixel data, built by
+`purrstrap uiassets build` from a directory of PNGs (a hand-rolled decoder -- 8bpc RGB/RGBA,
+non-interlaced only -- since this project has never taken a Pillow dependency), read
+read-only/memory-mapped straight from flash at boot (`purr_ui_assets.c`, zero-copy, no PSRAM
+cost), validated by a magic number and a CRC32 rather than a signature. A config's `image`
+widget references one by name (`asset = "icon_name"`); a missing asset is logged and that one
+widget is skipped, not a critical error -- missing art isn't treated the same as a missing
+config.
 
-**Applying a new theme takes a reboot,** the same shape as the kernel/kittenos fallback chain
-(`../bootloader/SPEC.md`). Drop the new `.kit` into LittleFS and reboot; there's no apply-now path
-that hot-swaps the UI service while it's running.
+**Why not signed, and why not binary:** nothing on this partition is executable code the way
+a kernelmod, kittenos or bootpkg image is -- the existing signature/verification machinery
+(`purr_verify`, the key roles) exists to stop a compromised or buggy system from smuggling
+code into a boot-critical slot, a threat model that doesn't apply to "which color is the
+title text." A plain text config is also directly human-editable and diffable, which a
+binary `.kit` container deliberately was not.
 
-Rules:
+**Still true from the original design, not yet revisited:**
 
-- The theme is **system-wide.** Apps get the current one automatically for every widget.
-- The user changes it in one place, with the `system-settings` permission (replace the file, then
-  reboot).
-- An app can draw its own colors on a canvas, but it **cannot restyle the standard widgets.**
-- The old system's default look was a Windows CE Classic theme. Whether that stays the built-in
-  default is open.
+- The theme/config is system-wide; apps get the current one for standard widgets (once apps
+  exist at all to care -- `AppRuntime/SPEC.md`'s minimal-first scope, in progress).
+- Applying a changed config happens on the next boot's `purr_ui_load_and_build()`, not a
+  live hot-reload -- no apply-now path exists yet, though nothing architectural rules one out
+  later (unlike the old design's "`.kit` + a flash burn," a text file is cheap to re-read on
+  demand).
+- Whether an app can restyle standard widgets, or only draw on its own canvas, is still open
+  -- revisit once the `ui` catcall (section 2) actually exists.
+- The old system's default look (Windows CE Classic) is not carried over; the current default
+  (`/ui/shell.conf`'s planted content) is this project's own, not trying to match it.
 
 ## 4. Testing
 

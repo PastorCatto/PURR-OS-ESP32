@@ -1,11 +1,13 @@
-"""Build a PURR module: Modules/SPEC.md.
+"""Build a PURR module: Modules/SPEC.md. Also builds `.cat` apps (--kind app), reusing the
+same pipeline (AppRuntime/SPEC.md's minimal-first manager, chunk C).
 
 Compiles a module's C source with the ESP-IDF cross compiler, links it twice at two
 different base addresses using a linker script that merges code, literals, rodata and
 data into one segment, and compares the two results word by word to find every place
 that needs the real load address added (the link-twice method, same idea
 CatFormat/SPEC.md section 8 describes for `.cat` apps, extended to modules). Writes an
-unsigned PURR_IMG_MODULE container; sign it with `keys sign` same as any other image.
+unsigned PURR_IMG_MODULE container (or PURR_IMG_APP for --kind app); sign it with `keys
+sign` same as any other image.
 """
 
 import glob
@@ -17,7 +19,8 @@ from lib import image as pimg
 from lib.model import Action, Param, Script
 
 # board -> (cross compiler prefix, chip id). Reuses coreos.py's mapping conventions.
-BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
+BOARDS = {"tdeck": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
+          "tdeck_plus": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
           "cyd_24c": ("xtensa-esp32-elf", pimg.CHIP_ESP32),
           "waveshare154": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3)}
 
@@ -31,6 +34,16 @@ BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
 KINDS = {"driver": pimg.MOD_DRIVER, "appmanager": pimg.MOD_APPMANAGER,
          "runtime": pimg.MOD_RUNTIME, "devbundle": pimg.MOD_DEVBUNDLE,
          "coreos": pimg.MOD_COREOS}
+
+# Not a module subtype -- picking this kind switches the whole output to a PURR_IMG_APP
+# container instead of PURR_IMG_MODULE, with no subtype byte (purr_appmgr.c never looks at
+# one). Added 2026-10-10 (AppRuntime/SPEC.md's minimal-first manager, chunk C): a `.cat` app's
+# container, its flat-payload layout and its two-base relocation scheme are identical to a
+# module's (CatFormat/SPEC.md's own payload-table/manifest design is superseded for now, same
+# note as that spec carries), so this reuses build_one()/find_relocations()/pack_payload()
+# rather than a near-duplicate "apps" subscript. purr_role_may_sign() (purr_keybag.c) accepts
+# the same signing roles (developer among them) for PURR_IMG_APP as for modules.
+APP_KIND = "app"
 
 # Far enough apart that a real relocated address can't be mistaken for an unrelated
 # small integer constant that happens to differ between builds for some other reason.
@@ -226,8 +239,8 @@ def build(ctx, board, source, entry, kind, name, version, out):
     if board not in BOARDS:
         ctx.error(f"unknown board {board}")
         return 1
-    if kind not in KINDS:
-        ctx.error(f"unknown module kind {kind!r}. Known: {', '.join(KINDS)}")
+    if kind not in KINDS and kind != APP_KIND:
+        ctx.error(f"unknown module kind {kind!r}. Known: {', '.join(KINDS)}, {APP_KIND}")
         return 1
     # --source takes one path, same as always, or a comma-separated list -- CoreOS will
     # need many files linked into one relocatable blob, unlike every module built so far.
@@ -246,7 +259,7 @@ def build(ctx, board, source, entry, kind, name, version, out):
         ctx.error(f"{prefix} tools not found. Install ESP-IDF, or put them on PATH.")
         return 1
 
-    out_dir = os.path.join(ctx.repo_root, "Modules", "build", name)
+    out_dir = os.path.join(ctx.repo_root, "Apps" if kind == APP_KIND else "Modules", "build", name)
     os.makedirs(out_dir, exist_ok=True)
 
     a = build_one(ctx, gcc, objcopy, nm, readelf, sources, out_dir, "a", BASE_A, entry)
@@ -270,7 +283,11 @@ def build(ctx, board, source, entry, kind, name, version, out):
     data_relocs, code_relocs = split
 
     payload = pack_payload(entry_offset, data_relocs, code_relocs, code_a)
-    image = pimg.make_image(name, version, pimg.IMG_MODULE, KINDS[kind], payload, chip_id)
+    if kind == APP_KIND:
+        image_type, subtype = pimg.IMG_APP, 0
+    else:
+        image_type, subtype = pimg.IMG_MODULE, KINDS[kind]
+    image = pimg.make_image(name, version, image_type, subtype, payload, chip_id)
 
     dest = out or os.path.join(out_dir, f"{name}.cat")
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
@@ -354,8 +371,8 @@ SCRIPT = Script(
                          help="the module's C source file, or several comma-separated"),
                    Param("entry", "str", required=True,
                          help="the C symbol the core calls to enter the module"),
-                   Param("kind", "choice", default="driver", choices=tuple(KINDS),
-                         help="the module subtype (decides which signing role may sign it)"),
+                   Param("kind", "choice", default="driver", choices=tuple(KINDS) + (APP_KIND,),
+                         help="the module subtype, or 'app' for a PURR_IMG_APP .cat (AppRuntime)"),
                    Param("name", "str", required=True, help='the module\'s name, e.g. "hello"'),
                    Param("version", "str", required=True, help='e.g. "0.1.0"'),
                    Param("out", "path", default="",

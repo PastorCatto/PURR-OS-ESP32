@@ -94,6 +94,12 @@ static void apply_kv(purr_manifest_t *m, draft_t *d, const char *key, size_t kle
         }
     } else if (klen == 14 && strncmp(key, "payload_sha256", 14) == 0) {
         d->e.have_payload_sha256 = parse_sha256(val, vlen, d->e.payload_sha256);
+    } else if (klen == 10 && strncmp(key, "compatible", 10) == 0) {
+        set_field(d->e.compatible, sizeof(d->e.compatible), val, vlen);
+    } else if (klen == 5 && strncmp(key, "buses", 5) == 0) {
+        set_field(d->e.buses, sizeof(d->e.buses), val, vlen);
+    } else if (klen == 7 && strncmp(key, "catcall", 7) == 0) {
+        set_field(d->e.catcall, sizeof(d->e.catcall), val, vlen);
     }
     /* Anything else is a newer field this reader does not know about yet: ignored. */
 }

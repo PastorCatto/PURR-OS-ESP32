@@ -1,0 +1,11 @@
+## IDF Component Manager manifest for PurrOS/main.
+## LVGL: the shell UI (purr_lvgl.c), proof-of-life chunk (documentation/ UI design, not yet
+## written). purr_console.c (the text shell) stays the fallback if this fails to init or hits
+## a critical error -- see main.c. Pinned to the same ~8.3.0 line the pre-rewrite project
+## (PURR-OS-0.11/CoreOS/main/idf_component.yml) already used LVGL at, so this isn't a second,
+## unrelated set of assumptions about how it behaves.
+dependencies:
+  idf:
+    version: ">=5.3.0,<6.0.0"
+  lvgl/lvgl:
+    version: "~8.3.0"

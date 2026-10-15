@@ -19,6 +19,7 @@ extern "C" {
  * password, with the growing delay) until one succeeds, and starts the session. */
 void purr_login_run(void);
 
+
 /* Loads the accounts (so useradd etc. still see them if any exist) but skips the login
  * gate entirely, starting an in-memory session that is not one of the stored accounts.
  * KittenOS uses this when there is no PURR OS installed yet: requiring an account to

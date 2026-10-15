@@ -42,6 +42,30 @@
  *   sha256=c2a9d0...(64 hex characters)
  *   key=developer
  *   min_coreos=1.2.0
+ *
+ * And a driver index/pack (Drivers/SPEC.md section 2/3), `type=driver`: one stanza per
+ * individual driver file, destined for `/boot/drivers`. `component` doubles as the driver's
+ * name ("st7789", "gt911", ...), same as every other type here. `compatible`/`buses`/`catcall`
+ * are the driver's own header fields (section 3) -- a single value each for now (one driver,
+ * one bus, one catcall), not a list, matching how small every other widget/entry shape in
+ * this codebase starts; a driver that genuinely serves more than one `compatible` string or
+ * needs more than one bus can get a real list later if one ever actually needs it. Optional,
+ * like `key`/`min_coreos` on every other entry here -- an older reader just won't understand
+ * what kind of driver it found. Per-board pin assignment (the "pack" half of Drivers/SPEC.md
+ * section 2, not covered by this file-level entry) is separate, later work. Example:
+ *
+ *   component=st7789
+ *   type=driver
+ *   version=1
+ *   chip=esp32s3
+ *   board=tdeck_plus
+ *   file=st7789-tdeck_plus-1.cat
+ *   size=9120
+ *   sha256=7e4b21...(64 hex characters)
+ *   key=system
+ *   compatible=st7789
+ *   buses=spi
+ *   catcall=display
  */
 #ifndef PURR_MANIFEST_H
 #define PURR_MANIFEST_H
@@ -62,6 +86,9 @@ extern "C" {
 #define PURR_MANIFEST_ROLE_LEN     16
 #define PURR_MANIFEST_DATE_LEN     16
 #define PURR_MANIFEST_TYPE_LEN     16
+#define PURR_MANIFEST_COMPAT_LEN   32
+#define PURR_MANIFEST_BUSES_LEN    16
+#define PURR_MANIFEST_CATCALL_LEN  16
 
 /* `type`, added for the module index (OTA/SPEC.md section 6.1 -- a second, separate file
  * using this same parser, not a new format): empty ("") for a whole-component entry (kernel,
@@ -92,6 +119,11 @@ typedef struct {
     uint32_t payload_size;
     uint8_t payload_sha256[32];
     int have_payload_sha256;
+    /* `type=driver` only (Drivers/SPEC.md section 3): empty ("") on every other entry type.
+     * Single value each, not a list -- see the file header comment on why. */
+    char compatible[PURR_MANIFEST_COMPAT_LEN];
+    char buses[PURR_MANIFEST_BUSES_LEN];
+    char catcall[PURR_MANIFEST_CATCALL_LEN];
 } purr_manifest_entry_t;
 
 typedef struct {

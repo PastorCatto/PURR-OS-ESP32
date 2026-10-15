@@ -11,6 +11,18 @@ Drivers and hardware are the kernel's
 
 ## 1. Scope
 
+**Scoped minimal-first, 2026-10-10:** this section's "In" list below is the eventual target,
+not the first build. The first pass deliberately builds only: one foreground app at a time
+(no background/suspended states, no switching between several loaded apps), `on_create`/
+`on_destroy` only from the lifecycle list in section 5 (no resume/pause/save-state/
+low-memory), and admission trimmed to "does the app's declared memory need fit in free
+PSRAM right now" (no OOM killer, no victim selection, no registry). This exists so the
+`ui` catcall, a real app-screen, and the Launcher3-style launcher (`../UI/SPEC.md`) can
+become real without first building the full state machine in section 4, the OOM killer in
+section 7, and the runtime-module pluggability in section 3 -- all of which stay the real
+target, just not the first thing built. Revisit this note once the minimal slice works end
+to end on real hardware.
+
 **In**
 
 - **Phone-style multitasking:** several apps loaded at once, one in the
@@ -47,6 +59,17 @@ Drivers and hardware are the kernel's
   like the other `.kitt` modules (`../PurrOS/SPEC.md` section 6).
 
 ## 3. Manager and runtime modules
+
+**Built so far, 2026-10-10 (chunk C):** `catrt` is not its own loaded module yet -- the
+minimal-first manager lives in `PurrOS/main/commands.c` (`kernel_table_app_run`, reached
+through `purr_kernel_table_t.app_run`) and is exposed as the `run <app>` command from
+`Modules/coreos/appmgr_module.c`, the same tier app_info/app_install/app_remove/app_format
+already live at. It reuses `load_relocatable_file()` (generalized to take an expected image
+type) rather than a second loader, and calls exactly `on_create()` then `on_destroy()`
+synchronously, with no event loop -- no states, no switching, no OOM killer, nothing below in
+this section is built yet. Splitting the manager from a real `catrt` module, and adding an
+event loop an app can actually live in, is real future work once more than one app exists to
+justify it.
 
 **The manager** is the common part. It owns the instance table, the states and
 transitions (section 4), focus (section 10), admission (section 6), the OOM

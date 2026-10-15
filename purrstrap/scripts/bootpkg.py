@@ -16,15 +16,18 @@ from lib.model import Action, Param, Script
 PKG_DIR = "bootpkg"
 # board -> (compiler prefix, chip id, linker script). Chip ids are esp_chip_id_t values.
 BOARDS = {
+    "tdeck": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
     "tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
     "waveshare154": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
 }
 # Which pkg_hw_*.c backs a board's display/input -- the one real per-board source file
-# (the rest of sources() below is shared). "InkyTuxedo" is this project's own codename for
-# the waveshare154 bootpkg build (pkg_main.c's draw_header()), not an upstream term -- picked
-# so a device on the bench is identifiable by sight/log line, same reason the recovery
-# releases this repo publishes are named (JumpingJaguar1, ...).
-HW_SOURCE = {"tdeck_plus": "pkg_hw.c", "waveshare154": "pkg_hw_epd.c"}
+# (the rest of sources() below is shared). "tdeck" reuses tdeck_plus's pkg_hw.c outright:
+# identical pins, nothing here talks to the one hardware difference (GPS) either. "BlackDeck"/
+# "BlackDeck+"/"InkyTuxedo" are this project's own codenames for these builds (pkg_main.c's
+# draw_header()), not upstream terms -- picked so a device on the bench is identifiable by
+# sight/log line, same reason the recovery releases this repo publishes are named
+# (JumpingJaguar1, ...).
+HW_SOURCE = {"tdeck": "pkg_hw.c", "tdeck_plus": "pkg_hw.c", "waveshare154": "pkg_hw_epd.c"}
 VERSION = "0.1.0"
 
 # Re-exported under their original names: purrstrap/tests/test_bootpkg.py reads these.

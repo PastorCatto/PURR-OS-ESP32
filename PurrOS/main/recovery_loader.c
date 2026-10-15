@@ -658,8 +658,14 @@ static int restore_components(void)
  * healthy boot to prove it) -- and sets CONTINUE_INSTALL so KittenOS knows to carry on
  * installing the rest of the system on its very next boot, rather than stopping at a normal
  * login prompt as if this were an ordinary first boot. Best-effort: a write failure here
- * only costs a slower recovery (back through the ladder again), not a correctness problem. */
-static void mark_install_success(void)
+ * only costs a slower recovery (back through the ladder again), not a correctness problem.
+ *
+ * unattended: true only from run_auto_mode() -- also sets PURR_CFGF_UNATTENDED_SETUP, so
+ * login.c's first_time_setup() knows not to block on a typed username nobody is there to
+ * provide (purr_abi.h's own comment on that flag). false from every attended call site here
+ * (a human already sat through offer_menu()/get_connected()), which is still right there for
+ * the login prompt that follows. */
+static void mark_install_success(bool unattended)
 {
     purr_flash_t fl;
     purr_cfg_t cfg;
@@ -668,6 +674,9 @@ static void mark_install_success(void)
     }
     cfg.boot_fail_count = 0;
     purr_cfg_set_flag(&cfg, PURR_CFGF_CONTINUE_INSTALL);
+    if (unattended) {
+        purr_cfg_set_flag(&cfg, PURR_CFGF_UNATTENDED_SETUP);
+    }
     if (purr_cfg_store(&fl, &cfg) != 0) {
         ESP_LOGW(TAG, "purrcfg: could not record the successful install");
     }
@@ -697,7 +706,7 @@ static void run_auto_mode(void)
         halt("automatic recovery failed");
     }
 
-    mark_install_success();
+    mark_install_success(true);
     status("done. restarting...");
     purr_console_flush();
     vTaskDelay(pdMS_TO_TICKS(1500));
@@ -755,7 +764,7 @@ void purr_recovery_loader_main(void)
         if (restore_components() != 0) {
             halt("recovery failed");
         }
-        mark_install_success();
+        mark_install_success(false);
         status("done. restarting...");
         purr_console_flush();
         vTaskDelay(pdMS_TO_TICKS(1500));
@@ -803,7 +812,7 @@ void purr_recovery_loader_main(void)
         halt("recovery failed");
     }
 
-    mark_install_success();
+    mark_install_success(false);
     status("done. restarting...");
     purr_console_flush();
     vTaskDelay(pdMS_TO_TICKS(1500));

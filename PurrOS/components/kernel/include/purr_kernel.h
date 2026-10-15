@@ -40,6 +40,12 @@ void purr_epd1in54_remove(void *handle);
 /* The next key as a character, or 0 if none is waiting (or there is no keyboard). */
 char purr_kernel_key(void);
 
+/* 1 and (*x, *y) set (screen pixel coordinates) if the touch panel is currently pressed, 0
+ * otherwise -- including boards with no touch driver bound at all. Driver entry
+ * (src/purr_kernel.c): purr_driver_t.probe/.remove for compatible="gt911". dev->cfg is this
+ * device's purr_touch_cfg_t*. */
+int purr_kernel_touch_read(uint16_t *x, uint16_t *y);
+
 #ifdef __cplusplus
 }
 #endif

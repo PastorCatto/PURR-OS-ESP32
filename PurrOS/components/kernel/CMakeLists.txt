@@ -15,6 +15,10 @@ set(srcs
     "src/purr_userstore.c"
     "src/purr_font_data.c")
 
+if(CONFIG_PURR_BOARD_TDECK)
+    list(APPEND srcs "boards/tdeck.c")
+endif()
+
 if(CONFIG_PURR_BOARD_TDECK_PLUS)
     list(APPEND srcs "boards/tdeck_plus.c")
 endif()

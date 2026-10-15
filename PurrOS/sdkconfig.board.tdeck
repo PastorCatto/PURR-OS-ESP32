@@ -1,0 +1,20 @@
+# T-Deck (original, no Plus): ESP32-S3, 16 MB quad flash, 8 MB PSRAM. Same module and
+# partition layout as T-Deck Plus -- the only known hardware difference is no GPS, which
+# nothing in this codebase talks to yet, so there is nothing else to configure differently.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/tdeck.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions/tdeck.csv"
+CONFIG_PURR_BOARD_TDECK=y
+
+# The N16R8 module's PSRAM is Octal SPI. Needed for the recovery loader, which downloads
+# a KittenOS image into PSRAM before verifying and writing it (RecoveryLoader/SPEC.md).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# LVGL (purr_lvgl.c/purr_ui_config.c): the color-LCD boards only, see PurrOS/main/CMakeLists.txt's
+# own comment on why. The larger built-in fonts back the UI config's "scale" property
+# (purr_ui_config.h) -- 14 (the default) always exists without asking.
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y

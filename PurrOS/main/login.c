@@ -8,6 +8,8 @@
 #include "freertos/task.h"
 
 #include "commands.h"
+#include "purr_abi.h"
+#include "purr_cfgstore.h"
 #include "purr_console.h"
 #include "purr_kernel.h"
 #include "purr_userstore.h"
@@ -90,8 +92,67 @@ static void create_account(const char *name, const char *password, purr_user_rol
     purr_shadow_set(&s_shadow, name, password, salt, PURR_PBKDF2_ITERATIONS);
 }
 
+/* PURR_CFGF_UNATTENDED_SETUP (purr_abi.h): set only by run_auto_mode()'s unattended install,
+ * read and cleared here. True means first_time_setup() below must not block on a typed
+ * username -- nothing summoned anyone to answer one. */
+static int unattended_setup_pending(void)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return 0;
+    }
+    if (!purr_cfg_take_flag(&cfg, PURR_CFGF_UNATTENDED_SETUP)) {
+        return 0;
+    }
+    purr_cfg_store(&fl, &cfg);   /* best-effort: worst case this asks again next boot */
+    return 1;
+}
+
+/* A short, readable hex string from real randomness (esp_fill_random, the same source
+ * purr_login_random_salt already uses) -- enough entropy that it is not guessable, short
+ * enough to read off a console and type back in. */
+static void random_password(char *buf, size_t cap)
+{
+    uint8_t raw[6];
+    esp_fill_random(raw, sizeof(raw));
+    size_t n = 0;
+    for (size_t i = 0; i < sizeof(raw) && n + 2 < cap; i++) {
+        snprintf(buf + n, cap - n, "%02x", raw[i]);
+        n += 2;
+    }
+}
+
+/* No one is known to be present to answer first_time_setup()'s prompts (an unattended
+ * recovery install just finished) -- create a clearly-named fallback admin account instead
+ * of blocking forever on a typed username that will never arrive, and print its generated
+ * password so whoever eventually looks (the console, or its serial log) can actually log in
+ * and fix things up properly. */
+static void unattended_first_account(void)
+{
+    char pass[16];
+    random_password(pass, sizeof(pass));
+    create_account("recovery", pass, PURR_ROLE_USER_ADMIN);
+    purr_login_persist();
+
+    purr_user_t *u = purr_user_list_find(&s_users, "recovery");
+    s_current = *u;
+
+    put_str("Unattended recovery install: created a fallback admin account.\n");
+    put_str("  login: recovery\n");
+    put_str("  password: ");
+    put_str(pass);
+    put_str("\n");
+    put_str("Log in and create a real account, or change this one's password.\n");
+    memset(pass, 0, sizeof(pass));
+}
+
 static void first_time_setup(void)
 {
+    if (unattended_setup_pending()) {
+        unattended_first_account();
+        return;
+    }
     put_str("No accounts yet. Let's create the first one (an admin).\n");
     char name[PURR_USER_NAME_LEN], pass[64], confirm[64];
     for (;;) {

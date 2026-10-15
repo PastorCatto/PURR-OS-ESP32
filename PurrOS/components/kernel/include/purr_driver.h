@@ -14,6 +14,8 @@
 #ifndef PURR_DRIVER_H
 #define PURR_DRIVER_H
 
+#include <stddef.h>
+
 #include "purr_board.h"
 
 #ifdef __cplusplus
@@ -26,11 +28,17 @@ extern "C" {
 typedef int (*purr_driver_probe_fn)(const purr_device_t *dev, const purr_board_t *board, void **out_handle);
 typedef void (*purr_driver_remove_fn)(void *handle);
 
+/* Optional (NULL if this driver has nothing to poll/read after probe() -- a display driver,
+ * say). POSIX read()'s own convention: >=0 is the number of bytes actually read (0 means
+ * "nothing available right now", not an error), <0 is an error. */
+typedef int (*purr_driver_read_fn)(void *handle, uint8_t *data, size_t len);
+
 typedef struct {
     const char *name;
     const char *compatible;       /* matches a purr_device_t's own `compatible` */
     purr_driver_probe_fn probe;
     purr_driver_remove_fn remove;
+    purr_driver_read_fn read;     /* optional */
 } purr_driver_t;
 
 /* One device's outcome, kernel/SPEC.md section 5. PURR_DEV_UNBOUND is a device
@@ -58,6 +66,11 @@ const char *purr_pins_owner(int pin);
  * for tests, which need a clean registry between cases. */
 void purr_pins_reset(void);
 
+/* Releases every pin currently claimed by `owner` (string-compared, same as purr_pins_claim).
+ * purr_driver_unregister()'s own cleanup step -- a device giving up its driver must give back
+ * its pins too, or the next driver that wants them is refused for no real reason. */
+void purr_pins_release_owner(const char *owner);
+
 /* ---------------------------------------------------------------- driver table */
 
 /* The drivers this build links in (src/purr_driver_table.c for the real one; host tests
@@ -76,10 +89,46 @@ void purr_drivers_bind(const purr_board_t *board, const purr_driver_t *const *ta
 /* The real one: purr_driver_table() as the driver list. */
 void purr_drivers_bind_all(const purr_board_t *board);
 
+/* ---------------------------------------------------------------- plug-and-play
+ *
+ * purr_drivers_bind() above is the one-time cold-boot pass: it resets every record and
+ * re-probes everything from scratch, which is correct exactly once, at the start, and wrong
+ * any other time (it would re-probe already-live hardware). register()/unregister() are the
+ * real plug-and-play pair for everything after that -- a driver loaded from a file well after
+ * boot (or swapped out later) goes through these, never through purr_drivers_bind() again.
+ */
+
+/* Adds `drv` to the registry, then immediately matches it against `board`'s devices: any
+ * device not already PURR_DEV_BOUND whose `compatible` matches gets claimed and probed right
+ * here, same as purr_drivers_bind()'s own per-device logic. A device already bound to a
+ * different driver is left alone -- registering a driver never steals a working device out
+ * from under one that already has it; that is what unregister()+register() is for. 0 on
+ * success, nonzero if the registry is full. */
+int purr_driver_register(const purr_board_t *board, const purr_driver_t *drv);
+
+/* The other half: finds every device currently bound to exactly `drv`, calls its remove(),
+ * releases the pins it claimed, and resets it to PURR_DEV_UNBOUND -- ready for a fresh
+ * register() (a different driver, or a reloaded version of the same one) to claim it. A no-op
+ * if `drv` was never registered or has nothing bound. */
+void purr_driver_unregister(const purr_driver_t *drv);
+
+/* Test-only, same spirit as purr_pins_reset(): clears the registered-drivers list without
+ * calling anyone's remove(). Real boot never calls this. */
+void purr_driver_registry_reset(void);
+
 purr_device_state_t purr_device_state(const char *device_name);
 
 /* NULL unless purr_device_state(device_name) == PURR_DEV_BOUND. */
 void *purr_device_handle(const char *device_name);
+
+/* The driver currently bound to this device, or NULL. Lets a caller (a future swap command)
+ * find out what to unregister() before registering a replacement. */
+const purr_driver_t *purr_device_driver(const char *device_name);
+
+/* Calls the bound driver's read(handle, data, len). -1 if the device is not bound or its
+ * driver has no read(). Lets a caller like purr_kernel_key() go through the device's own
+ * driver instead of fetching the raw handle and guessing its real type. */
+int purr_device_read(const char *device_name, uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

@@ -7,6 +7,20 @@ in `../bootloader/SPEC.md` section 3. How apps are built is in `../AppSDK/SPEC.m
 Python apps are not `.cat` files. They are a plain `.mpy` beside a signed JSON config
 (`../MicroPython/SPEC.md` section 2).
 
+**Superseded for the minimal-first build, 2026-10-10:** AppRuntime's first pass (`../AppRuntime/
+SPEC.md` section 1) reuses the module container wholesale instead of building the payload
+table, binary header and JSON manifest below: a `.cat` app today is a `PURR_IMG_APP` container
+holding exactly one flat payload with a two-base relocation list -- the identical format
+Modules/SPEC.md already built and proved on real hardware for kernel modules, built by the
+same tool (`purrstrap modules build --kind app`) and loaded by the same function
+(`load_relocatable_file()` in `PurrOS/main/commands.c`, now taking the expected image type as
+a parameter). No payload table (one platform per app file), no manifest block, no per-payload
+field set: those stay the real target once more than one app exists and multi-platform
+payloads or install-time catcall checking are actually needed. `purr_appmgr.c` never looks
+past the container's own header at a payload's shape either way, so nothing about install,
+verify or remove changes. Revisit this note once the minimal slice outgrows one flat payload
+per app.
+
 ## 1. Decisions so far
 
 - A `.cat` is a signed container with `image_type = 4`.
