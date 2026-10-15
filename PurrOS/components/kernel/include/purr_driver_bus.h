@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define PURR_DRIVER_BUS_ABI_VERSION 2u
+#define PURR_DRIVER_BUS_ABI_VERSION 3u
 
 typedef struct {
     uint32_t abi_version;
@@ -44,14 +44,19 @@ typedef struct {
     uint32_t (*spi_add_device)(int host, int cs_pin, int mode, int clock_hz);
     int (*spi_transfer)(uint32_t handle, const uint8_t *tx, uint8_t *rx, size_t len);
 
-    /* I2C, same shape. */
+    /* I2C, same shape. timeout_ms matters on all three: a device a driver polls in a tight
+     * loop (a keyboard's single-byte read, a touch controller's status/point registers via
+     * write_read) needs a short, bounded timeout -- an unresponsive chip must never be able to
+     * hang whatever task is polling it. */
     uint32_t (*i2c_add_device)(int port, int sda_pin, int scl_pin, uint16_t addr, int clock_hz);
-    int (*i2c_write)(uint32_t handle, const uint8_t *data, size_t len);
-    /* timeout_ms matters: a device a driver polls in a tight loop (a keyboard) needs a short
-     * timeout, not whatever a one-shot config read (a display/touch controller) would want. */
+    int (*i2c_write)(uint32_t handle, const uint8_t *data, size_t len, int timeout_ms);
     int (*i2c_read)(uint32_t handle, uint8_t *data, size_t len, int timeout_ms);
     int (*i2c_write_read)(uint32_t handle, const uint8_t *tx, size_t tx_len,
-                          uint8_t *rx, size_t rx_len);
+                          uint8_t *rx, size_t rx_len, int timeout_ms);
+    /* Removes a device handle added via i2c_add_device -- a driver that probes more than one
+     * possible address (GT911's primary/alt address fallback) needs to drop the failed one
+     * before adding the real address, or it leaks a bus-table handle slot forever. */
+    void (*i2c_remove_device)(uint32_t handle);
 
     /* GPIO: only ever the pins this device's own board-profile entry already claimed. */
     void (*gpio_set_output)(int pin, int level);
