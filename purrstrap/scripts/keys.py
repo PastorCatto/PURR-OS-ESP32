@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 
 from lib import image as pimg
+from lib import purrcfg as pcfg
 from lib.model import Action, Param, Script
 
 # The container layout lives in lib/image.py, shared with bootpkg and coreos. Aliased here
@@ -340,6 +341,71 @@ def inspect(ctx, path):
     return 1
 
 
+# -- trust block -------------------------------------------------------
+def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys, out):
+    """Build a purrcfg partition image carrying a SIGNED trust block (plan3.md): the secure mode,
+    the development-mode lock, revocations and override keys, signed with a boot-role key. Flash
+    it at the purrcfg partition (or hand it to the device's `trust apply`) to set the device's
+    policy before it ever boots. The unsigned parts (--dev-mode, --tighten) are included too, for
+    development boards; the device treats them as it treats any unsigned write: they can only
+    tighten, or relax enforce to warn through development mode."""
+    pw = get_password(ctx, f"Password for {key}: ")
+    if pw is None:
+        return 1
+    try:
+        with open(key, "rb") as fh:
+            private_key = serialization.load_pem_private_key(fh.read(), pw.encode())
+    except (OSError, ValueError, TypeError) as e:
+        ctx.error(f"could not load {key}: {e}")
+        return 1
+
+    revoked = 0
+    for part in [p for p in revoke.replace(" ", "").split(",") if p]:
+        if not part.isdigit() or not 0 <= int(part) <= 31:
+            ctx.error(f"--revoke wants key ids 0-31 separated by commas, got {part!r}")
+            return 1
+        revoked |= 1 << int(part)
+
+    slots = []
+    for part in [p for p in add_keys.replace(" ", "").split(",") if p]:
+        try:
+            key_id, role, pub_path = part.split(":", 2)
+            if not 1 <= int(key_id) <= 31:
+                raise ValueError("key id must be 1-31")
+            if role not in pcfg.ROLE_IDS:
+                raise ValueError(f"role must be one of {', '.join(pcfg.ROLE_IDS)}")
+            pub = load_public_key(pub_path)
+            slots.append(pcfg.key_slot(int(key_id), pcfg.ROLE_IDS[role], raw_pub(pub)))
+        except (ValueError, OSError) as e:
+            ctx.error(f"--add-keys wants id:role:pubkeyfile, got {part!r}: {e}")
+            return 1
+    if len(slots) > pcfg.KEY_SLOTS:
+        ctx.error(f"at most {pcfg.KEY_SLOTS} override keys")
+        return 1
+
+    secure_mode = pcfg.SECURE[mode]
+    trust_flags = pcfg.TRUSTF_DEV_LOCKED if dev_locked else 0
+    signed = pcfg.trust_signed_bytes(secure_mode, trust_flags, revoked, pcfg.keys_blob(slots))
+    der_sig = private_key.sign(sha256(signed), ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+    cfg = pcfg.build_cfg(secure_mode=secure_mode, trust_flags=trust_flags, revoked=revoked,
+                         slots=slots, flags=pcfg.CFGF_DEV_MODE if dev_mode else 0,
+                         tighten=pcfg.SECURE[tighten], seq=1, trust_sig=der_sig_to_raw(der_sig))
+    dest = out or "purrcfg.bin"
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(pcfg.partition_image(cfg))
+    ctx.ok(f"{dest}: signed trust block, mode {mode}"
+           f"{', development mode LOCKED' if dev_locked else ''}"
+           f"{', development mode ON' if dev_mode else ''}"
+           f"{f', {len(slots)} override key(s)' if slots else ''}"
+           f"{f', revokes {revoke}' if revoke else ''}")
+    ctx.info("flash it at the purrcfg partition (0xF000 on the current layout); the device's "
+             "version floors, boot count and one-shot flags start fresh")
+    ctx.info("only a boot-role key is trusted to sign this: a block signed by any other key "
+             "is ignored by the device")
+    return 0
+
+
 # -- wiring ------------------------------------------------------------
 def _sign(ctx, key, image, out, key_id):
     return sign(ctx, key, key_id if key_id else None, image, out or None)
@@ -378,6 +444,23 @@ SCRIPT = Script(
                help="check a PURR image's payload hash and signature",
                params=(Param("key", "path", required=True, help="a public key file, or 64 raw bytes"),
                        Param("image", "path", required=True, help="the image to check"))),
+        Action("trust-block", "Build a signed purrcfg", trust_block,
+               help="build a purrcfg partition image with a signed trust block (secure mode, "
+                    "development-mode lock, revocations, override keys)",
+               params=(Param("key", "path", required=True,
+                             help="the BOOT-role private key that signs the block"),
+                       Param("mode", "choice", default="warn", choices=tuple(pcfg.SECURE),
+                             help="the signed secure mode (off, warn, enforce)"),
+                       Param("dev_locked", "bool", default=False,
+                             help="a production device: development mode is refused outright"),
+                       Param("dev_mode", "bool", default=False,
+                             help="start with development mode ON (unsigned; a development board)"),
+                       Param("tighten", "choice", default="off", choices=tuple(pcfg.SECURE),
+                             help="an unsigned floor on the mode (can only tighten)"),
+                       Param("revoke", "str", default="", help="key ids to revoke, e.g. 3,5"),
+                       Param("add_keys", "str", default="",
+                             help="override keys, id:role:pubkeyfile, comma separated"),
+                       Param("out", "path", default="", help="output file (default: purrcfg.bin)"))),
         Action("inspect", "Inspect", inspect,
                help="show a key or a PURR image's header",
                params=(Param("path", "path", required=True, help="the file to look at"),)),

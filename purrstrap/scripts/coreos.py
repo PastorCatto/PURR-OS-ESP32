@@ -346,6 +346,91 @@ def package_component(ctx, component, file, version, board, out):
     return 0
 
 
+# slot name -> (image_type, module subtype) the partition may hold, as
+# bootloader/SPEC.md section 3.1 and purr_slotverify.c define them.
+SLOT_KIND = {"kernel": (pimg.IMG_MODULE, pimg.MOD_KERNEL),
+             "kittenos": (pimg.IMG_RECOVERY, 0),
+             "loader": (pimg.IMG_MODULE, pimg.MOD_LOADER)}
+TRAILER_SIZE = 4096     # PURR_TRAILER_SIZE in purr_trailer.h
+
+
+def _partition(project, board, name):
+    """(offset, size) of a partition from the board's CSV, or None."""
+    path = os.path.join(project, "partitions", f"{board}.csv")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                cols = [c.strip() for c in line.split(",")]
+                if len(cols) >= 5 and cols[0] == name:
+                    return int(cols[3], 0), int(cols[4], 0)
+    except OSError:
+        pass
+    return None
+
+
+def slot_image(ctx, file, board, slot, out):
+    """Cut a signed kernel/kittenos/loader container into a flashable image of the whole
+    partition: the ESP app image at offset 0, erased flash, and the container header copied
+    into the last sector as the signature trailer (bootloader/SPEC.md section 3.1). For
+    development flashing with esptool; the installers (net_install, the recovery loader) write
+    the same layout themselves."""
+    if slot not in SLOT_KIND:
+        ctx.error(f"unknown slot {slot!r}. Known: {', '.join(SLOT_KIND)}")
+        return 1
+    try:
+        with open(file, "rb") as fh:
+            data = fh.read()
+    except OSError as err:
+        ctx.error(f"{file}: {err}")
+        return 1
+    if not pimg.is_purr_image(data) or len(data) < pimg.HEADER_SIZE:
+        ctx.error(f"{file}: not a PURR container")
+        return 1
+
+    f = pimg.parse_header(data)
+    chip, image_type, flags = f[3], f[4], f[6]
+    payload_offset, payload_size = f[pimg.IX_PAYLOAD_OFFSET], f[pimg.IX_PAYLOAD_SIZE]
+    want_type, want_sub = SLOT_KIND[slot]
+    if image_type != want_type or (want_type == pimg.IMG_MODULE and (flags & 0xFF) != want_sub):
+        ctx.error(f"{file}: this container is not a {slot} image (type {image_type}, "
+                  f"subtype {flags & 0xFF})")
+        return 1
+    if chip != CHIP_IDS[BOARDS[board]]:
+        ctx.error(f"{file}: built for chip id {chip}, but {board} is {BOARDS[board]}")
+        return 1
+    if payload_offset < pimg.HEADER_SIZE or payload_offset > TRAILER_SIZE or \
+            payload_offset + payload_size > len(data):
+        ctx.error(f"{file}: inconsistent payload offset/size")
+        return 1
+
+    part = _partition(_project(ctx), board, slot)
+    if part is None:
+        ctx.error(f"no {slot} partition in {PROJECT_DIR}/partitions/{board}.csv")
+        return 1
+    offset, size = part
+    if payload_size > size - TRAILER_SIZE:
+        ctx.error(f"the image ({payload_size} bytes) does not fit the {slot} partition "
+                  f"({size - TRAILER_SIZE} bytes once the {TRAILER_SIZE}-byte trailer is reserved)")
+        return 1
+
+    payload = data[payload_offset:payload_offset + payload_size]
+    trailer = data[:pimg.HEADER_SIZE]
+    blob = payload + b"\xff" * (size - TRAILER_SIZE - len(payload)) + \
+        trailer + b"\xff" * (TRAILER_SIZE - len(trailer))
+    assert len(blob) == size
+
+    dest = out or f"{slot}_slot.bin"
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(blob)
+    signed = any(f[pimg.IX_SIGNATURE])
+    ctx.ok(f"{dest}: {size} bytes for the {slot} partition at {offset:#x} "
+           f"({'signed' if signed else 'UNSIGNED: sign it first with keys sign'})")
+    ctx.info(f"flash it with: python -m esptool --chip {BOARDS[board]} write_flash {offset:#x} {dest}")
+    return 0
+
+
 _BOARD = Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
                help="the board to build for (it decides the chip)")
 _PROFILE = Param("profile", "choice", default="full", choices=PROFILES,
@@ -386,5 +471,15 @@ SCRIPT = Script(
                        _BOARD,
                        Param("out", "path", default="",
                              help="output file (default: <component>.cat)"))),
+        Action("slot-image", "Cut a flashable slot image", slot_image,
+               help="turn a signed kernel/kittenos/loader container into a whole-partition "
+                    "image with its signature trailer, for esptool",
+               params=(Param("file", "path", required=True,
+                             help="the signed container (.cat / .kitt)"),
+                       _BOARD,
+                       Param("slot", "choice", required=True, choices=tuple(SLOT_KIND),
+                             help="which partition it is for"),
+                       Param("out", "path", default="",
+                             help="output file (default: <slot>_slot.bin)"))),
     ),
 )
