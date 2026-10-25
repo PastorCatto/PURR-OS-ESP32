@@ -11,7 +11,13 @@
  * KittenOS). Returns true and sets *boot_index if the menu chose a slot, or false to boot
  * normally.
  */
-bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index);
+bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index,
+                      bool (*usable)(int index));
+
+/* Whether a slot may be launched under the current secure_mode (purr_boot.c): it looks like
+ * an app image and, in enforce mode, its signature trailer verifies. The menu takes this as
+ * `usable` so it never offers a slot the bootloader would refuse. */
+bool purr_slot_usable(int index);
 
 /* Find a custom raw data partition (subtype 0x40) by name in the partition table. */
 bool purr_find_partition(const char *name, uint32_t *offset, uint32_t *size);

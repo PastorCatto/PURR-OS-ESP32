@@ -12,3 +12,20 @@ CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 # (StoreProhibited, a near-NULL EXCVADDR) partway through loading the first real module --
 # found the hard way, 2026-09-30, missing here even though PurrOS already carries the fix.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# The shared PURR bootloader (bootloader/bootloader_components/main) is almost out of room
+# before the partition table: IDF's own bootloader code logs at WARN, and the PURR files set
+# their own lines back to INFO. Must match bootloader/sdkconfig.defaults.
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# The bootloader hands the OS a purr_handoff_t through IDF's custom RTC FAST area
+# (bootloader/SPEC.md section 7). The bootloader and the app must use the same option and
+# size, so every project that builds or reads it sets both here.
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC=y
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE=0x14
+
+# The partition table moved from 0x8000 to 0xA000 (2026-10-25) so the PURR bootloader can be up to
+# 40 KB instead of 32 KB (plan3.md item 3b): the bootloader lives between 0x0 and the table. The
+# `otadata` partition was dropped to pay for it -- the PURR bootloader never read it. Every
+# project that builds the bootloader must agree.
+CONFIG_PARTITION_TABLE_OFFSET=0xA000

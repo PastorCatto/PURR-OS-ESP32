@@ -11,6 +11,8 @@
 #include "bootloader_flash_priv.h"
 #include "bootloader_utility.h"
 #include "esp_flash_partitions.h"
+/* Our own lines stay at INFO even though the rest of the bootloader logs at WARN. */
+#define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
@@ -72,7 +74,7 @@ static void svc_gpio_setup(int pin, int mode)
     }
 }
 
-static const purr_boot_services_t s_services = {
+static purr_boot_services_t s_services = {
     .version = PURR_PKG_SERVICES_VERSION,
     .log = svc_log,
     .delay_us = svc_delay_us,
@@ -81,14 +83,24 @@ static const purr_boot_services_t s_services = {
 
 /* ------------------------------------------------------------ finding it */
 
+/* The partition table is read once into RAM with the plain flash reader, never through
+ * bootloader_mmap(). The bootloader stage only ever allows one mmap at a time ("tried to
+ * bootloader_mmap twice", found on real hardware 2026-09-29): this used to map the table on
+ * every lookup, so any lookup made while load_package() held its own mapping of the boot
+ * package would crash, and whether one did depended on call order. With no mapping here,
+ * a lookup is safe from anywhere, in any order, any number of times. */
+static uint32_t s_table[ESP_PARTITION_TABLE_MAX_LEN / sizeof(uint32_t)];   /* word aligned */
+static bool s_table_loaded;
+
 bool purr_find_partition(const char *name, uint32_t *offset, uint32_t *size)
 {
-    const esp_partition_info_t *table = bootloader_mmap(ESP_PARTITION_TABLE_OFFSET,
-                                                        ESP_PARTITION_TABLE_MAX_LEN);
-    if (table == NULL) {
-        return false;
+    if (!s_table_loaded) {
+        if (bootloader_flash_read(ESP_PARTITION_TABLE_OFFSET, s_table, sizeof(s_table), false) != ESP_OK) {
+            return false;
+        }
+        s_table_loaded = true;
     }
-    bool found = false;
+    const esp_partition_info_t *table = (const esp_partition_info_t *)s_table;
     for (int i = 0; i < ESP_PARTITION_TABLE_MAX_ENTRIES; i++) {
         if (table[i].magic != ESP_PARTITION_MAGIC) {
             break;
@@ -97,12 +109,10 @@ bool purr_find_partition(const char *name, uint32_t *offset, uint32_t *size)
             strncmp((const char *)table[i].label, name, sizeof(table[i].label)) == 0) {
             *offset = table[i].pos.offset;
             *size = table[i].pos.size;
-            found = true;
-            break;
+            return true;
         }
     }
-    bootloader_munmap(table);
-    return found;
+    return false;
 }
 
 /* ------------------------------------------------------------ loading it */
@@ -139,14 +149,18 @@ static uint32_t load_package(void)
         return 0;
     }
 
+    /* The effective state (trust block checked once, development mode applied): bootloader/
+     * SPEC.md section 5. secure_mode here is the effective mode, the key bag only holds
+     * override keys a valid signature vouched for. */
+    const purr_cfg_t *cfg_view = purr_bootcfg_view();
+    purr_cfg_t cfg = *cfg_view;
+
+    /* The only mapping held anywhere in the bootloader: nothing below may map again. */
     const uint8_t *base = bootloader_mmap(off, part_size);
     if (base == NULL) {
         ESP_LOGW(TAG, "bootpkg: cannot read flash");
         return 0;
     }
-
-    purr_cfg_t cfg;
-    purr_bootcfg_load(&cfg);      /* defaults (secure_mode = warn) if unreadable */
 
     purr_keybag_t bag;
     purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
@@ -230,7 +244,8 @@ uint8_t purr_looks_bootable(const esp_partition_pos_t *pos)
            (first & 0xFF) == 0xE9;   /* an ESP app image */
 }
 
-bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index)
+bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index,
+                      bool (*usable)(int index))
 {
     uint32_t entry = load_package();
     if (entry == 0) {
@@ -252,7 +267,7 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
             name[8] = '\0';
         }
         set_name(&parts[n], name);
-        parts[n].bootable = purr_looks_bootable(&bs->ota[i]);
+        parts[n].bootable = usable(i);
         map[n] = i;
         if (i == preferred) {
             menu_preferred = n;
@@ -261,7 +276,7 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
     }
     if (bs->factory.size != 0 && n < PURR_PKG_MAX_PARTS) {
         set_name(&parts[n], "KittenOS");
-        parts[n].bootable = purr_looks_bootable(&bs->factory);
+        parts[n].bootable = usable(FACTORY_INDEX);
         map[n] = FACTORY_INDEX;
         if (preferred == FACTORY_INDEX) {
             menu_preferred = n;
@@ -271,6 +286,11 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
 
     ESP_LOGI(TAG, "starting the boot menu");
     flush_log();
+    {
+        const purr_trust_t *t = purr_bootcfg_trust();
+        s_services.secure_state = (t->mode & 3u) | (t->dev ? PURR_SECST_DEV : 0u) |
+                                  (t->signature_ok ? PURR_SECST_SIGNED : 0u);
+    }
     int choice = ((purr_pkg_entry_fn)entry)(&s_services, parts, n, menu_preferred);
     if (choice == PURR_PKG_CHOICE_INTERNET_RECOVERY) {
         if (bs->test.size == 0) {

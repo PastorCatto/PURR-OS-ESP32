@@ -3,11 +3,14 @@
 #include <string.h>
 
 #include "bootloader_flash_priv.h"
+/* Our own lines stay at INFO even though the rest of the bootloader logs at WARN. */
+#define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
 
 #include "purr_abi.h"
 #include "purr_bootcfg.h"
 #include "purr_bootpkg.h"
+#include "purr_crypto_uecc.h"
 #include "purr_cfg.h"
 
 static const char *TAG = "purr_boot";
@@ -47,28 +50,46 @@ static int fl_write(void *ctx, uint32_t addr, const void *buf, uint32_t len)
     return bootloader_flash_write(addr, s_bounce, len, false) == ESP_OK ? 0 : -1;
 }
 
-/* purrcfg's own offset never moves during a boot, and purr_find_partition() maps and unmaps
- * the whole partition table through bootloader_mmap() -- which only ever holds one mapping at
- * a time in the bootloader stage (bootloader_flash.c). Every extra call this session added
- * (the boot_fail_count load/store, on top of the pre-existing FORCE_RECOVERY/FORCE_LOADER
- * checks and the boot package's own load) pushed the count of these calls per boot from 3 to
- * 5+, and one of them was landing while a previous mapping hadn't been torn down yet --
- * "tried to bootloader_mmap twice", found on real hardware, 2026-09-29. Finding the partition
- * once and caching it here, instead of on every call, is the fix: it also just avoids
- * rescanning the same unchanging partition table five times a boot. */
-static uint32_t s_off, s_size;
-static bool s_found, s_looked;
-
+/* purr_find_partition() reads from a RAM copy of the table (purr_bootpkg.c), so it is cheap
+ * and never maps flash; no caching is needed here. */
 static bool find_purrcfg(uint32_t *off, uint32_t *size)
 {
-    if (!s_looked) {
-        s_looked = true;
-        s_found = purr_find_partition("purrcfg", &s_off, &s_size) &&
-                 s_size >= PURR_CFG_SECTORS * SECTOR;
+    return purr_find_partition("purrcfg", off, size) && *size >= PURR_CFG_SECTORS * SECTOR;
+}
+
+extern const purr_key_t purr_default_keys[];
+extern const size_t purr_default_keys_count;
+
+static purr_cfg_t s_view;
+static purr_trust_t s_trust;
+static bool s_published;
+
+void purr_bootcfg_publish(const purr_cfg_t *cfg)
+{
+    purr_trust_eval(cfg, purr_default_keys, purr_default_keys_count, &purr_crypto_uecc, &s_trust);
+    purr_trust_view(cfg, &s_trust, &s_view);
+    s_published = true;
+}
+
+static void ensure_published(void)
+{
+    if (!s_published) {
+        purr_cfg_t cfg;
+        purr_bootcfg_load(&cfg);        /* defaults (secure_mode = warn) if unreadable */
+        purr_bootcfg_publish(&cfg);
     }
-    *off = s_off;
-    *size = s_size;
-    return s_found;
+}
+
+const purr_cfg_t *purr_bootcfg_view(void)
+{
+    ensure_published();
+    return &s_view;
+}
+
+const purr_trust_t *purr_bootcfg_trust(void)
+{
+    ensure_published();
+    return &s_trust;
 }
 
 bool purr_bootcfg_load(purr_cfg_t *out)

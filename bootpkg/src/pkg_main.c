@@ -58,13 +58,32 @@ static void draw_kbd(void)
 }
 #endif
 
-static void draw_secure_boot(void)
+/* The hardware Secure Boot state (the chip's eFuse), then the PURR policy the bootloader is
+ * enforcing (bootloader/SPEC.md section 5): the effective mode, whether the trust block is signed,
+ * and -- in orange, so it cannot be missed -- development mode. */
+static void draw_secure_boot(const purr_boot_services_t *svc)
 {
     hw_fill(16, 60, 300, 8, BLACK);
     if (hw_secure_boot_enabled()) {
-        hw_text(16, 60, "Secure Boot: ON", ORANGE, BLACK, 1);
+        hw_text(16, 60, "HW Secure Boot: ON", ORANGE, BLACK, 1);
     } else {
-        hw_text(16, 60, "Secure Boot: off", GREY, BLACK, 1);
+        hw_text(16, 60, "HW Secure Boot: off", GREY, BLACK, 1);
+    }
+    if (svc->version >= 2) {
+        static const char *const modes[] = {"off", "warn", "ENFORCE", "warn"};
+        uint32_t s = svc->secure_state;
+        if (s & PURR_SECST_DEV) {
+            hw_text(150, 60, "DEVELOPMENT MODE", ORANGE, BLACK, 1);
+        } else {
+            char line[24];
+            int n = 0;
+            put_str(line, &n, "policy: ");
+            put_str(line, &n, modes[PURR_SECST_MODE(s)]);
+            if (s & PURR_SECST_SIGNED) {
+                put_str(line, &n, " (signed)");
+            }
+            hw_text(150, 60, line, GREY, BLACK, 1);
+        }
     }
     hw_flush();
 }
@@ -159,7 +178,7 @@ int purr_pkg_entry(const purr_boot_services_t *svc, const purr_boot_part_t *part
         purr_menu_t m;
         purr_menu_init(&m, mp, n, preferred);
         draw_header();
-        draw_secure_boot();
+        draw_secure_boot(svc);
         hw_key();
         draw_kbd();
         draw_list(&m, NULL);

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include "purr_cfg.h"
+#include "purr_trust.h"
 
 /*
  * Read-only. Fills `out` with the newest valid copy, or defaults (secure_mode = warn) if
@@ -19,6 +20,19 @@ bool purr_bootcfg_load(purr_cfg_t *out);
  * holds no such request, or anything went wrong (then it never blocks booting).
  */
 bool purr_bootcfg_take_flag(uint32_t flag);
+
+/*
+ * The effective security state (purr_trust.h): evaluate cfg's trust block once, against the
+ * compiled-in default keys, and keep the result. publish() is called by purr_boot.c right after
+ * the first load; view() is the cfg with the effective values in place (decisions only, never
+ * stored) and trust() the evaluation. The signature check costs about 250 ms at the bootloader's
+ * 80 MHz, and only when a trust block is present, so it is done exactly once per boot and shared
+ * by the boot package loader and the slot checks. Both fall back to loading purrcfg themselves if
+ * publish() was not called.
+ */
+void purr_bootcfg_publish(const purr_cfg_t *cfg);
+const purr_cfg_t *purr_bootcfg_view(void);
+const purr_trust_t *purr_bootcfg_trust(void);
 
 /*
  * Write cfg as the newest copy (bumping seq, sealing the CRC, reading back to check), the

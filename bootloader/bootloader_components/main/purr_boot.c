@@ -2,15 +2,93 @@
 //
 // The ROM bootloader loads this from flash. It does the bare minimum:
 // initialise hardware, read the partition table, pick an app slot
-// (otadata-aware) and jump to it. Nothing else lives here.
+// (kernel, KittenOS or the recovery loader; there is no otadata) and jump to it.
 #include <stdbool.h>
+/* Our own lines stay at INFO even though the rest of the bootloader logs at WARN. */
+#define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
 #include "bootloader_init.h"
 #include "bootloader_utility.h"
 #include "purr_bootcfg.h"
 #include "purr_bootpkg.h"
+#include "purr_handoff.h"
+#include "purr_slotverify.h"
 
 static const char *TAG = "purr_boot";
+
+/* ------------------------------------------------------------ slot policy */
+
+/* Whether a slot may be launched, and what its signature trailer says (bootloader/SPEC.md
+ * sections 3.1 and 6). Three app slots in all: the kernel (index 0, the only ota slot),
+ * KittenOS (FACTORY_INDEX) and the recovery loader (TEST_APP_INDEX).
+ *
+ * Verification costs a hash over the whole image, so it only runs when it can change the
+ * answer: always for the slot actually being launched (the handoff reports it), and for every
+ * slot examined along the way only in enforce mode, where a failed check makes a slot
+ * unusable. In off mode nothing is verified at all. */
+#define NSLOTS 3
+
+static const bootloader_state_t *s_bs;
+static const purr_cfg_t *s_cfg;
+static uint8_t s_mode;            /* the secure_mode in force for this boot */
+static bool s_ignore_once;        /* IGNORE_ONCE: let a failed slot boot even in enforce */
+static struct { bool done; purr_slot_verdict_t v; } s_cache[NSLOTS];
+
+static int cache_ix(int index)
+{
+    return index == FACTORY_INDEX ? 1 : index == TEST_APP_INDEX ? 2 : 0;
+}
+
+static const esp_partition_pos_t *slot_pos(int index)
+{
+    if (index == FACTORY_INDEX) {
+        return s_bs->factory.size != 0 ? &s_bs->factory : NULL;
+    }
+    if (index == TEST_APP_INDEX) {
+        return s_bs->test.size != 0 ? &s_bs->test : NULL;
+    }
+    return (index == 0 && s_bs->app_count > 0) ? &s_bs->ota[0] : NULL;
+}
+
+static purr_slot_kind_t slot_kind(int index)
+{
+    return index == FACTORY_INDEX ? PURR_SLOT_KITTENOS :
+           index == TEST_APP_INDEX ? PURR_SLOT_LOADER : PURR_SLOT_KERNEL;
+}
+
+static const purr_slot_verdict_t *slot_verdict(int index)
+{
+    int c = cache_ix(index);
+    if (!s_cache[c].done) {
+        purr_slot_verify(slot_pos(index), slot_kind(index), s_cfg, &s_cache[c].v);
+        s_cache[c].done = true;
+    }
+    return &s_cache[c].v;
+}
+
+/* Also the boot menu's predicate (purr_bootpkg_run), so it never offers what this refuses. */
+bool purr_slot_usable(int index)
+{
+    const esp_partition_pos_t *pos = slot_pos(index);
+    if (pos == NULL || !purr_looks_bootable(pos)) {
+        return false;
+    }
+    if (s_mode != PURR_SECURE_ENFORCE) {
+        return true;
+    }
+    if (slot_verdict(index)->verified || s_ignore_once) {
+        return true;
+    }
+    /* enforce: a slot that does not verify is not launched. Say so, once per slot, so the log
+     * shows a refusal and not just a failed check followed by a different slot booting. */
+    static bool said[NSLOTS];
+    if (!said[cache_ix(index)]) {
+        said[cache_ix(index)] = true;
+        ESP_LOGW(TAG, "slot %d REFUSED (%s): enforce does not launch an unverified slot", index,
+                 purr_verify_name(slot_verdict(index)->result));
+    }
+    return false;
+}
 
 void __attribute__((noreturn)) call_start_cpu0(void)
 {
@@ -36,6 +114,40 @@ void __attribute__((noreturn)) call_start_cpu0(void)
      * repeated silent failures even when nothing ever made a clean decision about why. */
     purr_cfg_t cfg;
     bool have_cfg = purr_bootcfg_load(&cfg);
+
+    /* The effective security state (purr_trust.h, plan3.md): the trust block's signature is
+     * checked once here against the compiled-in keys, development mode is applied, and from here
+     * on every decision reads the VIEW (s_cfg), never the raw purrcfg. The raw cfg is still what
+     * gets stored back below. */
+    purr_bootcfg_publish(&cfg);
+    const purr_trust_t *trust = purr_bootcfg_trust();
+
+    /* The two one-shot loosening flags are consumed on this boot, before anything acts on them
+     * (bootloader/SPEC.md section 5), so a crash cannot leave them set for the next boot. They
+     * are honoured only in development mode; anywhere else they are cleared and ignored. */
+    uint8_t flags_used = 0;     /* one-shot flags consumed this boot, for the handoff */
+    bool ignore_flag = (cfg.flags & PURR_CFGF_IGNORE_ONCE) != 0;
+    bool off_flag = (cfg.flags & PURR_CFGF_SECURE_OFF_ONCE) != 0;
+    if (ignore_flag) {
+        flags_used |= PURR_CFGF_IGNORE_ONCE;
+    }
+    if (off_flag) {
+        flags_used |= PURR_CFGF_SECURE_OFF_ONCE;
+    }
+    cfg.flags &= ~(PURR_CFGF_IGNORE_ONCE | PURR_CFGF_SECURE_OFF_ONCE);
+    s_ignore_once = ignore_flag && trust->dev;
+    bool secure_off_once = off_flag && trust->dev;
+    s_mode = secure_off_once ? PURR_SECURE_OFF : trust->mode;
+    s_bs = &bs;
+    s_cfg = purr_bootcfg_view();
+    {
+        static const char *const names[] = {"off", "warn", "enforce"};
+        ESP_LOGI(TAG, "secure_mode: %s%s%s%s", s_mode < 3 ? names[s_mode] : "?",
+                 trust->dev ? " (DEVELOPMENT MODE)" : "",
+                 trust->signature_ok ? " (signed trust block)" : "",
+                 secure_off_once ? " (SECURE_OFF_ONCE)" : "");
+    }
+
     cfg.boot_fail_count++;
     uint32_t fail_count = cfg.boot_fail_count;
     if (!purr_bootcfg_store(&cfg)) {
@@ -86,9 +198,7 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     int boot_index = INVALID_INDEX;
     for (int i = 0; i < 3; i++) {
         const slot_t *s = &tier[i];
-        const esp_partition_pos_t *pos = s->is_test ? &bs.test : s->is_factory ? &bs.factory : &bs.ota[0];
-        bool present = s->is_test ? bs.test.size != 0 : s->is_factory ? bs.factory.size != 0 : bs.app_count > 0;
-        if (present && purr_looks_bootable(pos)) {
+        if (purr_slot_usable(s->index)) {
             boot_index = s->index;
             break;
         }
@@ -98,7 +208,6 @@ void __attribute__((noreturn)) call_start_cpu0(void)
         bootloader_reset();
     }
 
-    (void)have_cfg;
     bool ladder_chose_loader = (boot_index == TEST_APP_INDEX && tier == k_tier2);
 
     /* A recovery request (the shell's "reboot recovery") skips the menu and starts KittenOS
@@ -110,12 +219,14 @@ void __attribute__((noreturn)) call_start_cpu0(void)
         ESP_LOGI(TAG, "recovery requested: starting KittenOS");
         boot_index = FACTORY_INDEX;
         ladder_chose_loader = false;
+        flags_used |= PURR_CFGF_FORCE_RECOVERY;
     } else if (purr_bootcfg_take_flag(PURR_CFGF_FORCE_LOADER) && bs.test.size != 0) {
         ESP_LOGI(TAG, "internet recovery requested: starting the recovery loader");
         boot_index = TEST_APP_INDEX;
         ladder_chose_loader = false;
+        flags_used |= PURR_CFGF_FORCE_LOADER;
     } else if ((cfg.flags & PURR_CFGF_CONTINUE_INSTALL) != 0 && bs.factory.size != 0 &&
-               purr_looks_bootable(&bs.factory)) {
+               purr_slot_usable(FACTORY_INDEX)) {
         /* Peeked, not taken: commands.c's purr_continue_install() is the one that reads and
          * clears this flag, once KittenOS actually gets to run (purr_abi.h's own comment on
          * it). Without this override, the tier0 ladder above still prefers the kernel slot
@@ -139,8 +250,31 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     } else {
         /* The boot package shows the menu and may pick another slot. Without one, boot normally. */
         int chosen;
-        if (purr_bootpkg_run(&bs, boot_index, &chosen)) {
+        if (purr_bootpkg_run(&bs, boot_index, &chosen, purr_slot_usable)) {
             boot_index = chosen;
+        }
+    }
+
+    /* Final gate on the slot actually being launched, whichever path chose it: the ladder, a
+     * one-shot request, the continue-install override or the boot menu. An explicit request
+     * must not be a way around enforce mode. If the choice is not usable, take the first
+     * usable slot in the ladder's order; if there is none, there is nothing safe to run. */
+    if (!purr_slot_usable(boot_index)) {
+        ESP_LOGE(TAG, "slot %d may not be launched in this secure mode", boot_index);
+        boot_index = INVALID_INDEX;
+        ladder_chose_loader = false;
+        for (int i = 0; i < 3; i++) {
+            if (purr_slot_usable(tier[i].index)) {
+                boot_index = tier[i].index;
+                break;
+            }
+        }
+        if (boot_index == INVALID_INDEX) {
+            /* bootloader/SPEC.md section 6 step 7: whether this waits at a serial prompt, halts
+             * or resets is an open decision. Today it resets, which keeps climbing
+             * boot_fail_count and so ends up at the recovery loader's tier. */
+            ESP_LOGE(TAG, "no slot passes verification; resetting");
+            bootloader_reset();
         }
     }
 
@@ -157,6 +291,40 @@ void __attribute__((noreturn)) call_start_cpu0(void)
             ESP_LOGW(TAG, "purrcfg: could not record the auto-reinstall request");
         }
     }
+
+    /* The handoff (bootloader/SPEC.md section 7): what CoreOS reads first to learn why it is
+     * running. The chosen slot's signature trailer is checked here for the handoff even when
+     * the policy would have let it boot regardless. In off mode nothing is verified, so the
+     * state stays UNCHECKED. */
+    uint8_t state = PURR_BOOT_UNCHECKED;
+    uint8_t key_id = 0xFF;
+    bool verified = false, failed = false;
+    if (s_mode != PURR_SECURE_OFF) {
+        const purr_slot_verdict_t *v = slot_verdict(boot_index);
+        verified = v->verified;
+        failed = !verified;
+        if (verified) {
+            key_id = v->key_id;
+        } else {
+            ESP_LOGW(TAG, "booting slot %d although it did not verify (%s), secure_mode %s",
+                     boot_index, purr_verify_name(v->result),
+                     s_mode == PURR_SECURE_ENFORCE ? "enforce + IGNORE_ONCE" : "warn");
+        }
+    }
+    if (failed) {
+        state = PURR_BOOT_FAILED_WARNED;
+    } else if (boot_index == TEST_APP_INDEX && ladder_chose_loader) {
+        state = PURR_BOOT_AUTO_REINSTALL;
+    } else if (flags_used & (PURR_CFGF_FORCE_RECOVERY | PURR_CFGF_FORCE_LOADER)) {
+        state = PURR_BOOT_FORCED_RECOVERY;
+    } else if (verified) {
+        state = PURR_BOOT_VERIFIED;
+    } else if (!have_cfg) {
+        state = PURR_BOOT_CONFIG_DEFAULT;
+    }
+    uint8_t secure_state = (uint8_t)((s_mode & 3u) | (trust->dev ? PURR_SECST_DEV : 0u) |
+                                     (trust->signature_ok ? PURR_SECST_SIGNED : 0u));
+    purr_handoff_write(state, key_id, flags_used, secure_state);
 
     ESP_LOGI(TAG, "booting app slot %d", boot_index);
     bootloader_utility_load_boot_image(&bs, boot_index);
