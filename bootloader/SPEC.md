@@ -41,10 +41,10 @@ bootloader knows about:
 
 | Name       | Type/Subtype | Size   | Notes |
 |------------|--------------|--------|-------|
-| bootloader | -            | ~32 KB | Second stage. |
-| purrcfg    | data/0x40    | 8 KB   | Two 4 KB copies (A/B) of the config struct. |
-| nvs        | data/nvs     | 24 KB  | Used by the OS, never by the bootloader. |
-| bootpkg    | data/0x44    | ~64 KB | The boot package, right after the bootloader. |
+| bootloader | -            | 40 KB (0x0, up to the table at 0xA000) | Second stage. |
+| nvs        | data/nvs     | 16 KB  | Used by the OS, never by the bootloader. |
+| purrcfg    | data/0x40    | 8 KB   | Two 4 KB copies (A/B) of the config struct, at 0xD000. Moved there (from 0x1E000) when `bootpkg` grew to 56 KB, with `nvs` giving up 8 KB to make room. |
+| bootpkg    | data/0x40    | 56 KB (0xE000) | The boot package. Sized for growth: its menu will get more features. |
 | kittenos   | app/factory  | 1 MB   | KittenOS, recovery only. Not updated in normal use. |
 | rescue     | app/test     | ~1 MB  | Modular boards: the recovery loader (Wi-Fi, TLS, keys, minimal CoreOS). Almost never changed. |
 | kernel     | app, single slot, `ota_0` subtype | 0x1E0000 (T-Deck Plus) | Modular boards only: hardware, drivers, FreeRTOS, mounts `root`, loads CoreOS from it (`PurrOS/SPEC.md` sections 1, 6). Built and flashed 2026-09-28: it keeps the `ota_0` *subtype* (not a genuinely distinct one, despite the original plan here) purely so ESP-IDF's own stock `bootloader_utility_load_boot_image()` -- which only knows `factory`/`test`/`ota_0..15` -- can actually jump to it; `esp_ota_*` selection semantics (otadata, `esp_ota_set_boot_partition`) are still never used. The bootloader picks it by trying it first in its own fallback chain (section 6), not through otadata. |
@@ -57,11 +57,28 @@ table if it grows. There is no OTA slot switching: which target boots is recorde
 
 ### 2.1 Sizing
 
-- **Bootloader budget.** On original ESP32 the bootloader sits at 0x1000 and the partition
-  table at 0x8000, leaving 28,672 bytes. The basic bootloader in this repo already builds to
-  27,008 bytes on esp32 (21,728 on esp32s3). Signature checking and `purrcfg` handling will
-  not fit, so the partition table has to move (`CONFIG_PARTITION_TABLE_OFFSET`) and every
-  partition after it shifts.
+- **Bootloader budget.** The bootloader lives between flash offset 0 and the partition table. It
+  was 32 KB (table at `0x8000`) and ran out of room: on 2026-10-25 the table moved to **`0xA000`**
+  (`CONFIG_PARTITION_TABLE_OFFSET` in every project's `sdkconfig.defaults`), giving the bootloader
+  **40 KB**. The room came from dropping the `otadata` partition (8 KB): the PURR bootloader
+  picks `kernel`, `kittenos` or `loader` itself and never read it, and nothing in the OS needs it
+  any more (the `esp_ota_set_boot_partition()` call in `net_install` was removed).
+  The area before `kittenos` at `0x20000` is now: bootloader 40 KB (0x0), table 4 KB (0xA000),
+  `nvs` 16 KB (0xB000), `purrcfg` 8 KB (0xF000), `phy_init` 4 KB (0x11000), `bootpkg` 56 KB
+  (0x12000). The two projects that build the bootloader and every app must agree on the offset:
+  an app finds the partition table at the offset compiled into it, so changing it means
+  rebuilding the OS images as well.
+- **Measured 2026-10-25 (ESP32-S3, built with ESP-IDF 5.3.5, `-Os`):** the bootloader as committed
+  before the trailer work was 32,688 bytes against the old 32,768 limit (80 free). With slot
+  verification and the handoff it was 34,400, over the limit. IDF's own bootloader code now logs at
+  WARN only (`CONFIG_BOOTLOADER_LOG_LEVEL_WARN` in every project's `sdkconfig.defaults`) while the
+  PURR files set `LOG_LOCAL_LEVEL` back to INFO for their own lines (side effect: IDF's own INFO
+  lines, such as "Loaded app from partition", no longer print). With slot verification, the
+  hardware SHA hook, the read window and the version floors it is **32,608 bytes, 8,352 free of
+  the new 40 KB**. The software SHA-256 stays linked (it hashes the 109-byte header, which the
+  word-only hardware block cannot).
+- The last 4096 bytes of `kernel`, `kittenos` and `loader` are reserved for the signature trailer
+  (section 3.1), so an image may be at most `partition size - 4096` bytes.
 - Layouts are per board, so each board carries its own partition file.
 - **Codename.** For a board that has a driver pack, the bootloader is built with the board's
   codename inside (`Boards/SPEC.md` section 3, `Install/SPEC.md`).
@@ -92,30 +109,57 @@ Signature is ECDSA P-256 with SHA-256, using micro-ecc and the bootloader's
 SHA support, both already linked into the bootloader. The image keeps IDF's own
 checksum and SHA-256 too; that check stays on in every mode.
 
-**Open item, sharpened 2026-09-28 while building the real `kernel`/`kittenos`/`loader`
-fallback chain (section 6):** this is the actual reason real per-image signature
-verification (section 6 steps 4-5) still isn't built for those three slots, only for
-`bootpkg`. `bootpkg` gets away with custom loading (mmap, verify, copy into a fixed RAM
-window, jump) because it's small and not a real ESP app image. `kernel`/`kittenos`/`loader`
-are real ESP-IDF apps -- the stock `bootloader_utility_load_boot_image()` is what actually
-knows how to set up the MMU and load segments, and it insists on finding the ESP app magic
-byte at the very start of the partition it's given. Today's flashed images have no PURR
-header at all (plain ESP images, magic at offset 0) -- that's *why* the stock loader can
-load them, and also why there is currently nothing for a signature check to even read.
-Two real designs, neither built, picked between next time this is picked up:
+### 3.1 Signatures on raw app slots: the trailer (built 2026-10-25)
 
-1. **A separate metadata slot** per app partition (or one shared one, indexed by which
-   partition), holding just the header + signature, verified before handing off to the
-   stock loader -- the app partition's own bytes stay untouched, plain, at offset 0.
-2. **Load the ESP image at a byte offset** inside a real PURR container occupying the
-   whole partition -- the original idea here, still unconfirmed: does `esp_image_load`
-   (or an equivalent stock function) actually support loading and correctly memory-mapping
-   an app image that doesn't start at its partition's offset 0? Has to be tried on real
-   hardware before this option is chosen over option 1.
+`kernel`, `kittenos` and `loader` are real ESP-IDF app images. The stock
+`bootloader_utility_load_boot_image()` is what knows how to set up the MMU and load their segments,
+and it insists on the ESP app magic byte at the very start of the partition, so a PURR header
+cannot go first (the original reason real per-image verification was not built). The signature
+therefore goes at the **end** of the partition:
 
-Option 1 is very likely the lower-risk path (no dependency on an unconfirmed stock-loader
-capability), but this needs settling with real code, not just a preference, before either
-is built.
+```
+partition offset 0                        ESP app image (the container's payload), untouched
+...                                       0xFF
+partition end - 4096 (PURR_TRAILER_SIZE)  purr_image_header_t (173 bytes), then 0xFF
+```
+
+- The trailer is a **verbatim copy of the signed container header** that the release file
+  (`.cat` / `.kitt`) already carries. Nothing about signing changed; `header_size` and
+  `payload_offset` are both 173 for everything `purrstrap` builds.
+- Verification treats the partition as the container it was cut from: header bytes come from the
+  trailer, payload bytes from partition offset 0, and the ordinary `purr_image_verify()` does the
+  rest (chip, role against type, version floor, key, revocation, payload SHA-256, signature).
+  This is `purr_trailer_verify()` (`PurrOS/components/coreos/src/purr_trailer.c`), shared with
+  CoreOS and tested on the PC (`test_trailer.c`).
+- The **partition decides what it may hold**, not the header: `kernel` takes `PURR_IMG_MODULE` /
+  `PURR_MOD_KERNEL`, `kittenos` takes `PURR_IMG_RECOVERY`, `loader` takes `PURR_IMG_MODULE` /
+  `PURR_MOD_LOADER`. A validly signed loader is rejected as a kernel. All are boot-role keys.
+- The largest image a slot can hold is `part_size - 4096`. `PURR_V_BAD_MAGIC` from the
+  trailer verifier means "no trailer" (a slot flashed straight from a build); anything else
+  means a trailer that is present and wrong.
+- **The whole payload is hashed** (software SHA-256 in the bootloader today). An earlier idea
+  was to sign only the SHA-256 that IDF appends to every app image and rely on IDF's loader to
+  check it against the contents; that was not taken, because it would rest on IDF behaviour
+  not yet checked in 5.3.5. Hashing the image costs boot time: **measured 2026-10-25 on a
+  T-Deck Plus, about 2.0 s for a 1.38 MB kernel slot with software SHA-256** (328 ms flash reads,
+  about 1300 ms hashing at the bootloader's 80 MHz, about 250 ms the signature check). The
+  bootloader now hashes with the chip's SHA block through an optional `purr_hash_t` hook in the
+  verifier (whole words only; other payload sizes use the software hash) and reads flash in 4 KB
+  windows: **about 0.65 s**. The signature check and the 80 MHz clock are what is left.
+- **Writers.** Anything that writes one of these slots writes the payload at offset 0 and the
+  header copy at `part_size - 4096`, then reads both back: `net_install` (`commands.c`) and the
+  recovery loader (`recovery_loader.c`). For development flashing,
+  `purrstrap coreos slot-image` cuts a signed container into a whole-partition image to flash with
+  esptool.
+- A slot flashed without a trailer still boots in `off` and `warn` mode (with a warning in
+  `warn`); `enforce` refuses it (section 6).
+- **Version floors (built 2026-10-25, checked on the device in `warn` mode).** The bootloader
+  passes each slot's floor from `purrcfg` (kernel, KittenOS, loader) to the verifier, always as
+  an enforced floor, so an older validly signed image is a failed verification: `warn` boots it
+  with a warning and `FAILED_WARNED`, `enforce` refuses it. The OS raises a slot's floor when a
+  boot from it reaches healthy (`purr_mark_boot_healthy()`), to the version in the slot's own
+  trailer and only if that trailer verifies at that moment. There is no way yet to lower a floor
+  on purpose; that belongs to the signed trust block (`plan3.md` item 4).
 
 ## 4. Keys and the virtual key bag
 
@@ -197,63 +241,111 @@ requests) depend on whether secure boot is enabled. Here "enabled" means
 - eFuse burning (section 8) is only available while secure boot is enabled, so
   a disabled system cannot burn anything.
 
+### 5.2 The trust block and the effective mode (built 2026-10-25)
+
+`purrcfg` stays the same size and version; two spare bytes become `tighten` and `trust_flags`, and
+the 64 reserved bytes become `trust_sig`. `secure_mode`, `trust_flags`, `revoked_keys` and
+`keys[]` are the **signed trust block**: `trust_sig` is an ECDSA P-256 signature, by a boot-role
+key among the **compiled-in default keys only** (never the overridden bag), over
+
+```
+"PURRTRUST" 0x00 | secure_mode | trust_flags | revoked_keys (u32 LE) | keys[8] (68 bytes each, as stored)
+```
+
+(`purr_trust_signed_bytes()`; `purrstrap/lib/purrcfg.py` builds the same bytes; both sides pin the
+field offsets in tests). `PurrOS/components/coreos/src/purr_trust.c` computes the **effective
+state**, shared by the bootloader and the OS and tested on the PC:
+
+```
+base = signature_ok ? secure_mode : warn            (unknown values count as warn, never off)
+mode = max(base, tighten)
+dev  = DEV_MODE flag set and not (signature_ok and DEV_LOCKED)
+if dev and mode > warn: mode = warn
+```
+
+- `tighten` and `PURR_CFGF_DEV_MODE` are unsigned and written by the OS; `PURR_TRUSTF_DEV_LOCKED`
+  is signed.
+- Override keys and `revoked_keys` take effect only when `signature_ok`; the OS gets the same
+  through `purr_trust_view()`, a copy that cannot be stored back (`purr_cfg_store()` refuses it).
+- `IGNORE_ONCE` and `SECURE_OFF_ONCE` are honoured only when `dev` is true; otherwise they are
+  cleared and ignored.
+- The signature is checked **once per boot**, only when a signature is present (about 250 ms at
+  the bootloader's 80 MHz), and shared by the boot package loader and the slot checks.
+- Not built: replay protection (no counter in the signed bytes); signing the version floors.
+
 ## 6. Boot flow
 
 1. Init, load the partition table, read `purrcfg`. If both copies are invalid, use defaults
    (secure_mode = warn) and continue.
 2. If `UPDATE_KEY` is set, validate and apply the key update, then clear it.
 3. Pick a default target -- **built and proven on hardware, 2026-09-28, modular boards:** try
-   `kernel` first; if it doesn't even look like a real app image, fall back to `kittenos`; if
-   that doesn't either, fall back to the recovery loader (`loader`/rescue) automatically, the
-   same target "internet recovery" already uses. "Looks like a real app image" today means
-   only the shallow check the boot menu already used to gray out a dead slot (the first word
-   is an ESP app-image magic byte) -- **not yet built:** the richer check steps 4-5 below
-   describe (real PURR signature verification with an off/warn/enforce policy) for this
-   app-image level. That richer check is real today only for the boot package itself (section
-   9's `load_package()`), not for `kernel`/`kittenos`/`loader`. Extending it here is real,
-   tracked future work, not a design change -- this fallback chain is deliberately built on
-   the weaker check that already existed and was already proven, rather than left unbuilt
-   until the stronger one is ready.
-3a. **Not yet built: a two-tier failure-count ladder,** reusing `boot_fail_count`. This is the
-   part of `PurrOS/components/coreos/SPEC.md` section 7 ("at the threshold (default 3) the boot
-   package starts KittenOS instead") that this boot-flow section didn't reflect yet, extended one
-   rung further. The boot package increments `boot_fail_count` every single boot, before it
-   returns its choice (section 9), and CoreOS/KittenOS reset it to 0 once they mark themselves
-   healthy (`coreos/SPEC.md` section 4 step 8) -- so the count only climbs across boots where
-   nothing ever got that far, whether or not anything ever set a one-shot flag or made a clean
-   decision about it. Step 3's default becomes a three-rung ladder on that count instead of a
-   flat kernel-first preference: 0-2, prefer `kernel`; 3-5, prefer `kittenos`; 6+, prefer
-   `loader`. Both thresholds are defaults, expected to need tuning once real hardware failure
-   data exists. Reaching the `loader` rung this way -- through the count, not through a human
-   picking "internet recovery" from the menu or the shell's `reboot loader` -- sets a new handoff
-   `boot_state`, `auto_reinstall` (section 7), so the recovery loader can tell a repeated,
-   undetected failure apart from a deliberate request and run its silent auto mode instead of
-   showing a menu nobody is there to answer (`RecoveryLoader/SPEC.md` section 2.1).
+   `kernel` first; if it is not usable, fall back to `kittenos`; if that is not usable either,
+   fall back to the recovery loader (`loader`/rescue) automatically, the same target "internet
+   recovery" already uses. A slot is **usable** (`purr_slot_usable()` in `purr_boot.c`) when its
+   first byte is the ESP app-image magic (`0xE9`) and, **in `enforce` mode only**, its signature
+   trailer verifies (section 3.1). In `warn` and `off` a slot that merely looks like an app image
+   is usable. Verification costs a hash over the whole image, so it runs only when it can change
+   the answer: for every slot examined along the way in `enforce`, and in `warn` for the slot
+   actually being launched (so the handoff can report it). In `off` nothing is verified.
+   `SECURE_OFF_ONCE` treats the mode as `off` for this boot, and `IGNORE_ONCE` lets a failed slot
+   boot even in `enforce`; both are cleared on this boot, before anything acts on them. A
+   `secure_mode` value the bootloader does not recognise is treated as `warn`, never `off`.
+3a. **Built: a two-tier failure-count ladder,** on `boot_fail_count`. The *bootloader* increments
+   it (in `purr_boot.c`, before anything else reads it) on every single boot, not the boot package
+   as earlier drafts said: the boot package never runs on a `FORCE_RECOVERY`/`FORCE_LOADER` boot,
+   and the ladder needs every attempt counted the same way. CoreOS/KittenOS reset it to 0 once
+   they mark themselves healthy (`coreos/SPEC.md` section 4 step 8), so the count only climbs
+   across boots where nothing ever got that far. Because the increment comes first, the count a
+   boot *sees* is already 1 on the first attempt, and the code's thresholds are `> 3` and `> 6`:
+   **1-3, prefer `kernel`; 4-6, prefer `kittenos`; 7+, prefer `loader`.** (The code is the
+   authority here; an earlier draft of this section said 0-2 / 3-5 / 6+.) Each tier falls through
+   the other two slots in order if its preferred one is missing or does not look bootable --
+   a missing loader at tier 3 falls back to `kittenos`, not back to the kernel that has just
+   proven unreliable. Both thresholds are defaults, expected to need tuning once real hardware
+   failure data exists. Reaching the `loader` rung this way -- through the count, not through a
+   human picking "internet recovery" or the shell's `reboot loader` -- skips the boot menu and
+   sets `PURR_CFGF_AUTO_REINSTALL` in `purrcfg` and the handoff `boot_state`
+   `PURR_BOOT_AUTO_REINSTALL` (section 7), so the recovery loader can tell a repeated, undetected
+   failure apart from a deliberate request and run its silent auto mode instead of a menu nobody
+   is there to answer (`RecoveryLoader/SPEC.md` section 2.1).
 
 4. `FORCE_RECOVERY`/`FORCE_LOADER` (the shell's `reboot recovery`/`reboot loader`) override
-   that default once, unconditionally, without even the shallow check -- built already,
-   unchanged by the above.
+   that default once, unconditionally, without even the shallow check -- but see step 6: the
+   chosen slot still goes through the final gate.
 5. Otherwise the boot package's menu can override the default with an explicit choice,
-   including "internet recovery" regardless of what the default fallback picked.
-6. **Still just the design, for when real per-image PURR verification is built:** verify the
-   chosen image (chip ID, magic and version, payload SHA-256, signature against its `key_id`,
-   revoked bit, and in `enforce` mode a version-floor check), then apply this policy:
+   including "internet recovery" regardless of what the default fallback picked. The menu is
+   given `purr_slot_usable()`, so in `enforce` mode it never offers a slot the bootloader would
+   refuse.
+6. **Final gate (built 2026-10-25).** Whatever chose the slot -- the ladder, a one-shot request,
+   the continue-install override or the menu -- the slot actually being launched must be usable.
+   An explicit request is not a way around `enforce`. If it is not usable, the bootloader takes
+   the first usable slot in the ladder's order; if there is none it logs and resets (see step 7
+   for what the reset means). Then, for any mode but `off`, the launched slot's trailer is
+   verified (once; the result is cached) and the outcome goes into the handoff (section 7):
 
 | Result | off | warn | enforce |
 |--------|-----|------|---------|
 | Verified | boot | boot | boot |
-| Failed | boot | boot, warning state set | boot KittenOS |
-| Failed, and `IGNORE_ONCE` set | boot | boot, warning state set | boot, warning state set |
+| Failed or no trailer | boot (not checked) | boot, `FAILED_WARNED` | slot unusable; falls down the ladder |
+| Failed, and `IGNORE_ONCE` set | boot (not checked) | boot, `FAILED_WARNED` | boot, `FAILED_WARNED` |
 
 7. If KittenOS is the target and is missing, damaged or fails verification: on a modular board start
    the recovery loader, which downloads a new KittenOS (`RecoveryLoader/SPEC.md`). On a board
    without one, in `off` and `warn` boot KittenOS with the warning, and in `enforce` print the
    serial prompt and wait. Open item: decide whether "wait" means a reset loop or a halt.
+   **Today, when nothing is usable, the bootloader resets**, which keeps raising `boot_fail_count`
+   and so ends up at the loader's rung. In `enforce` mode with unsigned slots that is a reset
+   loop, so release builds should not use `enforce` until every writer signs its slot.
 8. Clear one-shot flags, write `purrcfg` if it changed, write the handoff struct, jump.
 9. When the boot package returns its menu choice, load the chosen slot through the same stock
    ESP-IDF `bootloader_utility_load_boot_image()` every slot already goes through -- the
    packed image on monolithic boards, the **kernel** partition on modular ones. Same
    mechanism both tiers; only which slot the package is allowed to choose differs.
+
+**Tested for real, 2026-10-25, on a T-Deck Plus (the PURR bootloader, signed boot package and
+signed kernel slot):** `purr_boot: PURR OS bootloader`, `secure_mode: warn`, `bootpkg 0.1.0 loaded
+(key id 1, ok)`, the boot menu drawn, `slot @0x1a0000: ok`, `booting app slot 0`. The handoff reads back as `verified` in the shell's `purrcfg` command. The
+`enforce` refusal and the failure ladder's higher rungs have not yet been exercised on the device.
 
 **Tested for real, 2026-09-28, on a T-Deck Plus:** planted a real signed image at both
 `kernel` and `kittenos`. Booted `kernel` by default with no menu interaction needed
@@ -264,42 +356,58 @@ instead (`Loaded app from partition at offset 0x20000`). The third level (both d
 blank (`0xFF`) -- the real RecoveryLoader has never actually been flashed onto it, a separate,
 already-known gap, not a flaw in this chain.
 
-The boot package verifies the kernel and CoreOS files it loads with the same rules
+The kernel and CoreOS files are verified with the same rules
 (`PurrOS/components/coreos/SPEC.md` section 3.5).
 
-**Dev-workflow trap, found 2026-09-30, costly enough to call out explicitly:** `bootloader/`
-is a fully separate ESP-IDF project from `PurrOS/` -- its own build directory, own
-`idf.py build`, own `bootloader.bin`. `purrstrap coreos build`/`idf.py flash` from inside
-`PurrOS/` only ever flashes **PurrOS's own auto-generated stock ESP-IDF bootloader**; it never
-touches this project at all. An entire session's worth of hardware testing (RecoveryLoader's
-fallback chain, `purrcfg` flags, `boot_fail_count`) ran against that stock bootloader without
-anyone noticing, because both bootloaders boot a plain app partition identically for the simple
-cases -- the difference only shows up for anything `purr_boot.c` actually owns (the ladder, the
-one-shot flags, the boot package/menu at all). Caught by the missing `purr_boot: PURR OS
-bootloader` log line, the one unambiguous tell. **To actually exercise this project's own boot
-logic, build it here (`idf.py -B build_<board> -D SDKCONFIG=... -D IDF_TARGET=... -D
-SDKCONFIG_DEFAULTS=... build`, section 9's own commands) and flash only
-`build_<board>/bootloader/bootloader.bin` at `0x0`** -- never the whole suggested `flash_args`,
-which would also overwrite whatever real app is in the `kittenos` slot with this project's
-placeholder stub `main/` app.
+**One bootloader, built from here (changed 2026-10-25).** `bootloader/` is the only place the
+bootloader's source lives (`bootloader_components/main/`). `PurrOS/` and `Kernel/` each carry a
+two-line `bootloader_components/main/CMakeLists.txt` that includes the same
+`purr_bootloader_component.cmake`, so `idf.py flash` from `PurrOS/` or `Kernel/` now builds and
+flashes *this* bootloader instead of IDF's stock one. Before this, an entire session of hardware
+testing (the fallback chain, `purrcfg` flags, `boot_fail_count`) ran against the stock bootloader
+without anyone noticing, because the two boot a plain app partition identically for the simple
+cases -- the difference only shows for what `purr_boot.c` owns (the ladder, the one-shot flags,
+the boot package and menu, the handoff). The tell, if it ever recurs, is a missing
+`purr_boot: PURR OS bootloader` log line. Everything the bootloader needs from the
+`sdkconfig` is set in every project's `sdkconfig.defaults` (notably
+`CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC`, section 7); an already-configured build directory
+does not pick new defaults up, so delete its `sdkconfig` after changing them.
+
+`bootloader/` still builds standalone for the bootloader alone. In that case flash only
+`build_<board>/bootloader/bootloader.bin` at `0x0`, never the whole suggested `flash_args`,
+which would also overwrite the real app in the `kittenos` slot with that project's placeholder
+stub `main/` app.
 
 ## 7. Handoff to the OS
 
-A small struct in the RTC FAST memory area that ESP-IDF reserves for custom
-use (`CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC`). It has a fixed address shared by
-the bootloader and the app, survives a soft reset but not power loss, and needs
-the same option and size in both builds. It carries its own magic and CRC:
+**Built 2026-10-25 (written by `purr_handoff.c`, read by `purr_kernel_handoff()`; not yet
+built or run on hardware).** A small struct in the RTC FAST memory area that ESP-IDF reserves for
+custom use (`CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC`, 20 bytes since handoff version 2, which added `secure_state`). It has a fixed address shared by
+the bootloader and the app, survives a soft reset but not power loss, and needs the same option
+and size in both builds (every project's `sdkconfig.defaults` sets both). It carries its own magic
+and CRC, so a cold boot, or a stock bootloader, reads as "no handoff". The bootloader writes it
+once, right before jumping, then reseals IDF's own CRC over the retain block so the app side does
+not see the block as corrupt:
 
 | Field         | Meaning |
 |---------------|---------|
-| magic, crc    | Validity |
-| boot_state    | verified, failed_warned, forced_recovery, auto_reinstall, config_default |
-| key_id_used   | Which key verified the image, or 0xFF |
-| flags_used    | Which one-shot flags were consumed |
-| bootloader_v  | Bootloader version |
+| magic, crc    | Validity (`purr_handoff_valid()`, host-tested) |
+| boot_state    | see below |
+| secure_state  | what the bootloader enforced: effective mode (bits 0-1), development mode (bit 2), signed trust block (bit 3) |
+| key_id_used   | Which key verified the image, or 0xFF. Always 0xFF until per-image verification exists (section 3). |
+| flags_used    | Which one-shot flags were consumed this boot (`PURR_CFGF_*` bits) |
+| bootloader_v  | Packed version, `PURR_BOOTLOADER_VERSION` in `purr_handoff.h` |
+
+`boot_state`: `VERIFIED` (reserved, nothing sets it yet), `FAILED_WARNED` (reserved for the
+enforce/warn policy in section 6 step 6), `FORCED_RECOVERY` (a `FORCE_RECOVERY`/`FORCE_LOADER`
+flag was consumed), `CONFIG_DEFAULT` (`purrcfg` unreadable, defaults used), `AUTO_REINSTALL`
+(the failure-count ladder sent the boot to the loader), and `UNCHECKED` -- an ordinary boot whose
+slot passed only the shallow app-image magic check. `UNCHECKED` exists so the handoff never
+claims `VERIFIED` for something no signature was checked on; it becomes `VERIFIED` when section
+3's open item is built.
 
 CoreOS reads this first, decides what to do with it, and records any warning
-for the layers above to show. The bootloader itself
+for the layers above to show. The shell's `purrcfg` command prints it. The bootloader itself
 never shows anything.
 
 ## 8. eFuse support (optional, gated)
@@ -364,8 +472,8 @@ board that happens before the kernel lives in the **boot package**.
   packed image (below): it returns the choice from the app-slot list the bootloader already
   handed it, and the bootloader verifies and jumps into it (section 6 step 8). No LittleFS
   read and no PSRAM relocation happen inside the package itself -- that machinery belongs to
-  the kernel, one layer up, loading CoreOS (`PurrOS/SPEC.md` section 6). Before returning its
-  choice it increments `boot_fail_count`.
+  the kernel, one layer up, loading CoreOS (`PurrOS/SPEC.md` section 6). The
+  bootloader, not the package, increments `boot_fail_count` (section 6 step 3a).
 - **On monolithic boards it only shows the menu** and returns the choice to the bootloader,
   which loads the packed image. Modular and monolithic boards now share this exact
   mechanism -- the only difference is which slot is on offer.
@@ -379,6 +487,11 @@ board that happens before the kernel lives in the **boot package**.
    unsigned package is only accepted when `secure_mode` is off.
 2. It copies the package into a fixed RAM window that the bootloader reserves. The package is
    linked for that address, so it needs no relocation.
+   **Flash mapping rule (fixed 2026-10-25):** the bootloader stage allows exactly one
+   `bootloader_mmap()` at a time ("tried to bootloader_mmap twice" was a real crash). The
+   package's own partition is the only thing ever mapped, and `load_package()` takes that mapping
+   last, after `purrcfg` is read. The partition table is read once into a RAM copy with the plain
+   flash reader, so partition lookups never map and can happen in any order.
 3. It calls the package with a small service table (flash read, delay, GPIO, log). The package
    offers a small set of calls back: start the display, run the menu with a timeout, read a
    key, and return the choice.

@@ -479,7 +479,8 @@ way.
 - **Two display controllers** from the start (ILI9341 on the CYD, ST7789 on the T-Deck Plus),
   so the display driver contract keeps the controller in a table.
 - **Bootloader size.** The custom bootloader already measures 27,008 bytes on esp32 against
-  the 28,672 bytes available before the partition table.
+  the space before the partition table (28,672 bytes when written; the table has since moved
+  to 0xA000, giving 40 KB: `bootloader/SPEC.md` section 2.1).
 - **Secure Boot V2 on original ESP32** needs chip revision 3 or newer. The eFuse path has to
   check the revision. The software path is unaffected.
 - **Code is chip-specific.** An esp32 kernel or module does not run on esp32s3. The container's
