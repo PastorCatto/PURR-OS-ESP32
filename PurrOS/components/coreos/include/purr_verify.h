@@ -10,6 +10,7 @@
 #ifndef PURR_VERIFY_H
 #define PURR_VERIFY_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "purr_abi.h"
@@ -46,6 +47,21 @@ typedef struct {
 /* Read len bytes at offset. Returns 0 on success. */
 typedef int (*purr_read_fn)(void *ctx, uint32_t offset, void *buf, uint32_t len);
 
+/*
+ * An optional replacement for the software SHA-256 over an image's payload -- the one place a
+ * large amount of data is hashed. The bootloader plugs in the chip's hardware SHA block (about
+ * 30x faster than the software one at the bootloader's 80 MHz: measured, plan3.md item 2).
+ * update() is only ever given a length that is a multiple of 4, because the hardware block takes
+ * whole words; a payload whose size is not a multiple of 4 falls back to the software hash. The
+ * header's own signature hash is small and always software. start() returns the handle update()
+ * and finish() take.
+ */
+typedef struct {
+    void *(*start)(void);
+    void (*update)(void *handle, const void *data, size_t len);
+    void (*finish)(void *handle, uint8_t digest[PURR_SHA256_LEN]);
+} purr_hash_t;
+
 typedef struct {
     uint16_t             chip_id;             /* this device, PURR_CHIP_* */
     const purr_keybag_t *bag;
@@ -53,6 +69,7 @@ typedef struct {
     uint32_t             bootloader_version;  /* packed */
     uint32_t             version_floor;       /* packed, 0 = none */
     int                  enforce_floor;       /* nonzero in enforce mode */
+    const purr_hash_t   *payload_hash;        /* optional, see purr_hash_t; NULL = software */
 } purr_verify_env_t;
 
 /*

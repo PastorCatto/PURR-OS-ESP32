@@ -58,3 +58,7 @@ __pycache__/
 Thumbs.db
 .claude/
 signing_keys/
+
+# parser fuzzer output (PurrOS/components/coreos/test/host/fuzz)
+PurrOS/components/coreos/test/host/fuzz/build/
+PurrOS/components/coreos/test/host/fuzz/crash-*.bin

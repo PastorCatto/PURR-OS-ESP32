@@ -99,6 +99,22 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
 #define PURR_SECURE_WARN           1
 #define PURR_SECURE_ENFORCE        2
 
+/* Persistent (not one-shot) flag in purr_cfg_t.flags: development mode (plan3.md). Off by
+ * default. While it is on, an effective mode of `enforce` is relaxed to `warn` -- a failed or
+ * unsigned image boots with a warning -- unless the signed trust block says DEV_LOCKED. It never
+ * lowers the mode below `warn`, and it is reported in the handoff and the secure status, so apps
+ * can refuse to treat the device as trusted. Written by the OS (Settings, the `secure` command)
+ * or baked into the initial purrcfg before flashing. */
+#define PURR_CFGF_DEV_MODE         (1u << 8)
+
+/* purr_cfg_t.trust_flags (part of the signed trust block): */
+#define PURR_TRUSTF_DEV_LOCKED     (1u << 0)    /* a production device: DEV_MODE is ignored */
+
+/* A purr_cfg_t that purr_trust_view() filled in: the effective values, for decisions only. It
+ * has this magic, so purr_cfg_store() refuses it -- storing a view would overwrite the signed
+ * trust state with its own consequences. */
+#define PURR_CFG_VIEW_MAGIC        0x57454956u  /* 'VIEW' */
+
 /* flags: one-shot unless noted, cleared by the bootloader before handoff */
 #define PURR_CFGF_IGNORE_ONCE      (1u << 0)
 #define PURR_CFGF_UPDATE_KEY       (1u << 1)
@@ -189,9 +205,13 @@ typedef struct PURR_PACKED {
     uint16_t version;                         /* PURR_CFG_VERSION */
     uint16_t size;                            /* sizeof(purr_cfg_t) */
     uint32_t seq;                             /* increments on every write */
-    uint8_t  secure_mode;                     /* PURR_SECURE_* */
+    uint8_t  secure_mode;                     /* PURR_SECURE_*: the SIGNED trust mode (see trust_sig).
+                                               * Only honoured when trust_sig verifies; otherwise
+                                               * the device behaves as `warn`. */
     uint8_t  boot_target;                     /* PURR_TARGET_* */
-    uint8_t  reserved0[2];
+    uint8_t  tighten;                         /* PURR_SECURE_*, unsigned: a floor on the mode. The OS
+                                               * may raise it; it can never loosen anything. */
+    uint8_t  trust_flags;                     /* PURR_TRUSTF_*, signed */
     uint32_t flags;                           /* PURR_CFGF_* */
     uint32_t revoked_keys;                    /* bit per key id */
     uint32_t boot_seq;                        /* written only by the bootloader */
@@ -201,7 +221,9 @@ typedef struct PURR_PACKED {
     purr_floor_t floors[PURR_FLOOR_SLOTS];
     purr_key_slot_t keys[PURR_KEY_SLOTS];     /* override slots for the key bag */
     uint8_t  efuse_arm[32];                   /* reserved for the eFuse gating flow */
-    uint8_t  reserved1[64];
+    uint8_t  trust_sig[64];                   /* ECDSA P-256 by a boot-role key over the trust block:
+                                               * secure_mode, trust_flags, revoked_keys, keys[]
+                                               * (purr_trust.h). All 0x00 or all 0xFF = unsigned. */
     uint32_t crc32;                           /* over everything above, must stay last */
 } purr_cfg_t;
 
@@ -212,13 +234,19 @@ PURR_STATIC_ASSERT(sizeof(purr_cfg_t) <= PURR_CFG_SECTOR_SIZE, "purrcfg must fit
 /* ------------------------------------------------------------------------- */
 
 #define PURR_HANDOFF_MAGIC         0x4F464E48u  /* 'HNFO' */
-#define PURR_HANDOFF_VERSION       1
+#define PURR_HANDOFF_VERSION       2
 
 #define PURR_BOOT_NONE             0     /* no handoff, e.g. a stock bootloader */
 #define PURR_BOOT_VERIFIED         1
 #define PURR_BOOT_FAILED_WARNED    2
 #define PURR_BOOT_FORCED_RECOVERY  3
-#define PURR_BOOT_CONFIG_DEFAULT   4
+#define PURR_BOOT_CONFIG_DEFAULT   4     /* purrcfg unreadable, defaults used */
+#define PURR_BOOT_AUTO_REINSTALL   5     /* the failure-count ladder sent us to the loader */
+#define PURR_BOOT_UNCHECKED        6     /* normal boot; the slot passed only the shallow
+                                          * app-image magic check, no PURR signature was
+                                          * verified (per-image verification isn't built for
+                                          * kernel/kittenos/loader yet, bootloader/SPEC.md
+                                          * section 3). Becomes VERIFIED once it is. */
 
 typedef struct PURR_PACKED {
     uint32_t magic;                           /* PURR_HANDOFF_MAGIC */
@@ -227,10 +255,19 @@ typedef struct PURR_PACKED {
     uint8_t  key_id_used;                     /* 0xFF = none */
     uint8_t  flags_used;                      /* which one-shot flags were consumed */
     uint32_t bootloader_version;              /* packed version */
+    uint8_t  secure_state;                    /* PURR_SECST_*: what the bootloader enforced */
+    uint8_t  reserved[3];
     uint32_t crc32;                           /* over everything above */
 } purr_handoff_t;
 
-PURR_STATIC_ASSERT(sizeof(purr_handoff_t) == 16, "handoff layout changed");
+PURR_STATIC_ASSERT(sizeof(purr_handoff_t) == 20, "handoff layout changed");
+
+/* secure_state: the effective mode the bootloader used (bits 0-1, PURR_SECURE_*), whether
+ * development mode was active (bit 2), and whether the trust block's signature verified
+ * (bit 3). Apps read the combination through the secure status (plan3.md). */
+#define PURR_SECST_MODE(s)         ((s) & 3u)
+#define PURR_SECST_DEV             (1u << 2)
+#define PURR_SECST_SIGNED          (1u << 3)
 
 /* ------------------------------------------------------------------------- */
 /* Boot package (bootloader/SPEC.md section 9)                               */
@@ -263,7 +300,7 @@ PURR_STATIC_ASSERT(sizeof(purr_pkg_preamble_t) == 16, "package preamble layout c
 #define PURR_PKG_S3_DATA_MAX       0x8000u
 
 #define PURR_PKG_MAX_PARTS         8
-#define PURR_PKG_SERVICES_VERSION  1
+#define PURR_PKG_SERVICES_VERSION  2    /* 2: secure_state */
 
 /* A bootable-or-not app slot, as the bootloader found it in the partition table. */
 typedef struct {
@@ -283,6 +320,9 @@ typedef struct {
     /* Route a pin to the GPIO matrix in the given mode. Levels are then written by the
      * package itself, straight to the GPIO registers. */
     void (*gpio_setup)(int pin, int mode);
+    /* version >= 2: the effective security state the bootloader is using, PURR_SECST_*
+     * (mode, development mode, signed trust block), so the menu can show it. */
+    uint32_t secure_state;
 } purr_boot_services_t;
 
 #define PURR_PKG_CHOICE_NORMAL             (-1)   /* leave the choice to the bootloader */

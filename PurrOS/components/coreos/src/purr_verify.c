@@ -79,24 +79,43 @@ purr_verify_result_t purr_image_verify(const purr_verify_env_t *env,
         return PURR_V_ROLE_MISMATCH;
     }
 
-    /* Payload hash, streamed so no full-image buffer is needed. */
+    /* Payload hash, streamed so no full-image buffer is needed. The hardware hash, when the
+     * caller has one, only takes whole words: HASH_CHUNK is a multiple of 4, so every chunk is
+     * too exactly when the payload size is. */
     purr_sha256_t sha;
     uint8_t chunk[HASH_CHUNK], digest[PURR_SHA256_LEN];
     uint32_t done = 0;
+    const purr_hash_t *hw = (env->payload_hash != NULL && (hdr.payload_size % 4u) == 0) ? env->payload_hash : NULL;
+    void *hw_handle = NULL;
 
-    purr_sha256_init(&sha);
+    if (hw != NULL) {
+        hw_handle = hw->start();
+    } else {
+        purr_sha256_init(&sha);
+    }
     while (done < hdr.payload_size) {
         uint32_t n = hdr.payload_size - done;
         if (n > HASH_CHUNK) {
             n = HASH_CHUNK;
         }
         if (rd(ctx, hdr.payload_offset + done, chunk, n) != 0) {
+            if (hw != NULL) {
+                hw->finish(hw_handle, digest);          /* release the hardware block */
+            }
             return PURR_V_IO_ERROR;
         }
-        purr_sha256_update(&sha, chunk, n);
+        if (hw != NULL) {
+            hw->update(hw_handle, chunk, n);
+        } else {
+            purr_sha256_update(&sha, chunk, n);
+        }
         done += n;
     }
-    purr_sha256_final(&sha, digest);
+    if (hw != NULL) {
+        hw->finish(hw_handle, digest);
+    } else {
+        purr_sha256_final(&sha, digest);
+    }
     if (memcmp(digest, hdr.payload_sha256, PURR_SHA256_LEN) != 0) {
         return PURR_V_BAD_HASH;
     }

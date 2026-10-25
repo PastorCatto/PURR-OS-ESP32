@@ -254,6 +254,32 @@ static void test_flags(void)
     CHECK(c.flags & PURR_CFGF_IGNORE_ONCE);
 }
 
+/* The handoff block the bootloader leaves in RTC memory (bootloader/SPEC.md section 7). */
+static void test_handoff(void)
+{
+    purr_handoff_t h;
+    purr_handoff_make(&h, PURR_BOOT_FORCED_RECOVERY, 0xFF, PURR_CFGF_FORCE_RECOVERY, 0x00010203,
+                      PURR_SECURE_ENFORCE | PURR_SECST_SIGNED);
+    CHECK_EQ(purr_handoff_valid(&h), 1);
+    CHECK_EQ(h.boot_state, PURR_BOOT_FORCED_RECOVERY);
+    CHECK_EQ(h.key_id_used, 0xFF);
+    CHECK_EQ(h.flags_used, PURR_CFGF_FORCE_RECOVERY);
+    CHECK_EQ(h.secure_state, PURR_SECURE_ENFORCE | PURR_SECST_SIGNED);
+    CHECK_EQ(sizeof(h), 20u);
+
+    /* Any flipped byte, or RTC memory that was never written, is rejected. */
+    purr_handoff_t bad = h;
+    bad.boot_state = PURR_BOOT_VERIFIED;
+    CHECK_EQ(purr_handoff_valid(&bad), 0);
+    bad = h;
+    bad.version++;
+    CHECK_EQ(purr_handoff_valid(&bad), 0);
+    memset(&bad, 0, sizeof(bad));
+    CHECK_EQ(purr_handoff_valid(&bad), 0);
+    memset(&bad, 0xFF, sizeof(bad));
+    CHECK_EQ(purr_handoff_valid(&bad), 0);
+}
+
 static void test_recovery_round_trip(void)
 {
     fake_t f;
@@ -288,6 +314,7 @@ int main(void)
     test_power_loss();
     test_readback_failure();
     test_flags();
+    test_handoff();
     test_recovery_round_trip();
     TK_DONE("test_cfg");
 }
