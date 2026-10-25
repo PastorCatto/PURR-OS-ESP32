@@ -27,6 +27,8 @@
 #include "purr_fetch.h"
 #include "purr_kernel.h"
 #include "purr_manifest.h"
+#include "purr_slot_trailer.h"
+#include "purr_trust_os.h"
 #include "purr_net.h"
 #include "purr_netrec.h"
 #include "purr_util.h"
@@ -322,8 +324,10 @@ static int install_kittenos(const uint8_t *image, size_t image_len)
     if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
         purr_cfg_defaults(&cfg);
     }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
     purr_keybag_t bag;
-    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
 
     purr_verify_env_t env = {
         .chip_id = THIS_CHIP,
@@ -341,7 +345,7 @@ static int install_kittenos(const uint8_t *image, size_t image_len)
         status("not a KittenOS image");
         return -1;
     }
-    if (vr != PURR_V_OK && cfg.secure_mode != PURR_SECURE_OFF) {
+    if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
         statusf("verification failed: %s", purr_verify_name(vr));
         return -1;
     }
@@ -355,7 +359,7 @@ static int install_kittenos(const uint8_t *image, size_t image_len)
         status("no kittenos partition on this board");
         return -1;
     }
-    if (hdr.payload_size > kp->size) {
+    if (!purr_slot_trailer_fits(kp, hdr.payload_size)) {
         status("the image is bigger than the kittenos partition");
         return -1;
     }
@@ -388,6 +392,21 @@ static int install_kittenos(const uint8_t *image, size_t image_len)
     if (memcmp(digest, hdr.payload_sha256, sizeof(digest)) != 0) {
         status("read-back hash mismatch: the write did not take");
         return -1;
+    }
+
+    /* The signature trailer (bootloader/SPEC.md section 3.1), then check the slot the way the
+     * bootloader will. */
+    if (purr_slot_trailer_write(kp, &hdr) != 0) {
+        status("could not write the signature trailer");
+        return -1;
+    }
+    purr_verify_result_t tv = purr_slot_trailer_check(&env, kp, PURR_IMG_RECOVERY, 0);
+    if (tv != PURR_V_OK) {
+        if (view.secure_mode != PURR_SECURE_OFF) {
+            statusf("installed, but the bootloader would reject it: %s", purr_verify_name(tv));
+            return -1;
+        }
+        statusf("no valid signature trailer (%s); fine while secure mode is off", purr_verify_name(tv));
     }
     statusf("kittenos %s installed", hdr.version);
     return 0;
@@ -444,6 +463,31 @@ static int partition_matches_manifest(const esp_partition_t *p, const purr_manif
     return memcmp(digest, entry->payload_sha256, PURR_SHA256_LEN) == 0;
 }
 
+/* Whether the slot's signature trailer verifies right now (bootloader/SPEC.md section 3.1).
+ * The payload hash above says the image bytes are right; this says the bootloader will accept
+ * them. Not required while secure_mode is off, where an unsigned slot boots anyway -- a restore
+ * must not rewrite a healthy unsigned slot forever. */
+static int partition_trailer_ok(const esp_partition_t *p, uint8_t want_type, uint8_t want_subtype)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
+    if (view.secure_mode == PURR_SECURE_OFF) {
+        return 1;
+    }
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {
+        .chip_id = THIS_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
+    };
+    return purr_slot_trailer_check(&env, p, want_type, want_subtype) == PURR_V_OK;
+}
+
 /* Whether what's already sitting in `p` verifies as image_type/subtype right now, without
  * touching the network -- so a restore only ever writes the components that actually need it.
  * Only meaningful for a component whose partition holds the WHOLE signed container (bootpkg;
@@ -456,8 +500,10 @@ static int partition_verify_in_place(const esp_partition_t *p, uint8_t want_type
     if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
         purr_cfg_defaults(&cfg);
     }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
     purr_keybag_t bag;
-    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
     purr_verify_env_t env = {
         .chip_id = THIS_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
         .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
@@ -515,8 +561,10 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
     if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
         purr_cfg_defaults(&cfg);
     }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
     purr_keybag_t bag;
-    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
     purr_verify_env_t env = {
         .chip_id = THIS_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
         .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
@@ -531,7 +579,7 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
         statusf("not a %s image", name);
         return -1;
     }
-    if (vr != PURR_V_OK && cfg.secure_mode != PURR_SECURE_OFF) {
+    if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
         free(image);
         statusf("%s verification failed: %s", name, purr_verify_name(vr));
         return -1;
@@ -554,7 +602,7 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
     const uint8_t *write_data = whole_container ? image : (image + hdr.payload_offset);
     uint32_t write_len = whole_container ? (uint32_t)image_len : hdr.payload_size;
 
-    if (write_len > slot->size) {
+    if (whole_container ? write_len > slot->size : !purr_slot_trailer_fits(slot, write_len)) {
         free(image);
         statusf("the image is bigger than the %s partition", label);
         return -1;
@@ -567,6 +615,24 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
     if (!ok) {
         status("write failed");
         return -1;
+    }
+
+    /* The signature trailer (bootloader/SPEC.md section 3.1) for the raw app slots; the boot
+     * package already holds its whole container. Then check the slot the way the bootloader
+     * will. */
+    if (!whole_container) {
+        if (purr_slot_trailer_write(slot, &hdr) != 0) {
+            status("could not write the signature trailer");
+            return -1;
+        }
+        purr_verify_result_t tv = purr_slot_trailer_check(&env, slot, PURR_IMG_MODULE, subtype);
+        if (tv != PURR_V_OK) {
+            if (view.secure_mode != PURR_SECURE_OFF) {
+                statusf("%s installed, but the bootloader would reject it: %s", name, purr_verify_name(tv));
+                return -1;
+            }
+            statusf("no valid signature trailer (%s); fine while secure mode is off", purr_verify_name(tv));
+        }
     }
     statusf("%s %s installed", name, hdr.version);
     return 0;
@@ -596,7 +662,8 @@ static int restore_components(void)
                                                           ESP_PARTITION_SUBTYPE_ANY, "kernel");
     const purr_manifest_entry_t *kentry = purr_manifest_find(&man, "kernel", CONFIG_IDF_TARGET,
                                                               purr_board()->name);
-    if (kp != NULL && partition_matches_manifest(kp, kentry)) {    /* F-14 */
+    if (kp != NULL && partition_matches_manifest(kp, kentry) &&    /* F-14 */
+        partition_trailer_ok(kp, PURR_IMG_MODULE, PURR_MOD_KERNEL)) {
         status("kernel: already good");
     } else if (fetch_and_install_module("kernel", "kernel", PURR_MOD_KERNEL, &man) != 0) {
         failures++;
@@ -615,7 +682,8 @@ static int restore_components(void)
                                                            "kittenos");
     const purr_manifest_entry_t *kosentry = purr_manifest_find(&man, "kittenos", CONFIG_IDF_TARGET,
                                                                  purr_board()->name);
-    if (kop != NULL && partition_matches_manifest(kop, kosentry)) {    /* F-14 */
+    if (kop != NULL && partition_matches_manifest(kop, kosentry) &&    /* F-14 */
+        partition_trailer_ok(kop, PURR_IMG_RECOVERY, 0)) {
         status("kittenos: already good");
     } else {
         const purr_manifest_entry_t *entry = kosentry;

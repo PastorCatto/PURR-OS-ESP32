@@ -37,7 +37,13 @@ static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *colo
     int h = area->y2 - area->y1 + 1;
     /* lv_color_t at CONFIG_LV_COLOR_DEPTH=16 is laid out exactly like this project's own
      * host-endian RGB565 (purr_display.h's own convention) -- no conversion needed. */
-    s_display->blit(area->x1, area->y1, w, h, (const uint16_t *)color_p);
+    int e = s_display->blit(area->x1, area->y1, w, h, (const uint16_t *)color_p);
+    if (e != 0) {
+        /* This callback used to ignore blit()'s result, so a failing flush left no trace at all
+         * (found chasing a white screen, 2026-10-25 -- which turned out to be elsewhere, but the
+         * silence cost a lot of time). Still ends in flush_ready so LVGL does not stall. */
+        ESP_LOGW(TAG, "flush (%d,%d %dx%d): blit failed (%d)", area->x1, area->y1, w, h, e);
+    }
     lv_disp_flush_ready(drv);
 }
 

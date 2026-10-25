@@ -1,0 +1,57 @@
+/*
+ * purr_trust_os.h - the OS's view of the device's security state (purr_trust.h, plan3.md).
+ *
+ * purrcfg holds trust state the OS must not take at face value: secure_mode and the override
+ * keys count only if the trust block's signature verifies, and development mode and `tighten`
+ * change the effective mode. Anything that decides something from purrcfg -- whether an unsigned
+ * install is acceptable, which keys may sign, whether to enforce a version floor -- reads the
+ * VIEW from os_cfg_view(), not the raw config. The view cannot be stored back: purr_cfg_store()
+ * refuses it. Keep the raw config for storing.
+ */
+#ifndef PURR_TRUST_OS_H
+#define PURR_TRUST_OS_H
+
+#include "purr_cfg.h"
+#include "purr_trust.h"
+
+/* Evaluate raw against the compiled-in default keys. */
+void os_trust(const purr_cfg_t *raw, purr_trust_t *t);
+
+/* A decisions-only copy with the effective values in place. */
+void os_cfg_view(const purr_cfg_t *raw, purr_cfg_t *view);
+
+/*
+ * The device's security state as an app, a service or the shell should see it (plan3.md "Secure
+ * status"). Honest about what it is: SOFTWARE attestation. Without the hardware root of trust
+ * (eFuse Secure Boot) someone who can write flash can still make a device report GENUINE.
+ *
+ *   GENUINE      the bootloader enforced `enforce` this boot, the slot it started verified, and
+ *                development mode is neither active now nor was it at boot
+ *   DEVELOPMENT  development mode is active (now, or it was at boot)
+ *   UNVERIFIED   anything else: not enforcing, the slot did not verify, or no handoff at all (a
+ *                stock bootloader or a cold boot that lost it)
+ *
+ * mode_now / dev_now / signed_now come from purrcfg (what the NEXT boot will use); the *_at_boot
+ * values are what the bootloader actually enforced for THIS boot (the handoff).
+ */
+typedef enum {
+    PURR_SECURE_LEVEL_UNVERIFIED = 0,
+    PURR_SECURE_LEVEL_DEVELOPMENT = 1,
+    PURR_SECURE_LEVEL_GENUINE = 2,
+} purr_secure_level_t;
+
+typedef struct {
+    purr_secure_level_t level;
+    int     have_handoff;
+    uint8_t mode_now, mode_at_boot;        /* PURR_SECURE_*; mode_at_boot is meaningless without a handoff */
+    int     dev_now, dev_at_boot;
+    int     signed_now, signed_at_boot;
+    int     slot_verified;                 /* the running slot's signature verified at boot */
+    uint8_t key_id;                        /* the key that verified it, or 0xFF */
+    uint8_t boot_state;                    /* PURR_BOOT_* */
+} purr_secure_status_t;
+
+void purr_secure_status(purr_secure_status_t *out);
+const char *purr_secure_level_name(purr_secure_level_t l);
+
+#endif

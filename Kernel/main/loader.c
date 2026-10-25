@@ -20,6 +20,7 @@
 #include "purr_keybag.h"
 #include "purr_module.h"
 #include "purr_relocate.h"
+#include "purr_trust.h"
 #include "purr_verify.h"
 
 #include "loader.h"
@@ -66,8 +67,14 @@ kernel_load_result_t kernel_load_relocatable_file(purr_fs_t *fs, const char *pat
     if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
         purr_cfg_defaults(&cfg);
     }
+    /* Override keys in purrcfg count only if the trust block's signature verifies against the
+     * compiled-in keys (purr_trust.h): decide from the effective view, never the raw config. */
+    purr_trust_t trust;
+    purr_trust_eval(&cfg, purr_default_keys, purr_default_keys_count, &purr_crypto_mbedtls, &trust);
+    purr_cfg_t view;
+    purr_trust_view(&cfg, &trust, &view);
     purr_keybag_t bag;
-    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
     purr_verify_env_t env = {.chip_id = PURR_CHIP_ESP32S3, .bag = &bag, .crypto = &purr_crypto_mbedtls};
     purr_mem_read_ctx_t mrc = {rb, rc.len};
     purr_image_header_t hdr;

@@ -1,4 +1,4 @@
-set(main_srcs "main.c" "commands.c" "recovery_loader.c" "login.c")
+set(main_srcs "main.c" "commands.c" "recovery_loader.c" "login.c" "purr_slot_trailer.c" "purr_trust_os.c")
 set(main_reqs kernel coreos littlefs esp_partition esp_system esp_timer esp_wifi
              mbedtls esp_http_client app_update heap esp_mm
              esp_driver_usb_serial_jtag vfs)
