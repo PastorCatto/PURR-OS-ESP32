@@ -11,6 +11,7 @@
 
 #include "esp_err.h"
 
+#include "purr_abi.h"
 #include "purr_board.h"
 #include "purr_display.h"
 #include "purr_driver.h"
@@ -22,15 +23,19 @@ extern "C" {
 /* Power the board, start the buses, and bind every device in the board profile. */
 esp_err_t purr_kernel_init(void);
 
+/*
+ * The bootloader's handoff for this boot (bootloader/SPEC.md section 7). Returns 0 and fills
+ * `out` if the bootloader left a valid one, -1 if there is none (a cold power-on, a stock
+ * bootloader, or a build without CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC).
+ */
+int purr_kernel_handoff(purr_handoff_t *out);
+
 /* The display, or NULL if it did not come up. */
 const purr_display_v2_t *purr_kernel_display(void);
 
-/* Driver entry (src/st7789.c): purr_driver_t.probe/.remove for compatible="st7789". dev->cfg
- * is this device's purr_display_cfg_t*; board->spi.host is the bus it's on (the one-bus
- * assumption purr_kernel_init() itself still makes -- a second real bus is section 6's own
- * open future work, not assumed away here). */
-int purr_st7789_probe(const purr_device_t *dev, const purr_board_t *board, void **out_handle);
-void purr_st7789_remove(void *handle);
+/* st7789 (display) converted to a real loadable driver module (Modules/drivers/
+ * st7789_module.c) -- no compiled-in entry point here anymore, see purr_kernel.c's own
+ * comment by s_drivers[] and purr_kernel_init(). */
 
 /* Driver entry (src/epd1in54.c): purr_driver_t.probe/.remove for compatible="epd1in54".
  * dev->cfg is this device's purr_epd_cfg_t*. */
@@ -41,9 +46,8 @@ void purr_epd1in54_remove(void *handle);
 char purr_kernel_key(void);
 
 /* 1 and (*x, *y) set (screen pixel coordinates) if the touch panel is currently pressed, 0
- * otherwise -- including boards with no touch driver bound at all. Driver entry
- * (src/purr_kernel.c): purr_driver_t.probe/.remove for compatible="gt911". dev->cfg is this
- * device's purr_touch_cfg_t*. */
+ * otherwise -- including boards with no touch driver bound at all. gt911 is a real loadable
+ * driver module now (Modules/drivers/gt911_module.c), not a compiled-in entry point here. */
 int purr_kernel_touch_read(uint16_t *x, uint16_t *y);
 
 #ifdef __cplusplus

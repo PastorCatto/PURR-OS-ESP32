@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define PURR_DRIVER_BUS_ABI_VERSION 3u
+#define PURR_DRIVER_BUS_ABI_VERSION 4u
 
 typedef struct {
     uint32_t abi_version;
@@ -62,9 +62,32 @@ typedef struct {
     void (*gpio_set_output)(int pin, int level);
     void (*gpio_set_input_pullup)(int pin);
     int (*gpio_get)(int pin);
+    /* gpio_set_output() above reconfigures the pin (gpio_config()) on every call -- fine for
+     * a reset pulse, too slow for a line toggled per SPI chunk (a display's D/C line, flipped
+     * on every command/data boundary during a blit). gpio_write() just sets the level on a
+     * pin gpio_set_output() has already configured once. */
+    void (*gpio_write)(int pin, int level);
 
     void (*delay_ms)(uint32_t ms);
     uint64_t (*now_us)(void);
+
+    /* A DMA-capable buffer, allocated once and kept forever -- same lifetime as the module
+     * itself (Modules/SPEC.md: a loaded module is never unloaded today). NULL on failure.
+     * Freestanding modules have no malloc/heap_caps_malloc of their own, and the one driver
+     * that needs this (a display, chunking pixel data to the panel over SPI/DMA) needs
+     * memory the DMA engine can actually reach -- ordinary module .bss is not guaranteed to
+     * be. No dma_free(): nothing in this project frees a loaded module's own allocations
+     * today, display included. */
+    void *(*dma_alloc)(size_t bytes);
+
+    /* Display backlight PWM -- scoped to exactly this one real need (not a general PWM
+     * subsystem) since it is the only driver so far that wants anything beyond plain GPIO
+     * on/off. Only one backlight channel exists on any board this project targets today,
+     * so there is no handle -- backlight_init() claims it, backlight_set() drives it. 0 on
+     * success, nonzero if the channel could not be configured (backlight_set() is then a
+     * silent no-op, same as the compiled st7789 driver's own s.backlight_ready check). */
+    int (*backlight_init)(int pin);
+    void (*backlight_set)(uint8_t level);
 } purr_driver_bus_table_t;
 
 /* core -> module direction (Modules/SPEC.md section 6, scoped to drivers): called once per

@@ -1227,7 +1227,9 @@ static void *process_request(const purr_ui_request_t *req)
     case PURR_UI_OP_ADD_WIDGET:
         return do_add_widget(&req->widget);
     case PURR_UI_OP_BUILD_CARD_SHELL:
+        ESP_LOGI(TAG, "diag2: build_card_shell entering, cfg=%p", (void *)req->card_shell_screen);
         build_card_shell(req->card_shell_screen);
+        ESP_LOGI(TAG, "diag2: build_card_shell returned");
         return NULL;
     default:
         ESP_LOGW(TAG, "unknown op %d", (int)req->op);
@@ -1246,18 +1248,30 @@ static void service_task(void *arg)
             next_ms = LVGL_TICK_PERIOD_MS;
         }
         TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(next_ms);
-        for (;;) {
+        /* A do/while, not a for(;;) that checks the deadline BEFORE the first receive: when
+         * LVGL reports next_ms == 0 (nothing scheduled "soon", which includes "idle, nothing
+         * queued right now" -- not just "busy, call again instantly"), deadline == now
+         * already, and checking the deadline first meant this loop broke without ever calling
+         * xQueueReceive even once. That starved the queue forever the moment LVGL settled
+         * into next_ms == 0 between frames -- found 2026-10-15 as the real cause of a
+         * permanently stuck boot screen: purr_card_shell_start()'s request sat in s_cmd_q,
+         * never picked up, while this task spun calling lv_timer_handler() with nothing left
+         * to render (hence no further flush activity either -- it wasn't hung, it just never
+         * looked at its own inbox again). xQueueReceive's own timeout of 0 when the deadline
+         * has already passed is a legitimate non-blocking poll, not a bug -- the guarantee
+         * this fixes is "check at least once," not "always wait the full next_ms." */
+        do {
             TickType_t now = xTaskGetTickCount();
-            if (now >= deadline) {
-                break;
-            }
+            TickType_t wait = (now >= deadline) ? 0 : (deadline - now);
             internal_msg_t msg;
-            if (xQueueReceive(s_cmd_q, &msg, deadline - now) != pdTRUE) {
-                break;              /* timed out waiting -- time to tick LVGL again */
+            if (xQueueReceive(s_cmd_q, &msg, wait) != pdTRUE) {
+                break;              /* nothing waiting -- time to tick LVGL again */
             }
+            ESP_LOGI(TAG, "diag2: received op=%d", (int)msg.req.op);
             void *obj = process_request(&msg.req);
+            ESP_LOGI(TAG, "diag2: replying op=%d", (int)msg.req.op);
             xQueueSend(msg.reply_q, &obj, portMAX_DELAY);
-        }
+        } while (xTaskGetTickCount() < deadline);
     }
 }
 

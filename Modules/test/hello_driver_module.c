@@ -30,6 +30,7 @@ static const purr_driver_t s_hello_driver = {
     .compatible = "hello_driver",
     .probe = hello_probe,
     .remove = hello_remove,
+    .bus_abi = PURR_DRIVER_BUS_ABI_VERSION,
 };
 
 __attribute__((used))

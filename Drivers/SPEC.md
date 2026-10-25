@@ -54,6 +54,33 @@ used.
   (`../ModuleSpike/SPEC.md`). Until it passes, code drivers are built into the kernel and only data-description
   drivers are separate files.
 
+### 4.1 The bus table and its ABI (rule added 2026-10-25)
+
+A loadable driver is freestanding code with no libc and no ESP-IDF link. Everything it reaches
+(SPI, I2C, GPIO, delays, DMA memory, the backlight) it reaches through a table of function
+pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
+(`PurrOS/components/kernel/include/purr_driver_bus.h`). The module calls a slot by position, so
+**the table layout is the ABI**.
+
+- **Every loadable driver stamps `bus_abi`.** `purr_driver_t.bus_abi` is set to
+  `PURR_DRIVER_BUS_ABI_VERSION`, taken from the same header the module was compiled with. The
+  loader (`load_one_driver_file()` in `commands.c`) refuses a driver whose value differs from the
+  kernel's, with an error naming the module.
+- **Why this exists.** When `gpio_write` was inserted in the middle of the table (ABI 3 to 4), a
+  touch module built before it called `now_us()` and landed on `delay_ms()` with a leftover
+  register as the argument: a 12.8-day sleep inside LVGL's input timer, so the UI froze on its
+  first white frame. Nothing checked the version, so the failure looked like a display bug.
+- **Change the table by appending.** A new function goes at the END of the table, never in the
+  middle, so an old module's slots keep their meaning. Bump `PURR_DRIVER_BUS_ABI_VERSION` on every
+  layout change regardless.
+- **After a bump, every driver blob must be rebuilt, re-signed and re-embedded.** The firmware
+  carries baked-in copies in `commands.c` (`s_kbd_i2c_driver_module`, `s_gt911_driver_module`,
+  `s_st7789_driver_module`, `s_hello_driver_module`). Build with `purrstrap modules build --kind
+  driver`, sign with the developer key (key id 2), and replace the byte arrays.
+- **Planting replaces a differing file.** Driver files in `/boot/drivers` come only from the
+  firmware, so on boot a file whose contents differ from the baked-in blob is replaced. (Files in
+  `/system` and `/kernelmods` keep the older rule: planted only if missing.)
+
 ## 5. Testing
 
 - Pack checks: a wrong signature, a driver file whose hash does not match, a swapped driver, and a missing

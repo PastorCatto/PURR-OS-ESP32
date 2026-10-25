@@ -39,6 +39,14 @@ typedef struct {
     purr_driver_probe_fn probe;
     purr_driver_remove_fn remove;
     purr_driver_read_fn read;     /* optional */
+    /* The purr_driver_bus_table_t layout this driver was compiled against: every loadable
+     * driver sets it to PURR_DRIVER_BUS_ABI_VERSION (purr_driver_bus.h), taken from the same
+     * header it was built with. The loader refuses a mismatch. Without it, a driver built
+     * before a slot was inserted into the bus table silently calls the WRONG function: found
+     * for real, 2026-10-25, when a stale touch module's now_us() landed on delay_ms() after
+     * gpio_write() was inserted ahead of it (ABI 3 to 4) and put the whole UI task to sleep for
+     * 12.8 days. Compiled-in drivers leave it 0; only the module loader checks it. */
+    uint32_t bus_abi;
 } purr_driver_t;
 
 /* One device's outcome, kernel/SPEC.md section 5. PURR_DEV_UNBOUND is a device

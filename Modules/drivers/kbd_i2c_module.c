@@ -48,6 +48,7 @@ static int kbd_read(void *handle, uint8_t *data, size_t len)
 static const purr_driver_t s_kbd_driver = {
     .name = "kbd-i2c", .compatible = "kbd-i2c",
     .probe = kbd_probe, .remove = kbd_remove, .read = kbd_read,
+    .bus_abi = PURR_DRIVER_BUS_ABI_VERSION,
 };
 
 __attribute__((used))

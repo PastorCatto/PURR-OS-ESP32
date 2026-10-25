@@ -27,6 +27,17 @@ esp_err_t purr_console_init(const purr_display_v2_t *d)
     return ESP_OK;
 }
 
+esp_err_t purr_console_init_headless(const purr_board_t *board)
+{
+    if (board == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_d = NULL;
+    purr_term_init(&s_term, board->display.width / CELL_W, board->display.height / ROW_H);
+    s_cur_x = s_cur_y = -1;
+    return ESP_OK;
+}
+
 void purr_console_put(void *ctx, char c)
 {
     (void)ctx;

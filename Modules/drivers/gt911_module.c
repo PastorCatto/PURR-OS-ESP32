@@ -227,6 +227,7 @@ static int gt911_read(void *handle, uint8_t *data, size_t len)
 static const purr_driver_t s_gt911_driver = {
     .name = "gt911", .compatible = "gt911",
     .probe = gt911_probe, .remove = gt911_remove, .read = gt911_read,
+    .bus_abi = PURR_DRIVER_BUS_ABI_VERSION,
 };
 
 __attribute__((used))

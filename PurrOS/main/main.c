@@ -115,18 +115,25 @@ void app_main(void)
     return;                        /* not reached; kept so the function's shape stays plain */
 #endif
 
-    if (purr_kernel_init() != ESP_OK || purr_kernel_display() == NULL) {
-        /* No display: there is nothing to draw on, so say so on the serial console. */
+    if (purr_kernel_init() != ESP_OK) {
+        /* A real hardware failure (the SPI bus itself didn't start) -- distinct from "no
+         * display driver bound yet", which is now expected at this point (st7789 converted
+         * to a loadable module, Modules/drivers/st7789_module.c; it cannot bind before the
+         * filesystem mounts the way the compiled-in version always could). */
         for (;;) {
-            ESP_LOGE(TAG, "display did not come up");
+            ESP_LOGE(TAG, "kernel init failed (board hardware did not come up)");
             vTaskDelay(pdMS_TO_TICKS(2000));
         }
     }
-    const purr_display_v2_t *d = purr_kernel_display();
-    if (d->set_brightness) {
-        d->set_brightness(255);
-    }
-    purr_console_init(d);
+
+    /* No display is bound yet -- purr_console_put()/purr_console_clear() only touch the
+     * in-memory terminal buffer (purr_console.c's own comment), and purr_console_flush()
+     * already no-ops with none set, so boot status can safely accumulate here, sized from
+     * the board profile instead of a live display query. The real purr_console_init(d)
+     * below (once display has had its chance to load) resets this -- the few lines printed
+     * in this window are serial-log-only (ESP_LOGI/ESP_LOGW already duplicate everything),
+     * not lost information, just not shown on the physical screen for that brief window. */
+    purr_console_init_headless(purr_board());
 
     /* A throwaway cli, just so purr_fs_setup/purr_net_setup have somewhere to print their
      * status before the login prompt (which uses the console directly, not the shell). */
@@ -139,7 +146,25 @@ void app_main(void)
      * 6.1) before anything else touches /boot -- reboots and never returns if there was one. */
     purr_swap_setup(&boot_cli);
 #endif
-    purr_modules_setup(&boot_cli);
+    purr_modules_setup(&boot_cli);   /* loads/registers display (+ keyboard/touch) from here */
+
+    /* Display is the one driver that still has to exist before anything can be shown on the
+     * physical screen -- same fail-stop this function always had, just moved to after the
+     * filesystem mounts and purr_modules_setup() has had its chance to load the module. */
+    const purr_display_v2_t *d = purr_kernel_display();
+    if (d == NULL) {
+        for (;;) {
+            ESP_LOGE(TAG, "display did not come up");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+    }
+    if (d->set_brightness) {
+        d->set_brightness(255);
+    }
+    purr_console_init(d);
+    purr_console_flush();   /* paint whatever's already buffered (the "starting"/fs-mount
+                              * lines) immediately instead of waiting for the next flush. */
+
     purr_apps_setup(&boot_cli);
     purr_net_setup(&boot_cli);
 #if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS

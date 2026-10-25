@@ -25,5 +25,8 @@ esp_err_t purr_card_shell_start(void)
     }
 
     purr_ui_request_t req = {.op = PURR_UI_OP_BUILD_CARD_SHELL, .card_shell_screen = cfg};
-    return purr_ui_service_request(&req, NULL);
+    ESP_LOGI(TAG, "diag2: sending, cfg=%p", (void *)cfg);
+    esp_err_t e = purr_ui_service_request(&req, NULL);
+    ESP_LOGI(TAG, "diag2: request returned e=%s", esp_err_to_name(e));
+    return e;
 }

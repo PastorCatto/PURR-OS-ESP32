@@ -4,11 +4,19 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
+
+#include "purr_cfg.h"
+#if CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC
+#include "bootloader_common.h"
+#endif
 
 #include "purr_driver_bus.h"
 
@@ -60,10 +68,12 @@ static esp_err_t shared_i2c_bus(int port, int sda, int scl, i2c_master_bus_handl
     return e;
 }
 
-static const purr_driver_t s_st7789_driver = {
-    .name = "st7789", .compatible = "st7789",
-    .probe = purr_st7789_probe, .remove = purr_st7789_remove,
-};
+/* st7789 (display) is gone from here too now -- converted to a real loadable driver module
+ * (Modules/drivers/st7789_module.c), same as keyboard and touch before it. Unlike those two,
+ * display's real logic never lived outside its own probe()/the returned purr_display_v2_t
+ * ops table, so this was a more direct port -- the two real gaps were a DMA-capable allocator
+ * and backlight PWM, neither of which any other driver needed yet (purr_driver_bus_table_t's
+ * dma_alloc()/backlight_init()/backlight_set()/gpio_write()). */
 static const purr_driver_t s_epd1in54_driver = {
     .name = "epd1in54", .compatible = "epd1in54",
     .probe = purr_epd1in54_probe, .remove = purr_epd1in54_remove,
@@ -112,7 +122,7 @@ static void *handle_at(uint32_t h)
 static uint32_t bus_spi_add_device(int host, int cs_pin, int mode, int clock_hz)
 {
     spi_device_interface_config_t dc = {
-        .clock_speed_hz = clock_hz, .mode = mode, .spics_io_num = cs_pin, .queue_size = 1,
+        .clock_speed_hz = clock_hz, .mode = mode, .spics_io_num = cs_pin, .queue_size = 2,
     };
     spi_device_handle_t dev;
     if (spi_bus_add_device((spi_host_device_t)host, &dc, &dev) != ESP_OK) {
@@ -187,8 +197,45 @@ static void bus_i2c_remove_device(uint32_t handle)
 static void bus_gpio_set_output(int pin, int level) { pin_out(pin, level); }
 static void bus_gpio_set_input_pullup(int pin) { pin_in_pullup(pin); }
 static int bus_gpio_get(int pin) { return gpio_get_level((gpio_num_t)pin); }
+static void bus_gpio_write(int pin, int level) { gpio_set_level((gpio_num_t)pin, level); }
 static void bus_delay_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 static uint64_t bus_now_us(void) { return (uint64_t)esp_timer_get_time(); }
+
+static void *bus_dma_alloc(size_t bytes)
+{
+    return heap_caps_malloc(bytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+}
+
+/* Only one backlight channel exists on any board this project targets today -- same LEDC
+ * timer/channel the compiled st7789 driver always used, just reached through the bus table
+ * instead of linking driver/ledc.h directly into a module. */
+static int s_backlight_ready;
+
+static int bus_backlight_init(int pin)
+{
+    ledc_timer_config_t t = {
+        .speed_mode = LEDC_LOW_SPEED_MODE, .timer_num = LEDC_TIMER_2,
+        .duty_resolution = LEDC_TIMER_8_BIT, .freq_hz = 5000, .clk_cfg = LEDC_AUTO_CLK,
+    };
+    ledc_channel_config_t c = {
+        .gpio_num = pin, .speed_mode = LEDC_LOW_SPEED_MODE, .channel = LEDC_CHANNEL_2,
+        .timer_sel = LEDC_TIMER_2, .duty = 0, .hpoint = 0,
+    };
+    if (ledc_timer_config(&t) == ESP_OK && ledc_channel_config(&c) == ESP_OK) {
+        s_backlight_ready = 1;
+        return 0;
+    }
+    return -1;
+}
+
+static void bus_backlight_set(uint8_t level)
+{
+    if (!s_backlight_ready) {
+        return;
+    }
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2, level);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2);
+}
 
 static const purr_driver_bus_table_t s_bus_table = {
     .abi_version = PURR_DRIVER_BUS_ABI_VERSION,
@@ -202,8 +249,12 @@ static const purr_driver_bus_table_t s_bus_table = {
     .gpio_set_output = bus_gpio_set_output,
     .gpio_set_input_pullup = bus_gpio_set_input_pullup,
     .gpio_get = bus_gpio_get,
+    .gpio_write = bus_gpio_write,
     .delay_ms = bus_delay_ms,
     .now_us = bus_now_us,
+    .dma_alloc = bus_dma_alloc,
+    .backlight_init = bus_backlight_init,
+    .backlight_set = bus_backlight_set,
 };
 
 const purr_driver_bus_table_t *purr_driver_bus_table(void)
@@ -215,7 +266,6 @@ const purr_driver_bus_table_t *purr_driver_bus_table(void)
  * this is a plain table, not yet the spec's linker-section self-registration). A new real
  * driver is a new entry here plus its own source file -- no other kernel code changes. */
 static const purr_driver_t *const s_drivers[] = {
-    &s_st7789_driver,
     &s_epd1in54_driver,
 };
 
@@ -280,13 +330,14 @@ esp_err_t purr_kernel_init(void)
 
     /* F-02: every device in the board profile is matched, pin-checked and probed here,
      * instead of the display and keyboard each being brought up by a hardcoded, named call.
-     * A device's own failure is recorded (purr_device_state()) and never stops the rest. */
+     * A device's own failure is recorded (purr_device_state()) and never stops the rest.
+     * display is NOT expected to be bound by this call anymore (st7789 converted to a real
+     * loadable module, Modules/drivers/st7789_module.c) -- it can only load after the
+     * filesystem mounts, well after this function returns, so main.c's own display-bound
+     * check moved there too (purr_console.h's purr_console_init_headless() covers the
+     * window in between). Returning ESP_OK here only means the board's bare hardware (power,
+     * pins, buses) came up -- it says nothing about which drivers are bound yet. */
     purr_drivers_bind_all(b);
-
-    if (purr_device_state("display") != PURR_DEV_BOUND) {
-        ESP_LOGE(TAG, "display did not come up");
-        return ESP_FAIL;
-    }
     return ESP_OK;
 }
 
@@ -370,4 +421,18 @@ int purr_kernel_touch_read(uint16_t *x, uint16_t *y)
     *x = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
     *y = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
     return 1;
+}
+
+int purr_kernel_handoff(purr_handoff_t *out)
+{
+#if CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC
+    purr_handoff_t h;
+    memcpy(&h, bootloader_common_get_rtc_retain_mem()->custom, sizeof(h));
+    if (purr_handoff_valid(&h)) {
+        *out = h;
+        return 0;
+    }
+#endif
+    (void)out;
+    return -1;
 }
