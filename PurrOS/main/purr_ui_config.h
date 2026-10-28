@@ -163,6 +163,7 @@ void purr_ui_card_shell_config_setup(purr_cli_t *cli);
 typedef enum {
     PURR_UI_MODE_CARD_SHELL,
     PURR_UI_MODE_NAV,
+    PURR_UI_MODE_W10M,          /* the Windows 10 Mobile style shell (purr_w10m.c, plan7.md) */
 } purr_ui_mode_t;
 
 /* Reads /ui/mode.conf (plain text, just the mode name on its own line) -- missing, empty, or

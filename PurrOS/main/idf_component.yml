@@ -1,11 +1,12 @@
 ## IDF Component Manager manifest for PurrOS/main.
 ## LVGL: the shell UI (purr_lvgl.c), proof-of-life chunk (documentation/ UI design, not yet
 ## written). purr_console.c (the text shell) stays the fallback if this fails to init or hits
-## a critical error -- see main.c. Pinned to the same ~8.3.0 line the pre-rewrite project
-## (PURR-OS-0.11/CoreOS/main/idf_component.yml) already used LVGL at, so this isn't a second,
-## unrelated set of assumptions about how it behaves.
+## a critical error -- see main.c. Was pinned to the ~8.3.0 line the pre-rewrite project
+## (PURR-OS-0.11/CoreOS/main/idf_component.yml) used; moved to 9.2 on 2026-10-26 (plan7.md) so the
+## Windows 10 Mobile style shell (fbiego/windows-10-mobile-lvgl, native LVGL 9.2) can be adapted
+## without back-porting it.
 dependencies:
   idf:
     version: ">=5.3.0,<6.0.0"
   lvgl/lvgl:
-    version: "~8.3.0"
+    version: "~9.2.0"

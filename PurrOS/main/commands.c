@@ -35,6 +35,13 @@
 #include "purr_driver.h"
 #include "purr_driver_bus.h"
 #include "purr_fetch.h"
+#include "purr_catrt.h"
+#include "purr_catrt_storage.h"
+#include "purr_settings.h"
+#include "purr_power_plat.h"
+#include "purr_recovery_src.h"
+#include "purr_catrt_power.h"
+#include "purr_runtime.h"
 #include "purr_fs.h"
 #include "purr_kernel.h"
 #include "purr_slot_trailer.h"
@@ -490,6 +497,9 @@ static int kernel_table_app_install(purr_cli_t *cli, const char *file_or_url)
      * result is what add() needs to apply the update-must-be-newer rule. */
     purr_cfg_t cfg;
     purr_appmgr_env_t env = apps_env(&cfg);
+    if (purr_security_unsigned_apps_allowed()) {
+        cfg.secure_mode = PURR_SECURE_OFF;          /* the app manager's accept-unsigned rule */
+    }
     purr_app_registry_t reg;
     purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);
 
@@ -539,6 +549,150 @@ static int kernel_table_app_remove(purr_cli_t *cli, const char *name)
     return 0;
 }
 
+/* The same install and remove the shell commands do, without a prompt, for the Settings app: one
+ * place for the rules, `msg` says what happened. Both run on the caller's task and use the shared
+ * scratch buffer, so call them from a worker, one at a time. */
+int purr_apps_install(const char *file_or_url, char *msg, size_t cap)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        snprintf(msg, cap, "the filesystem is not mounted");
+        return -1;
+    }
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    ensure_user_home(purr_login_current()->name);
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        snprintf(msg, cap, "out of memory");
+        return -1;
+    }
+    static purr_app_registry_t reg;                 /* ~1.6 KB: not for a small task stack */
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    if (purr_security_unsigned_apps_allowed()) {
+        cfg.secure_mode = PURR_SECURE_OFF;          /* developer mode, unsigned apps switched on */
+    }
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);
+    uint32_t len = 0;
+    if (is_url(file_or_url)) {
+        size_t got = 0;
+        esp_err_t err = purr_fetch_into(file_or_url, scratch, APP_SCRATCH_CAP, &got);
+        if (err != ESP_OK) {
+            snprintf(msg, cap, "could not fetch it (%s)", esp_err_to_name(err));
+            return -1;
+        }
+        len = (uint32_t)got;
+    } else {
+        char path[80];
+        appinstall_read_ctx_t rc = {scratch, APP_SCRATCH_CAP, 0};
+        if (purr_fs_read(&s_fs, abs_path(file_or_url, path, sizeof(path)), appinstall_accumulate, &rc) < 0) {
+            snprintf(msg, cap, "could not read %s", file_or_url);
+            return -1;
+        }
+        len = rc.len;
+    }
+    purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, len);
+    if (r != PURR_APP_OK) {
+        snprintf(msg, cap, "%s", purr_app_result_name(r));
+        return -1;
+    }
+    snprintf(msg, cap, "installed");
+    return 0;
+}
+
+/* ---------------------------------------------------------------- the developer folder */
+
+static void user_devapps_root(char *out, size_t cap, const char *username)
+{
+    snprintf(out, cap, "/home/%s/devapps", username);
+}
+
+static void ensure_devapps_root(void)
+{
+    char home[48], root[64];
+    snprintf(home, sizeof(home), "/home/%s", purr_login_current()->name);
+    purr_fs_mkdir(&s_fs, "/home");
+    purr_fs_mkdir(&s_fs, home);
+    user_devapps_root(root, sizeof(root), purr_login_current()->name);
+    purr_fs_mkdir(&s_fs, root);
+}
+
+void purr_devapps_scan(purr_app_registry_t *out_reg)
+{
+    memset(out_reg, 0, sizeof(*out_reg));
+    if (!purr_fs_mounted(&s_fs) || !purr_security_dev_active() || purr_login_current()->name[0] == '\0') {
+        return;
+    }
+    ensure_devapps_root();
+    char root[64];
+    user_devapps_root(root, sizeof(root), purr_login_current()->name);
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, out_reg);
+}
+
+int purr_devapps_remove(const char *name)
+{
+    if (!purr_fs_mounted(&s_fs) || !purr_security_dev_active() || name == NULL || name[0] == '\0' ||
+        strchr(name, '/') != NULL) {
+        return -1;
+    }
+    char root[64];
+    user_devapps_root(root, sizeof(root), purr_login_current()->name);
+    return purr_appmgr_remove(&s_appmgr_fs, root, name) == 0 ? 0 : -1;
+}
+
+int purr_devapps_install_url(const char *url, const purr_repo_app_t *app, char *msg, size_t cap)
+{
+    if (!purr_fs_mounted(&s_fs) || !purr_security_dev_active()) {
+        snprintf(msg, cap, "developer mode is not active this boot");
+        return -1;
+    }
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        snprintf(msg, cap, "out of memory");
+        return -1;
+    }
+    ensure_devapps_root();
+    char root[64];
+    user_devapps_root(root, sizeof(root), purr_login_current()->name);
+    static purr_app_registry_t reg;                 /* ~1.6 KB: not for a small task stack */
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);   /* before the download reuses the buffer */
+    if (purr_security_unsigned_apps_allowed()) {
+        cfg.secure_mode = PURR_SECURE_OFF;          /* the app manager's accept-unsigned rule */
+    }
+    size_t got = 0;
+    esp_err_t err = purr_fetch_local_into(url, scratch, APP_SCRATCH_CAP, &got);
+    if (err != ESP_OK) {
+        snprintf(msg, cap, "could not download it (%s)", esp_err_to_name(err));
+        return -1;
+    }
+    purr_repo_pkg_result_t chk = purr_repo_check_package(app, scratch, got);
+    if (chk != PURR_REPO_PKG_OK) {
+        snprintf(msg, cap, "the download does not match the server's index (%s)", purr_repo_pkg_result_name(chk));
+        return -1;
+    }
+    purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, (uint32_t)got);
+    if (r != PURR_APP_OK) {
+        snprintf(msg, cap, "%s", purr_app_result_name(r));
+        return -1;
+    }
+    snprintf(msg, cap, "installed");
+    return 0;
+}
+
+int purr_apps_remove(const char *name)
+{
+    if (!purr_fs_mounted(&s_fs) || name == NULL || name[0] == '\0' || strchr(name, '/') != NULL) {
+        return -1;
+    }
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    return purr_appmgr_remove(&s_appmgr_fs, root, name) == 0 ? 0 : -1;
+}
+
 static int kernel_table_app_format(purr_cli_t *cli)
 {
     if (!require_admin(cli)) return 1;        /* F-10 */
@@ -585,7 +739,8 @@ void purr_net_setup(purr_cli_t *cli)
 {
     esp_err_t e = purr_net_init(&s_fs);
     if (e != ESP_OK) {
-        purr_cli_printf(cli, "wifi: did not start (%s)\n", esp_err_to_name(e));
+        purr_cli_printf(cli, "%s: did not start (%s)\n", purr_net_wired() ? "ethernet" : "wifi",
+                        esp_err_to_name(e));
     }
 }
 
@@ -633,6 +788,26 @@ static int confirm_install(purr_cli_t *cli)
     return r.index == 0;
 }
 
+/* Whether the kernel slot holds an image and no reset has marked it bad. The recovery loader installs the kernel itself now; KittenOS only
+ * fetches it when it is missing (a loader from before that change restored KittenOS alone). */
+int purr_kernel_installed(void)
+{
+    const esp_partition_t *kp = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    uint8_t first = 0;
+    return kp != NULL && esp_partition_read(kp, 0, &first, 1) == ESP_OK && first == 0xE9 && !purr_slot_marked_bad(kp);
+}
+
+/* Whether a recovery install is waiting to continue, without clearing the request. */
+int purr_stage2_pending(void)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return 0;
+    }
+    return (cfg.flags & PURR_CFGF_CONTINUE_INSTALL) != 0;
+}
+
 /* Stage 2 of recovery (PURR_CFGF_CONTINUE_INSTALL, purr_abi.h): called once every boot, right
  * after Wi-Fi starts and before this boot's normal login/shell loop; a no-op unless the flag
  * is actually set (checked and cleared here, the same one-shot shape every other purrcfg flag
@@ -662,16 +837,26 @@ void purr_continue_install(purr_cli_t *cli)
     purr_cli_puts(cli, "continuing installation (stage 2)...\n");
     purr_console_flush();
 
-    char ssid[PURR_NETREC_SSID_LEN] = "", pass[PURR_NETREC_PASS_LEN] = "";
-    if (purr_netrec_load(ssid, pass) != 0) {
-        purr_cli_puts(cli, "stage 2: no saved recovery network, skipping\n");
-        return;
-    }
-    purr_cli_printf(cli, "stage 2: connecting to %s...\n", ssid);
-    purr_console_flush();
-    if (purr_net_connect(ssid, pass, 15000) != ESP_OK) {
-        purr_cli_puts(cli, "stage 2: could not connect, skipping\n");
-        return;
+    if (purr_net_wired()) {
+        /* No remembered network on a wire: it has an address or it does not. */
+        purr_cli_puts(cli, "stage 2: waiting for the wired link and an address...\n");
+        purr_console_flush();
+        if (purr_net_connect("", "", 30000) != ESP_OK) {
+            purr_cli_puts(cli, "stage 2: no wired link or address, skipping\n");
+            return;
+        }
+    } else {
+        char ssid[PURR_NETREC_SSID_LEN] = "", pass[PURR_NETREC_PASS_LEN] = "";
+        if (purr_netrec_load(ssid, pass) != 0) {
+            purr_cli_puts(cli, "stage 2: no saved recovery network, skipping\n");
+            return;
+        }
+        purr_cli_printf(cli, "stage 2: connecting to %s...\n", ssid);
+        purr_console_flush();
+        if (purr_net_connect(ssid, pass, 15000) != ESP_OK) {
+            purr_cli_puts(cli, "stage 2: could not connect, skipping\n");
+            return;
+        }
     }
 
     /* Keyboard boards keep today's fully-silent, fully-automatic behavior exactly as it
@@ -687,8 +872,34 @@ void purr_continue_install(purr_cli_t *cli)
     }
 
     purr_console_clear();
-    purr_net_install_run(cli, "kernel");
+    if (!purr_kernel_installed()) {
+        purr_net_install_run(cli, "kernel");
+    }
     purr_net_install_run(cli, "modules");
+}
+
+/* Stage 2 for the setup wizard (oobe_firstboot.c): the same installs as purr_continue_install(), one step at a time and without the
+ * text prompts. take_pending says whether a recovery install is waiting to be continued (and clears the request); step 0 is the
+ * kernel, step 1 the modules. The cli's output is the caller's to keep or throw away. */
+int purr_stage2_take_pending(void)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return 0;
+    }
+    if (!purr_cfg_take_flag(&cfg, PURR_CFGF_CONTINUE_INSTALL)) {
+        return 0;
+    }
+    if (purr_cfg_store(&fl, &cfg) != 0) {
+        ESP_LOGW("stage2", "purrcfg: could not clear the continue-install request");
+    }
+    return 1;
+}
+
+int purr_stage2_step(purr_cli_t *cli, int step)
+{
+    return purr_net_install_run(cli, step == 0 ? "kernel" : "modules");
 }
 
 /* ---------------------------------------------------------------- net install */
@@ -904,7 +1115,7 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
     purr_console_flush();
     uint8_t *manifest_buf = NULL;
     size_t manifest_len = 0;
-    if (purr_fetch_alloc(CONFIG_PURR_RECOVERY_MANIFEST_URL, &manifest_buf, &manifest_len,
+    if (purr_fetch_alloc(purr_recovery_manifest_url(), &manifest_buf, &manifest_len,
                          32 * 1024) != ESP_OK) {
         purr_cli_puts(cli, "could not fetch the manifest\n");
         return 1;
@@ -922,7 +1133,7 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
     purr_cli_printf(cli, "found %s %s (%u bytes)\n", component, entry->version, (unsigned)entry->size);
 
     char image_url[256];
-    resolve_manifest_url(CONFIG_PURR_RECOVERY_MANIFEST_URL, entry->file, image_url, sizeof(image_url));
+    resolve_manifest_url(purr_recovery_manifest_url(), entry->file, image_url, sizeof(image_url));
     purr_cli_printf(cli, "downloading %s...\n", entry->file);
     purr_console_flush();
 
@@ -1117,7 +1328,7 @@ static int purr_net_install_modules(purr_cli_t *cli)
     purr_console_flush();
     uint8_t *idx_buf = NULL;
     size_t idx_len = 0;
-    if (purr_fetch_alloc(CONFIG_PURR_MODULE_INDEX_URL, &idx_buf, &idx_len, 32 * 1024) != ESP_OK) {
+    if (purr_fetch_alloc(purr_recovery_modules_url(), &idx_buf, &idx_len, 32 * 1024) != ESP_OK) {
         purr_cli_puts(cli, "could not fetch the module index\n");
         return 1;
     }
@@ -1157,7 +1368,7 @@ static int purr_net_install_modules(purr_cli_t *cli)
         }
 
         char url[256];
-        resolve_manifest_url(CONFIG_PURR_MODULE_INDEX_URL, e->file, url, sizeof(url));
+        resolve_manifest_url(purr_recovery_modules_url(), e->file, url, sizeof(url));
         purr_cli_printf(cli, "fetching %s...\n", e->component);
         purr_console_flush();
         uint8_t *data = NULL;
@@ -1324,6 +1535,12 @@ void purr_mark_boot_healthy(purr_cli_t *cli)
         cfg.boot_fail_count = 0;
         changed = 1;
     }
+#if !CONFIG_PURR_PROFILE_RECOVERY && !CONFIG_PURR_PROFILE_MINIMAL
+    if (cfg.flags & PURR_CFGF_FRESH) {                  /* the full OS reached a healthy boot: no longer a first run */
+        cfg.flags &= ~PURR_CFGF_FRESH;
+        changed = 1;
+    }
+#endif
     /* Confirm a pending system-file update (PurrOS/SPEC.md section 6.1, step 6): reaching
      * healthy after KittenOS's swap means the new file actually works. Raise its version
      * floor -- a downgrade past this point needs an explicit override -- and close out the
@@ -1738,33 +1955,15 @@ static int cmd_secure(purr_cli_t *cli, int argc, char **argv)
             return 0;
         }
         if (strcmp(argv[2], "on") == 0) {
-            purr_flash_t fl;
-            purr_cfg_t cfg;
-            if (load_cfg(cli, &fl, &cfg) < 0) {
-                return 1;
-            }
-            purr_trust_t tr;
-            os_trust(&cfg, &tr);
-            if (tr.signature_ok && (cfg.trust_flags & PURR_TRUSTF_DEV_LOCKED)) {
-                purr_cli_puts(cli, "refused: this device's signed trust block locks development mode out.\n");
-                return 1;
-            }
-            if (!secure_confirm(cli, "Development mode relaxes enforce to warn: unsigned or failed images will\n"
-                                     "BOOT WITH A WARNING, and apps that need a trusted device will see\n"
-                                     "DEVELOPMENT, not GENUINE.")) {
-                return 1;
-            }
-            if (secure_store(cli, change_dev, 1) != 0) {
-                return 1;
-            }
-            purr_cli_puts(cli, "development mode is on. It applies from the next boot (reboot).\n");
-            return 0;
+            purr_cli_puts(cli, "development mode can only be turned on from the Security tab in recovery (KittenOS):\n"
+                               "it asks for an administrator and about your data first.\n");
+            return 1;
         }
     }
     purr_cli_puts(cli, "usage: secure [status]\n"
                        "       secure enforce        (admin) enforce from the next boot\n"
                        "       secure relax          (admin) clear the tighten floor\n"
-                       "       secure dev on|off     (admin) development mode\n");
+                       "       secure dev off        (admin) turn development mode off (turning it on is in recovery)\n");
     return 1;
 }
 
@@ -2148,6 +2347,127 @@ static int kernel_table_login_usermod(purr_cli_t *cli, const char *name, int as_
         return 1;
     }
     purr_cli_printf(cli, "%s is now %s\n", name, role == PURR_ROLE_USER_ADMIN ? "admin" : "standard");
+    return 0;
+}
+
+/* ---------------------------------------------------------------- security, without a prompt */
+
+typedef struct {
+    char *buf;
+    size_t cap, len;
+} sec_capture_t;
+
+static void sec_capture_put(void *ctx, char c)
+{
+    sec_capture_t *cp = ctx;
+    if (cp->len + 1 < cp->cap) {
+        cp->buf[cp->len++] = c == '\n' ? ' ' : c;
+        cp->buf[cp->len] = '\0';
+    }
+}
+
+static int sec_admin(char *msg, size_t cap)
+{
+    if (purr_login_is_root() || purr_login_current()->role == PURR_ROLE_USER_ADMIN) {
+        return 1;
+    }
+    snprintf(msg, cap, "only an administrator can change security settings");
+    return 0;
+}
+
+int purr_security_dev_active(void)
+{
+    static int cached = -1;                 /* constant for a boot, and the VM fallback below verifies a signature */
+    if (cached >= 0) {
+        return cached;
+    }
+    purr_handoff_t h;
+    int have = purr_kernel_handoff(&h) == 0;
+    int active = have && (h.secure_state & PURR_SECST_DEV) != 0;
+#if CONFIG_PURR_NET_ETH_W5500
+    /* The VM flavor only (never a device): the emulator's RTC memory does not survive a cold power-on, so
+     * the bootloader's handoff can be missing. Then the trust block in flash decides. The standard build
+     * has no such fallback and only ever believes the bootloader. */
+    if (!have) {
+        purr_secure_status_t st;
+        purr_secure_status(&st);
+        active = st.dev_now != 0;
+    }
+#endif
+    cached = active;
+    return active;
+}
+
+int purr_security_unsigned_apps_allowed(void)
+{
+    return purr_security_dev_active() && purr_settings_kv_int("dev.unsigned_apps", 0) == 1;
+}
+
+int purr_security_set_enforce(int on, char *msg, size_t cap)
+{
+    if (!sec_admin(msg, cap)) {
+        return -1;
+    }
+    purr_cli_t quiet;
+    sec_capture_t cp = {msg, cap, 0};
+    msg[0] = '\0';
+    purr_cli_init(&quiet, NULL, 0, sec_capture_put, &cp, "");
+    if (on) {
+        /* never leave the device with nothing it may boot: every slot has to verify right now */
+        if (secure_check_slots(&quiet, 0) != 0) {
+            snprintf(msg, cap, "a boot slot does not verify; reinstall it first, enforcing would make it unbootable");
+            return -1;
+        }
+    }
+    if (secure_store(&quiet, change_tighten, on ? PURR_SECURE_ENFORCE : PURR_SECURE_OFF) != 0) {
+        if (msg[0] == '\0') snprintf(msg, cap, "could not write the setting");
+        return -1;
+    }
+    snprintf(msg, cap, on ? "Enforcing signatures from the next boot." : "Enforce floor cleared; applies from the next boot.");
+    return 0;
+}
+
+int purr_security_set_dev(int on, char *msg, size_t cap)
+{
+    if (!sec_admin(msg, cap)) {
+        return -1;
+    }
+    purr_cli_t quiet;
+    sec_capture_t cp = {msg, cap, 0};
+    msg[0] = '\0';
+    purr_cli_init(&quiet, NULL, 0, sec_capture_put, &cp, "");
+    if (on) {                       /* weakening the bootloader is recovery's job (recovery_app.c), where the data question is asked */
+        snprintf(msg, cap, "turn developer mode on from recovery (KittenOS > Security)");
+        return -1;
+    }
+    if (secure_store(&quiet, change_dev, on ? 1 : 0) != 0) {
+        if (msg[0] == '\0') snprintf(msg, cap, "could not write the setting");
+        return -1;
+    }
+    if (!on) {
+        purr_settings_kv_set("dev.unsigned_apps", "0");      /* it cannot outlive developer mode */
+    }
+    snprintf(msg, cap, on ? "Developer mode on from the next boot." : "Developer mode off from the next boot.");
+    return 0;
+}
+
+int purr_security_set_unsigned_apps(int on, char *msg, size_t cap)
+{
+    if (!sec_admin(msg, cap)) {
+        return -1;
+    }
+    if (on && !purr_security_dev_active()) {
+        snprintf(msg, cap, "developer mode is not active this boot; turn it on and restart first");
+        return -1;
+    }
+    if (purr_settings_kv_set("dev.unsigned_apps", on ? "1" : "0") != 0) {
+        snprintf(msg, cap, "could not save");
+        return -1;
+    }
+    if (on) {
+        ESP_LOGW("security", "UNSIGNED APPS ALLOWED by %s (developer mode)", purr_login_current()->name);
+    }
+    snprintf(msg, cap, on ? "Unsigned apps may now be installed and run." : "Only signed apps will run.");
     return 0;
 }
 
@@ -3750,13 +4070,117 @@ static int cmd_lvgldemo(purr_cli_t *cli, int argc, char **argv)
 }
 #endif
 
+/* ---------------------------------------------------------------- purrctl (plan6.md)
+ * The shell's way into the app runtime, in the manner of hyprctl: dispatchers change things,
+ * queries read them, `events` streams what happens. Every one of these is a request to the
+ * runtime's manager task (purr_catrt.h); the shell holds no state of its own. */
+static int purrctl_run(purr_cli_t *cli, int rc_wanted_text, const char *line, int is_query)
+{
+    (void)rc_wanted_text;
+    char *out = malloc(1600);
+    if (out == NULL) {
+        purr_cli_puts(cli, "purrctl: out of memory\n");
+        return 1;
+    }
+    int rc = is_query ? purr_catrt_query(line, out, 1600) : purr_catrt_dispatch(line, out, 1600);
+    purr_cli_puts(cli, out);
+    free(out);
+    return rc < 0 ? 1 : 0;
+}
+
+static unsigned purrctl_mods(const char *s)
+{
+    unsigned m = 0;
+    if (strstr(s, "SUPER") || strstr(s, "super")) m |= PURR_RT_MOD_SUPER;
+    if (strstr(s, "CTRL") || strstr(s, "ctrl")) m |= PURR_RT_MOD_CTRL;
+    if (strstr(s, "ALT") || strstr(s, "alt")) m |= PURR_RT_MOD_ALT;
+    if (strstr(s, "SHIFT") || strstr(s, "shift")) m |= PURR_RT_MOD_SHIFT;
+    return m;
+}
+
+static int cmd_purrctl(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2) {
+        purr_cli_puts(cli,
+            "usage: purrctl dispatch <open|close|kill|focus|cycle|suspend|resume|background|pin|post> [args]\n"
+            "       purrctl <apps|activeapp|memory|rules|binds|version> [-j]\n"
+            "       purrctl events | reload | key <MODS> <key>\n");
+        return 1;
+    }
+    char line[PURR_RT_LINE_LEN];
+    line[0] = '\0';
+    const char *sub = argv[1];
+    if (strcmp(sub, "dispatch") == 0) {
+        for (int i = 2; i < argc; i++) {
+            size_t n = strlen(line);
+            snprintf(line + n, sizeof(line) - n, "%s%s", i > 2 ? " " : "", argv[i]);
+        }
+        return purrctl_run(cli, 1, line, 0);
+    }
+    if (strcmp(sub, "events") == 0) {
+        purr_cli_puts(cli, "events (any key stops):\n");
+        purr_console_flush();
+        uint32_t cur = purr_catrt_event_cursor();
+        char ev[PURR_RT_LINE_LEN * 2];
+        for (;;) {
+            while (purr_catrt_event_next(&cur, ev, sizeof(ev))) {
+                purr_cli_puts(cli, ev);
+                purr_cli_puts(cli, "\n");
+            }
+            purr_console_flush();
+            if (purr_kernel_key() != 0) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        return 0;
+    }
+    if (strcmp(sub, "reload") == 0) {
+        char err[512];
+        int bad = purr_catrt_reload(err, sizeof(err));
+        if (bad < 0) {
+            purr_cli_puts(cli, "purrctl: the runtime did not answer\n");
+            return 1;
+        }
+        if (bad == 0) {
+            purr_cli_puts(cli, "reloaded /etc/apps.conf\n");
+        } else {
+            purr_cli_printf(cli, "reloaded /etc/apps.conf with %d bad line%s:\n%s", bad,
+                            bad == 1 ? "" : "s", err);
+        }
+        return bad ? 1 : 0;
+    }
+    if (strcmp(sub, "key") == 0) {
+        if (argc < 4) {
+            purr_cli_puts(cli, "usage: purrctl key <MODS> <key>   e.g. purrctl key SUPER Tab\n");
+            return 1;
+        }
+        int handled = purr_catrt_key(purrctl_mods(argv[2]), argv[3]);
+        purr_cli_puts(cli, handled > 0 ? "handled\n" : "no bind for that\n");
+        return handled > 0 ? 0 : 1;
+    }
+    for (int i = 1; i < argc; i++) {
+        size_t n = strlen(line);
+        snprintf(line + n, sizeof(line) - n, "%s%s", i > 1 ? " " : "", argv[i]);
+    }
+    return purrctl_run(cli, 1, line, 1);
+}
+
 static const purr_cmd_t s_cmds[] = {
     {"help",    "list the commands",             purr_cli_cmd_help},
     {"plantmodules", "temporary: plant the real modules for testing", cmd_plantmodules},
     {"planthelloapp", "temporary: stage the hello test app for appinstall", cmd_planthelloapp},
+    {"purrctl", "app runtime: dispatch|apps|activeapp|memory|rules|binds|version|events|reload|key", cmd_purrctl},
     {"testdriverload", "temporary: proof of the loadable-driver mechanism", cmd_testdriverload},
     {"secure", "security status; enforce / relax / dev on|off (admin)", cmd_secure},
     {"trust", "trust apply <file>: apply a signed trust block (admin)", cmd_trust},
+    {"settings", "settings [list] | get <key> | set <key> <value>: the same settings as the Settings app",
+     purr_settings_cmd},
+    {"perms", "perms [app | reset <app>]: what apps are allowed to do (admin to change)", purr_perms_cmd},
+    {"grant", "grant <app> <permission>: allow keep-awake or wake-alarm (admin)", purr_perms_cmd},
+    {"revoke", "revoke <app> <permission>: the app asks again (admin)", purr_perms_cmd},
+    {"power", "power [screen on|off | timeout <seconds|never>]: sleep state, wake locks and alarms",
+     purr_power_cmd},
 #if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
     {"lvgldemo", "proof of life: draw one LVGL screen for 15s", cmd_lvgldemo},
     {"testkbdmodule", "temporary: test the real kbd_i2c driver module against live hardware", cmd_testkbdmodule},
@@ -4172,22 +4596,27 @@ typedef enum {
     PURR_LOAD_UNTRUSTED,    /* bad signature, bad layout, too big: quarantine, don't retry */
 } purr_load_result_t;
 
-static purr_load_result_t load_relocatable_file(const char *path, const char *log_tag,
-                                                uint32_t read_cap, uint32_t max_pages,
-                                                uint8_t expected_image_type,
-                                                uint8_t **out_databuf, void **out_exec_ptr,
-                                                uint32_t *out_entry_offset)
+/* Only an app in a user's own folder, /home/<name>/apps/<app>/package.cat or the developer folder
+ * /home/<name>/devapps/<app>/package.cat, can ever be unsigned. The system's /apps, /system, /kernelmods
+ * and /boot/drivers can not, whatever the settings say. */
+static int path_in_user_apps(const char *path)
 {
-    uint8_t *rb = malloc(read_cap);
-    if (rb == NULL) {
-        return PURR_LOAD_TRANSIENT;
+    if (strncmp(path, "/home/", 6) != 0 || strstr(path, "..") != NULL) {
+        return 0;
     }
-    appinstall_read_ctx_t rc = {rb, read_cap, 0};
-    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
-        free(rb);
-        return PURR_LOAD_TRANSIENT;
-    }
+    const char *after_name = strchr(path + 6, '/');
+    return after_name != NULL &&
+           (strncmp(after_name, "/apps/", 6) == 0 || strncmp(after_name, "/devapps/", 9) == 0);
+}
 
+/* Everything after the bytes are in memory: verify the signature, lay the module out, relocate it, map it executable. Takes
+ * ownership of rb (malloc'd, len bytes) and frees it. The file version below reads the module from the filesystem; the recovery
+ * loader, which has no filesystem, hands in the baked-in driver modules directly (purr_loader_load_drivers). */
+static purr_load_result_t load_relocatable_image(uint8_t *rb, size_t len, const char *path, const char *log_tag,
+                                                 uint32_t max_pages, uint8_t expected_image_type,
+                                                 uint8_t **out_databuf, void **out_exec_ptr,
+                                                 uint32_t *out_entry_offset)
+{
     purr_cfg_t cfg;
     purr_flash_t fl;
     if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
@@ -4198,15 +4627,30 @@ static purr_load_result_t load_relocatable_file(const char *path, const char *lo
     purr_keybag_t bag;
     purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
     purr_verify_env_t env = {.chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls};
-    purr_mem_read_ctx_t mrc = {rb, rc.len};
+    purr_mem_read_ctx_t mrc = {rb, len};
     purr_image_header_t hdr;
-    purr_verify_result_t vr = purr_image_verify(&env, purr_mem_read, &mrc, rc.len, &hdr);
+    purr_verify_result_t vr = purr_image_verify(&env, purr_mem_read, &mrc, len, &hdr);
+    /* Developer mode, with "allow unsigned apps" switched on, lets an APP through that has no trusted
+     * signature (never a module, driver or kernel mod, and never a revoked key). The verifier stops at the
+     * key lookup, before it has looked at the payload, so its hash is checked here: an unsigned app is
+     * still not allowed to be a damaged one. */
+    if ((vr == PURR_V_NO_KEY || vr == PURR_V_ROLE_MISMATCH || vr == PURR_V_BAD_SIGNATURE) &&
+        expected_image_type == PURR_IMG_APP && hdr.image_type == PURR_IMG_APP &&
+        path_in_user_apps(path) && purr_security_unsigned_apps_allowed() &&
+        (uint64_t)hdr.payload_offset + hdr.payload_size <= len) {
+        uint8_t digest[PURR_SHA256_LEN];
+        purr_sha256(rb + hdr.payload_offset, hdr.payload_size, digest);
+        if (memcmp(digest, hdr.payload_sha256, PURR_SHA256_LEN) == 0) {
+            ESP_LOGW(log_tag, "%s: UNSIGNED APP, loaded because developer mode allows it", path);
+            vr = PURR_V_OK;
+        }
+    }
     if (vr != PURR_V_OK || hdr.image_type != expected_image_type) {
         ESP_LOGW(log_tag, "%s: %s", path, vr != PURR_V_OK ? purr_verify_name(vr) : "wrong image type");
         free(rb);
         return PURR_LOAD_UNTRUSTED;
     }
-    if ((uint64_t)hdr.payload_offset + hdr.payload_size > rc.len) {
+    if ((uint64_t)hdr.payload_offset + hdr.payload_size > len) {
         ESP_LOGW(log_tag, "%s: payload runs past the file", path);
         free(rb);
         return PURR_LOAD_UNTRUSTED;
@@ -4335,6 +4779,25 @@ static purr_load_result_t load_relocatable_file(const char *path, const char *lo
     return PURR_LOAD_OK;
 }
 
+static purr_load_result_t load_relocatable_file(const char *path, const char *log_tag,
+                                                uint32_t read_cap, uint32_t max_pages,
+                                                uint8_t expected_image_type,
+                                                uint8_t **out_databuf, void **out_exec_ptr,
+                                                uint32_t *out_entry_offset)
+{
+    uint8_t *rb = malloc(read_cap);
+    if (rb == NULL) {
+        return PURR_LOAD_TRANSIENT;
+    }
+    appinstall_read_ctx_t rc = {rb, read_cap, 0};
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
+        free(rb);
+        return PURR_LOAD_TRANSIENT;
+    }
+    return load_relocatable_image(rb, rc.len, path, log_tag, max_pages, expected_image_type, out_databuf,
+                                  out_exec_ptr, out_entry_offset);
+}
+
 /* One page each, same as before this function was pulled out of load_one_module_file()/
  * load_one_kernelmod_file() -- a future CoreOS loader (PurrOS/SPEC.md section 6) is the reason
  * load_relocatable_file() takes a page budget at all, but neither existing caller needs more
@@ -4404,6 +4867,177 @@ static int kernel_table_app_run(purr_cli_t *cli, const char *name)
     esp_mmu_unmap(exec_ptr);
     free(databuf);
     return 0;
+}
+
+/* ---------------------------------------------------------------- app runtime platform (plan6.md)
+ * What purr_catrt.c runs on: loading a signed .cat, saved state, the console, and a few files.
+ *
+ * An app that is not signed by a trusted key never runs. load_relocatable_file() runs
+ * purr_image_verify() first, which needs a key id, a role that may sign an app, the payload hash
+ * and the signature to all check out, whatever the secure mode is (the mode only decides the
+ * version floor), so an unsigned or altered app comes back PURR_LOAD_UNTRUSTED and is refused here
+ * before a byte of it is relocated or called. */
+
+typedef struct {
+    uint8_t *databuf;
+    void *exec_ptr;
+} catrt_loaded_t;
+
+static int catrt_try_load(const char *path, const purr_app_table_t **table, void **handle)
+{
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_file(path, "apprt", APP_SCRATCH_CAP,
+                                                 PURR_APP_LOAD_MAX_PAGES, PURR_IMG_APP, &databuf,
+                                                 &exec_ptr, &entry_offset);
+    if (r == PURR_LOAD_UNTRUSTED) {
+        ESP_LOGW("apprt", "%s: refused (not signed by a trusted key, or altered)", path);
+        return PURR_RT_HOST_UNTRUSTED;
+    }
+    if (r != PURR_LOAD_OK) {
+        return -1;
+    }
+    purr_app_entry_fn entry = (purr_app_entry_fn)((uint8_t *)exec_ptr + entry_offset);
+    const purr_app_table_t *t = entry();
+    if (t == NULL || t->on_create == NULL ||
+        (t->abi_version != PURR_APP_ABI_VERSION && t->abi_version != PURR_APP_ABI_VERSION_2)) {
+        ESP_LOGW("apprt", "%s: not compatible with this runtime", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+    catrt_loaded_t *l = malloc(sizeof(*l));
+    if (l == NULL) {
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+    l->databuf = databuf;
+    l->exec_ptr = exec_ptr;
+    *table = t;
+    *handle = l;
+    return 0;
+}
+
+/* A user's own copy of an app wins over the system one, and a refused user copy is not quietly
+ * replaced by the system one: there is no fallback past a refusal. */
+static int catrt_platform_load(const char *name, const purr_app_table_t **table, void **handle)
+{
+    if (name == NULL || name[0] == '\0' || strchr(name, '/') != NULL || strstr(name, "..") != NULL) {
+        return -1;
+    }
+    char path[112];
+    const purr_user_t *u = purr_login_current();
+    if (u != NULL && u->name[0] != '\0' && purr_security_dev_active()) {
+        /* the developer folder wins while developer mode is on, so a build under test can stand in for an
+         * installed app of the same name (the installed one is untouched on disk) */
+        snprintf(path, sizeof(path), "/home/%s/devapps/%s/package.cat", u->name, name);
+        int r = catrt_try_load(path, table, handle);
+        if (r == 0 || r == PURR_RT_HOST_UNTRUSTED) {
+            return r;
+        }
+    }
+    if (u != NULL && u->name[0] != '\0') {
+        snprintf(path, sizeof(path), "/home/%s/apps/%s/package.cat", u->name, name);
+        int r = catrt_try_load(path, table, handle);
+        if (r == 0 || r == PURR_RT_HOST_UNTRUSTED) {
+            return r;
+        }
+    }
+    snprintf(path, sizeof(path), "/apps/%s/package.cat", name);
+    return catrt_try_load(path, table, handle);
+}
+
+static void catrt_platform_unload(void *handle)
+{
+    catrt_loaded_t *l = handle;
+    if (l == NULL) {
+        return;
+    }
+    esp_mmu_unmap(l->exec_ptr);
+    free(l->databuf);
+    free(l);
+}
+
+static void catrt_state_path(char *out, size_t cap, const char *name)
+{
+    snprintf(out, cap, "/var/state/%s.bin", name);
+}
+
+static int catrt_save_state(const char *name, const void *buf, uint32_t len)
+{
+    purr_fs_mkdir(&s_fs, "/var");
+    purr_fs_mkdir(&s_fs, "/var/state");
+    char path[64];
+    catrt_state_path(path, sizeof(path), name);
+    return purr_fs_write(&s_fs, path, buf, len);
+}
+
+static int catrt_load_state(const char *name, void *buf, uint32_t cap)
+{
+    char path[64];
+    catrt_state_path(path, sizeof(path), name);
+    appinstall_read_ctx_t rc = {buf, cap, 0};
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
+        return 0;                               /* nothing saved (or too big to hand back) */
+    }
+    return (int)rc.len;
+}
+
+static void catrt_console_write(const char *buf, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        purr_console_put(NULL, buf[i]);
+    }
+    purr_console_flush();
+}
+
+static int catrt_read_file(const char *path, char *buf, size_t cap)
+{
+    if (cap < 2) {
+        return -1;
+    }
+    appinstall_read_ctx_t rc = {(uint8_t *)buf, (uint32_t)cap - 1, 0};
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
+        return -1;
+    }
+    buf[rc.len] = '\0';
+    return (int)rc.len;
+}
+
+static int catrt_write_file(const char *path, const void *buf, size_t len)
+{
+    char dir[96];
+    for (size_t i = 1; path[i] != '\0' && i < sizeof(dir) - 1; i++) {
+        if (path[i] == '/') {
+            memcpy(dir, path, i);
+            dir[i] = '\0';
+            purr_fs_mkdir(&s_fs, dir);          /* an existing directory is just an ignored error */
+        }
+    }
+    return purr_fs_write(&s_fs, path, buf, (uint32_t)len);
+}
+
+void purr_catrt_setup(purr_cli_t *cli)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        return;
+    }
+    static const purr_catrt_platform_t plat = {
+        .load = catrt_platform_load,
+        .unload = catrt_platform_unload,
+        .save_state = catrt_save_state,
+        .load_state = catrt_load_state,
+        .console_write = catrt_console_write,
+        .read_file = catrt_read_file,
+        .write_file = catrt_write_file,
+    };
+    purr_fs_mkdir(&s_fs, "/apps");
+    purr_catrt_storage_init();
+    purr_catrt_power_init();
+    esp_err_t e = purr_catrt_start(&plat);
+    purr_cli_printf(cli, "apps: runtime %s\n", e == ESP_OK ? "up" : "did not start");
 }
 
 static module_load_result_t load_one_module_file(const char *path)
@@ -4631,18 +5265,10 @@ static const uint8_t s_hello_driver_module[] = {
  * driver boundary (purr_driver_bus_table_t) instead of the kernel-table one. The driver's own
  * bus_abi must match this kernel's bus table, and the pointer is also validated by shape:
  * non-NULL, with a real name/compatible/probe. */
-static int load_one_driver_file(const char *path, const purr_driver_t **out_driver)
+/* The part after the module is mapped: ask it for its driver, and refuse a bad one or one built for another bus table. */
+static int driver_from_loaded(const char *path, uint8_t *databuf, void *exec_ptr, uint32_t entry_offset,
+                              const purr_driver_t **out_driver)
 {
-    uint8_t *databuf;
-    void *exec_ptr;
-    uint32_t entry_offset;
-    purr_load_result_t r = load_relocatable_file(path, "drivers", PURR_MODULE_READ_CAP,
-                                                 PURR_KERNELMOD_LOAD_MAX_PAGES, PURR_IMG_MODULE,
-                                                 &databuf, &exec_ptr, &entry_offset);
-    if (r != PURR_LOAD_OK) {
-        return -1;
-    }
-
     purr_driver_entry_fn entry =
         (purr_driver_entry_fn)(uintptr_t)((uint8_t *)exec_ptr + entry_offset);
     const purr_driver_t *drv = entry(purr_driver_bus_table());
@@ -4669,6 +5295,39 @@ static int load_one_driver_file(const char *path, const purr_driver_t **out_driv
      * module in this file keeps its mapping alive indefinitely once bound. */
     *out_driver = drv;
     return 0;
+}
+
+static int load_one_driver_file(const char *path, const purr_driver_t **out_driver)
+{
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_file(path, "drivers", PURR_MODULE_READ_CAP,
+                                                 PURR_KERNELMOD_LOAD_MAX_PAGES, PURR_IMG_MODULE,
+                                                 &databuf, &exec_ptr, &entry_offset);
+    if (r != PURR_LOAD_OK) {
+        return -1;
+    }
+    return driver_from_loaded(path, databuf, exec_ptr, entry_offset, out_driver);
+}
+
+/* The same, from a module already in memory (a baked-in one). */
+static int load_one_driver_image(const char *label, const uint8_t *image, size_t len, const purr_driver_t **out_driver)
+{
+    uint8_t *rb = malloc(len);
+    if (rb == NULL) {
+        return -1;
+    }
+    memcpy(rb, image, len);
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_image(rb, len, label, "drivers", PURR_KERNELMOD_LOAD_MAX_PAGES, PURR_IMG_MODULE,
+                                                  &databuf, &exec_ptr, &entry_offset);
+    if (r != PURR_LOAD_OK) {
+        return -1;
+    }
+    return driver_from_loaded(label, databuf, exec_ptr, entry_offset, out_driver);
 }
 
 /* The real boot-time sweep (unlike load_kernelmods_from()'s own sibling, this is not
@@ -4853,6 +5512,22 @@ void purr_modules_setup(purr_cli_t *cli)
     }
 }
 
+
+/* The recovery loader has no filesystem, so it cannot load its display, keyboard and touch drivers from /boot/drivers the way
+ * purr_modules_setup() does. It loads the same baked-in modules (each verified like any other) straight from memory instead.
+ * Without this the loader never gets a screen: the display became a loadable module (commit 45c46edc). Returns how many bound. */
+int purr_loader_load_drivers(void)
+{
+    int bound = 0;
+    for (size_t i = 0; i < sizeof(s_temp_drivers) / sizeof(s_temp_drivers[0]); i++) {
+        const purr_driver_t *drv = NULL;
+        if (load_one_driver_image(s_temp_drivers[i].filename, s_temp_drivers[i].data, s_temp_drivers[i].len, &drv) == 0) {
+            purr_driver_register(purr_board(), drv);
+            bound++;
+        }
+    }
+    return bound;
+}
 
 const purr_cmd_t *purr_commands(int *count)
 {

@@ -22,10 +22,15 @@
 extern "C" {
 #endif
 
+#define PURR_ASSET_RGB565    0   /* w*h RGB565 pixels */
+#define PURR_ASSET_RGB565A8  1   /* the RGB565 plane, then a w*h 8-bit alpha plane (LVGL's RGB565A8) */
+
 typedef struct {
     char name[24];
-    const uint16_t *pixels;   /* host-native RGB565, straight from the mapped partition */
+    const uint16_t *pixels;   /* host-native RGB565, straight from the mapped partition; for
+                               * PURR_ASSET_RGB565A8 the alpha plane follows the pixels directly */
     uint16_t width, height;
+    uint8_t color_format;     /* PURR_ASSET_* */
 } purr_asset_t;
 
 /* Maps the ui_assets partition and validates it (magic + CRC32). Safe to call even if the

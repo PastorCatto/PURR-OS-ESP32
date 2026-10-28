@@ -1,3 +1,4 @@
+#include "sdkconfig.h"
 #include "purr_ui_config.h"
 
 #include <stdlib.h>
@@ -609,6 +610,9 @@ purr_ui_mode_t purr_ui_mode_get(void)
     if (strcmp(t, "nav") == 0) {
         return PURR_UI_MODE_NAV;
     }
+    if (strcmp(t, "w10m") == 0) {
+        return PURR_UI_MODE_W10M;
+    }
     return PURR_UI_MODE_CARD_SHELL;            /* "card_shell", empty, or anything unrecognized */
 }
 
@@ -620,7 +624,7 @@ void purr_ui_mode_setup(purr_cli_t *cli)
         return;                            /* already there -- never overwrite */
     }
     purr_fs_mkdir(fs, "/ui");              /* ignore the error if it already exists */
-    static const char default_mode[] = "card_shell\n";
+    static const char default_mode[] = CONFIG_PURR_UI_DEFAULT_MODE "\n";
     if (purr_fs_write(fs, path, default_mode, sizeof(default_mode) - 1) != 0) {
         purr_cli_puts(cli, "ui: could not plant the default mode.conf\n");
         return;

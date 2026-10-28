@@ -50,6 +50,19 @@ void purr_lvgl_report_critical_error(const char *why);
 /* True once purr_lvgl_report_critical_error() has been called. */
 int purr_lvgl_critical_error_pending(void);
 
+/* Screen orientation, in degrees clockwise from the panel's own: 0, 90, 180 or 270. The display
+ * is rotated in software and LVGL swaps its width and height for 90 and 270, so a layout that
+ * reads lv_display_get_horizontal_resolution() reflows on its own; touch is mapped by LVGL.
+ * Must be called on the UI service task (purr_ui_service_run). Returns -1 for any other angle. */
+int purr_lvgl_set_rotation(int degrees);
+
+/* The hardware keyboard as an LVGL keypad: what is typed reaches whichever widget has focus in the
+ * input device's group (lv_indev_set_group). Enter, backspace, escape and tab are mapped to LVGL's
+ * keys. NULL before purr_lvgl_init() has run. */
+struct _lv_indev_t;
+struct _lv_indev_t *purr_lvgl_keypad(void);
+int purr_lvgl_get_rotation(void);
+
 #ifdef __cplusplus
 }
 #endif

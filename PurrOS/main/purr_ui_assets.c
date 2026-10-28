@@ -10,7 +10,7 @@
 static const char *TAG = "ui_assets";
 
 #define MAGIC 0x54534150u   /* 'PAST', little-endian: "Purr ASset Table" */
-#define MAX_ASSETS 64
+#define MAX_ASSETS 128
 
 /* On-flash layout (verified byte-for-byte against the real xtensa-esp32s3-elf cross-compiler
  * before writing purrstrap's packer to match -- the netrec record_t struct earlier in this
@@ -31,7 +31,7 @@ typedef struct {
     uint32_t length;
     uint16_t width;
     uint16_t height;
-    uint8_t color_format;  /* 0 = RGB565; nothing else defined yet */
+    uint8_t color_format;  /* PURR_ASSET_RGB565 or PURR_ASSET_RGB565A8 */
     uint8_t reserved[3];
 } dir_entry_t;
 
@@ -77,7 +77,10 @@ esp_err_t purr_ui_assets_init(void)
     /* CRC over the directory and every entry's declared pixel range -- not the whole
      * mapped partition (which is padded to the partition's full size with erased 0xFF
      * flash past whatever was actually written). */
-    size_t used = dir_bytes;
+    /* `used` is how far into the pixel region the last entry reaches. (It used to start at
+     * dir_bytes and so measured the region from the wrong end: the CRC then covered dir_bytes too
+     * few bytes and never matched the packer's, which is why a real pack read as "corrupt".) */
+    size_t used = 0;
     for (uint32_t i = 0; i < hdr->count; i++) {
         uint64_t end = (uint64_t)dir[i].offset + dir[i].length;
         if (end > part->size - sizeof(header_t) - dir_bytes) {
@@ -89,7 +92,7 @@ esp_err_t purr_ui_assets_init(void)
         }
     }
     uint32_t crc = purr_crc32(0, dir, dir_bytes);
-    crc = purr_crc32(crc, pixel_region, used - dir_bytes);
+    crc = purr_crc32(crc, pixel_region, used);
     if (crc != hdr->crc32) {
         ESP_LOGW(TAG, "CRC mismatch (corrupt or partial write)");
         return ESP_ERR_INVALID_CRC;
@@ -102,6 +105,7 @@ esp_err_t purr_ui_assets_init(void)
         a->pixels = (const uint16_t *)(pixel_region + dir[i].offset);
         a->width = dir[i].width;
         a->height = dir[i].height;
+        a->color_format = dir[i].color_format;
         s_count++;
     }
     ESP_LOGI(TAG, "up: %d asset(s)", s_count);

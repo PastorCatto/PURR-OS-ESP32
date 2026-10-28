@@ -68,3 +68,35 @@ void purr_secure_status(purr_secure_status_t *out)
         out->level = PURR_SECURE_LEVEL_UNVERIFIED;
     }
 }
+
+int purr_secure_dev_locked(void)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    purr_trust_t t;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return 0;
+    }
+    os_trust(&cfg, &t);
+    return t.signature_ok && (cfg.trust_flags & PURR_TRUSTF_DEV_LOCKED) != 0;
+}
+
+int purr_secure_set_dev(int on)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    purr_trust_t t;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return -1;
+    }
+    os_trust(&cfg, &t);
+    if (on && t.signature_ok && (cfg.trust_flags & PURR_TRUSTF_DEV_LOCKED)) {
+        return -2;
+    }
+    if (on) {
+        cfg.flags |= PURR_CFGF_DEV_MODE;
+    } else {
+        cfg.flags &= ~PURR_CFGF_DEV_MODE;
+    }
+    return purr_cfg_store(&fl, &cfg) == 0 ? 0 : -1;
+}

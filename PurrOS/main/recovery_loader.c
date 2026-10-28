@@ -19,12 +19,17 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "commands.h"
 #include "purr_abi.h"
 #include "purr_cfgstore.h"
 #include "purr_cli.h"
 #include "purr_console.h"
 #include "purr_crypto_mbedtls.h"
 #include "purr_fetch.h"
+#include "oobe_job.h"
+#include "oobe_ui.h"
+#include "purr_oobe.h"
+#include "purr_recovery_src.h"
 #include "purr_kernel.h"
 #include "purr_manifest.h"
 #include "purr_slot_trailer.h"
@@ -65,9 +70,18 @@ static void console_puts(const char *s)
     }
 }
 
+/* The setup wizard (purr_oobe.c) runs the slow work as jobs. While it does, messages go to the job (the wizard shows
+ * them) instead of the text console, and the progress figures too. */
+static int s_wizard;
+static oobe_job_t *s_job;
+
 static void status(const char *line)
 {
     ESP_LOGI(TAG, "%s", line);
+    if (s_wizard) {
+        oobe_job_report(s_job, line, -1);
+        return;
+    }
     console_puts(line);
     console_puts("\n");
     purr_console_flush();
@@ -85,6 +99,10 @@ static void statusf(const char *fmt, ...)
 
 static void halt(const char *why)
 {
+    if (s_wizard) {                                   /* inside a job: end it as failed, and say why */
+        ESP_LOGE(TAG, "%s", why);
+        oobe_job_abort(s_job, why);
+    }
     status(why);
     status("halted. Power-cycle to try again, or use the boot menu.");
     for (;;) {
@@ -148,6 +166,11 @@ static int cmd_wifi_scan(purr_cli_t *cli)
 
 static int cmd_wifi(purr_cli_t *cli, int argc, char **argv)
 {
+    if (purr_net_wired()) {
+        purr_cli_puts(cli, "this build uses wired Ethernet: there is no Wi-Fi to scan or join.\n"
+                           "use `net` to see the link and address.\n");
+        return 1;
+    }
     if (argc < 2) {
         purr_cli_puts(cli, "usage: wifi scan|connect|forget|list\n");
         return 1;
@@ -195,11 +218,15 @@ static int cmd_net(purr_cli_t *cli, int argc, char **argv)
     (void)argv;
     purr_net_status_t st;
     purr_net_status(&st);
-    if (st.connected) {
+    if (st.connected && purr_net_wired()) {
+        purr_cli_puts(cli, "link: wired Ethernet\n");
+        purr_cli_printf(cli, "ip:   %s\n", st.ip);
+    } else if (st.connected) {
         purr_cli_printf(cli, "wifi: %s (%d dBm)\n", st.ssid, st.rssi);
         purr_cli_printf(cli, "ip:   %s\n", st.ip);
     } else {
-        purr_cli_puts(cli, "not connected\n");
+        purr_cli_puts(cli, purr_net_wired() ? "no address yet (is the cable or the NIC missing?)\n"
+                                            : "not connected\n");
     }
     return 0;
 }
@@ -246,7 +273,7 @@ static void run_wifi_shell(void)
  * read a prompt, so there's no window to offer. */
 static void offer_menu(bool *want_full_restore)
 {
-    statusf("press S within 3 seconds for a Wi-Fi shell, F for a full component restore...");
+    statusf("press S within 3 seconds for a network shell, F for a full component restore...");
     for (uint32_t waited = 0; waited < 3000; waited += 50) {
         char c = purr_kernel_key();
         if (c == 's' || c == 'S') {
@@ -265,6 +292,18 @@ static void offer_menu(bool *want_full_restore)
 
 static esp_err_t get_connected(void)
 {
+    if (purr_net_wired()) {
+        /* No network to pick and no password to type: the wire either has a link and a DHCP
+         * address or it does not. Keep trying; the person can fix the cable or the NIC. */
+        for (;;) {
+            status("waiting for the wired link and an address...");
+            if (purr_net_connect("", "", 30000) == ESP_OK) {
+                return ESP_OK;
+            }
+            status("no link or no address yet. retrying.");
+        }
+    }
+
     char ssid[PURR_NETREC_SSID_LEN] = "", pass[PURR_NETREC_PASS_LEN] = "";
     if (purr_netrec_load(ssid, pass) == 0) {
         statusf("connecting to %s...", ssid);
@@ -539,8 +578,8 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
         return -1;
     }
     char url[256];
-    resolve_url(CONFIG_PURR_RECOVERY_MANIFEST_URL, entry->file, url, sizeof(url));
-    statusf("downloading %s...", entry->file);
+    resolve_url(purr_recovery_manifest_url(), entry->file, url, sizeof(url));
+    status(purr_recovery_source_name() != NULL ? "Downloading PURR OS from your dev server" : "Downloading PURR OS");
 
     uint8_t *image = NULL;
     size_t image_len = 0;
@@ -642,14 +681,41 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
  * writes the ones that fail. Never touches LittleFS (RecoveryLoader/SPEC.md section 1) --
  * CoreOS/AppManager/the runtimes/the drivers bundle/apps stay KittenOS's own job once it's
  * running again (section 2.1). */
-static int restore_components(void)
+/* The screen's bar: which step of how many, and how much of the download in progress has arrived. */
+static int s_step, s_steps = 1;
+static bool s_setup;        /* the wizard is only collecting the network details (no saved network); the restore runs after the restart */
+
+static void wiz_progress(int step, int steps, int within)
 {
-    status("fetching the recovery manifest...");
+    if (s_wizard && steps > 0) {
+        oobe_job_report(s_job, NULL, (step * 1000 + within) / steps);
+    }
+}
+
+static void fetch_progress(size_t got, size_t total)
+{
+    if (total > 0) {
+        wiz_progress(s_step, s_steps, (int)((uint64_t)got * 1000 / total));
+    }
+}
+
+/* What recovery puts back. By default only what KittenOS needs to restart: the KittenOS slot, and the boot package (the boot menu and
+ * screens; best effort, the device starts without it). KittenOS then carries on: it asks for the account, and installs the kernel and
+ * the modules in the background (stage 2, commands.c). include_kernel is the old "restore everything at once" (the F key in the text
+ * flow). Failures return -1 except the boot package, which never stops the restore. */
+static int restore_components(int include_kernel)
+{
+    int steps = include_kernel ? 3 : 2, step = 0;
+    s_steps = steps;
+    s_step = 0;
+    wiz_progress(0, steps, 0);
+    purr_fetch_set_progress(fetch_progress);
+    status("Checking what to install...");
     uint8_t *manifest_buf = NULL;
     size_t manifest_len = 0;
-    if (purr_fetch_alloc(CONFIG_PURR_RECOVERY_MANIFEST_URL, &manifest_buf, &manifest_len,
+    if (purr_fetch_alloc(purr_recovery_manifest_url(), &manifest_buf, &manifest_len,
                          MAX_MANIFEST_SIZE) != ESP_OK) {
-        status("could not fetch the manifest");
+        status("Couldn't reach the install server.");
         return -1;
     }
     purr_manifest_t man;
@@ -658,53 +724,61 @@ static int restore_components(void)
 
     int failures = 0;
 
-    const esp_partition_t *kp = esp_partition_find_first(ESP_PARTITION_TYPE_ANY,
-                                                          ESP_PARTITION_SUBTYPE_ANY, "kernel");
-    const purr_manifest_entry_t *kentry = purr_manifest_find(&man, "kernel", CONFIG_IDF_TARGET,
-                                                              purr_board()->name);
-    if (kp != NULL && partition_matches_manifest(kp, kentry) &&    /* F-14 */
-        partition_trailer_ok(kp, PURR_IMG_MODULE, PURR_MOD_KERNEL)) {
-        status("kernel: already good");
-    } else if (fetch_and_install_module("kernel", "kernel", PURR_MOD_KERNEL, &man) != 0) {
-        failures++;
+    if (include_kernel) {
+        s_step = step;
+        wiz_progress(step++, steps, 0);
+        const esp_partition_t *kp = esp_partition_find_first(ESP_PARTITION_TYPE_ANY,
+                                                              ESP_PARTITION_SUBTYPE_ANY, "kernel");
+        const purr_manifest_entry_t *kentry = purr_manifest_find(&man, "kernel", CONFIG_IDF_TARGET,
+                                                                  purr_board()->name);
+        if (kp != NULL && !purr_slot_marked_bad(kp) && partition_matches_manifest(kp, kentry) &&    /* F-14 */
+            partition_trailer_ok(kp, PURR_IMG_MODULE, PURR_MOD_KERNEL)) {
+            status("kernel: already good");
+        } else if (fetch_and_install_module("kernel", "kernel", PURR_MOD_KERNEL, &man) != 0) {
+            failures++;
+        }
     }
 
+    s_step = step;
+    wiz_progress(step++, steps, 0);
     const esp_partition_t *bp = esp_partition_find_first(ESP_PARTITION_TYPE_ANY,
                                                           ESP_PARTITION_SUBTYPE_ANY, "bootpkg");
     if (bp != NULL && partition_verify_in_place(bp, PURR_IMG_MODULE, PURR_MOD_BOOTPKG)) {
-        status("bootpkg: already good");
+        status("The boot menu is already good");
     } else if (fetch_and_install_module("bootpkg", "bootpkg", PURR_MOD_BOOTPKG, &man) != 0) {
-        failures++;
+        status("The boot menu couldn't be updated, carrying on without it");     /* optional: never stops the restore */
     }
 
+    s_step = step;
+    wiz_progress(step++, steps, 0);
     const esp_partition_t *kop = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
                                                            ESP_PARTITION_SUBTYPE_APP_FACTORY,
                                                            "kittenos");
     const purr_manifest_entry_t *kosentry = purr_manifest_find(&man, "kittenos", CONFIG_IDF_TARGET,
                                                                  purr_board()->name);
-    if (kop != NULL && partition_matches_manifest(kop, kosentry) &&    /* F-14 */
+    if (kop != NULL && !purr_slot_marked_bad(kop) && partition_matches_manifest(kop, kosentry) &&    /* F-14 */
         partition_trailer_ok(kop, PURR_IMG_RECOVERY, 0)) {
-        status("kittenos: already good");
+        status("KittenOS is already good");
     } else {
         const purr_manifest_entry_t *entry = kosentry;
         uint8_t *image = NULL;
         size_t image_len = 0;
         char url[256];
         if (entry == NULL) {
-            status("no kittenos entry in the manifest");
+            status("The server has nothing for this device yet.");
             failures++;
         } else {
-            resolve_url(CONFIG_PURR_RECOVERY_MANIFEST_URL, entry->file, url, sizeof(url));
-            statusf("downloading %s...", entry->file);
+            resolve_url(purr_recovery_manifest_url(), entry->file, url, sizeof(url));
+            status(purr_recovery_source_name() != NULL ? "Downloading PURR OS from your dev server" : "Downloading PURR OS");
             uint8_t got_hash[PURR_SHA256_LEN];
             if (purr_fetch_alloc(url, &image, &image_len, MAX_IMAGE_SIZE) != ESP_OK) {
-                status("download failed");
+                status("The download didn't finish.");
                 failures++;
             } else {
                 purr_sha256(image, image_len, got_hash);
                 if (image_len != entry->size ||
                     memcmp(got_hash, entry->sha256, PURR_SHA256_LEN) != 0) {
-                    status("download does not match the manifest (size or hash)");
+                    status("The download didn't match what the server promised.");
                     failures++;
                 } else if (install_kittenos(image, image_len) != 0) {
                     failures++;
@@ -714,6 +788,8 @@ static int restore_components(void)
         }
     }
 
+    purr_fetch_set_progress(NULL);
+    wiz_progress(steps, steps, 0);
     return failures == 0 ? 0 : -1;
 }
 
@@ -733,7 +809,7 @@ static int restore_components(void)
  * provide (purr_abi.h's own comment on that flag). false from every attended call site here
  * (a human already sat through offer_menu()/get_connected()), which is still right there for
  * the login prompt that follows. */
-static void mark_install_success(bool unattended)
+static void mark_install_success_ex(bool unattended, bool continue_install)
 {
     purr_flash_t fl;
     purr_cfg_t cfg;
@@ -741,14 +817,32 @@ static void mark_install_success(bool unattended)
         purr_cfg_defaults(&cfg);
     }
     cfg.boot_fail_count = 0;
-    purr_cfg_set_flag(&cfg, PURR_CFGF_CONTINUE_INSTALL);
-    if (unattended) {
-        purr_cfg_set_flag(&cfg, PURR_CFGF_UNATTENDED_SETUP);
+    if (continue_install) {
+        purr_cfg_set_flag(&cfg, PURR_CFGF_CONTINUE_INSTALL);
+        if (unattended) {
+            purr_cfg_set_flag(&cfg, PURR_CFGF_UNATTENDED_SETUP);
+        }
     }
     if (purr_cfg_store(&fl, &cfg) != 0) {
         ESP_LOGW(TAG, "purrcfg: could not record the successful install");
     }
 }
+
+static void mark_install_success(bool unattended) { mark_install_success_ex(unattended, true); }
+
+/* A reset that keeps the data (the recovery app's "Reinstall PURR OS"): the kernel was marked BAD and the device is not being wiped
+ * (FRESH is not set). The loader has the RAM that KittenOS does not, so it puts the kernel back itself, and since the modules and the
+ * files are still there, PURR OS can start straight away: no KittenOS stage 2. */
+static bool restoring_in_place(void)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return false;
+    }
+    return (cfg.flags & PURR_CFGF_BAD_KERNEL) != 0 && (cfg.flags & PURR_CFGF_FRESH) == 0;
+}
+
 
 /* ------------------------------------------------------------ auto mode (RecoveryLoader/SPEC.md
  * section 2.1): no Wi-Fi shell offer, no menu -- nothing summoned a person to answer one. Only
@@ -758,35 +852,296 @@ static void run_auto_mode(void)
 {
     status("automatic recovery: repeated boot failure detected");
     if (purr_net_init(NULL) != ESP_OK) {
-        halt("wifi did not start");
+        halt(purr_net_wired() ? "the wired network did not start" : "wifi did not start");
     }
-    char ssid[PURR_NETREC_SSID_LEN] = "", pass[PURR_NETREC_PASS_LEN] = "";
-    if (purr_netrec_load(ssid, pass) != 0) {
-        halt("no saved network: cannot recover unattended");
-    }
-    statusf("connecting to %s...", ssid);
-    if (purr_net_connect(ssid, pass, 15000) != ESP_OK) {
-        halt("could not connect to the saved network");
+    if (purr_net_wired()) {
+        /* Nothing to remember and nothing to type: the wire has an address or it does not. */
+        status("waiting for the wired link and an address...");
+        if (purr_net_connect("", "", 30000) != ESP_OK) {
+            halt("no wired link or address: cannot recover unattended");
+        }
+    } else {
+        char ssid[PURR_NETREC_SSID_LEN] = "", pass[PURR_NETREC_PASS_LEN] = "";
+        if (purr_netrec_load(ssid, pass) != 0) {
+            halt("no saved network: cannot recover unattended");
+        }
+        statusf("connecting to %s...", ssid);
+        if (purr_net_connect(ssid, pass, 15000) != ESP_OK) {
+            halt("could not connect to the saved network");
+        }
     }
     status("connected");
 
-    if (restore_components() != 0) {
+    bool in_place = restoring_in_place();
+    if (restore_components(1) != 0) {
         halt("automatic recovery failed");
     }
 
-    mark_install_success(true);
+    mark_install_success_ex(true, !in_place);
     status("done. restarting...");
     purr_console_flush();
     vTaskDelay(pdMS_TO_TICKS(1500));
     esp_restart();
 }
 
+/* ------------------------------------------------------------ the setup wizard (colour T-Deck boards) */
+
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+
+#define WIZ_MAX_AP 8
+#define LEGAL_MAX (16 * 1024)
+
+static purr_oobe_ap_t s_aps[WIZ_MAX_AP];
+static int s_nap;
+static char *s_legal_text;
+static char s_arg_a[64], s_arg_b[72];
+static int s_auto;                                  /* the failure ladder sent us here: nobody to ask, restore everything */
+
+static int job_scan(oobe_job_t *job, void *arg)
+{
+    (void)arg;
+    purr_net_ap_t aps[WIZ_MAX_AP];
+    int n = 0;
+    oobe_job_report(job, "Looking for networks...", -1);
+    if (purr_net_scan(aps, WIZ_MAX_AP, &n) != ESP_OK) {
+        oobe_job_report(job, "Couldn't scan for networks.", -1);
+        return 1;
+    }
+    s_nap = 0;
+    for (int i = 0; i < n && s_nap < WIZ_MAX_AP; i++) {
+        snprintf(s_aps[s_nap].ssid, sizeof(s_aps[0].ssid), "%s", aps[i].ssid);
+        s_aps[s_nap].rssi = aps[i].rssi;
+        s_aps[s_nap].secure = !aps[i].open;
+        s_nap++;
+    }
+    return 0;
+}
+
+static purr_oobe_server_t s_servers[4];
+static int s_nsrv;
+
+static int job_devscan(oobe_job_t *job, void *arg)
+{
+    (void)arg;
+    purr_lan_server_t found[4];
+    oobe_job_report(job, "Looking for servers...", -1);
+    int n = purr_lan_discover(found, 4, 4000);          /* probes, and listens for the announcements a server sends */
+    s_nsrv = 0;
+    for (int i = 0; i < n; i++) {
+        snprintf(s_servers[s_nsrv].base, sizeof(s_servers[0].base), "%s", found[i].base);
+        snprintf(s_servers[s_nsrv].name, sizeof(s_servers[0].name), "%s", found[i].name);
+        snprintf(s_servers[s_nsrv].id, sizeof(s_servers[0].id), "%s", found[i].id);
+        s_nsrv++;
+    }
+    return 0;
+}
+
+static int job_devverify(oobe_job_t *job, void *arg)
+{
+    (void)arg;
+    char msg[80];
+    int r = purr_recovery_verify(s_arg_a, msg, sizeof(msg));
+    oobe_job_report(job, msg, -1);
+    return r == 0 ? 0 : 1;
+}
+
+static int job_connect(oobe_job_t *job, void *arg)
+{
+    (void)arg;
+    if (purr_net_wired()) {                         /* nothing to pick and no password: the wire has an address or it doesn't */
+        oobe_job_report(job, "Waiting for the wired link and an address...", -1);
+        if (purr_net_connect("", "", 30000) != ESP_OK) {
+            oobe_job_report(job, "No wired link or address yet.", -1);
+            return 1;
+        }
+        return 0;
+    }
+    char pass[PURR_NETREC_PASS_LEN];
+    snprintf(pass, sizeof(pass), "%.*s", (int)sizeof(pass) - 1, s_arg_b);
+    if (pass[0] == '\0') {                          /* a remembered network connects without typing the password again */
+        char rs[PURR_NETREC_SSID_LEN], rp[PURR_NETREC_PASS_LEN];
+        if (purr_netrec_load(rs, rp) == 0 && strcmp(rs, s_arg_a) == 0) {
+            snprintf(pass, sizeof(pass), "%.*s", (int)sizeof(pass) - 1, rp);
+        }
+    }
+    oobe_job_report(job, "Connecting...", -1);
+    if (purr_net_connect(s_arg_a, pass, 15000) != ESP_OK) {
+        oobe_job_report(job, "Couldn't connect. Check the password and try again.", -1);
+        return 1;
+    }
+    purr_netrec_save(s_arg_a, pass);                /* so the next boot (KittenOS) can carry on without asking */
+    return 0;
+}
+
+static int job_legal(oobe_job_t *job, void *arg)
+{
+    (void)arg;
+    char url[256];
+    snprintf(url, sizeof(url), "%s", purr_recovery_legal_url());
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    free(s_legal_text);
+    s_legal_text = NULL;
+    if (purr_fetch_alloc(url, &buf, &len, LEGAL_MAX) != ESP_OK) {
+        oobe_job_report(job, "Couldn't load it.", -1);
+        return 1;
+    }
+    s_legal_text = malloc(len + 1);                 /* a NUL-terminated copy, whatever the fetch left after the bytes */
+    if (s_legal_text != NULL) {
+        memcpy(s_legal_text, buf, len);
+        s_legal_text[len] = '\0';
+    }
+    free(buf);
+    return s_legal_text != NULL ? 0 : 1;
+}
+
+/* Joins the saved network (or the wire) with nobody to ask: the unattended path. */
+static void connect_saved_or_halt(void)
+{
+    if (purr_net_wired()) {
+        status("Waiting for the wired link and an address...");
+        if (purr_net_connect("", "", 30000) != ESP_OK) {
+            halt("No wired link or address, so we can't recover on our own.");
+        }
+        return;
+    }
+    char ssid[PURR_NETREC_SSID_LEN] = "", pass[PURR_NETREC_PASS_LEN] = "";
+    if (purr_netrec_load(ssid, pass) != 0) {
+        halt("There's no saved network, so we can't recover on our own.");
+    }
+    status("Connecting to the saved network...");
+    if (purr_net_connect(ssid, pass, 15000) != ESP_OK) {
+        halt("Couldn't connect to the saved network.");
+    }
+}
+
+static int job_restore(oobe_job_t *job, void *arg)
+{
+    (void)arg;
+    if (s_auto) {
+        connect_saved_or_halt();
+    }
+    /* Normally only what KittenOS needs to restart; KittenOS asks for the account, installs the kernel and the modules, and does the rest.
+     * After a reset the kernel comes from here as well (this task has the RAM), and an in-place restore needs nothing more. */
+    bool in_place = restoring_in_place();
+    if (restore_components(1) != 0) {
+        halt("Something went wrong while installing. Power it off and on to try again.");
+    }
+    mark_install_success_ex(s_auto != 0, !in_place);
+    oobe_job_report(job, "All done. Restarting...", 1000);
+    return 0;
+}
+
+/* ---- the wizard's operations (purr_oobe.h) */
+
+static uint16_t op_reasons(void)
+{
+    purr_handoff_t h;
+    return purr_kernel_handoff(&h) == 0 ? h.recovery_reasons : 0;
+}
+
+static const char *op_legal(void) { return s_legal_text; }
+static int op_wired(void) { return purr_net_wired(); }
+
+static const char *op_remembered(void)
+{
+    static char ssid[PURR_NETREC_SSID_LEN];
+    char pass[PURR_NETREC_PASS_LEN];
+    return purr_netrec_load(ssid, pass) == 0 ? ssid : NULL;
+}
+
+static int op_job_start(purr_oobe_job_t kind, const char *a, const char *b)
+{
+    oobe_job_fn fn;
+    snprintf(s_arg_a, sizeof(s_arg_a), "%s", a != NULL ? a : "");
+    snprintf(s_arg_b, sizeof(s_arg_b), "%s", b != NULL ? b : "");
+    switch (kind) {
+    case PURR_OOBE_JOB_DEVSCAN:   fn = job_devscan; break;
+    case PURR_OOBE_JOB_DEVVERIFY: fn = job_devverify; break;
+    case PURR_OOBE_JOB_SCAN:    fn = job_scan; break;
+    case PURR_OOBE_JOB_CONNECT: fn = job_connect; break;
+    case PURR_OOBE_JOB_LEGAL:   fn = job_legal; break;
+    case PURR_OOBE_JOB_RESTORE: fn = job_restore; break;
+    default:                    return -1;
+    }
+    return oobe_job_start_stack(s_job, fn, NULL, kind == PURR_OOBE_JOB_RESTORE ? OOBE_STACK_INSTALL : OOBE_STACK_NET);
+}
+
+static int op_job_poll(purr_oobe_job_t kind, char *msg, size_t cap, int *per_mille)
+{
+    (void)kind;
+    return oobe_job_poll(s_job, msg, cap, per_mille);
+}
+
+static int op_scan_results(purr_oobe_ap_t *out, int max)
+{
+    int n = s_nap < max ? s_nap : max;
+    memcpy(out, s_aps, (size_t)n * sizeof(out[0]));
+    return n;
+}
+
+static int op_dev_recovery(void) { return purr_recovery_dev_allowed(); }
+
+static int op_server_results(purr_oobe_server_t *out, int max)
+{
+    int n = s_nsrv < max ? s_nsrv : max;
+    memcpy(out, s_servers, (size_t)n * sizeof(out[0]));
+    return n;
+}
+
+static void op_use_server(const purr_oobe_server_t *s)
+{
+    purr_lan_server_t srv;
+    if (s == NULL) {
+        purr_recovery_use(NULL);
+        return;
+    }
+    snprintf(srv.base, sizeof(srv.base), "%s", s->base);
+    snprintf(srv.name, sizeof(srv.name), "%s", s->name);
+    snprintf(srv.id, sizeof(srv.id), "%s", s->id);
+    purr_recovery_use(&srv);
+}
+
+static void restart_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(2500));                 /* long enough to read "All done" */
+    esp_restart();
+}
+
+static void op_finish(void)
+{
+    if (s_setup) {                                   /* the details are saved: restart and let the automatic reinstall use them */
+        purr_flash_t fl;
+        purr_cfg_t cfg;
+        if (purr_cfgstore_open(&fl) == 0 && purr_cfg_load(&fl, &cfg, NULL) >= 0) {
+            purr_cfg_set_flag(&cfg, PURR_CFGF_AUTO_REINSTALL);
+            purr_cfg_store(&fl, &cfg);
+        }
+    }
+    xTaskCreatePinnedToCore(restart_task, "restart", 2048, NULL, 3, NULL, 0);   /* core 0: see park_app_cpu() in the bootloader */
+}
+
+static const purr_oobe_ops_t k_ops = {
+    .reasons = op_reasons, .legal = op_legal, .dev_recovery = op_dev_recovery, .server_results = op_server_results,
+    .use_server = op_use_server, .wired = op_wired, .remembered_ssid = op_remembered,
+    .job_start = op_job_start, .job_poll = op_job_poll, .scan_results = op_scan_results, .background = NULL,
+    .finish = op_finish,
+};
+
+#endif /* colour T-Deck */
+
 /* ------------------------------------------------------------ entry point */
 
 void purr_recovery_loader_main(void)
 {
     ESP_LOGI(TAG, "PURR internet recovery starting");
-    if (purr_kernel_init() != ESP_OK || purr_kernel_display() == NULL) {
+    int hw_ok = purr_kernel_init() == ESP_OK;
+    if (hw_ok) {
+        /* No filesystem here, so the display, keyboard and touch drivers come from the copies baked into this image. */
+        ESP_LOGI(TAG, "%d driver module(s) loaded from memory", purr_loader_load_drivers());
+    }
+    if (!hw_ok || purr_kernel_display() == NULL) {
         for (;;) {
             ESP_LOGE(TAG, "display did not come up");
             vTaskDelay(pdMS_TO_TICKS(2000));
@@ -797,13 +1152,19 @@ void purr_recovery_loader_main(void)
         d->set_brightness(255);
     }
     purr_console_init(d);
-    status("PURR internet recovery");
+    int wizard = oobe_ui_available();
+    if (wizard) {
+        purr_console_set_muted(1);                     /* the setup wizard draws the screen; the log text stays in the serial log */
+    } else {
+        status("PURR internet recovery");
+    }
 
     /* PURR_CFGF_AUTO_REINSTALL flows bootloader -> here (purr_boot.c's failure-count ladder,
      * bootloader/SPEC.md section 6), the opposite direction from a shell's one-shot request:
      * read and cleared here, not by the bootloader. Its presence means the ladder chose the
      * loader on its own, not a human or a shell command, so this boot runs silently instead of
      * offering anything nobody may be there to answer (RecoveryLoader/SPEC.md section 2.1). */
+    int auto_mode = 0;
     {
         purr_flash_t cfg_fl;
         purr_cfg_t cfg;
@@ -812,14 +1173,59 @@ void purr_recovery_loader_main(void)
             if (purr_cfg_store(&cfg_fl, &cfg) != 0) {
                 ESP_LOGW(TAG, "purrcfg: could not clear the auto-reinstall request");
             }
-            run_auto_mode();
-            /* run_auto_mode() only returns via halt(), which itself never returns. */
+            auto_mode = 1;
         }
     }
 
-    if (purr_net_init(NULL) != ESP_OK) {          /* no filesystem here */
-        halt("wifi did not start");
+    /* A reset asks for the automatic reinstall, which joins the saved network. With no saved network (and no wire) there is nothing to join,
+     * so fall back to the questions instead of stopping with "no saved network". */
+    if (auto_mode && !purr_net_wired()) {
+        char ssid0[PURR_NETREC_SSID_LEN] = "", pass0[PURR_NETREC_PASS_LEN] = "";
+        if (purr_netrec_load(ssid0, pass0) != 0) {
+            auto_mode = 0;
+        }
     }
+
+    /* Every entry to the loader is a restore, and the restore always runs the same way: automatically, from the saved network (or the wire),
+     * with nothing else running. With no saved network the wizard only asks for one (setup), saves it, and restarts; the automatic
+     * restore then runs on a fresh heap. */
+    bool setup_mode = false;
+    if (wizard && !purr_net_wired()) {
+        char ssid1[PURR_NETREC_SSID_LEN] = "", pass1[PURR_NETREC_PASS_LEN] = "";
+        setup_mode = purr_netrec_load(ssid1, pass1) != 0;
+    }
+    if (wizard && !setup_mode) {
+        auto_mode = 1;
+    }
+    s_setup = setup_mode;
+
+    if (purr_net_init(NULL) != ESP_OK) {          /* no filesystem here */
+        if (wizard) {
+            purr_console_set_muted(0);
+            wizard = 0;
+        }
+        halt(purr_net_wired() ? "the wired network did not start" : "wifi did not start");
+    }
+
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+    if (wizard) {
+        /* The wizard: "something went wrong" (or "first time?"), Wi-Fi, the legal text, restoring. Unattended, it opens on the
+         * restoring page and joins the saved network by itself. It does not return unless LVGL could not start. */
+        s_wizard = 1;
+        s_auto = auto_mode;
+        s_job = oobe_job_new();
+        oobe_ui_run(setup_mode ? PURR_OOBE_PART_LOADER_SETUP : PURR_OOBE_PART_LOADER, &k_ops, auto_mode ? -1 : 0);
+        s_wizard = 0;                              /* LVGL did not start: fall back to the text screens */
+        purr_console_set_muted(0);
+        status("PURR internet recovery");
+    }
+#endif
+
+    if (auto_mode) {
+        run_auto_mode();
+        /* run_auto_mode() only returns via halt(), which itself never returns. */
+    }
+
     bool want_full_restore = false;
     offer_menu(&want_full_restore);
 
@@ -828,58 +1234,9 @@ void purr_recovery_loader_main(void)
     }
     status("connected");
 
-    if (want_full_restore) {
-        if (restore_components() != 0) {
-            halt("recovery failed");
-        }
-        mark_install_success(false);
-        status("done. restarting...");
-        purr_console_flush();
-        vTaskDelay(pdMS_TO_TICKS(1500));
-        esp_restart();
-    }
-
-    status("fetching the recovery manifest...");
-    uint8_t *manifest_buf = NULL;
-    size_t manifest_len = 0;
-    if (purr_fetch_alloc(CONFIG_PURR_RECOVERY_MANIFEST_URL, &manifest_buf, &manifest_len,
-                         MAX_MANIFEST_SIZE) != ESP_OK) {
-        halt("could not fetch the manifest");
-    }
-    purr_manifest_t man;
-    purr_manifest_parse(&man, (const char *)manifest_buf, manifest_len);
-    free(manifest_buf);
-
-    const purr_manifest_entry_t *entry = purr_manifest_find(&man, "kittenos", CONFIG_IDF_TARGET,
-                                                             purr_board()->name);
-    if (entry == NULL) {
-        halt("no kittenos entry for this board in the manifest");
-    }
-    statusf("found kittenos %s (%u bytes)", entry->version, (unsigned)entry->size);
-
-    char image_url[256];
-    resolve_url(CONFIG_PURR_RECOVERY_MANIFEST_URL, entry->file, image_url, sizeof(image_url));
-    statusf("downloading %s...", entry->file);
-
-    uint8_t *image = NULL;
-    size_t image_len = 0;
-    if (purr_fetch_alloc(image_url, &image, &image_len, MAX_IMAGE_SIZE) != ESP_OK) {
-        halt("download failed");
-    }
-    uint8_t got_hash[PURR_SHA256_LEN];
-    purr_sha256(image, image_len, got_hash);
-    if (image_len != entry->size || memcmp(got_hash, entry->sha256, PURR_SHA256_LEN) != 0) {
-        free(image);
-        halt("download does not match the manifest (size or hash)");
-    }
-
-    status("verifying...");
-    int ok = install_kittenos(image, image_len);
-    free(image);
-    if (ok != 0) {
+    if (restore_components(want_full_restore ? 1 : 0) != 0) {     /* F = everything at once; the default is KittenOS only */
         halt("recovery failed");
     }
-
     mark_install_success(false);
     status("done. restarting...");
     purr_console_flush();

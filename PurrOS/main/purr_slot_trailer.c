@@ -2,6 +2,9 @@
 
 #include <string.h>
 
+#include "purr_cfg.h"
+#include "purr_cfgstore.h"
+
 static int slot_read(void *ctx, uint32_t offset, void *buf, uint32_t len)
 {
     const esp_partition_t *p = ctx;
@@ -14,6 +17,33 @@ static int slot_read(void *ctx, uint32_t offset, void *buf, uint32_t len)
 int purr_slot_trailer_fits(const esp_partition_t *slot, uint32_t payload_size)
 {
     return slot->size > PURR_TRAILER_SIZE && payload_size <= PURR_TRAILER_MAX_IMAGE(slot->size);
+}
+
+static uint32_t bad_bit(const esp_partition_t *slot)
+{
+    if (slot == NULL) {
+        return 0;
+    }
+    return strcmp(slot->label, "kernel") == 0 ? PURR_CFGF_BAD_KERNEL : strcmp(slot->label, "kittenos") == 0 ? PURR_CFGF_BAD_KITTENOS : 0;
+}
+
+int purr_slot_marked_bad(const esp_partition_t *slot)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    uint32_t bit = bad_bit(slot);
+    return bit != 0 && purr_cfgstore_open(&fl) == 0 && purr_cfg_load(&fl, &cfg, NULL) >= 0 && (cfg.flags & bit) != 0;
+}
+
+static void clear_bad(const esp_partition_t *slot)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    uint32_t bit = bad_bit(slot);
+    if (bit != 0 && purr_cfgstore_open(&fl) == 0 && purr_cfg_load(&fl, &cfg, NULL) >= 0 && (cfg.flags & bit) != 0) {
+        cfg.flags &= ~bit;
+        purr_cfg_store(&fl, &cfg);
+    }
 }
 
 int purr_slot_trailer_write(const esp_partition_t *slot, const purr_image_header_t *hdr)
@@ -30,6 +60,7 @@ int purr_slot_trailer_write(const esp_partition_t *slot, const purr_image_header
         memcmp(&back, hdr, sizeof(back)) != 0) {
         return -1;
     }
+    clear_bad(slot);                          /* the new image is in: the reset's mark on this slot is done */
     return 0;
 }
 

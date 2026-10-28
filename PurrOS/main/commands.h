@@ -5,6 +5,7 @@
 #include "purr_appmgr.h"
 #include "purr_cli.h"
 #include "purr_fs.h"
+#include "purr_repo.h"
 #include "purr_kernel_table.h"
 
 /* The shared, already-mounted root filesystem, for login.c's account files. */
@@ -22,6 +23,43 @@ void purr_fs_setup(purr_cli_t *cli);
 /* Mount the apps filesystem and say how it went. */
 void purr_apps_setup(purr_cli_t *cli);
 
+/* Install (from a file on the device or an http(s) address) and remove, for the signed-in user, without
+ * a prompt: what the Settings app calls. 0 on success; msg says what happened. Worker task only, one at
+ * a time (they share the app scratch buffer). */
+int purr_apps_install(const char *file_or_url, char *msg, size_t cap);
+int purr_apps_remove(const char *name);
+
+/* Security settings without a prompt, for the Settings app and the `settings` command. Each needs an
+ * administrator, returns 0 on success, and says what happened (or why not) in msg. The first two apply
+ * from the next boot, like the `secure` command; the confirmation is the caller's job. */
+int purr_security_set_enforce(int on, char *msg, size_t cap);   /* refuses if a boot slot would not verify */
+int purr_security_set_dev(int on, char *msg, size_t cap);       /* refused when a signed trust block locks it out */
+int purr_security_set_unsigned_apps(int on, char *msg, size_t cap);
+
+/* The developer folder, /home/<name>/devapps: what the Developer Portal installs. Kept apart from the apps
+ * folder Settings manages. Everything here needs developer mode active this boot. */
+void purr_devapps_scan(purr_app_registry_t *out_reg);
+int purr_devapps_remove(const char *name);
+/* Downloads `url` (a package on an SDK server on the local network; no redirect is followed), checks it
+ * against the repository's index entry, and installs it. Worker task only. 0 on success; msg says what
+ * happened. */
+int purr_devapps_install_url(const char *url, const purr_repo_app_t *app, char *msg, size_t cap);
+
+/* Developer mode was on for THIS boot (the bootloader's handoff says so; a file cannot fake it). */
+int purr_security_dev_active(void);
+/* Unsigned apps may be installed and run: developer mode is active this boot AND the owner switched
+ * "allow unsigned apps" on. A production-signed trust block that locks development mode out makes the
+ * first part impossible, so this is then always 0. */
+int purr_security_unsigned_apps_allowed(void);
+
+/* The app runtime (purr_catrt.h, plan6.md): starts the manager, reads /etc/apps.conf, opens its
+ * exec-once apps. Call after purr_apps_setup. */
+void purr_catrt_setup(purr_cli_t *cli);
+
+/* Called after any successful sign-in (main.c): fixes home-folder ownership and starts the apps
+ * that were waiting for a user. */
+void purr_session_started(void);
+
 /* F-10: assigns every /home/<name> that has no owner of its own yet to that account, by
  * name -- the one-time migration for a device upgrading to file ownership (Users/SPEC.md
  * 2.1). Call once the account list is actually loaded (main.c's run_login(), right after
@@ -35,6 +73,8 @@ void purr_fs_permissions_migrate(void);
  * purr_commands() is first called -- it used to load modules lazily on that first call;
  * now it expects the sweep already done. */
 void purr_modules_setup(purr_cli_t *cli);
+/* For the recovery loader (no filesystem): load the baked-in display, keyboard and touch driver modules from memory. */
+int purr_loader_load_drivers(void);
 
 /* Start the Wi-Fi service, sharing the mounted root filesystem for saved networks. */
 void purr_net_setup(purr_cli_t *cli);
@@ -44,6 +84,11 @@ void purr_net_setup(purr_cli_t *cli);
  * over it. Call once, right after a fresh network install's first boot. Best-effort, never
  * fatal to booting. */
 void purr_continue_install(purr_cli_t *cli);
+/* Stage 2 in steps, for the setup wizard (oobe_firstboot.c). */
+int purr_kernel_installed(void);                    /* the kernel slot holds an image and is not marked bad */
+int purr_stage2_pending(void);                      /* the same, without clearing it */
+int purr_stage2_take_pending(void);                 /* 1 if a recovery install is waiting to continue (clears the request) */
+int purr_stage2_step(purr_cli_t *cli, int step);    /* 0 = the kernel, 1 = the modules; returns 0 when it installed */
 
 /* Resets purrcfg's boot_fail_count to 0 once a boot has reached a stable, working state (right
  * before the login loop starts) -- the bootloader's failure-count ladder

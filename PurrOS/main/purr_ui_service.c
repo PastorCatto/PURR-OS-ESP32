@@ -76,13 +76,13 @@ static const lv_font_t *font_for_scale(int scale)
     return NULL;        /* NULL leaves LVGL's own default (14) in place */
 }
 
-/* lv_img_set_src() just stores the pointer it's given -- the lv_img_dsc_t it points to has
+/* lv_image_set_src() just stores the pointer it's given -- the lv_image_dsc_t it points to has
  * to outlive the lv_obj_t. Indexed by request sequence number modulo the pool, which is fine
  * for the config builder's one-shot "create everything once" use; an app that keeps creating
  * images after the pool wraps would start reusing slots still in use by an older image --
  * acceptable for now (no app does this yet), worth revisiting once one does. */
 #define IMG_DESC_POOL 32
-static lv_img_dsc_t s_img_descs[IMG_DESC_POOL];
+static lv_image_dsc_t s_img_descs[IMG_DESC_POOL];
 static int s_img_desc_next;
 
 static void button_clicked_cb(lv_event_t *e)
@@ -98,17 +98,20 @@ static lv_obj_t *create_image(lv_obj_t *scr, const purr_ui_widget_t *w)
         ESP_LOGW(TAG, "%s: asset '%s' not found, skipping", w->name, w->asset);
         return NULL;
     }
-    lv_img_dsc_t *d = &s_img_descs[s_img_desc_next];
+    lv_image_dsc_t *d = &s_img_descs[s_img_desc_next];
     s_img_desc_next = (s_img_desc_next + 1) % IMG_DESC_POOL;
-    d->header.cf = LV_IMG_CF_TRUE_COLOR;
-    d->header.always_zero = 0;
+    d->header.magic = LV_IMAGE_HEADER_MAGIC;
+    int alpha = asset->color_format == PURR_ASSET_RGB565A8;
+    d->header.cf = alpha ? LV_COLOR_FORMAT_RGB565A8 : LV_COLOR_FORMAT_RGB565;
+    d->header.flags = 0;
     d->header.w = asset->width;
     d->header.h = asset->height;
-    d->data_size = (uint32_t)asset->width * asset->height * 2;
+    d->header.stride = (uint32_t)asset->width * 2;
+    d->data_size = (uint32_t)asset->width * asset->height * (alpha ? 3 : 2);
     d->data = (const uint8_t *)asset->pixels;
 
-    lv_obj_t *obj = lv_img_create(scr);
-    lv_img_set_src(obj, d);
+    lv_obj_t *obj = lv_image_create(scr);
+    lv_image_set_src(obj, d);
     return obj;
 }
 
@@ -1226,6 +1229,8 @@ static void *process_request(const purr_ui_request_t *req)
         return NULL;
     case PURR_UI_OP_ADD_WIDGET:
         return do_add_widget(&req->widget);
+    case PURR_UI_OP_CALL:
+        return req->call_fn ? req->call_fn(req->call_arg) : NULL;
     case PURR_UI_OP_BUILD_CARD_SHELL:
         ESP_LOGI(TAG, "diag2: build_card_shell entering, cfg=%p", (void *)req->card_shell_screen);
         build_card_shell(req->card_shell_screen);
@@ -1293,7 +1298,7 @@ esp_err_t purr_ui_service_start(void)
      * login prompt on its own screen (run_login() now always runs before LVGL), which only
      * a person at the physical keyboard can get past, not an automated serial reset. Not a
      * regression from this number; restored. */
-    if (xTaskCreate(service_task, "ui_service", 8192, NULL, 5, NULL) != pdPASS) {
+    if (xTaskCreate(service_task, "ui_service", 12288, NULL, 5, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     s_started = 1;
@@ -1325,4 +1330,10 @@ esp_err_t purr_ui_service_request(const purr_ui_request_t *req, void **out_obj)
         *out_obj = obj;
     }
     return ESP_OK;
+}
+
+esp_err_t purr_ui_service_run(void *(*fn)(void *), void *arg, void **result)
+{
+    purr_ui_request_t req = {.op = PURR_UI_OP_CALL, .call_fn = fn, .call_arg = arg};
+    return purr_ui_service_request(&req, result);
 }

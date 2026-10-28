@@ -3,7 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_log.h"
 #include "esp_random.h"
+#include "sdkconfig.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -12,12 +15,14 @@
 #include "purr_cfgstore.h"
 #include "purr_console.h"
 #include "purr_kernel.h"
+#include "purr_settings.h"
 #include "purr_userstore.h"
 
 static purr_user_list_t s_users;
 static purr_shadow_list_t s_shadow;
 static purr_user_t s_current;
 static int s_is_root;
+static int s_elevated;
 static int s_logout_requested;
 
 purr_user_list_t *purr_login_users(void) { return &s_users; }
@@ -228,8 +233,72 @@ static void login_prompt(void)
     }
 }
 
+static int s_store_loaded;
+static uint32_t s_lock_until_ms[PURR_USER_MAX];
+static uint8_t s_lock_armed[PURR_USER_MAX];
+
+static void ensure_loaded(void)
+{
+    if (!s_store_loaded) {
+        purr_userstore_load(purr_login_fs(), &s_users, &s_shadow);
+        s_store_loaded = 1;
+    }
+}
+
+int purr_login_has_accounts(void)
+{
+    ensure_loaded();
+    return s_users.count > 0;
+}
+
+purr_login_result_t purr_login_try(const char *name, const char *password, uint32_t *wait_s)
+{
+    ensure_loaded();
+    if (wait_s) {
+        *wait_s = 0;
+    }
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    purr_user_t *u = (name != NULL) ? purr_user_list_find(&s_users, name) : NULL;
+    int idx = (u != NULL) ? (int)(u - s_users.users) : -1;
+
+    /* A user with earlier failures starts the first attempt of a boot already waiting, as the text
+     * prompt does after the name is typed. */
+    if (idx >= 0 && u->fail_count > 0) {
+        if (!s_lock_armed[idx]) {
+            s_lock_armed[idx] = 1;
+            s_lock_until_ms[idx] = now + purr_login_delay_seconds(u->fail_count) * 1000u;
+        }
+        if ((int32_t)(s_lock_until_ms[idx] - now) > 0) {
+            if (wait_s) {
+                *wait_s = (s_lock_until_ms[idx] - now + 999) / 1000;
+            }
+            return PURR_LOGIN_WAIT;
+        }
+    }
+
+    /* "root" is never a stored account; its login is always refused (Users/SPEC.md). */
+    int ok = (u != NULL) && strcmp(name, "root") != 0 && password != NULL &&
+             purr_shadow_check(&s_shadow, name, password);
+    if (ok) {
+        u->fail_count = 0;
+        s_lock_armed[idx] = 0;
+        purr_login_persist();
+        s_current = *u;
+        s_is_root = 0;
+        return PURR_LOGIN_OK;
+    }
+    if (u != NULL) {
+        u->fail_count++;
+        s_lock_armed[idx] = 1;
+        s_lock_until_ms[idx] = now + purr_login_delay_seconds(u->fail_count) * 1000u;
+        purr_login_persist();
+    }
+    return PURR_LOGIN_BAD;
+}
+
 void purr_login_run(void)
 {
+    s_store_loaded = 1;
     purr_userstore_load(purr_login_fs(), &s_users, &s_shadow);
     if (s_users.count == 0) {
         first_time_setup();
@@ -245,4 +314,235 @@ void purr_login_skip(const char *name, purr_user_role_t role)
     strncpy(s_current.name, name, sizeof(s_current.name) - 1);
     s_current.role = role;
     s_is_root = 0;
+}
+
+/* Recovery's own user: KittenOS starts as "kitten", a standard account that exists only in memory, so recovery is never
+ * an unknown or absent user. uid 254 is not an account and never gets a home folder. */
+void purr_login_kitten(void)
+{
+    purr_login_skip("kitten", PURR_ROLE_USER_STANDARD);
+    s_current.uid = 254;
+    s_elevated = 0;
+}
+
+int purr_login_elevated(void) { return s_elevated; }
+
+/* User account control: an administrator proves who they are and this session becomes theirs, for as long as the device stays
+ * on (the session is memory only; a restart is a logout). A wrong password, or an account that is not an administrator, leaves
+ * the session exactly as it was. */
+purr_login_result_t purr_login_elevate(const char *name, const char *password, uint32_t *wait_s)
+{
+    purr_user_t before = s_current;
+    int root_before = s_is_root;
+    purr_login_result_t r = purr_login_try(name, password, wait_s);
+    if (r == PURR_LOGIN_OK && s_current.role != PURR_ROLE_USER_ADMIN) {
+        s_current = before;
+        s_is_root = root_before;
+        return PURR_LOGIN_BAD;
+    }
+    if (r == PURR_LOGIN_OK) {
+        s_elevated = 1;
+    }
+    return r;
+}
+
+
+/* ---------------------------------------------------------------- account changes without a prompt */
+
+static int acting_admin(void)
+{
+    return purr_login_is_root() || purr_login_current()->role == PURR_ROLE_USER_ADMIN;
+}
+
+static void set_password_for(const char *name, const char *password)
+{
+    uint8_t salt[PURR_SALT_LEN];
+    purr_login_random_salt(salt);
+    purr_shadow_set(purr_login_shadow(), name, password, salt, PURR_PBKDF2_ITERATIONS);
+}
+
+static purr_acct_result_t add_account(const char *name, const char *password, int admin)
+{
+    if (!purr_user_name_valid(name)) {
+        return PURR_ACCT_INVALID;
+    }
+    if (password == NULL || password[0] == '\0') {
+        return PURR_ACCT_BADPASS;
+    }
+    uint8_t uid = purr_user_next_uid(purr_login_users());
+    int r = purr_user_list_add(purr_login_users(), name, uid,
+                               admin ? PURR_ROLE_USER_ADMIN : PURR_ROLE_USER_STANDARD);
+    if (r == PURR_USER_EXISTS) return PURR_ACCT_EXISTS;
+    if (r == PURR_USER_FULL) return PURR_ACCT_FULL;
+    if (r != PURR_USER_ADDED) return PURR_ACCT_INVALID;
+    set_password_for(name, password);
+    if (purr_login_persist() != 0) {
+        purr_user_list_remove(purr_login_users(), name);
+        purr_shadow_list_remove(purr_login_shadow(), name);
+        return PURR_ACCT_SAVE;
+    }
+    return PURR_ACCT_OK;
+}
+
+purr_acct_result_t purr_login_account_add(const char *name, const char *password, int admin)
+{
+    if (!acting_admin()) {
+        return PURR_ACCT_DENIED;
+    }
+    return add_account(name, password, admin);
+}
+
+/* The very first account, from the setup wizard: nobody is signed in yet, so there is no administrator to ask. Allowed only while
+ * the device has no accounts at all; it is an administrator. Hashes the password: call it from a worker task. */
+purr_acct_result_t purr_login_account_add_first(const char *name, const char *password)
+{
+    if (purr_login_has_accounts()) {
+        return PURR_ACCT_DENIED;
+    }
+    return add_account(name, password, 1);
+}
+
+purr_acct_result_t purr_login_account_set_password(const char *name, const char *new_password,
+                                                   const char *current_password)
+{
+    int is_self = strcmp(name, purr_login_current()->name) == 0;
+    if (!is_self && !acting_admin()) {
+        return PURR_ACCT_DENIED;
+    }
+    if (purr_user_list_find(purr_login_users(), name) == NULL) {
+        return PURR_ACCT_NOUSER;
+    }
+    if (new_password == NULL || new_password[0] == '\0') {
+        return PURR_ACCT_BADPASS;
+    }
+    if (is_self && !purr_shadow_check(purr_login_shadow(), name, current_password ? current_password : "")) {
+        return PURR_ACCT_BADPASS;
+    }
+    set_password_for(name, new_password);
+    return purr_login_persist() == 0 ? PURR_ACCT_OK : PURR_ACCT_SAVE;
+}
+
+purr_acct_result_t purr_login_account_remove(const char *name)
+{
+    if (!acting_admin()) {
+        return PURR_ACCT_DENIED;
+    }
+    if (strcmp(name, purr_login_current()->name) == 0) {
+        return PURR_ACCT_SELF;
+    }
+    if (purr_user_list_find(purr_login_users(), name) == NULL) {
+        return PURR_ACCT_NOUSER;
+    }
+    if (purr_user_is_last_admin(purr_login_users(), name)) {
+        return PURR_ACCT_LAST_ADMIN;
+    }
+    purr_user_list_remove(purr_login_users(), name);
+    purr_shadow_list_remove(purr_login_shadow(), name);
+    return purr_login_persist() == 0 ? PURR_ACCT_OK : PURR_ACCT_SAVE;
+}
+
+purr_acct_result_t purr_login_account_set_admin(const char *name, int admin)
+{
+    if (!acting_admin()) {
+        return PURR_ACCT_DENIED;
+    }
+    purr_user_t *u = purr_user_list_find(purr_login_users(), name);
+    if (u == NULL) {
+        return PURR_ACCT_NOUSER;
+    }
+    if (!admin && purr_user_is_last_admin(purr_login_users(), name)) {
+        return PURR_ACCT_LAST_ADMIN;
+    }
+    u->role = admin ? PURR_ROLE_USER_ADMIN : PURR_ROLE_USER_STANDARD;
+    return purr_login_persist() == 0 ? PURR_ACCT_OK : PURR_ACCT_SAVE;
+}
+
+const char *purr_login_account_error(purr_acct_result_t r)
+{
+    switch (r) {
+    case PURR_ACCT_OK:         return "done";
+    case PURR_ACCT_DENIED:     return "only an administrator can do that";
+    case PURR_ACCT_INVALID:    return "names use letters, digits, - and _";
+    case PURR_ACCT_EXISTS:     return "that name is taken";
+    case PURR_ACCT_FULL:       return "too many accounts";
+    case PURR_ACCT_NOUSER:     return "no such account";
+    case PURR_ACCT_LAST_ADMIN: return "that is the last administrator";
+    case PURR_ACCT_SELF:       return "you are signed in as that account";
+    case PURR_ACCT_BADPASS:    return "password empty, or the current one is wrong";
+    case PURR_ACCT_SAVE:       return "could not save";
+    case PURR_ACCT_DEVMODE:    return "automatic sign-in needs developer mode, active this boot";
+    }
+    return "failed";
+}
+
+
+/* ---------------------------------------------------------------- automatic sign-in */
+
+#if CONFIG_PURR_TEST_AUTOLOGIN && !CONFIG_PURR_NET_ETH_W5500
+#error "PURR_TEST_AUTOLOGIN puts a known password in the image; it is only allowed in the VM flavor"
+#endif
+
+static int s_auto_used;
+
+void purr_login_autologin_user(char *out, size_t cap)
+{
+    if (purr_settings_kv_get("login.autologin", out, cap) != 0) {
+        out[0] = '\0';
+    }
+}
+
+int purr_login_autologin_used(void) { return s_auto_used; }
+
+int purr_login_autologin(void)
+{
+    /* Only with developer mode active for THIS boot, as the bootloader's handoff reports it. A secure
+     * device, or one whose signed trust block locks developer mode out, therefore never signs in on its
+     * own, whatever a file says. */
+    int dev = purr_security_dev_active();
+    ESP_LOGI("login", "automatic sign-in check: developer mode active this boot = %d", dev);
+    if (!dev) {
+        return 0;
+    }
+    ensure_loaded();
+    char want[PURR_USER_NAME_LEN];
+    purr_login_autologin_user(want, sizeof(want));
+    purr_user_t *u = (want[0] != '\0' && strcmp(want, "root") != 0) ? purr_user_list_find(&s_users, want) : NULL;
+#if CONFIG_PURR_TEST_AUTOLOGIN
+    if (u == NULL) {
+        u = purr_user_list_find(&s_users, CONFIG_PURR_TEST_AUTOLOGIN_USER);
+        if (u == NULL) {
+            create_account(CONFIG_PURR_TEST_AUTOLOGIN_USER, CONFIG_PURR_TEST_AUTOLOGIN_PASSWORD, PURR_ROLE_USER_ADMIN);
+            purr_login_persist();
+            u = purr_user_list_find(&s_users, CONFIG_PURR_TEST_AUTOLOGIN_USER);
+        }
+    }
+#endif
+    if (u == NULL) {
+        return 0;
+    }
+    s_current = *u;
+    s_is_root = 0;
+    s_auto_used = 1;
+    ESP_LOGW("login", "AUTOMATIC SIGN-IN as %s (no password asked)", u->name);
+    return 1;
+}
+
+purr_acct_result_t purr_login_set_autologin(const char *name, const char *admin_password)
+{
+    if (!acting_admin()) {
+        return PURR_ACCT_DENIED;
+    }
+    if (name != NULL) {
+        if (!purr_security_dev_active()) {
+            return PURR_ACCT_DEVMODE;                   /* turning it on needs developer mode, active now */
+        }
+        if (strcmp(name, "root") == 0 || purr_user_list_find(purr_login_users(), name) == NULL) {
+            return PURR_ACCT_NOUSER;
+        }
+        if (admin_password != NULL && !purr_login_is_root() &&
+            !purr_shadow_check(purr_login_shadow(), purr_login_current()->name, admin_password)) {
+            return PURR_ACCT_BADPASS;                   /* turning it ON needs the administrator's password */
+        }
+    }
+    return purr_settings_kv_set("login.autologin", name ? name : "") == 0 ? PURR_ACCT_OK : PURR_ACCT_SAVE;
 }

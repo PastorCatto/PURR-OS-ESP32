@@ -47,6 +47,10 @@ typedef enum {
      * from /ui/cardshell.conf by purr_card_shell_start() -- the engine driving it (drag/
      * reveal/carousel/overview/minimize) is still compiled C. */
     PURR_UI_OP_BUILD_CARD_SHELL,
+    /* Runs fn(arg) on the service task, the only place LVGL may be called from, and returns what
+     * it returns. This is how a shell (purr_w10m.c) does its work without this file knowing
+     * anything about it. */
+    PURR_UI_OP_CALL,
 } purr_ui_op_t;
 
 typedef struct {
@@ -57,6 +61,9 @@ typedef struct {
      * purr_ui_service_request() blocks until the request is handled, so a stack-local pointer
      * is safe to pass here. */
     const purr_ui_screen_t *card_shell_screen;
+    /* PURR_UI_OP_CALL only. */
+    void *(*call_fn)(void *);
+    void *call_arg;
 } purr_ui_request_t;
 
 /* Starts the service task. Call once, after purr_lvgl_init() succeeds and before any call
@@ -71,6 +78,11 @@ esp_err_t purr_ui_service_start(void);
  * service is running -- the whole point of routing through a queue instead of calling lv_*
  * directly. */
 esp_err_t purr_ui_service_request(const purr_ui_request_t *req, void **out_obj);
+
+/* Runs fn(arg) on the service task and waits for it. Safe from any task but the service task
+ * itself (which would wait on its own queue), and from a callback LVGL runs there, never call this:
+ * just call fn directly. */
+esp_err_t purr_ui_service_run(void *(*fn)(void *), void *arg, void **result);
 
 #ifdef __cplusplus
 }

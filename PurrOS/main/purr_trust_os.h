@@ -54,4 +54,12 @@ typedef struct {
 void purr_secure_status(purr_secure_status_t *out);
 const char *purr_secure_level_name(purr_secure_level_t l);
 
+/* 1 if this device's SIGNED trust block locks development mode out (a production device). */
+int purr_secure_dev_locked(void);
+
+/* Development mode on or off for the next boot. This is the one way the bootloader's enforce is weakened without a signed
+ * trust block, and only the recovery app (recovery_app.c) calls it with on = 1: it makes the user choose about their data
+ * first. Returns 0, -1 (purrcfg unreadable or unwritable) or -2 (the signed trust block forbids it). Turning it off always works. */
+int purr_secure_set_dev(int on);
+
 #endif
