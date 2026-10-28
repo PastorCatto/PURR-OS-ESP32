@@ -26,7 +26,10 @@ installing and the shell (`../AppManager/SPEC.md`), running apps
 - **Revocation:** the user can change or remove any grant later. The next attempt
   asks again, unless "don't ask again" is set *(assumed)*.
 - **Prompts are text on the console for now,** since the shell comes first. A dialog
-  can replace them later.
+  can replace them later. *(plan10: the W10M shell now shows a dialog card with Allow always / Just once /
+  Don't allow, and the third button becomes "Don't ask again" after two refusals. The call that caused it
+  returns `ASK` at once and the app is sent `PURR_APPEV_PERM` with the answer, so no app task ever blocks
+  inside a callback.)*
 
 ## 2. The permissions
 
@@ -49,6 +52,11 @@ app's own storage folder, `system` (read-only battery, time, memory), audio outp
 | `system-settings` | Brightness, time and similar settings |
 | `hardware-raw` | Direct GPIO, I2C and SPI (`gpio`, `i2c`, `spi`), never pins or buses that drivers own |
 | `device-admin` | Adding, removing and exporting other installed apps (`appmgr` catcall) |
+| `keep-awake` | Holding the screen on or the CPU out of light sleep (`power` catcall, `hold`). Added by plan10. |
+| `wake-alarm` | Waking the device on a schedule (`power` catcall, `alarm_set`). Added by plan10. |
+
+Both power permissions are dangerous because battery is what a handheld runs out of. Android makes plain wake locks a
+normal permission; here a CPU lock carries a lease and expires on its own, and the user still gets the say.
 
 **Special:**
 

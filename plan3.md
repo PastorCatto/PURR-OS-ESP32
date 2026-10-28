@@ -140,3 +140,15 @@ Decisions from the owner:
 - 2026-10-25: item 3 done (floors); 3b identified.
 - 2026-10-25: item 2 done (timing instrumentation added, measured, removed; the hook flashed to the device).
 - 2026-10-25: item 1 done. Run with `python3 PurrOS/components/coreos/test/host/fuzz/fuzz.py [target] [iterations] [seed]`.
+
+### Item 6 decided (owner, 2026-10-28)
+- KittenOS stays bootable even when policy is `enforce` and nothing else is usable; it gets restricted heavily before shipping so that it is
+  purely a recovery menu (recovery app, Security tab, nothing else).
+- If KittenOS itself is corrupt, the escape route is, in order: (1) the dev server path (local restore), driven by a desktop tool for
+  Windows, macOS and Linux that triggers a safe restore over the network, no USB cable; (2) an emergency pull of the newest image from
+  the official GitHub repository, whose address is hard-coded into the bootloader (so it needs the bootloader to speak Wi-Fi/HTTPS or hand
+  off to a minimal fetcher; size budget is ~6.4 KB free, so likely a fixed loader slot does the fetching and the bootloader only stores the URL
+  and trust key).
+- Boot menu (F7): kept; no change decided yet beyond the BAD-slot greying already done.
+- Also here: the bootloader reset crash-loop (park_app_cpu) hardware check, moved from plan1.
+Open design for this item: the desktop restore tool (name, protocol: reuse `purrstrap dev serve` discovery, signed images only).

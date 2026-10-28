@@ -55,6 +55,26 @@ KittenOS's partition can be made larger if it needs to be.
 - Time: NTP never raises the floor, and an HTTPS `Date` header does.
 - The shell commands against fake networks.
 
+## 5b. Wired networking (the VM flavor)
+
+A build with `CONFIG_PURR_NET_WIRED` uses wired Ethernet instead of Wi-Fi (`sdkconfig.flavor.vm`; `purrstrap coreos build --flavor vm`).
+It exists so the emulator, which has no radio, can run the whole network path, and so a board with a wired controller could
+use the same code. `purr_net_wired()` tells the rest of the OS which one it has.
+
+- **Hardware:** a W5500 on SPI, driven by the IDF Ethernet driver in MACRAW mode, polled every 10 ms (no interrupt line).
+  In the VM it has its own SPI bus (SPI3: GPIO 47/48/21, chip select 9); the VM-info device (I2C 0x6e) tells the OS to use
+  it. The emulated controller is `crates/devices/src/w5500.rs` in the emulator repository.
+- **No Wi-Fi credentials.** A wired device has a link or it does not. The recovery loader's Wi-Fi page is skipped, and stage 2
+  of an install (KittenOS finishing the kernel and modules) waits for the link and an address instead of loading a saved
+  network. `wifi` commands report that the board has no radio.
+- **Same everything else:** DHCP, DNS, HTTPS `fetch`, the recovery download and the dev server all go through the same IP stack
+  and `purr_fetch`, so what is tested over the wire is what runs over Wi-Fi above the link layer.
+- **Reaching the host:** the emulator uses QEMU's user-mode network, so the device is 10.0.2.15 and the host is 10.0.2.2
+  (the dev server is at `10.0.2.2:47801`; network discovery maps the loopback address it sees to that).
+- **Verified (2026-10-27, VM):** link and DHCP; HTTPS downloads from the release (recovery manifest and images); a full
+  internet recovery from the loader (KittenOS, then kernel and modules in stage 2) with every slot verified in `enforce` mode.
+  **Not covered:** a real W5500 module (no hardware here), and Wi-Fi-specific behaviour such as roaming and power saving.
+
 ## 6. Open questions
 
 - **HTTPS for apps.** Whether apps get a TLS client through a catcall, or bring their own

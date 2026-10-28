@@ -279,7 +279,29 @@ Known limits of this design, so nobody is surprised:
   `purrcfg` can lower one and roll back. Closing that needs the hardware root of trust.
 - A flash programmer still beats all of this (section 2): the bootloader itself is not verified.
 
-### 6.2 The secure status
+### 6.2 Unsigned apps in developer mode (built 2026-10-26)
+
+By default no unsigned app runs, in any secure mode. A developer can opt in, in Settings > Privacy &
+security > Developer options, or with `settings set dev.unsigned_apps on`. All of these must hold:
+
+- **Developer mode is active for this boot**, as the bootloader's handoff reports it. A flag in a file
+  cannot fake that, and a device whose signed trust block locks developer mode out can never satisfy it.
+- **An administrator switched "allow unsigned apps" on** (stored in `/etc/system.conf`). Turning
+  developer mode off turns it off too.
+- **The app is in the signed-in user's own folder**, `/home/<name>/apps/<app>/package.cat`. The loader
+  checks the path itself: the system's `/apps`, `/system`, `/kernelmods` and `/boot/drivers` always need a
+  signature, and so does every module and driver, whatever the settings say.
+- **The payload hash still has to match.** The verifier stops at the key lookup, before it has read the
+  payload, so the loader checks the hash itself; an unsigned app may not be a damaged one. A revoked key is
+  refused outright.
+
+While unsigned apps are allowed the status strip shows a badge, the log carries a warning for every unsigned
+app loaded, and the Apps page marks them `UNSIGNED (developer mode)`. An unsigned app runs with the same
+access as the system: there is no sandbox yet (section 2), so this is a switch for people building their
+own apps and nothing else. Known gap: the installer, with the switch on, accepts a package it could not
+verify, including one with a bad hash; the loader still refuses to run such a package.
+
+### 6.3 The secure status
 
 The OS exposes one honest answer to "is this device in a trusted state?" (`purr_secure_status()`,
 shell command `secure`), for the system, services and, through a catcall to be added, apps:

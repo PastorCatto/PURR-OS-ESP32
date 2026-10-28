@@ -169,3 +169,7 @@ The boot chain (`plan1.md`) comes first.
 - 2026-10-25 (later): debugged the white screen live on the T-Deck Plus (`/dev/cu.usbmodem101`).
   Flashed the working-tree app to 0x20000 four times (stock bootloader and old partition table
   still on the device). Root cause: stale driver modules after a bus ABI change. Fix prepared.
+
+### Owner verdict (2026-10-28)
+Display performance is good enough on the device and passes; the A and B items stay parked. Only the notification-shade swipe is sluggish.
+Real follow-up is app lifecycle (unload/freeze hidden apps, see plan5/plan6/plan10), which also frees RAM and helps that swipe.

@@ -201,3 +201,202 @@ Still to check on the device (needs the keyboard):
   specs still to do.
 - 2026-10-25: design settled with the user (trailer approach approved); full-hash decision made
   by me, user not yet told in detail. `purr_trailer.h/.c` written.
+
+## Boot screens redesign (2026-10-27)
+Decided with the user: one minimal frame for every boot screen. Cat's-eye mark, letter-spaced "PURR OS" wordmark, board
+and version line; the entry rows in the middle (menu only); a thin progress bar low on the screen with one line of text
+above it (stage and percentage, or the countdown and "any key stops"); the small status chips UNDER the bar. The bar is
+always in the same place: it fills while something is verified or installed and drains while the menu counts down. Chips:
+policy (ENFORCE / WARN / OFF), SIGNED, HW secure boot (only when on), input (kbd ok / NO KBD, or BOOT / PWR on e-ink);
+DEV MODE is a filled amber chip. The sign-in-screen idea and the Lumia theme mockups were dropped (the OS already has its
+UI; boot only complements it).
+- Done: `bootpkg/src/pkg_ui.c/.h` (the look, hw_fill/hw_text only, 320x240 and 200x200 layouts), `pkg_main.c` menu rewritten
+  on it, "Starting <slot>" hand-off screen, `purrstrap` builds it with `-DPKG_VERSION`. Package ~5.8 KB of 32 KB.
+  Host renderer of the REAL code: `tools/boot/render_real.py` (PNGs in `out/boot-preview/`); `tools/boot/preview.py` is the
+  original mockup. Ran in the VM (signed package loads, menu counts down, kernel boots); the look itself was checked on
+  rendered PNGs, not on the VM screen.
+- Done later the same day: (1) **verification progress**: bootloader services version 3; while it verifies the slots the
+  bootloader calls the package's entry with `nparts < 0` (purr_abi.h, "a progress call"), only to a package whose version is
+  0.2 or later; the package brings the display up on the first call and the menu continues on the same frame without
+  clearing it. The bar steps per slot ("Verifying Kernel" 0 %, "Verifying KittenOS" 50 %, "Verified" 100 %); inside a slot
+  there is no progress (`purr_slot_verify` is one call). Skipped on the e-ink board (each refresh takes seconds).
+  (2) **re-install progress** in the recovery loader: `main/recovery_screen.c` compiles `bootpkg/src/pkg_ui.c` against the
+  kernel display; stage line, bar by component (3 steps) plus bytes of the download in progress (new
+  `purr_fetch_set_progress` hook in the kernel fetch code), RECOVERY / WIFI / SIGNED chips, a FAILED chip on halt.
+  (3) **kernel start screen**: after the display is up the kernel shows the same frame with stage lines (starting services,
+  network, preparing the shell, "Hold space: text shell", starting PURR OS) instead of log text; the text console returns
+  for a text login, the space-bar escape, or a fallback from the graphical shell (which now also unmutes it).
+  The bootloader is built in `out/boot_tdeck_plus` (the old `bootloader/build_*` folders came from Windows).
+- Checked: host-rendered PNGs of the real code (T-Deck Plus and the 200x200 e-ink layout); all three boot packages build;
+  bootloader, full, minimal (loader) and recovery profiles build; the VM boots through bootloader -> package 0.2.0 ->
+  verification -> menu -> kernel screen -> automatic sign-in -> LVGL. NOT checked: how it looks on the VM or device screen,
+  and the re-install screen has not run (it needs the recovery manifest server and a forced recovery boot).
+- Still open: accent follows the OS accent (needs it stored in purrcfg; amber for now); a Montserrat subset for the
+  wordmark (the pixel font differs from the shell's type); the display module re-initialises the panel at kernel start, so
+  there can still be a brief blank between the package's hand-off and the kernel screen; progress inside a slot's
+  verification; the image script patches only bootloader, package, kernel and trust block (loader and KittenOS slots keep
+  the old builds, so the new re-install screen needs those two slots rebuilt into the image to be seen).
+
+## KittenOS internet recovery: first-run setup (OOBE) (2026-10-27)
+Decided with the user: the recovery experience is one wizard in the existing LVGL UI (W10M theme, the Settings app's own widgets,
+now shared as `PurrOS/main/purr_w10m_widgets.c`), in two parts because recovery has two stages. Minimal: no header, no step
+counter, one accent title and the page's controls.
+- **Part 1, recovery loader (no filesystem):** (1) "Uh-oh, something went wrong. We need to recover this device." with the reasons
+  the bootloader flagged, OK; (2) connect to Wi-Fi (scan list, a remembered network connects without a password, wired skips); (3) "The legal stuff & cool people" (legal and credits), a plain
+  text file that is NOT built into the firmware: the loader has no filesystem, so it downloads `OTA/legal.txt` from the recovery
+  server next to the manifest once Wi-Fi is up (lines starting with # are editor notes; if it cannot be fetched the page says so and
+  carries on), and the installed system keeps it as `/etc/legal.txt` for Settings > About; (4) "Okay, getting this sorted out":
+  progress while the restore runs. Restore everything (kernel too) when the reasons say the system cannot be trusted
+  (`purr_reason_needs_full_restore`), otherwise only PURR OS.
+- **Part 2, KittenOS first boot (has a filesystem):** pick a colour (accent grid + dark/light, restyles live), the account (replaces
+  the text first-time setup), date and time, done. The rest of the system keeps installing in the background (a line and a thin
+  bar in a small header) while the user answers; Finish waits for it, then restarts into PURR OS.
+- **Reasons from the bootloader:** `purr_handoff_t.recovery_reasons` (PURR_RR_*: UNSIGNED, ALTERED, DAMAGED, ROLLBACK, REPEATED,
+  NO_SYSTEM, REQUESTED, CONFIG, SYSTEM) in `purr_abi.h`; wording and the verify-result mapping in `purr_reason.c`;
+  `purr_handoff_set_reasons`. Host tests: `test_reason` (34 checks) and `test_cfg` pass.
+- **Done:** `purr_oobe.c/.h` (the pages, platform actions behind `purr_oobe_ops_t`, slow work as polled jobs), `legal.txt`,
+  `purr_reason`, host LVGL renderer `tools/lvgl_host/render.py` (real LVGL 9.2 + the real theme and widgets + the real OOBE pages,
+  PNGs in `out/lvgl_host/`; Settings now uses the shared widgets and the full firmware still builds).
+- **Not done (needs approval of the look first):** the bootloader filling in `recovery_reasons` (purr_boot.c: slot verdicts, ladder,
+  request, no system, config) and `purr_handoff_write`; the loader running this wizard (LVGL + theme in the minimal profile, real Wi-Fi
+  scan/connect/remember, restore as a polled job reporting progress, replacing `recovery_screen.c`'s drawing); KittenOS first boot running
+  part 2 (account creation job, the background stage-2 install as a job, restart); the loader's LEGAL job (fetch `legal.txt` beside the manifest, cap 16 KB), the restore also installing it as /etc/legal.txt,
+  Settings > About > Legal reading /etc/legal.txt; the accent saved in purrcfg so the boot screens can follow it. None of it has run
+  on the VM or a device.
+
+### Update (same day): FRESH, reasons from the bootloader, tone
+- **`PURR_CFGF_FRESH`** (purrcfg flag, bit 9) is ON BY DEFAULT: `purr_cfg_defaults()` and purrstrap's initial purrcfg
+  (`keys trust-block`; `--installed` leaves it off, used by `tools/vm/mkimage_dbg.sh` because that image holds a working
+  system). Meaning: "never reached a healthy boot of the full OS". Cleared only by the full OS in `purr_mark_boot_healthy`
+  (not by the bootloader, the loader or KittenOS, so it survives the whole install). With FRESH set and no usable system the
+  bootloader flags `PURR_RR_BLANK` and the loader's first page reads "Hi there, first time? This is a network install..." instead
+  of "Uh-oh, something went wrong." (`purr_reason_is_first_run`: BLANK with no sign of damage or tampering).
+- **Bootloader now fills `recovery_reasons`** (purr_boot.c `recovery_reasons()`): damaged / unsigned / altered / rollback from the two
+  system slots' verdicts, NO_SYSTEM, BLANK, REPEATED (the failure ladder), REQUESTED (FORCE_LOADER or the boot menu's pick),
+  CONFIG. Only computed when the loader is the slot being launched (it verifies the slots, so it is skipped on normal boots).
+  `purr_handoff_write` takes the reasons. Builds; a normal boot in the VM is unchanged; the loader-launch path (the reasons
+  themselves) has NOT been run: it needs a device or VM with the system slots erased and a key press at the boot menu.
+- Copy is casual ("Let's get you connected", "We'll hop on Wi-Fi...", contractions) and the legal page is titled "The legal stuff &
+  cool people". Host tests: the whole coreos suite passes (test_reason 42 checks); purrstrap trust-block and key tests pass (30).
+
+### Update (same day): the wizard is wired in, and a dev server can host recovery
+- **Wired in.** The recovery loader (minimal profile) now runs the setup wizard part 1 on LVGL (`recovery_loader.c`, jobs: Wi-Fi scan,
+  connect + remember, dev server scan/verify, legal download, restore; `oobe_job.c` is the worker, `oobe_ui.c` the LVGL bring-up).
+  KittenOS first boot (recovery profile, no accounts) runs part 2 (`oobe_firstboot.c`: colour, account via
+  `purr_login_account_add_first`, date and time, done) while stage 2 installs in the background (`purr_stage2_take_pending` and
+  `purr_stage2_step` in commands.c). The text flows stay as the fallback (waveshare e-ink, or LVGL failing). Unattended recovery
+  (the ladder) opens on the install page and joins the saved network.
+- **Found and fixed: the loader had no screen at all.** Since the display became a loadable module (commit 45c46edc) the loader, which has
+  no filesystem, never bound a display ("display did not come up"). `purr_loader_load_drivers()` now loads the baked-in display, keyboard
+  and touch modules from memory (`load_relocatable_image` split out of `load_relocatable_file`, verified like any module).
+- **Dev server hosts recovery** (`purrstrap dev recovery`, `dev serve`): `/recovery/<file>` (plain names only, no way out of the folder),
+  recovery.manifest + modules.manifest generated from the images in the folder (the device's C parser reads them), legal.txt.
+  The server now announces itself network-wide every 3 s (`--announce`, 0 = off; limited broadcast plus each interface's), and
+  `dev find` listens like a device (try it from another computer on the same AP). Devices (`purr_lan_discover.c`, also used by the
+  portal) probe AND listen on the discovery port.
+- **Gated by a bootloader flag.** `PURR_CFGF_DEV_RECOVERY` (purrcfg bit 10, `keys trust-block --dev-recovery`): the bootloader honours it
+  only in development mode and reports `PURR_SECST_DEVREC` in the hand-off. Only then does the wizard add its extra page (after Wi-Fi,
+  before the install): it finds servers, shows name + address + id, checks the server has recovery files for this board
+  (`purr_recovery_verify`), the owner taps one and "Use it" (or "Use the internet instead"). The choice is remembered beside the
+  saved network (netrec source record) so KittenOS stage 2 pulls from the same server (`purr_recovery_src.c` supplies the manifest,
+  module index and legal URLs to the loader and commands.c). Images are still checked against the boot key before anything is written.
+- **Checked:** whole C host suite and purrstrap tests pass (dev-recovery tests: manifests, safe names, the server serving only its folder,
+  announcements); every profile and the bootloader build (loader 28 % free, KittenOS 23 %, full 14 %); in the VM the normal OS still
+  boots, and a forced recovery shows the wizard (bootloader reasons 0x40, 3 drivers loaded from memory, LVGL, theme, "wizard part 1 is up").
+  `tools/vm/mkimage_dbg.sh` has SCENARIO=normal|recover|first and DEV_RECOVERY=1; `out/vm-recover-devrec-flash.bin` is the recover image.
+- **Not checked:** nothing has been clicked through: Wi-Fi scan/connect, the dev server page against a real server, the legal download, the
+  restore itself (it needs a reachable server and writes flash), KittenOS first boot (account, stage 2 background install), the "first
+  time?" page end to end (SCENARIO=first). The VM's Wi-Fi is simulated and may not reach the dev server (discovery also probes 10.0.2.2).
+
+### Update (same day): recovery installs only KittenOS; release folder
+- **Staged recovery.** The loader no longer restores everything at once. It installs KittenOS plus the boot package (best effort: a
+  failure there never stops the restore) and restarts. KittenOS then asks for the account (setup wizard part 2) and installs the kernel
+  and the modules in the background (stage 2). `restore_components(include_kernel)`: 0 by default and unattended, 1 only for the
+  text flow's F key. The reasons from the bootloader no longer choose the scope.
+- **Why a release folder.** The published OTA was stale (kernel 0.6.1, KittenOS 0.2.8, loader 0.1.0, no boot package), so a device
+  that recovered from it went BACK to an old system. `tools/release/make_release.py` builds a signed, self-checking release:
+  new tdeck_plus images at 1.0.0 (real-device builds out/stdfull, stdmin, stdrec: Wi-Fi, official URLs, no VM/debug flavor), the boot
+  package 0.2.0, legal.txt, a recovery.manifest that also carries the other boards' entries unchanged, and the modules release
+  unchanged. Output went to ~/Desktop/PURR-OS-release (JumpingJaguar1/ and JumpingJaguar2/ = the two release tags the firmware reads).
+- Checked: every manifest entry matches its file (size + sha256); the device's C manifest parser reads the new manifest; each image
+  verifies against the boot key. NOT checked: running the real-device images on a T-Deck (the VM runs the VM-flavor builds). Tight:
+  the real KittenOS image has 3 % of its slot free, the loader 8 %.
+
+## Recovery app, kitten user, user account control, Security tab (2026-10-27)
+Built and compiled (vmrec, stdrec, vmfull); NOT run in the VM or on the device yet.
+- The card-stack UI no longer starts in the recovery profile (KittenOS). `main/recovery_app.c` replaces it: W10M theme and
+  Settings widgets, "Hi, welcome to recovery.", the bootloader's reasons, Restart / Reinstall (keep data) / Reinstall and erase
+  everything (wipes root + saved Wi-Fi, sets FRESH, FORCE_LOADER) / Security.
+- KittenOS signs in as a built-in `kitten` standard account (`purr_login_kitten`, uid 254, memory only), never nobody.
+- User account control: `purr_login_elevate` (login.c). An administrator's name and password turn the session into theirs until
+  the device restarts. Reinstall and erase also open without a password when the system is damaged/missing/repeatedly failing
+  (`recovery_gate_open_for`) or there are no accounts; Security always needs an admin.
+- Security tab: the only way to weaken the bootloader. "Weaken" = developer mode (relaxes enforce to warn), refused when the
+  signed trust block says DEV_LOCKED. Default wipes root + saved Wi-Fi first; "keep my data" needs an "I understand" switch.
+  "Restore full security" clears it. `secure dev on` (shell) and the Settings dev-mode switch no longer turn it on.
+- Open: VM/hardware run; host test for `recovery_gate_open_for`; whether tighten (`secure relax`) should also move here.
+
+## Hardware crash loop after a restart (2026-10-27, from the owner's serial log)
+Log: `cpu_start: Multicore app`, then `Guru Meditation Error: Core 1 panic'ed (IllegalInstruction)`, PC 0x40375d9d,
+backtrace 0x40375d9a = `esp_restart_noos` (the same address in all three std builds), then the bootloader and boot menu again, in a loop.
+Reading: the previous run called `esp_restart()` from a task on core 1; IDF then resets core 0 first and core 1 last, and core 1 was
+left spinning in the final `while (true)` of `esp_restart_noos`. The next app's `start_other_core` (cpu_start.c) only resets the app
+CPU if its clock is off, so it was never restarted, and when the new image overwrote the IRAM under the loop, core 1 executed
+garbage. The VM does not model this (the emulated reset is clean), which is why it never showed there.
+Fixes: (1) the bootloader parks the app CPU first thing (`park_app_cpu()` in `purr_boot.c`: run-stall, reset, clock off), which is the
+real fix and needs the bootloader reflashed (it does not ship in OTA slot updates); (2) the restart tasks of the loader, the first-boot
+wizard and the recovery app are pinned to core 0. Both build; VM boot checked (both cores start, recovery app comes up). NOT yet
+verified on the device: that needs the new bootloader flashed and a restart from the wizard.
+
+## "Couldn't start that" on the device (2026-10-27, owner's report)
+On the T-Deck, creating the account and every recovery action failed with "couldn't start that" / "Could not start that." Cause: every
+background job (`oobe_job.c`) asked for a 40 KB task stack from INTERNAL RAM, one contiguous block; with Wi-Fi up that was not available
+(the VM, wired, has plenty, which is why it never showed). Fix: per-job stack sizes (accounts, password check, flash erase 12 KB; Wi-Fi and
+small downloads 16 KB; image installs 32 KB, measured use ~13 KB restore, ~22 KB stage 2), one retry, and if the task still cannot be
+created the job fails at once with "Not enough memory to do that (N KB free)" instead of a generic message, plus a log line with free and
+largest internal blocks. The wizard and the recovery app also log internal RAM at start, so the next device log shows the real numbers.
+Not verified on the device. If the largest block is still too small for the 32 KB install stack, the next step is to free internal RAM in the
+KittenOS profile (find who holds it) or run installs in a task with a smaller footprint.
+
+The fixed images are release 1.0.2 (`~/Desktop/PURR-OS-release-1.0.2`; 1.0.1 had only the bootloader fix).
+
+### Memory follow-up (2026-10-27, after the device showed "Not enough memory ... 30 KB free")
+The largest free internal block on the real device was about 30 KB, just under the 32 KB install stack, so the per-job sizes were not enough.
+Two changes: (1) `oobe_job_host_run()`: the main task (32 KB stack, idle while the wizard is up) runs the install-sized jobs (restore,
+stage 2) itself, so they need no new internal RAM; `oobe_job_abort` long-jumps back to the host loop there instead of deleting the task;
+smaller jobs still get their own 12 or 16 KB tasks. (2) `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` for the T-Deck Plus (`sdkconfig.board.tdeck_plus`):
+TLS buffers in PSRAM (a session holds ~25 KB of internal RAM). PSRAM stacks were ruled out for jobs that write flash (cache is off during
+a flash write). VM: the unattended recovery still completes with the restore on the main task. Release 1.0.3 holds these fixes
+(`~/Desktop/PURR-OS-release-1.0.3`). Not yet confirmed on the device; the wizard logs internal RAM at start, so the next log gives the numbers.
+
+Correction (2026-10-27): on the device the legal.txt download timed out right after a good TLS handshake ("Connection timed out before data was ready"),
+and downloads had worked before the TLS buffers were moved to PSRAM. Reverted `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC` (internal again); the job host already removed
+the need for that memory. Release stays 1.0.3 (owner: no version bump; the earlier 1.0.3 folder is `PURR-OS-release-1.0.3-old` on the Desktop). Whether the
+timeout was the PSRAM TLS buffers is a guess: not confirmed until a device run downloads legal.txt and the images.
+
+## One way to restore: the loader, automatically (2026-10-27, owner's design)
+Owner: the auto loader should be the only thing that restores; it has the RAM, nothing else can interfere with the download; KittenOS should not
+download the image itself or force the interactive loader. Built:
+- Reset = `PURR_CFGF_BAD_KERNEL | PURR_CFGF_BAD_KITTENOS` (new persistent purrcfg flags) + FORCE_LOADER + AUTO_REINSTALL, set by the recovery app's
+  Reinstall (keeps data) and Erase (also FRESH). The bootloader refuses a slot marked bad (`marked_bad()` in `purr_boot.c`, only while the loader slot
+  is present) so an interrupted reinstall can never fall back to the old system; the boot menu greys it out too. The mark is cleared per slot by
+  `purr_slot_trailer_write` once the new image is in. The saved Wi-Fi is kept on erase so the automatic restore can run.
+- Loader: every entry is a restore and runs automatically from the saved network or the wire, kernel included (`restore_components(1)`). With no saved
+  network the wizard runs in setup mode (`PURR_OOBE_PART_LOADER_SETUP`: reasons, Wi-Fi, dev server page if allowed), saves it, sets AUTO_REINSTALL and
+  restarts; the automatic restore then runs on a fresh heap. An in-place reset (kernel marked bad, not FRESH) sets no CONTINUE_INSTALL, so it goes
+  straight to PURR OS with the data and modules untouched. After an erase or a first install KittenOS still carries on (account, colour, modules).
+- KittenOS stage 2 only fetches the kernel if the slot is empty or marked bad (`purr_kernel_installed()`), so an older loader still works.
+- Gone from the loader flow for now: the legal page (it needs the network, and the setup now has none). Put it in KittenOS part 2.
+Verified in the VM: blank device, wired: loader installs the kernel and KittenOS, restarts into KittenOS stage 2. NOT run: the setup mode (needs Wi-Fi),
+the BAD-flag path and the in-place reset (needs a device with accounts and a click on Reinstall), none of it on the T-Deck.
+Follow-up for less duplicate code: commands.c `net_install` for the kernel is now only a fallback.
+
+### Legal page moved to KittenOS (2026-10-28)
+The loader no longer shows the legal page. It is page 2 of KittenOS's first-boot wizard (colour, legal, account, time, done). The text is
+fetched by the stage 2 install job right after it gets the network (`fetch_legal` in `oobe_firstboot.c`, same `legal.txt` URL as before), so
+there is no second TLS session; the page polls that job and falls back to "couldn't load, read it in Settings". Builds: stdrec, stdmin, vmrec
+(stdrec ~8% free). Not run in the VM or on the device. Dead code left in the loader: `job_legal`/`op_legal`.
+
+### Closed (2026-10-28, owner)
+Owner verified the whole reset and restore flows on the device several times (that is how the bugs above were found). Plan1 is complete.
+The one leftover, the bootloader reset crash-loop (core 1 not parked), moves to plan3 item 6.
