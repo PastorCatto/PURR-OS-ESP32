@@ -165,3 +165,14 @@ Design (to build, in this order):
 Safety: passive first; anything that drives an output only on pins that appear in some known board's map and are not reserved, or after the owner confirms; a profile is saved only
 after the owner confirms it once.
 Cannot be found: parts wired straight to a pin with no bus and no known map (the owner maps them by hand: guided mode, or a hand-written board.conf shared back to the repo).
+
+### Step 1 built: the hardware report (2026-10-28)
+`components/coreos/src/purr_hwscan.c` (pure: reserved pins on the S3, candidate pins, an I2C address + ID-register table of ~25 chips; host test `test_hwscan.c`, 67 checks pass)
+and `main/purr_hwscan_plat.c` (the part that touches pins). Shell command `hwscan [power <gpio>]`, full profile only. It prints what the board profile already set up, then senses
+free pins as inputs with a weak pull-down (a pin that still reads high has a pull-up), tries each pair of pulled-up pins as SDA/SCL on I2C port 1 (the kernel uses port 0),
+probes 0x08-0x77 and identifies each hit (ID register first, address as a labelled guess). Never touches reserved pins (straps 0/3/45/46, USB 19/20, flash/PSRAM 26-37), pins the board
+profile names, or pins the registry has claimed. `power <gpio>` drives that one pin high first, only because the owner named it.
+Built for vmfull and stdrec. NOT run: the VM's base image has no account so its text shell asks for one first, and the VM probably does not model pull-ups; needs the T-Deck.
+Next: a Settings "Find hardware" button that calls `purr_hwscan_run`; the device database and driver install (steps 2-4); SPI/UART in the report.
+Caveat to check on hardware: a free pin may be an output of another chip (LoRa BUSY/DIO1 on the T-Deck); sensing it as an input with a weak pull-down is harmless, but the I2C pair
+probe briefly pulls both pins low as open-drain, which is the one thing that is not strictly passive.

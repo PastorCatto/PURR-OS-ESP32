@@ -39,6 +39,7 @@
 #include "purr_catrt_storage.h"
 #include "purr_settings.h"
 #include "purr_power_plat.h"
+#include "purr_hwscan_plat.h"
 #include "purr_recovery_src.h"
 #include "purr_catrt_power.h"
 #include "purr_runtime.h"
@@ -4179,6 +4180,9 @@ static const purr_cmd_t s_cmds[] = {
     {"perms", "perms [app | reset <app>]: what apps are allowed to do (admin to change)", purr_perms_cmd},
     {"grant", "grant <app> <permission>: allow keep-awake or wake-alarm (admin)", purr_perms_cmd},
     {"revoke", "revoke <app> <permission>: the app asks again (admin)", purr_perms_cmd},
+#if CONFIG_PURR_PROFILE_FULL
+    {"hwscan", "hwscan [power <gpio>]: look for attached hardware (I2C), reading only", purr_hwscan_cmd},
+#endif
     {"power", "power [screen on|off | timeout <seconds|never>]: sleep state, wake locks and alarms",
      purr_power_cmd},
 #if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
