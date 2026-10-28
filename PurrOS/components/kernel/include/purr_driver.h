@@ -114,6 +114,13 @@ void purr_drivers_bind_all(const purr_board_t *board);
  * success, nonzero if the registry is full. */
 int purr_driver_register(const purr_board_t *board, const purr_driver_t *drv);
 
+/* Devices that arrived after boot (the discovered board profile, /etc/board.conf): matches each unbound device of `board` against every
+ * driver registered so far, and probes it. Safe to call again after more drivers are registered. */
+void purr_drivers_bind_extra(const purr_board_t *board);
+
+/* 1 if a driver for this compatible string is registered (loaded this boot). */
+int purr_driver_registered(const char *compatible);
+
 /* The other half: finds every device currently bound to exactly `drv`, calls its remove(),
  * releases the pins it claimed, and resets it to PURR_DEV_UNBOUND -- ready for a fresh
  * register() (a different driver, or a reloaded version of the same one) to claim it. A no-op

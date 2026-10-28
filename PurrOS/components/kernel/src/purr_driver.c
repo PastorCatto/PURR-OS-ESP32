@@ -49,7 +49,7 @@ void purr_pins_release_owner(const char *owner)
 
 /* ---------------------------------------------------------------- binding */
 
-#define MAX_TRACKED_DEVICES 16
+#define MAX_TRACKED_DEVICES 24
 
 typedef struct {
     const char *name;
@@ -147,7 +147,7 @@ void purr_drivers_bind(const purr_board_t *board, const purr_driver_t *const *ta
 
 /* ---------------------------------------------------------------- plug-and-play */
 
-#define MAX_REGISTERED_DRIVERS 8
+#define MAX_REGISTERED_DRIVERS 16
 
 static const purr_driver_t *s_registered[MAX_REGISTERED_DRIVERS];
 static int s_registered_count;
@@ -175,6 +175,31 @@ int purr_driver_register(const purr_board_t *board, const purr_driver_t *drv)
         bind_device(rec, dev, board, &drv, 1);
     }
     return 0;
+}
+
+int purr_driver_registered(const char *compatible)
+{
+    for (int i = 0; i < s_registered_count; i++) {
+        if (strcmp(s_registered[i]->compatible, compatible) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void purr_drivers_bind_extra(const purr_board_t *board)
+{
+    if (board == NULL) {
+        return;
+    }
+    for (int i = 0; i < board->device_count; i++) {
+        const purr_device_t *dev = &board->devices[i];
+        device_record_t *rec = record_for(dev->name);
+        if (rec == NULL || rec->state == PURR_DEV_BOUND) {
+            continue;
+        }
+        bind_device(rec, dev, board, s_registered, s_registered_count);
+    }
 }
 
 void purr_driver_registry_reset(void)

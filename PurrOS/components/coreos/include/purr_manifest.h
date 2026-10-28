@@ -124,6 +124,10 @@ typedef struct {
     char compatible[PURR_MANIFEST_COMPAT_LEN];
     char buses[PURR_MANIFEST_BUSES_LEN];
     char catcall[PURR_MANIFEST_CATCALL_LEN];
+    /* `type=driver`: the driver bus ABI range it works with (purr_driver_bus.h), 0 = not stated; `blocked=yes` marks a version that
+     * broke on a newer OS: the update service never offers it (plan8.md "Driver compatibility"). */
+    uint16_t abi_min, abi_max;
+    uint8_t blocked;
 } purr_manifest_entry_t;
 
 typedef struct {

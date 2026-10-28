@@ -270,6 +270,21 @@ static void test_empty_input(void)
     CHECK_EQ(m.dropped, 0);
 }
 
+static void test_driver_entry_abi_range_and_blocked(void)
+{
+    const char *text =
+        "component=bme280\ntype=driver\nversion=2\nboard=any\nfile=bme280.cat\nsize=900\nsha256=" HASH64 "\n"
+        "compatible=bme280\nbuses=i2c\ncatcall=sensor\nabi_min=4\nabi_max=6\n\n"
+        "component=old\ntype=driver\nversion=1\nfile=old.cat\nsize=10\nsha256=" HASH64 "\nblocked=yes\nabi_min=banana\n";
+    purr_manifest_t m;
+    CHECK_EQ(purr_manifest_parse(&m, text, strlen(text)), 2);
+    CHECK_EQ(m.entries[0].abi_min, 4);
+    CHECK_EQ(m.entries[0].abi_max, 6);
+    CHECK_EQ(m.entries[0].blocked, 0);
+    CHECK_EQ(m.entries[1].blocked, 1);
+    CHECK_EQ(m.entries[1].abi_min, 0);                 /* a malformed number is ignored, not guessed */
+}
+
 int main(void)
 {
     test_basic_parse();
@@ -284,5 +299,6 @@ int main(void)
     test_lines_without_equals_are_ignored();
     test_too_many_entries();
     test_empty_input();
+    test_driver_entry_abi_range_and_blocked();
     TK_DONE("test_manifest");
 }

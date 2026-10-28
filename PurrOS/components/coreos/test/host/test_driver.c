@@ -358,6 +358,32 @@ static void test_register_after_unregister_rebinds_to_the_new_driver(void)
     CHECK(purr_device_driver("gadget") == &s_swap_driver_b);
 }
 
+/* Devices that arrive after boot (the discovered profile): a second board object whose device list is separate, bound against the drivers
+ * registered so far, and again when a later driver arrives. */
+static void test_bind_extra_for_discovered_devices(void)
+{
+    purr_pins_reset();
+    purr_driver_registry_reset();
+    s_probe_calls = 0;
+    static const purr_device_t devs[] = {
+        {.name = "disc0", .compatible = "fake-ok", .priority = PURR_PRI_OPTIONAL, .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE}},
+        {.name = "disc1", .compatible = "fake-readable", .priority = PURR_PRI_OPTIONAL, .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE}},
+    };
+    purr_board_t b = {.name = "discovered", .devices = devs, .device_count = 2};
+    CHECK_EQ(purr_driver_register(NULL, &s_ok_driver), 0);       /* the driver arrives before the device does */
+    purr_drivers_bind_extra(&b);
+    CHECK_EQ(purr_device_state("disc0"), PURR_DEV_BOUND);
+    CHECK_EQ(purr_device_state("disc1"), PURR_DEV_NO_DRIVER);
+    CHECK_EQ(s_probe_calls, 1);
+    CHECK_EQ(purr_driver_register(NULL, &s_readable_driver), 0);   /* a driver that arrives later */
+    purr_drivers_bind_extra(&b);
+    CHECK_EQ(purr_device_state("disc1"), PURR_DEV_BOUND);
+    CHECK_EQ(s_probe_calls, 1);                                  /* the bound one is never probed again */
+    purr_drivers_bind_extra(NULL);                               /* harmless */
+    purr_driver_registry_reset();
+    purr_pins_reset();
+}
+
 int main(void)
 {
     test_matching_binds_a_device();
@@ -369,6 +395,7 @@ int main(void)
     test_priority_is_just_recorded();
     test_rebind_resets_previous_state();
     test_plug_and_play_acceptance();
+    test_bind_extra_for_discovered_devices();
     test_device_read_reaches_the_bound_drivers_read();
     test_device_read_without_a_read_fn_fails();
     test_device_read_on_an_unbound_device_fails();

@@ -40,6 +40,7 @@
 #include "purr_settings.h"
 #include "purr_power_plat.h"
 #include "purr_hwscan_plat.h"
+#include "purr_hwsetup.h"
 #include "purr_recovery_src.h"
 #include "purr_catrt_power.h"
 #include "purr_runtime.h"
@@ -5302,12 +5303,12 @@ static int driver_from_loaded(const char *path, uint8_t *databuf, void *exec_ptr
         free(databuf);
         return -1;
     }
-    if (drv->bus_abi != PURR_DRIVER_BUS_ABI_VERSION) {
+    if (drv->bus_abi < PURR_DRIVER_BUS_ABI_MIN || drv->bus_abi > PURR_DRIVER_BUS_ABI_VERSION) {
         /* A module built against another bus table calls the wrong slots (a now_us() landing on
          * delay_ms() put the UI task to sleep for 12.8 days, 2026-10-25). Refuse it by name. */
-        ESP_LOGE("drivers", "%s: '%s' was built for driver bus ABI %u, this kernel is %u: "
-                 "rebuild and replant it", path, drv->name, (unsigned)drv->bus_abi,
-                 (unsigned)PURR_DRIVER_BUS_ABI_VERSION);
+        ESP_LOGE("drivers", "%s: '%s' was built for driver bus ABI %u, this kernel serves %u to %u: "
+                 "rebuild it (or get a version for this ABI)", path, drv->name, (unsigned)drv->bus_abi,
+                 (unsigned)PURR_DRIVER_BUS_ABI_MIN, (unsigned)PURR_DRIVER_BUS_ABI_VERSION);
         esp_mmu_unmap(exec_ptr);
         free(databuf);
         return -1;
@@ -5362,6 +5363,17 @@ static int load_one_driver_image(const char *label, const uint8_t *image, size_t
  * own comment on why: a device already bound is never stolen, so loading drivers in any order
  * is safe). One bad file never stops the rest, same "log and skip, don't quarantine" treatment
  * kernelmods get -- this boundary is still young enough that quarantine feels premature. */
+/* Loads (verifies, relocates) one driver file and registers it with the board profile. For the hardware setup, which adds drivers after boot. */
+int purr_driver_load_file(const char *path)
+{
+    const purr_driver_t *drv = NULL;
+    if (load_one_driver_file(path, &drv) != 0) {
+        return -1;
+    }
+    purr_driver_register(purr_board(), drv);
+    return 0;
+}
+
 static void load_drivers_from(purr_cli_t *cli, const char *dir)
 {
     module_listing_t l = {.count = 0};
@@ -5525,6 +5537,9 @@ void purr_modules_setup(purr_cli_t *cli)
      * before this function even runs (main.c's own hard halt otherwise), so it stays
      * compiled in. */
     load_drivers_from(cli, PURR_DRIVERS_DIR);
+#if CONFIG_PURR_PROFILE_FULL
+    purr_hwsetup_boot(cli);                 /* the discovered profile (/etc/board.conf): bind its devices to the drivers just loaded */
+#endif
     if (purr_device_state("keyboard") != PURR_DEV_BOUND) {
         purr_cli_printf(cli, "drivers: WARNING -- keyboard did not bind "
                              "(no loaded driver matched)\n");

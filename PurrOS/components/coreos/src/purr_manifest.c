@@ -100,6 +100,20 @@ static void apply_kv(purr_manifest_t *m, draft_t *d, const char *key, size_t kle
         set_field(d->e.buses, sizeof(d->e.buses), val, vlen);
     } else if (klen == 7 && strncmp(key, "catcall", 7) == 0) {
         set_field(d->e.catcall, sizeof(d->e.catcall), val, vlen);
+    } else if ((klen == 7 && strncmp(key, "abi_min", 7) == 0) || (klen == 7 && strncmp(key, "abi_max", 7) == 0)) {
+        char tmp[8];
+        set_field(tmp, sizeof(tmp), val, vlen);
+        char *end = NULL;
+        unsigned long n = strtoul(tmp, &end, 10);
+        if (end != tmp && *end == '\0' && n < 65536) {
+            if (key[5] == 'i') {
+                d->e.abi_min = (uint16_t)n;
+            } else {
+                d->e.abi_max = (uint16_t)n;
+            }
+        }
+    } else if (klen == 7 && strncmp(key, "blocked", 7) == 0) {
+        d->e.blocked = vlen >= 1 && (val[0] == 'y' || val[0] == '1');
     }
     /* Anything else is a newer field this reader does not know about yet: ignored. */
 }

@@ -81,6 +81,24 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
   firmware, so on boot a file whose contents differ from the baked-in blob is replaced. (Files in
   `/system` and `/kernelmods` keep the older rule: planted only if missing.)
 
+### 4.2 Driver versions, the ABI range, the discovered profile (added 2026-10-28)
+
+- **A driver's version is independent of the OS's.** The bus table only grows at its end, so a driver built against bus ABI N works on every
+  kernel that serves N or later. The loader accepts a driver whose `bus_abi` is between `PURR_DRIVER_BUS_ABI_MIN` and
+  `PURR_DRIVER_BUS_ABI_VERSION` (purr_driver_bus.h) and refuses anything outside it by name. Raise MIN only if a slot is ever moved.
+- **The driver index** is a manifest of `type=driver` stanzas (purr_manifest.h) published next to the module index (`drivers.manifest`), with
+  `compatible`, `buses`, `catcall`, `abi_min`/`abi_max` (the kernel ABIs it works with; 0 = no bound) and `blocked=yes` for a version found
+  broken on a newer OS: it stays listed, and is never offered. `tools/release/make_drivers_index.py` writes it; `make_release.py --driver`
+  puts it in the release.
+- **Unsigned drivers** load only in developer mode with "Allow unsigned apps and drivers" on, only from `/boot/drivers`, with the payload hash
+  still checked. A device whose signed trust block says DEV_LOCKED never has developer mode, so never loads one.
+- **The discovered profile** (`/etc/board.conf`, purr_hwprofile.h) lists devices that Settings > Updates > Find hardware found and the owner
+  confirmed: name, driver, bus, pins, address. It is read as untrusted input (a reserved pin or a bad address drops the entry). A device in it is
+  bound to its driver after the boot-time driver load (`purr_hwsetup_boot`), in a second board object, so the real board profile is never edited.
+  A driver for such a device reads `dev->cfg` as `purr_i2c_dev_cfg_t` (`buses=i2c`).
+- **Two I2C buses at most:** the kernel's bus lookup is by pin pair, so a driver for a discovered device gets its own controller (port 1) and
+  can never be handed the keyboard's bus by mistake.
+
 ## 5. Testing
 
 - Pack checks: a wrong signature, a driver file whose hash does not match, a swapped driver, and a missing

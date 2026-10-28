@@ -176,3 +176,17 @@ Built for vmfull and stdrec. NOT run: the VM's base image has no account so its 
 Next: a Settings "Find hardware" button that calls `purr_hwscan_run`; the device database and driver install (steps 2-4); SPI/UART in the report.
 Caveat to check on hardware: a free pin may be an output of another chip (LoRa BUSY/DIO1 on the T-Deck); sensing it as an input with a weak pull-down is harmless, but the I2C pair
 probe briefly pulls both pins low as open-drain, which is the one thing that is not strictly passive.
+
+### Steps 2-4 built (2026-10-28); to test on the T-Deck in one go
+Built, compiled in vmfull/stdfull/stdrec/stdmin (stdrec still 5% free), host-tested where there is pure logic (test_hwprofile 21, test_hwscan 67, test_manifest +abi fields,
+test_driver +bind_extra; the Rust client 13). NOT run on a device or in the VM (the VM has no I2C sensor and no way to type into the W10M shell):
+- Settings > **Updates**: Find hardware (scan, list), **Set up N devices** (downloads the driver from the index, checks size+hash against the index, loads it through the normal
+  loader, adds the device to /etc/board.conf, binds it), **Drivers** list with versions and **Update drivers** (newer versions download, old kept as .bak, apply after a restart).
+- `purr_hwsetup.c`: sources = official `drivers.manifest` next to the module index; plus, in developer mode, the dev server the owner chose (`<base>/recovery/drivers.manifest`).
+- `purr_hwprofile` (pure), `purr_drivers_bind_extra`, `purr_driver_registered`; the kernel's I2C bus table now keys by pin pair (two buses); driver ABI range check.
+- First driver: `Modules/drivers/bme280_module.c` (temperature/pressure/humidity, forced mode, Bosch integer compensation), built and signed with the developer key; in the 1.0.3 release as
+  JumpingJaguar2/drivers.manifest + bme280-tdeck_plus.cat, and in out/devrepo/recovery for the dev server.
+- Release 1.0.3 repacked (old copy: PURR-OS-release-1.0.3-prev2), out/hw/tdeck_plus-blank-flash.bin rebuilt 2026-10-28 14:26.
+Test plan (one session): flash the image; let it restore; sign in; Settings > Updates > Find hardware; with a BME280 on free GPIOs (SDA/SCL with pull-ups) expect "BME280 sensor ... driver bme280",
+then Set up; restart; "found by scan ... driver bme280" without "(not running)". Without a sensor expect "Nothing new answered". Check the log line "N free pins looked at" and that keyboard/touch still work after a scan.
+Known gaps: the sensor has no UI/shell reader yet (read() returns text; nothing calls it); no SPI/UART discovery; the index source in secure mode is the official server only; updates need a restart.

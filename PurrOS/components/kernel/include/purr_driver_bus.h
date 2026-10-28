@@ -34,6 +34,10 @@ extern "C" {
 #endif
 
 #define PURR_DRIVER_BUS_ABI_VERSION 4u
+/* The oldest bus table layout this kernel still serves. The table only ever grows at the end (see Drivers/SPEC.md section 4.1), so a driver
+ * built against any version from this one up to the current works unchanged: the driver's version is independent of the OS's. Raise this
+ * only if a slot is ever moved, which the append-only rule forbids. */
+#define PURR_DRIVER_BUS_ABI_MIN     4u
 
 typedef struct {
     uint32_t abi_version;

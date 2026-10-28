@@ -106,6 +106,8 @@ def main():
     ap.add_argument("--min", dest="minimal", default=os.path.join(ROOT, "out", "stdmin", "purros.bin"))
     ap.add_argument("--rec", default=os.path.join(ROOT, "out", "stdrec", "purros.bin"))
     ap.add_argument("--legal", default=os.path.join(ROOT, "OTA", "legal.txt"))
+    ap.add_argument("--driver", action="append", default=[], help="FILE:COMPATIBLE:BUSES:CATCALL, a signed driver for drivers.manifest "
+                    "(JumpingJaguar2); see tools/release/make_drivers_index.py")
     ap.add_argument("--offline", action="store_true", help="do not fetch the current release (no carried-over files)")
     a = ap.parse_args()
     if not os.environ.get("PURRSTRAP_KEY_PASSWORD"):
@@ -175,6 +177,15 @@ def main():
             if sha256(dest) != s["sha256"]:
                 sys.exit("module %s (%s) does not match modules.manifest" % (s["file"], s["board"]))
 
+    if a.driver:                                    # the driver index "Find hardware" and the update page read
+        cmd = [sys.executable, os.path.join(ROOT, "tools", "release", "make_drivers_index.py"), "--out", r2, "--board", b]
+        for d in a.driver:
+            cmd += ["--driver", d]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit("make_drivers_index failed:\n%s%s" % (r.stdout, r.stderr))
+        print(r.stdout.strip())
+
     lines = ["release=%s+%s" % (a.version, b), "released=%s" % time.strftime("%Y-%m-%d"), ""]
     for s in new + carried:
         lines.append(stanza_text(s))
@@ -213,6 +224,7 @@ fetched from the same release as that manifest):
       legal.txt                NEW         "The legal stuff & cool people" (loaded at run time; edit it, re-upload, done)
       ... plus the other boards' files, carried over unchanged from the current release
   JumpingJaguar2/   upload as the assets of release tag JumpingJaguar2
+      drivers.manifest         the driver index (Settings > Updates > Find hardware / Update drivers) and the driver files it lists
       modules.manifest and the module files: unchanged copies of what is published (no module changed)
 
 TO UPLOAD (GitHub release page -> Edit): delete the old assets with the same names, drag these in, save. An asset name must be

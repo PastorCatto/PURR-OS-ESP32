@@ -47,6 +47,9 @@ int purr_devapps_install_url(const char *url, const purr_repo_app_t *app, char *
 
 /* Developer mode was on for THIS boot (the bootloader's handoff says so; a file cannot fake it). */
 int purr_security_dev_active(void);
+
+/* Loads one driver file (verified like any driver: unsigned only in developer mode) and registers it. 0 or -1. */
+int purr_driver_load_file(const char *path);
 /* Unsigned apps may be installed and run: developer mode is active this boot AND the owner switched
  * "allow unsigned apps" on. A production-signed trust block that locks development mode out makes the
  * first part impossible, so this is then always 0. */

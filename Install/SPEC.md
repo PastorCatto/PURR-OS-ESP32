@@ -74,6 +74,8 @@ matching known map. Some boards also **power their peripherals through an enable
 set, the display and sensors are invisible, so a scan finds nothing. The database needs those enable pins
 for known boards.
 
+> **Built 2026-10-28** (plan8.md "Driver foundation"): the I2C walk (pull-up sensing, pair scan, ID registers), the discovered profile, driver fetch and the Settings > Updates page. SPI and UART discovery are still design.
+
 ## 4. Shell tools
 
 - `i2cscan`: lists every address that answers, with a best-guess chip name from the table. **Unknown

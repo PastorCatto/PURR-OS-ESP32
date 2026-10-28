@@ -40,7 +40,11 @@
 #include "login.h"
 #include "purr_appmgr.h"
 #include "purr_catrt.h"
+#include "purr_board.h"
 #include "purr_catrt_power.h"
+#include "purr_driver.h"
+#include "purr_hwscan_plat.h"
+#include "purr_hwsetup.h"
 #include "purr_perm.h"
 #include "purr_lvgl.h"
 #include "purr_net.h"
@@ -59,6 +63,7 @@ typedef enum {
     PAGE_MAIN,
     PAGE_SYSTEM,
     PAGE_DEVICES,
+    PAGE_UPDATES,
     PAGE_NETWORK,
     PAGE_PERSONAL,
     PAGE_APPS,
@@ -82,6 +87,7 @@ typedef struct {
 static const section_t s_sections[] = {
     {"System",          "Display, shell, restart",       "wp_system",          PAGE_SYSTEM,   1},
     {"Devices",         "Screen, keyboard, memory",      "wp_devices",         PAGE_DEVICES,  1},
+    {"Updates",         "Find hardware, drivers",        "wp_system",          PAGE_UPDATES,  1},
     {"Network",         "Wi-Fi and wired",               "wp_network",         PAGE_NETWORK,  1},
     {"Personalization", "Colours, transparency, tiles",  "wp_personalization", PAGE_PERSONAL, 1},
     {"Apps",            "Installed apps, install",       "wp_apps",            PAGE_APPS,     1},
@@ -172,6 +178,7 @@ typedef struct job {
     char msg[112];
     char a[40], b[72], c[72];
     int flag;
+    unsigned stack;                     /* 0 = the default */
     int (*run)(struct job *);
     void (*done)(struct job *);
 } job_t;
@@ -220,7 +227,7 @@ static int job_start(job_t *j)
         return -1;
     }
     s_busy = 1;
-    if (xTaskCreate(job_task, "set-job", 7168, j, 3, NULL) != pdPASS) {
+    if (xTaskCreate(job_task, "set-job", j->stack ? j->stack : 7168, j, 3, NULL) != pdPASS) {
         s_busy = 0;
         free(j);
         say("Out of memory.", 0);
@@ -590,6 +597,204 @@ static void net_forget_cb(lv_event_t *e)
     if (confirm_tap(btn, "Sure?")) {
         purr_net_forget(ssid);
         show_page(PAGE_NETWORK);
+    }
+}
+
+/* ---------------------------------------------------------------- updates: find hardware, drivers */
+
+static purr_hwscan_report_t s_hw;
+static lv_obj_t *s_hw_list, *s_hw_setup_btn, *s_drv_list;
+
+static int hw_run(job_t *j)
+{
+    int rc = purr_hwscan_run(-1, &s_hw);
+    snprintf(j->msg, sizeof(j->msg), "Looked at %d free pins; found %d device(s).", s_hw.looked_at, s_hw.nfound);
+    return rc;
+}
+
+static int hw_to_set_up(void)
+{
+    int n = 0;
+    for (int i = 0; i < s_hw.nfound; i++) {
+        n += s_hw.found[i].known && !purr_hwsetup_is_set_up(&s_hw.found[i]);
+    }
+    return n;
+}
+
+static void hw_fill(void)
+{
+    if (s_hw_list == NULL) {
+        return;
+    }
+    lv_obj_clean(s_hw_list);
+    char buf[200];
+    if (s_hw.nfound == 0) {
+        snprintf(buf, sizeof(buf), "Nothing new answered. %d free pins have a pull-up (%d reserved or in use were not touched).%s",
+                 s_hw.npulled, s_hw.skipped, s_hw.bus_error ? " The second I2C port is busy, so some pairs were not tried." : "");
+        cm_dim(s_hw_list, buf);
+    }
+    for (int i = 0; i < s_hw.nfound; i++) {
+        const purr_hwscan_found_t *f = &s_hw.found[i];
+        char sub[100];
+        int done = purr_hwsetup_is_set_up(f);
+        if (f->known) {
+            snprintf(sub, sizeof(sub), "I2C 0x%02X, pins %d / %d, driver \"%s\"%s%s", f->addr, f->sda, f->scl, f->match.compatible,
+                     f->match.by_id ? "" : " (guessed)", done ? "  - set up" : "");
+        } else {
+            snprintf(sub, sizeof(sub), "I2C 0x%02X, pins %d / %d", f->addr, f->sda, f->scl);
+        }
+        cm_row(s_hw_list, f->known ? f->match.name : "Unknown device", sub, 0, NULL, NULL);
+    }
+    if (s_hw_setup_btn != NULL) {
+        int n = hw_to_set_up();
+        if (n > 0) {
+            snprintf(buf, sizeof(buf), "Set up %d device%s", n, n == 1 ? "" : "s");
+            cm_button_text(s_hw_setup_btn, buf);
+            lv_obj_remove_flag(s_hw_setup_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_hw_setup_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void drivers_fill(void)
+{
+    if (s_drv_list == NULL) {
+        return;
+    }
+    lv_obj_clean(s_drv_list);
+    static purr_hwsetup_driver_t drv[PURR_HWSETUP_MAX_DRIVERS];
+    int n = purr_hwsetup_list_drivers(drv, PURR_HWSETUP_MAX_DRIVERS);
+    if (n == 0) {
+        cm_dim(s_drv_list, "No downloaded drivers yet. The ones the system came with are part of the system.");
+    }
+    for (int i = 0; i < n; i++) {
+        char sub[48];
+        snprintf(sub, sizeof(sub), "version %s", drv[i].version[0] ? drv[i].version : "?");
+        cm_row(s_drv_list, drv[i].name, sub, 0, NULL, NULL);
+    }
+}
+
+static void hw_done(job_t *j)
+{
+    say(j->msg, j->rc == 0);
+    hw_fill();
+}
+
+static void hw_cb(lv_event_t *e)
+{
+    (void)e;
+    job_t *j = job_new(hw_run, hw_done);
+    if (j == NULL) {
+        say("Out of memory.", 0);
+        return;
+    }
+    j->stack = 10240;
+    say("Looking...", 1);
+    job_start(j);
+}
+
+static int hw_setup_run(job_t *j)
+{
+    int n = purr_hwsetup_install(&s_hw, NULL, j->msg, sizeof(j->msg));
+    return n > 0 ? 0 : -1;
+}
+
+static void hw_setup_done(job_t *j)
+{
+    say(j->msg, j->rc == 0);
+    hw_fill();
+    drivers_fill();
+}
+
+static void hw_setup_cb(lv_event_t *e)
+{
+    (void)e;
+    job_t *j = job_new(hw_setup_run, hw_setup_done);
+    if (j == NULL) {
+        say("Out of memory.", 0);
+        return;
+    }
+    j->stack = 12288;
+    say("Setting up...", 1);
+    job_start(j);
+}
+
+static int drv_update_run(job_t *j)
+{
+    int n = purr_hwsetup_update_drivers(NULL, j->msg, sizeof(j->msg));
+    return n >= 0 ? 0 : -1;
+}
+
+static void drv_update_done(job_t *j)
+{
+    say(j->msg, j->rc == 0);
+    drivers_fill();
+}
+
+static void drv_update_cb(lv_event_t *e)
+{
+    (void)e;
+    job_t *j = job_new(drv_update_run, drv_update_done);
+    if (j == NULL) {
+        say("Out of memory.", 0);
+        return;
+    }
+    j->stack = 12288;
+    say("Checking for driver updates...", 1);
+    job_start(j);
+}
+
+static void page_updates(void)
+{
+    cm_title(s_body, "Hardware");
+    cm_dim(s_body, "Looks for hardware that is attached but not set up yet. It only reads: it never drives a pin the system "
+                   "already uses, and it never touches the flash, USB or boot pins.");
+    lv_obj_t *b = cm_button(s_body, "Find hardware", hw_cb, NULL);
+    lv_obj_set_width(b, LV_PCT(100));
+    make_status();
+    s_hw_list = lv_obj_create(s_body);
+    lv_obj_remove_style_all(s_hw_list);
+    lv_obj_set_width(s_hw_list, LV_PCT(100));
+    lv_obj_set_height(s_hw_list, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_hw_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_hw_list, 2, 0);
+    s_hw_setup_btn = cm_button(s_body, "Set up", hw_setup_cb, NULL);
+    lv_obj_set_width(s_hw_setup_btn, LV_PCT(100));
+    lv_obj_add_flag(s_hw_setup_btn, LV_OBJ_FLAG_HIDDEN);
+
+    cm_space(s_body, 4);
+    cm_title(s_body, "Already set up");
+    const purr_board_t *bd = purr_board();
+    for (int i = 0; i < bd->device_count; i++) {
+        char sub[48];
+        snprintf(sub, sizeof(sub), "driver \"%s\"", bd->devices[i].compatible);
+        cm_row(s_body, bd->devices[i].name, sub, 0, NULL, NULL);
+    }
+    static purr_hwp_t prof;
+    int np = purr_hwsetup_profile(&prof);
+    for (int i = 0; i < np; i++) {
+        char sub[160];
+        snprintf(sub, sizeof(sub), "found by scan: pins %d / %d, driver \"%s\"%s", prof.dev[i].sda, prof.dev[i].scl, prof.dev[i].compatible,
+                 purr_device_state(prof.dev[i].name) == PURR_DEV_BOUND ? "" : " (not running)");
+        cm_row(s_body, prof.dev[i].label[0] ? prof.dev[i].label : prof.dev[i].name, sub, 0, NULL, NULL);
+    }
+
+    cm_space(s_body, 4);
+    cm_title(s_body, "Drivers");
+    s_drv_list = lv_obj_create(s_body);
+    lv_obj_remove_style_all(s_drv_list);
+    lv_obj_set_width(s_drv_list, LV_PCT(100));
+    lv_obj_set_height(s_drv_list, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_drv_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_drv_list, 2, 0);
+    drivers_fill();
+    lv_obj_t *u = cm_button(s_body, "Update drivers", drv_update_cb, NULL);
+    lv_obj_set_width(u, LV_PCT(100));
+    cm_dim(s_body, "Drivers update on their own, apart from the system. A downloaded driver must be signed; in developer mode "
+                   "with unsigned drivers allowed, it can be unsigned. Updated drivers start after a restart.");
+    if (s_hw.looked_at > 0) {
+        hw_fill();                                  /* the last result, if this page was left and came back */
     }
 }
 
@@ -1530,6 +1735,7 @@ static const char *page_title(page_t p)
     switch (p) {
     case PAGE_SYSTEM:    return "System";
     case PAGE_DEVICES:   return "Devices";
+    case PAGE_UPDATES:   return "Updates";
     case PAGE_NETWORK:   return "Network";
     case PAGE_PERSONAL:  return "Personalization";
     case PAGE_APPS:      return "Apps";
@@ -1571,6 +1777,7 @@ static void show_page(page_t page)
     switch (page) {
     case PAGE_SYSTEM:    page_system(); break;
     case PAGE_DEVICES:   page_devices(); break;
+    case PAGE_UPDATES:   page_updates(); break;
     case PAGE_NETWORK:   page_network(); break;
     case PAGE_PERSONAL:  page_personal(); break;
     case PAGE_APPS:      page_apps(); break;

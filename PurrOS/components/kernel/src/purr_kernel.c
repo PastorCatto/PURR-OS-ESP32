@@ -55,22 +55,41 @@ static void pin_in_pullup(int pin)
  * driver here, or the loaded keyboard module calling through purr_driver_bus_table_t's own
  * i2c_add_device, which reuses this exact same function) creates s_shared_i2c_bus; the other
  * reuses it. Bind order is neither guaranteed nor needed to be -- this works either way. */
-static i2c_master_bus_handle_t s_shared_i2c_bus;
+/* One bus per distinct pin pair, at most one per I2C controller (the S3 has two): the board's own keyboard/touch bus on port 0, and a
+ * device found by "Find hardware" on other pins gets port 1. A request for pins that no bus has, with a controller that is already taken
+ * by other pins, fails instead of quietly handing back the wrong bus. */
+#define PURR_I2C_BUSES 2
+static struct { int port, sda, scl; i2c_master_bus_handle_t h; } s_i2c_buses[PURR_I2C_BUSES];
 
 static esp_err_t shared_i2c_bus(int port, int sda, int scl, i2c_master_bus_handle_t *out)
 {
-    if (s_shared_i2c_bus != NULL) {
-        *out = s_shared_i2c_bus;
-        return ESP_OK;
+    int free_slot = -1;
+    for (int i = 0; i < PURR_I2C_BUSES; i++) {
+        if (s_i2c_buses[i].h == NULL) {
+            if (free_slot < 0) {
+                free_slot = i;
+            }
+        } else if (s_i2c_buses[i].sda == sda && s_i2c_buses[i].scl == scl) {
+            *out = s_i2c_buses[i].h;
+            return ESP_OK;
+        } else if (s_i2c_buses[i].port == port) {
+            return ESP_ERR_INVALID_STATE;               /* that controller already serves other pins */
+        }
+    }
+    if (free_slot < 0) {
+        return ESP_ERR_NO_MEM;
     }
     i2c_master_bus_config_t bc = {
         .i2c_port = port, .sda_io_num = sda, .scl_io_num = scl,
         .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-    esp_err_t e = i2c_new_master_bus(&bc, &s_shared_i2c_bus);
+    esp_err_t e = i2c_new_master_bus(&bc, &s_i2c_buses[free_slot].h);
     if (e == ESP_OK) {
-        *out = s_shared_i2c_bus;
+        s_i2c_buses[free_slot].port = port;
+        s_i2c_buses[free_slot].sda = sda;
+        s_i2c_buses[free_slot].scl = scl;
+        *out = s_i2c_buses[free_slot].h;
     }
     return e;
 }

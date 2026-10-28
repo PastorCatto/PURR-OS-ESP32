@@ -87,6 +87,15 @@ typedef enum {
 
 #define PURR_MAX_EXTRA_PINS 6
 
+/* The cfg of a device found by "Find hardware" (the discovered profile, /etc/board.conf) and of any other plain I2C device: a driver whose
+ * entry says buses=i2c reads dev->cfg as this. The bus table's i2c_add_device() takes these values as they are. */
+typedef struct {
+    int port;                     /* the I2C controller: 1 for a discovered device (0 is the board's own bus) */
+    int sda, scl;
+    uint8_t addr;
+    uint32_t hz;
+} purr_i2c_dev_cfg_t;
+
 /* One entry in a board's device list (section 3, section 5's driver-matching target).
  * `compatible` matches a purr_driver_t's own `compatible` (purr_driver.h) -- the kernel never
  * calls a driver by name. `extra_pins` are the device's own pins beyond whatever bus it's
