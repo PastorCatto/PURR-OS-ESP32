@@ -14,5 +14,16 @@ CONFIG_SPIRAM_SPEED_80M=y
 # LVGL (purr_lvgl.c/purr_ui_config.c): the color-LCD boards only, see PurrOS/main/CMakeLists.txt's
 # own comment on why. The larger built-in fonts back the UI config's "scale" property
 # (purr_ui_config.h) -- 14 (the default) always exists without asking.
+# LVGL takes its memory from the system heap (which falls back to PSRAM) instead of a fixed pool:
+# the shell has far more widgets than the 64 KB default pool holds, and a full pool makes
+# lv_*_create return NULL.
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_40=y
+
+# The shell planted in /ui/mode.conf on first boot: the Windows 10 Mobile style one (plan7.md).
+# Edit /ui/mode.conf to card_shell, nav or w10m to switch.
+CONFIG_PURR_UI_DEFAULT_MODE="w10m"

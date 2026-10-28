@@ -107,6 +107,20 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
  * or baked into the initial purrcfg before flashing. */
 #define PURR_CFGF_DEV_MODE         (1u << 8)
 
+/* Persistent flag in purr_cfg_t.flags: FRESH. On by default in every new purrcfg (purr_cfg_defaults, and purrstrap's
+ * initial purrcfg), meaning "this device has never reached a healthy boot of the full PURR OS". With it set and no
+ * system installed the bootloader reports a first run (PURR_RR_BLANK) and the recovery loader opens with "Hi there,
+ * first time?" instead of "something went wrong". Cleared by the full OS the first time it reaches a healthy boot
+ * (purr_mark_boot_healthy); never by the bootloader, the loader or KittenOS, so it survives the whole install. */
+#define PURR_CFGF_FRESH            (1u << 9)
+
+/* Persistent flag in purr_cfg_t.flags: DEV_RECOVERY. Lets the recovery loader and KittenOS pull the recovery images from an SDK
+ * server on the local network (the same server that hosts apps, `purrstrap dev serve`) instead of the official one, after the
+ * owner picks and confirms the server on an extra setup page. Honoured by the bootloader ONLY while development mode is active
+ * (like IGNORE_ONCE): it then reports PURR_SECST_DEVREC in the handoff. A device whose signed trust block locks development
+ * mode out can never use it. The images themselves are still checked against the boot key before anything is written. */
+#define PURR_CFGF_DEV_RECOVERY     (1u << 10)
+
 /* purr_cfg_t.trust_flags (part of the signed trust block): */
 #define PURR_TRUSTF_DEV_LOCKED     (1u << 0)    /* a production device: DEV_MODE is ignored */
 
@@ -114,6 +128,13 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
  * has this magic, so purr_cfg_store() refuses it -- storing a view would overwrite the signed
  * trust state with its own consequences. */
 #define PURR_CFG_VIEW_MAGIC        0x57454956u  /* 'VIEW' */
+
+/* Persistent flags in purr_cfg_t.flags: a reset (the recovery app's reinstall or erase) marks the kernel and KittenOS slots BAD. The
+ * bootloader will not launch a slot marked bad (as long as the recovery loader is there to take over), so an interrupted reinstall can
+ * never fall back to the old system. They are cleared per slot by whatever writes that slot's new image (purr_slot_trailer_write), and by
+ * nothing else. */
+#define PURR_CFGF_BAD_KERNEL       (1u << 11)
+#define PURR_CFGF_BAD_KITTENOS     (1u << 12)
 
 /* flags: one-shot unless noted, cleared by the bootloader before handoff */
 #define PURR_CFGF_IGNORE_ONCE      (1u << 0)
@@ -236,6 +257,20 @@ PURR_STATIC_ASSERT(sizeof(purr_cfg_t) <= PURR_CFG_SECTOR_SIZE, "purrcfg must fit
 #define PURR_HANDOFF_MAGIC         0x4F464E48u  /* 'HNFO' */
 #define PURR_HANDOFF_VERSION       2
 
+/* Why the bootloader ended up in (or near) recovery: a set of flags, so several can apply at once. The recovery
+ * loader shows them on its first page (purr_reason.h has the wording). */
+#define PURR_RR_UNSIGNED   (1u << 0)     /* a system image is not signed by a key this device trusts */
+#define PURR_RR_ALTERED    (1u << 1)     /* an image no longer matches what was signed (tampering, or a bad write) */
+#define PURR_RR_DAMAGED    (1u << 2)     /* an image is unreadable or not a valid image at all */
+#define PURR_RR_ROLLBACK   (1u << 3)     /* an image is older than this device allows */
+#define PURR_RR_REPEATED   (1u << 4)     /* the device failed to start several times in a row */
+#define PURR_RR_NO_SYSTEM  (1u << 5)     /* nothing bootable was left */
+#define PURR_RR_REQUESTED  (1u << 6)     /* somebody asked for recovery (the boot menu, or a command) */
+#define PURR_RR_CONFIG     (1u << 7)     /* the boot settings could not be read */
+#define PURR_RR_SYSTEM     (1u << 8)     /* the running system reported a problem and asked for a fresh install */
+#define PURR_RR_BLANK      (1u << 9)     /* FRESH is set and no system is installed: a first run, not a failure */
+#define PURR_RR_COUNT      10
+
 #define PURR_BOOT_NONE             0     /* no handoff, e.g. a stock bootloader */
 #define PURR_BOOT_VERIFIED         1
 #define PURR_BOOT_FAILED_WARNED    2
@@ -256,7 +291,8 @@ typedef struct PURR_PACKED {
     uint8_t  flags_used;                      /* which one-shot flags were consumed */
     uint32_t bootloader_version;              /* packed version */
     uint8_t  secure_state;                    /* PURR_SECST_*: what the bootloader enforced */
-    uint8_t  reserved[3];
+    uint16_t recovery_reasons;                /* PURR_RR_*: why it is sending the device to recovery (0 = none) */
+    uint8_t  reserved;
     uint32_t crc32;                           /* over everything above */
 } purr_handoff_t;
 
@@ -268,6 +304,7 @@ PURR_STATIC_ASSERT(sizeof(purr_handoff_t) == 20, "handoff layout changed");
 #define PURR_SECST_MODE(s)         ((s) & 3u)
 #define PURR_SECST_DEV             (1u << 2)
 #define PURR_SECST_SIGNED          (1u << 3)
+#define PURR_SECST_DEVREC          (1u << 4)     /* DEV_RECOVERY is on and development mode is active: a dev server may host recovery */
 
 /* ------------------------------------------------------------------------- */
 /* Boot package (bootloader/SPEC.md section 9)                               */
@@ -300,7 +337,14 @@ PURR_STATIC_ASSERT(sizeof(purr_pkg_preamble_t) == 16, "package preamble layout c
 #define PURR_PKG_S3_DATA_MAX       0x8000u
 
 #define PURR_PKG_MAX_PARTS         8
-#define PURR_PKG_SERVICES_VERSION  2    /* 2: secure_state */
+#define PURR_PKG_SERVICES_VERSION  3    /* 2: secure_state. 3: the package may be called to show progress */
+
+/* A progress call (services version 3; only made to a package whose own version is 0.2 or later). The same entry
+ * point is called with nparts < 0: `parts` then points at a NUL-terminated label (the slot being verified, a plain
+ * C string, not a purr_boot_part_t), nparts is -PURR_PKG_STAGE_*, and `preferred` is the progress in thousandths.
+ * The package draws its progress screen and returns 0. The bootloader makes these calls while it verifies the
+ * slots, before the menu entry call, so the screen is already up when the menu appears. */
+#define PURR_PKG_STAGE_VERIFY      1
 
 /* A bootable-or-not app slot, as the bootloader found it in the partition table. */
 typedef struct {

@@ -1,9 +1,16 @@
 /*
- * purr_net.h - the Wi-Fi connection service (Network/SPEC.md section 2).
+ * purr_net.h - the network connection service (Network/SPEC.md section 2).
  *
- * Station mode only. Owns the radio and the saved network list, persisted at /etc/wifi
- * through purr_fs. Reconnects on its own, like a phone: apps (and the shell) only ask
- * it to connect, forget or report status.
+ * Two backends behind this one API, chosen at build time (PURR_NET_BACKEND in Kconfig):
+ *
+ *   Wi-Fi (purr_net_wifi.c): station mode only. Owns the radio and the saved network list,
+ *   persisted at /etc/wifi through purr_fs. Reconnects on its own, like a phone: apps (and the
+ *   shell) only ask it to connect, forget or report status.
+ *
+ *   Wired (purr_net_eth.c, the VM flavor): a W5500 SPI Ethernet controller through ESP-IDF's
+ *   esp_eth. The radio is never started. There is no SSID or password: "connect" waits for the
+ *   link and a DHCP address, "scan" finds nothing, and status reports the SSID as "ethernet".
+ *   purr_net_wired() lets callers that would otherwise ask for credentials skip that.
  */
 #ifndef PURR_NET_H
 #define PURR_NET_H
@@ -53,6 +60,9 @@ void purr_net_status(purr_net_status_t *out);
 /* The reason code (a wifi_err_reason_t value) from the last disconnect, or 0 if there has
  * not been one yet. Mainly for the shell to explain a failed connect. */
 uint8_t purr_net_last_disconnect_reason(void);
+
+/* 1 when this build's backend is wired Ethernet (no SSID, no password, no radio), else 0. */
+int purr_net_wired(void);
 
 /* The saved networks, for the shell's "wifi list". */
 int purr_net_saved(purr_net_ap_t *out, int max);   /* rssi and open are left at 0 */

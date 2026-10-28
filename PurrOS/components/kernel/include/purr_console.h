@@ -35,6 +35,9 @@ void purr_console_put(void *ctx, char c);
 
 void purr_console_clear(void);
 
+/* While muted, flush draws nothing (text still collects): a graphical shell owns the display. */
+void purr_console_set_muted(int muted);
+
 /* Draw what changed since the last flush. */
 void purr_console_flush(void);
 

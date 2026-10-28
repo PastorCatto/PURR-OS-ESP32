@@ -7,12 +7,18 @@ set(srcs
     "src/purr_cfgstore.c"
     "src/purr_fs.c"
     "src/purr_fs_flash.c"
-    "src/purr_net.c"
     "src/purr_netrec.c"
     "src/purr_fetch.c"
     "src/purr_crypto_mbedtls.c"
     "src/purr_userstore.c"
     "src/purr_font_data.c")
+
+# One network backend (purr_net.h). Wi-Fi unless the VM flavor selects the wired one.
+if(CONFIG_PURR_NET_ETH_W5500)
+    list(APPEND srcs "src/purr_net_eth.c")
+else()
+    list(APPEND srcs "src/purr_net_wifi.c")
+endif()
 
 if(CONFIG_PURR_BOARD_TDECK)
     list(APPEND srcs "boards/tdeck.c")
@@ -30,4 +36,8 @@ idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "include"
                        REQUIRES coreos littlefs esp_partition esp_wifi esp_netif esp_event nvs_flash
                                 mbedtls esp_http_client esp-tls esp_timer bootloader_support
-                                driver esp_driver_gpio esp_driver_spi esp_driver_i2c esp_driver_ledc heap log)
+                                driver esp_driver_gpio esp_driver_spi esp_driver_i2c esp_driver_ledc heap log
+                                # Always listed: component requirements are expanded before
+                                # the project's sdkconfig exists, so this cannot depend on the
+                                # network backend. The linker drops it when the Wi-Fi one is used.
+                                esp_eth efuse)

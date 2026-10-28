@@ -12,16 +12,21 @@ static const char *TAG = "fetch";
 
 #define MAX_REDIRECTS 5
 
+static purr_fetch_progress_fn s_progress;
+
+void purr_fetch_set_progress(purr_fetch_progress_fn fn) { s_progress = fn; }
+
 /* GitHub (and most release hosting) answers a release asset URL with a redirect to the
  * real object store. esp_http_client only follows redirects on its own inside
  * esp_http_client_perform(); this uses the lower-level open/fetch_headers/read instead
  * (to stream into our own buffer), so redirects are followed by hand here. */
-static esp_err_t open_get(const char *url, esp_http_client_handle_t *out, int64_t *content_length)
+static esp_err_t open_get_ex(const char *url, esp_http_client_handle_t *out, int64_t *content_length,
+                             int follow, int timeout_ms)
 {
     esp_http_client_config_t cfg = {
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 20000,
+        .timeout_ms = timeout_ms,
         /* GitHub's release redirect (to a signed, long-URL S3 object) carries header lines
          * well past a couple of KB; too small a buffer here fails with "Out of buffer". */
         .buffer_size = 8192,
@@ -44,6 +49,11 @@ static esp_err_t open_get(const char *url, esp_http_client_handle_t *out, int64_
 
         if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
             esp_http_client_close(client);
+            if (!follow) {
+                ESP_LOGW(TAG, "%s: redirect refused", url);
+                esp_http_client_cleanup(client);
+                return ESP_ERR_HTTP_MAX_REDIRECT;
+            }
             if (hop >= MAX_REDIRECTS || esp_http_client_set_redirection(client) != ESP_OK) {
                 ESP_LOGW(TAG, "%s: too many redirects", url);
                 esp_http_client_cleanup(client);
@@ -61,6 +71,11 @@ static esp_err_t open_get(const char *url, esp_http_client_handle_t *out, int64_
         *content_length = len;                       /* -1 if the server did not say */
         return ESP_OK;
     }
+}
+
+static esp_err_t open_get(const char *url, esp_http_client_handle_t *out, int64_t *content_length)
+{
+    return open_get_ex(url, out, content_length, 1, 20000);
 }
 
 static void close_client(esp_http_client_handle_t client)
@@ -95,6 +110,41 @@ esp_err_t purr_fetch_into(const char *url, uint8_t *buf, size_t cap, size_t *out
             break;                                  /* the body is done */
         }
         got += (size_t)n;
+        if (s_progress != NULL) {
+            s_progress(got, content_length > 0 ? (size_t)content_length : 0);
+        }
+    }
+    close_client(client);
+    *out_len = got;
+    return ESP_OK;
+}
+
+esp_err_t purr_fetch_local_into(const char *url, uint8_t *buf, size_t cap, size_t *out_len)
+{
+    esp_http_client_handle_t client;
+    int64_t content_length;
+    esp_err_t e = open_get_ex(url, &client, &content_length, 0, 8000);
+    if (e != ESP_OK) {
+        return e;
+    }
+    if (content_length > 0 && (size_t)content_length > cap) {
+        close_client(client);
+        return ESP_ERR_NO_MEM;
+    }
+    size_t got = 0;
+    while (got < cap) {
+        int n = esp_http_client_read(client, (char *)buf + got, (int)(cap - got));
+        if (n < 0) {
+            close_client(client);
+            return ESP_FAIL;
+        }
+        if (n == 0) {
+            break;
+        }
+        got += (size_t)n;
+        if (s_progress != NULL) {
+            s_progress(got, content_length > 0 ? (size_t)content_length : 0);
+        }
     }
     close_client(client);
     *out_len = got;
@@ -157,6 +207,9 @@ esp_err_t purr_fetch_alloc(const char *url, uint8_t **out, size_t *out_len, size
             break;
         }
         got += (size_t)n;
+        if (s_progress != NULL) {
+            s_progress(got, content_length > 0 ? (size_t)content_length : 0);
+        }
     }
     close_client(client);
     *out = buf;

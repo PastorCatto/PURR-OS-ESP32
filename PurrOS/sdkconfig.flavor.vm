@@ -1,0 +1,20 @@
+# The VM flavor (plan4.md): this build runs in the emulator, where the ESP32-S3 has no usable
+# Wi-Fi. The radio is never started; a W5500 SPI Ethernet controller is the network instead, so
+# the whole system (lwIP, TLS, KittenOS's net install, the recovery loader) has a link to use.
+#
+# Applied after sdkconfig.board.<board> and sdkconfig.profile.<profile>:
+#   purrstrap coreos build --board tdeck_plus --profile full --flavor vm
+#
+# The W5500 pins and clock are PURR_ETH_* in main/Kconfig.projbuild (chip select GPIO 9 on the
+# shared SPI bus, no interrupt line, polling). The emulated chip answers on the same pin.
+CONFIG_PURR_NET_ETH_W5500=y
+
+
+# The VM boots into the Windows 10 Mobile style shell (plan7.md) until it replaces the card stack.
+CONFIG_PURR_UI_DEFAULT_MODE="w10m"
+
+# In the VM, recovery pulls from the host's dev server (`purrstrap dev serve`, reached at 10.0.2.2) with no development mode
+# needed: the images are still verified against the boot key. The official release URLs are for real devices.
+CONFIG_PURR_RECOVERY_MANIFEST_URL="http://10.0.2.2:47801/recovery/recovery.manifest"
+CONFIG_PURR_MODULE_INDEX_URL="http://10.0.2.2:47801/recovery/modules.manifest"
+

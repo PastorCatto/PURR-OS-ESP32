@@ -19,6 +19,7 @@ void purr_cfg_defaults(purr_cfg_t *cfg)
     cfg->size = (uint16_t)sizeof(purr_cfg_t);
     cfg->secure_mode = PURR_SECURE_WARN;
     cfg->boot_target = PURR_TARGET_NORMAL;
+    cfg->flags = PURR_CFGF_FRESH;                   /* never reached a healthy boot of the full OS yet */
     purr_cfg_seal(cfg);
 }
 
@@ -150,6 +151,12 @@ void purr_handoff_make(purr_handoff_t *h, uint8_t boot_state, uint8_t key_id_use
     h->flags_used = flags_used;
     h->bootloader_version = bootloader_version;
     h->secure_state = secure_state;
+    h->crc32 = purr_crc32(0, h, HANDOFF_CRC_LEN);
+}
+
+void purr_handoff_set_reasons(purr_handoff_t *h, uint16_t reasons)
+{
+    h->recovery_reasons = reasons;
     h->crc32 = purr_crc32(0, h, HANDOFF_CRC_LEN);
 }
 

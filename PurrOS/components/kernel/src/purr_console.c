@@ -49,9 +49,22 @@ void purr_console_clear(void)
     purr_term_clear(&s_term);
 }
 
+static volatile int s_muted;
+
+void purr_console_set_muted(int muted)
+{
+    s_muted = muted;
+    if (!muted && s_d != NULL) {
+        for (int r = 0; r < s_term.rows; r++) {
+            s_term.dirty[r] = 1;                /* repaint everything the text screen missed */
+        }
+        s_cur_x = s_cur_y = -1;
+    }
+}
+
 void purr_console_flush(void)
 {
-    if (s_d == NULL) {
+    if (s_d == NULL || s_muted) {
         return;
     }
     /* A moved cursor means both its old and new rows need drawing. */

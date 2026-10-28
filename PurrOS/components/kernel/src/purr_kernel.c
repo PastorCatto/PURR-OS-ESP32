@@ -2,18 +2,25 @@
 
 #include <string.h>
 
+#include <inttypes.h>
+
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
+#include "esp_efuse.h"
+#include "esp_efuse_table.h"
+#include "esp_flash_encrypt.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_memory_utils.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
 #include "purr_cfg.h"
+#include "purr_vm.h"
 #if CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC
 #include "bootloader_common.h"
 #endif
@@ -66,6 +73,69 @@ static esp_err_t shared_i2c_bus(int port, int sda, int scl, i2c_master_bus_handl
         *out = s_shared_i2c_bus;
     }
     return e;
+}
+
+/* ---------------------------------------------------------------- VM info (purr_vm.h)
+ * Asks the emulator's VM-info device, if there is one, what it provides. Block layout (12 bytes,
+ * read from any offset): "PVM", version, flags, NIC SPI host, sclk, mosi, miso, cs (0xFF = none),
+ * two reserved. The first call does the probe; reading it also logs the eFuse state, so a
+ * soft-burned fuse (emulator --efuse) can be seen taking effect without real hardware. */
+static purr_vm_info_t s_vm;
+static bool s_vm_probed;
+
+static int8_t vm_pin(uint8_t raw)
+{
+    return raw == 0xff ? -1 : (int8_t)raw;
+}
+
+const purr_vm_info_t *purr_vm_info(void)
+{
+    if (s_vm_probed) {
+        return &s_vm;
+    }
+    s_vm_probed = true;
+    const purr_board_t *b = purr_board();
+    if (b == NULL || b->keyboard.addr == 0) {
+        return &s_vm;
+    }
+    i2c_master_bus_handle_t bus;
+    if (shared_i2c_bus(b->keyboard.port, b->keyboard.sda, b->keyboard.scl, &bus) != ESP_OK) {
+        return &s_vm;
+    }
+    if (i2c_master_probe(bus, PURR_VM_I2C_ADDR, 50) != ESP_OK) {
+        return &s_vm;                                   /* nothing there: a real board */
+    }
+    i2c_device_config_t dc = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = PURR_VM_I2C_ADDR,
+        .scl_speed_hz = 100000,
+    };
+    i2c_master_dev_handle_t dev;
+    if (i2c_master_bus_add_device(bus, &dc, &dev) != ESP_OK) {
+        return &s_vm;
+    }
+    uint8_t raw[PURR_VM_INFO_LEN];
+    esp_err_t e = i2c_master_receive(dev, raw, sizeof(raw), 100);
+    i2c_master_bus_rm_device(dev);
+    if (e != ESP_OK || raw[0] != 'P' || raw[1] != 'V' || raw[2] != 'M') {
+        return &s_vm;
+    }
+    s_vm.present = 1;
+    s_vm.version = raw[3];
+    s_vm.flags = raw[4];
+    s_vm.nic_host = raw[5];
+    s_vm.nic_sclk = vm_pin(raw[6]);
+    s_vm.nic_mosi = vm_pin(raw[7]);
+    s_vm.nic_miso = vm_pin(raw[8]);
+    s_vm.nic_cs = vm_pin(raw[9]);
+    ESP_LOGI("vm", "running in a VM (info v%u, flags 0x%02x)", s_vm.version, s_vm.flags);
+
+    /* Show the eFuses the OS and bootloader care about. */
+    uint32_t usr[2] = {0, 0};
+    esp_efuse_read_block(EFUSE_BLK3, usr, 0, 64);
+    ESP_LOGI("vm", "eFuse: secure boot %s, flash encryption %s, user data %08" PRIx32 " %08" PRIx32,
+             esp_efuse_read_field_bit(ESP_EFUSE_SECURE_BOOT_EN) ? "ON" : "off",
+             esp_flash_encryption_enabled() ? "ON" : "off", usr[0], usr[1]);
+    return &s_vm;
 }
 
 /* st7789 (display) is gone from here too now -- converted to a real loadable driver module
@@ -161,25 +231,90 @@ static uint32_t bus_i2c_add_device(int port, int sda_pin, int scl_pin, uint16_t 
     return store_handle(dev);
 }
 
+/* The I2C driver's interrupt reads and writes the caller's buffer directly. A buffer in PSRAM (a big allocation, or a task
+ * stack placed there) cannot be touched while the flash cache is off, e.g. during a purrcfg or settings write, and the
+ * interrupt then faults (LoadStorePIFAddrError in i2c_ll_read_rxfifo, plan7.md "VM panic"). So anything not in internal
+ * RAM goes through a short-lived internal bounce buffer. */
+static uint8_t *i2c_internal(const void *p, size_t len, int *bounced)
+{
+    *bounced = 0;
+    if (p == NULL || len == 0 || esp_ptr_internal(p)) {
+        return (uint8_t *)p;
+    }
+    uint8_t *b = heap_caps_malloc(len, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    *bounced = b != NULL;
+    return b;
+}
+
 static int bus_i2c_write(uint32_t handle, const uint8_t *data, size_t len, int timeout_ms)
 {
     i2c_master_dev_handle_t dev = (i2c_master_dev_handle_t)handle_at(handle);
-    return (dev != NULL && i2c_master_transmit(dev, data, len, timeout_ms) == ESP_OK) ? 0 : -1;
+    if (dev == NULL) {
+        return -1;
+    }
+    int bounced;
+    uint8_t *tx = i2c_internal(data, len, &bounced);
+    if (tx == NULL) {
+        return -1;
+    }
+    if (bounced) {
+        memcpy(tx, data, len);
+    }
+    int r = i2c_master_transmit(dev, tx, len, timeout_ms) == ESP_OK ? 0 : -1;
+    if (bounced) {
+        heap_caps_free(tx);
+    }
+    return r;
 }
 
 static int bus_i2c_read(uint32_t handle, uint8_t *data, size_t len, int timeout_ms)
 {
     i2c_master_dev_handle_t dev = (i2c_master_dev_handle_t)handle_at(handle);
-    return (dev != NULL && i2c_master_receive(dev, data, len, timeout_ms) == ESP_OK) ? 0 : -1;
+    if (dev == NULL) {
+        return -1;
+    }
+    int bounced;
+    uint8_t *rx = i2c_internal(data, len, &bounced);
+    if (rx == NULL) {
+        return -1;
+    }
+    int r = i2c_master_receive(dev, rx, len, timeout_ms) == ESP_OK ? 0 : -1;
+    if (bounced) {
+        if (r == 0) {
+            memcpy(data, rx, len);
+        }
+        heap_caps_free(rx);
+    }
+    return r;
 }
 
 static int bus_i2c_write_read(uint32_t handle, const uint8_t *tx, size_t tx_len,
                               uint8_t *rx, size_t rx_len, int timeout_ms)
 {
     i2c_master_dev_handle_t dev = (i2c_master_dev_handle_t)handle_at(handle);
-    return (dev != NULL &&
-            i2c_master_transmit_receive(dev, tx, tx_len, rx, rx_len, timeout_ms) == ESP_OK)
-               ? 0 : -1;
+    if (dev == NULL) {
+        return -1;
+    }
+    int btx, brx;
+    uint8_t *t = i2c_internal(tx, tx_len, &btx);
+    uint8_t *r = i2c_internal(rx, rx_len, &brx);
+    int res = -1;
+    if (t != NULL && r != NULL) {
+        if (btx) {
+            memcpy(t, tx, tx_len);
+        }
+        res = i2c_master_transmit_receive(dev, t, tx_len, r, rx_len, timeout_ms) == ESP_OK ? 0 : -1;
+        if (brx && res == 0) {
+            memcpy(rx, r, rx_len);
+        }
+    }
+    if (btx && t != NULL) {
+        heap_caps_free(t);
+    }
+    if (brx && r != NULL) {
+        heap_caps_free(r);
+    }
+    return res;
 }
 
 static void bus_i2c_remove_device(uint32_t handle)

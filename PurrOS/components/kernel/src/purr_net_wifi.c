@@ -306,6 +306,11 @@ uint8_t purr_net_last_disconnect_reason(void)
     return s_last_reason;
 }
 
+int purr_net_wired(void)
+{
+    return 0;
+}
+
 int purr_net_saved(purr_net_ap_t *out, int max)
 {
     int n = s_saved.count < max ? s_saved.count : max;

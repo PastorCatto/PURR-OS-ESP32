@@ -1,0 +1,7 @@
+# A debug VM image, for bench testing without typing at the sign-in screen (layered on top of the vm flavor).
+# It builds in an account with a KNOWN password and signs in as it at boot, and is assembled with a
+# developer-mode trust block, because automatic sign-in only works while developer mode is active. The
+# build refuses this on anything but the VM flavor. Not for any device that matters.
+CONFIG_PURR_TEST_AUTOLOGIN=y
+CONFIG_PURR_TEST_AUTOLOGIN_USER="dev"
+CONFIG_PURR_TEST_AUTOLOGIN_PASSWORD="dev"
