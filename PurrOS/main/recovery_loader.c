@@ -341,6 +341,19 @@ static void resolve_url(const char *base_url, const char *name, char *out, size_
 
 /* ------------------------------------------------------------ verifying and writing */
 
+/* May an image that failed verification be written anyway? Never from a relay (a computer on the network) unless developer mode is on;
+ * from the official server or a dev server, only while secure mode is off, as before. Strict is the default: this is the only place
+ * that decides it. */
+static bool unverified_ok(const purr_cfg_t *view)
+{
+    if (purr_recovery_source_is_relay()) {
+        return purr_recovery_dev_mode();
+    }
+    return view->secure_mode == PURR_SECURE_OFF;
+}
+
+
+
 typedef struct {
     const uint8_t *base;
     size_t size;
@@ -384,12 +397,12 @@ static int install_kittenos(const uint8_t *image, size_t image_len)
         status("not a KittenOS image");
         return -1;
     }
-    if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
+    if (vr != PURR_V_OK && !unverified_ok(&view)) {
         statusf("verification failed: %s", purr_verify_name(vr));
         return -1;
     }
     if (vr != PURR_V_OK) {
-        statusf("unverified (%s), accepted because secure mode is off", purr_verify_name(vr));
+        statusf("unverified (%s), accepted: nothing here requires it", purr_verify_name(vr));
     }
 
     const esp_partition_t *kp = esp_partition_find_first(ESP_PARTITION_TYPE_APP,
@@ -441,11 +454,11 @@ static int install_kittenos(const uint8_t *image, size_t image_len)
     }
     purr_verify_result_t tv = purr_slot_trailer_check(&env, kp, PURR_IMG_RECOVERY, 0);
     if (tv != PURR_V_OK) {
-        if (view.secure_mode != PURR_SECURE_OFF) {
+        if (!unverified_ok(&view)) {
             statusf("installed, but the bootloader would reject it: %s", purr_verify_name(tv));
             return -1;
         }
-        statusf("no valid signature trailer (%s); fine while secure mode is off", purr_verify_name(tv));
+        statusf("no valid signature trailer (%s); fine: nothing here requires it", purr_verify_name(tv));
     }
     statusf("kittenos %s installed", hdr.version);
     return 0;
@@ -618,7 +631,7 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
         statusf("not a %s image", name);
         return -1;
     }
-    if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
+    if (vr != PURR_V_OK && !unverified_ok(&view)) {
         free(image);
         statusf("%s verification failed: %s", name, purr_verify_name(vr));
         return -1;
@@ -666,11 +679,11 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
         }
         purr_verify_result_t tv = purr_slot_trailer_check(&env, slot, PURR_IMG_MODULE, subtype);
         if (tv != PURR_V_OK) {
-            if (view.secure_mode != PURR_SECURE_OFF) {
+            if (!unverified_ok(&view)) {
                 statusf("%s installed, but the bootloader would reject it: %s", name, purr_verify_name(tv));
                 return -1;
             }
-            statusf("no valid signature trailer (%s); fine while secure mode is off", purr_verify_name(tv));
+            statusf("no valid signature trailer (%s); fine: nothing here requires it", purr_verify_name(tv));
         }
     }
     statusf("%s %s installed", name, hdr.version);
@@ -703,6 +716,8 @@ static void fetch_progress(size_t got, size_t total)
  * screens; best effort, the device starts without it). KittenOS then carries on: it asks for the account, and installs the kernel and
  * the modules in the background (stage 2, commands.c). include_kernel is the old "restore everything at once" (the F key in the text
  * flow). Failures return -1 except the boot package, which never stops the restore. */
+static bool s_emergency_ok;                        /* nobody to ask (automatic recovery): the loader may pick a recovery computer by itself */
+
 static int restore_components(int include_kernel)
 {
     int steps = include_kernel ? 3 : 2, step = 0;
@@ -716,7 +731,7 @@ static int restore_components(int include_kernel)
     if (purr_fetch_alloc(purr_recovery_manifest_url(), &manifest_buf, &manifest_len,
                          MAX_MANIFEST_SIZE) != ESP_OK) {
         status("Couldn't reach the install server. Looking for a dev server (emergency mode)...");
-        if (purr_recovery_emergency() != 0 ||
+        if (!s_emergency_ok || purr_recovery_emergency() != 0 ||
             purr_fetch_alloc(purr_recovery_manifest_url(), &manifest_buf, &manifest_len, MAX_MANIFEST_SIZE) != ESP_OK) {
             status("Couldn't reach the install server.");
             return -1;
@@ -856,6 +871,7 @@ static bool restoring_in_place(void)
 static void run_auto_mode(void)
 {
     status("automatic recovery: repeated boot failure detected");
+    s_emergency_ok = true;
     if (purr_net_init(NULL) != ESP_OK) {
         halt(purr_net_wired() ? "the wired network did not start" : "wifi did not start");
     }
@@ -933,6 +949,9 @@ static int job_devscan(oobe_job_t *job, void *arg)
     int n = purr_lan_discover(found, 4, 4000);          /* probes, and listens for the announcements a server sends */
     s_nsrv = 0;
     for (int i = 0; i < n; i++) {
+        if (!purr_recovery_server_allowed(found[i].id)) {
+            continue;                                   /* a developer's server while developer recovery is off */
+        }
         snprintf(s_servers[s_nsrv].base, sizeof(s_servers[0].base), "%s", found[i].base);
         snprintf(s_servers[s_nsrv].name, sizeof(s_servers[0].name), "%s", found[i].name);
         snprintf(s_servers[s_nsrv].id, sizeof(s_servers[0].id), "%s", found[i].id);
@@ -1024,6 +1043,7 @@ static int job_restore(oobe_job_t *job, void *arg)
 {
     (void)arg;
     if (s_auto) {
+        s_emergency_ok = true;
         connect_saved_or_halt();
     }
     /* Normally only what KittenOS needs to restart; KittenOS asks for the account, installs the kernel and the modules, and does the rest.

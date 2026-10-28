@@ -18,7 +18,20 @@
 static const char *TAG = "recsrc";
 
 static char s_base[PURR_NETREC_SRC_BASE_LEN], s_name[PURR_NETREC_SRC_NAME_LEN];
-static int s_loaded;
+static int s_loaded, s_relay;
+
+int purr_recovery_dev_mode(void)
+{
+    purr_handoff_t h;
+    return purr_kernel_handoff(&h) == 0 && (h.secure_state & PURR_SECST_DEV) != 0;
+}
+
+int purr_recovery_source_is_relay(void) { return s_relay && s_base[0] != '\0'; }
+
+int purr_recovery_server_allowed(const char *id)
+{
+    return (id != NULL && strncmp(id, "relay-", 6) == 0) || purr_recovery_dev_allowed();
+}
 
 int purr_recovery_dev_allowed(void)
 {
@@ -44,7 +57,8 @@ static void load_once(void)
 void purr_recovery_use(const purr_lan_server_t *server)
 {
     s_loaded = 1;
-    if (!purr_recovery_dev_allowed() || server == NULL) {
+    s_relay = 0;
+    if (server == NULL || !purr_recovery_server_allowed(server->id)) {
         s_base[0] = s_name[0] = '\0';
         if (purr_recovery_dev_allowed()) {
             purr_netrec_save_source("", "", "");
@@ -53,6 +67,10 @@ void purr_recovery_use(const purr_lan_server_t *server)
     }
     snprintf(s_base, sizeof(s_base), "%s", server->base);
     snprintf(s_name, sizeof(s_name), "%s", server->name);
+    if (strncmp(server->id, "relay-", 6) == 0) {
+        s_relay = 1;                                    /* not remembered: the next recovery asks the network again */
+        return;
+    }
     purr_netrec_save_source(server->base, server->name, server->id);
 }
 
@@ -127,17 +145,23 @@ int purr_recovery_verify(const char *base, char *msg, size_t cap)
 
 int purr_recovery_emergency(void)
 {
-    if (!purr_recovery_dev_allowed() || (load_once(), s_base[0] != '\0')) {
-        return -1;                                  /* not allowed, or a dev server is already the source and it was the one that failed */
+    load_once();
+    if (s_base[0] != '\0') {
+        return -1;                                      /* a server is already the source and it was the one that failed */
     }
     static purr_lan_server_t found[4];
     int n = purr_lan_discover(found, 4, 4000);
     for (int i = 0; i < n; i++) {
         char msg[96];
+        if (!purr_recovery_server_allowed(found[i].id)) {
+            ESP_LOGW(TAG, "emergency mode: ignoring %s (a developer server, and developer recovery is off)", found[i].base);
+            continue;
+        }
         if (purr_recovery_verify(found[i].base, msg, sizeof(msg)) == 0) {
-            ESP_LOGW(TAG, "emergency mode: using dev server \"%s\" at %s", found[i].name, found[i].base);
-            snprintf(s_base, sizeof(s_base), "%s", found[i].base);
+            ESP_LOGW(TAG, "emergency mode: using \"%s\" at %s", found[i].name, found[i].base);
+            snprintf(s_base, sizeof(s_base), "%s", found[i].base);          /* for this recovery only: never remembered */
             snprintf(s_name, sizeof(s_name), "%s", found[i].name);
+            s_relay = strncmp(found[i].id, "relay-", 6) == 0;
             return 0;
         }
         ESP_LOGW(TAG, "emergency mode: %s is no use: %s", found[i].base, msg);

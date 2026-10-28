@@ -24,6 +24,16 @@ int purr_recovery_dev_allowed(void);
  * board. 0 if so; else -1 and msg says why, in plain words. msg also says what it found when it is fine. Blocks: a worker task. */
 int purr_recovery_verify(const char *base, char *msg, size_t cap);
 
+/* 1 if the bootloader's secure state says developer mode is on. */
+int purr_recovery_dev_mode(void);
+
+/* 1 if the source in use is a relay (a computer running broken-kitten-recovery, discovered with an id starting "relay-"). */
+int purr_recovery_source_is_relay(void);
+
+/* May a server with this discovery id be used for recovery? A relay in any secure mode, a developer's server only when the bootloader
+ * allowed one. The images are checked by the device whichever it is. */
+int purr_recovery_server_allowed(const char *id);
+
 /* Use this server from now on (remembered for the next boot), or NULL for the official one. Ignored unless allowed. */
 void purr_recovery_use(const purr_lan_server_t *server);
 

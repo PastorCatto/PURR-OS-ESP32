@@ -17,7 +17,8 @@
 
 typedef enum { PG_WRONG, PG_DEVSERVER, PG_LEGAL, PG_WIFI, PG_RESTORING, PG_COLOUR, PG_ACCOUNT, PG_TIME, PG_DONE, PG_FINISHING } page_t;
 
-static const page_t k_loader[] = {PG_WRONG, PG_WIFI, PG_RESTORING};
+/* The last page is only reached from a failed restore ("Use a recovery computer"); the normal flow ends on the restore. */
+static const page_t k_loader[] = {PG_WRONG, PG_WIFI, PG_RESTORING, PG_DEVSERVER};
 /* When the bootloader allowed a dev server (its DEV_RECOVERY flag), one extra page comes after Wi-Fi and before the install. */
 static const page_t k_loader_dev[] = {PG_WRONG, PG_WIFI, PG_DEVSERVER, PG_RESTORING};
 static const page_t k_loader_setup[] = {PG_WRONG, PG_WIFI};
@@ -42,6 +43,7 @@ static int s_connected, s_account_ok, s_restoring_done;
 static purr_oobe_ap_t s_ap[MAX_AP];
 static int s_nap;
 static lv_obj_t *s_ta_name, *s_ta_pass, *s_ta_confirm, *s_ta_wifi_pass;
+static lv_obj_t *s_relay_btn;
 static lv_obj_t *s_progress, *s_stage, *s_wifi_connect, *s_legal_label, *s_srv_list;
 #define MAX_SRV 4
 static purr_oobe_server_t s_srv[MAX_SRV];
@@ -219,6 +221,9 @@ static void tick_cb(lv_timer_t *t)
         } else {
             lv_label_set_text(s_stage, msg[0] ? msg : "That didn't work. Power it off and on to try again.");
             lv_obj_set_style_text_color(s_stage, lv_color_hex(0xFFB900), 0);
+            if (s_relay_btn != NULL) {
+                lv_obj_remove_flag(s_relay_btn, LV_OBJ_FLAG_HIDDEN);       /* the server could not be reached: another route */
+            }
         }
         break;
     }
@@ -380,13 +385,24 @@ static void srv_list_build(void)
 {
     lv_obj_clean(s_srv_list);
     if (s_nsrv <= 0) {
-        w10m_dim(s_srv_list, "No servers found. Is your dev server running on this network? You can use the internet instead.");
+        w10m_dim(s_srv_list, "Nothing found. Is broken-kitten-recovery running on a computer on this network? You can try the internet instead.");
         return;
     }
     for (int i = 0; i < s_nsrv; i++) {
         char sub[120];
-        snprintf(sub, sizeof(sub), "%s   id %s", s_srv[i].base, s_srv[i].id);
+        snprintf(sub, sizeof(sub), "%s   %s", s_srv[i].base, strncmp(s_srv[i].id, "relay-", 6) == 0 ? "recovery computer" : "dev server");
         w10m_row(s_srv_list, s_srv[i].name, sub, 1, srv_clicked, (void *)(intptr_t)i);
+    }
+}
+
+static void show_page(int idx);
+static void goto_page(page_t pg)
+{
+    for (int i = 0; i < s_npages; i++) {
+        if (s_pages[i] == pg) {
+            show_page(i);
+            return;
+        }
     }
 }
 
@@ -396,13 +412,18 @@ static void internet_cb(lv_event_t *e)
     if (s_ops->use_server != NULL) {
         s_ops->use_server(NULL);
     }
-    show_page(s_idx + 1);
+    goto_page(PG_RESTORING);
 }
 
 static void page_devserver(void)
 {
-    w10m_title(s_body, "Use your dev server?");
-    w10m_dim(s_body, "Developer mode is on, so we can grab PURR OS from a server on your network instead of the internet.");
+    if (s_ops->dev_recovery != NULL && s_ops->dev_recovery()) {
+        w10m_title(s_body, "Use your dev server?");
+        w10m_dim(s_body, "Developer mode is on, so we can grab PURR OS from a server on your network instead of the internet.");
+    } else {
+        w10m_title(s_body, "Use a recovery computer?");
+        w10m_dim(s_body, "A computer on this network running broken-kitten-recovery can send PURR OS to this device. Pick it only if it is yours.");
+    }
     s_srv_list = lv_obj_create(s_body);
     lv_obj_remove_style_all(s_srv_list);
     lv_obj_set_width(s_srv_list, LV_PCT(100));
@@ -419,6 +440,12 @@ static void page_devserver(void)
     job_start(PURR_OOBE_JOB_DEVSCAN, NULL, NULL);
 }
 
+static void relay_cb(lv_event_t *e)
+{
+    (void)e;
+    goto_page(PG_DEVSERVER);
+}
+
 static void page_restoring(void)
 {
     w10m_title(s_body, "Okay, getting this sorted out.");
@@ -430,6 +457,9 @@ static void page_restoring(void)
     lv_bar_set_range(s_progress, 0, 1000);
     lv_bar_set_value(s_progress, 0, LV_ANIM_OFF);
     w10m_dim(s_body, "This takes a few minutes. Keep it charged or plugged in.");
+    s_relay_btn = w10m_button(s_body, "Use a recovery computer", relay_cb, NULL);
+    lv_obj_set_width(s_relay_btn, LV_PCT(100));
+    lv_obj_add_flag(s_relay_btn, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_next, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_back, LV_OBJ_FLAG_HIDDEN);
     s_restoring_done = 0;
@@ -609,7 +639,7 @@ static void show_page(int idx)
     s_idx = idx;
     s_job_active = -1;
     s_status = NULL;
-    s_progress = s_stage = s_legal_label = s_srv_list = NULL;
+    s_progress = s_stage = s_legal_label = s_srv_list = s_relay_btn = NULL;
     lv_obj_clean(s_body);
     lv_group_remove_all_objs(s_group);
     lv_obj_remove_flag(s_next, LV_OBJ_FLAG_HIDDEN);
@@ -656,6 +686,8 @@ static void next_clicked(lv_event_t *e)
         if (s_srv_sel >= 0 && s_srv_sel < s_nsrv && s_ops->use_server != NULL) {
             s_ops->use_server(&s_srv[s_srv_sel]);
         }
+        goto_page(PG_RESTORING);
+        return;
     }
     show_page(s_idx + 1);
 }
@@ -741,7 +773,11 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
     if (s_timer == NULL) {
         s_timer = lv_timer_create(tick_cb, 100, NULL);
     }
-    show_page(start_page < 0 ? s_npages - 1 : (start_page < s_npages ? start_page : 0));
+    if (start_page < 0) {                                       /* -1: straight to the install (an unattended recovery) */
+        goto_page(PG_RESTORING);
+        return;
+    }
+    show_page(start_page < s_npages ? start_page : 0);
 }
 
 int purr_oobe_page_count(int part)

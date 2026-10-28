@@ -202,3 +202,16 @@ channel needs developer mode.
 - The relay client also carries a **dev role**: when the system image is signed but drivers are not (onboarding new hardware), the client pushes the new drivers from
   the developer's machine, and the client does the verifying for them.
 - The client is **broken-kitten-recovery**, written in Rust for Windows, macOS and Linux: `tools/broken-kitten-recovery/`.
+
+### Relay support on the device, VM tests (2026-10-28)
+Built: `relay-` discovery ids (purr_recovery_src.c: `purr_recovery_server_allowed`, `purr_recovery_dev_mode`, `purr_recovery_source_is_relay`); a relay may be used in any
+secure mode, a developer's server only when the bootloader allowed one (it is ignored otherwise, and said so in the log); a relay is never remembered across boots.
+Unattended recovery (auto mode) picks a relay by itself when the official server is unreachable (`s_emergency_ok`). Attended recovery (the wizard): a failed
+restore shows "Use a recovery computer", which lists what was found with its name and address and uses it only after the owner picks it. Verification: an image that fails
+the device's own check from a relay is refused unless developer mode is on (`unverified_ok` in recovery_loader.c); from other sources the old rule (secure mode off) stands.
+Tests (VM, enforce mode, developer mode OFF, official URL set to a dead address):
+- real broken-kitten-recovery serving the 1.0.3 release: found, used, kernel 1.0.3 and kittenos 1.0.3 installed. Pass.
+- a developer server on the network in that state: ignored. Pass.
+- a rogue "relay" serving images with the manifest hashes forged to match: "kernel verification failed: bad-hash", "verification failed: bad-hash"; nothing written. Pass.
+Not run: the attended wizard screens (no touch input in the headless runner), dev mode flashing a failing image, hardware.
+Found while testing: the unicast discovery probe to the VM host reaches only one program per UDP port, so the relay and `dev serve` cannot both answer in the VM.
