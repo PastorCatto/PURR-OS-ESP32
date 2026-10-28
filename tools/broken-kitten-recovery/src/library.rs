@@ -14,6 +14,7 @@ use crate::manifest::{self, Entry};
 
 const MAX_FILE: u64 = 8 * 1024 * 1024;
 pub const MANIFESTS: [&str; 2] = ["recovery.manifest", "modules.manifest"];
+pub const DRIVERS_MANIFEST: &str = "drivers.manifest";
 
 pub fn recovery_dir(dir: &Path) -> PathBuf { dir.join("recovery") }
 
@@ -96,7 +97,7 @@ pub fn fetch_legal(base: &str, dir: &Path) {
 
 /// Every image in the folder re-checked from disk against its manifest and the keys. On success: the bytes of everything
 /// that may be served, by the name the device will ask for. Any failure is an error and nothing is served.
-pub fn check_dir(dir: &Path, board: &str, keys: &[Key], log: &mut dyn FnMut(&str)) -> Result<BTreeMap<String, Vec<u8>>, String> {
+pub fn check_dir(dir: &Path, board: &str, keys: &[Key], dev: bool, log: &mut dyn FnMut(&str)) -> Result<BTreeMap<String, Vec<u8>>, String> {
     let rdir = recovery_dir(dir);
     let mut files = BTreeMap::new();
     let mut images = 0;
@@ -120,11 +121,63 @@ pub fn check_dir(dir: &Path, board: &str, keys: &[Key], log: &mut dyn FnMut(&str
         }
         files.insert(m.to_string(), bytes);
     }
+    if dev {
+        if let Ok(bytes) = fs::read(rdir.join(DRIVERS_MANIFEST)) {
+            let text = String::from_utf8(bytes.clone()).map_err(|_| format!("{}: not text", DRIVERS_MANIFEST))?;
+            for e in manifest::parse(&text).into_iter().filter(|e| applies(e, board)) {
+                let data = fs::read(rdir.join(&e.file)).map_err(|err| format!("{}: {}", e.file, err))?;
+                let trust = check_driver(&e, &data, keys)?;
+                log(&format!("  driver    {}  {}", e.file, trust));
+                files.insert(e.file.clone(), data);
+                images += 1;
+            }
+            files.insert(DRIVERS_MANIFEST.to_string(), bytes);
+        }
+    }
     if let Ok(t) = fs::read(rdir.join("legal.txt")) {
         files.insert("legal.txt".to_string(), t);
     }
     log(&format!("{} image(s) checked against the official keys", images));
     Ok(files)
+}
+
+/// A driver for developer mode: the file against its manifest entry, then a well-formed driver module with an intact payload.
+/// Says whether it is signed by an official key or unsigned (which a device loads only in developer mode).
+pub fn check_driver(e: &Entry, data: &[u8], keys: &[Key]) -> Result<String, String> {
+    if data.len() != e.size || sha256_hex(data) != e.sha256 {
+        return Err(format!("{}: does not match the drivers manifest", e.file));
+    }
+    let (h, trust) = image::inspect_driver(data, CHIP_ESP32S3, keys).map_err(|err| format!("{}: {}", e.file, err))?;
+    Ok(match trust {
+        image::Trust::Signed(id) => format!("{} {}, signed by key {}", h.name, h.version, id),
+        image::Trust::Unsigned => format!("{} {}, UNSIGNED: only a device in developer mode will load it", h.name, h.version),
+    })
+}
+
+/// Adds (or replaces) a driver in <dir>/recovery/drivers.manifest and copies the file next to it, after checking it.
+pub fn add_driver(dir: &Path, file: &Path, board: &str, compatible: &str, buses: &str, catcall: &str, keys: &[Key]) -> Result<String, String> {
+    let data = fs::read(file).map_err(|e| format!("{}: {}", file.display(), e))?;
+    let (h, trust) = image::inspect_driver(&data, CHIP_ESP32S3, keys).map_err(|e| format!("{}: {}", file.display(), e))?;
+    let rdir = recovery_dir(dir);
+    fs::create_dir_all(&rdir).map_err(|e| format!("{}: {}", rdir.display(), e))?;
+    let name: String = h.name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+    if name.is_empty() {
+        return Err("the driver has no usable name in its header".into());
+    }
+    let fname = format!("{}-{}.cat", name, board);
+    let key = match trust { image::Trust::Signed(_) => "developer", image::Trust::Unsigned => "none" };
+    let stanza = format!(
+        "component={}\ntype=driver\nversion={}\nchip=esp32s3\nboard={}\nfile={}\nsize={}\nsha256={}\nkey={}\ncompatible={}\nbuses={}\ncatcall={}\n",
+        name, h.version, board, fname, data.len(), sha256_hex(&data), key, compatible, buses, catcall);
+    let mpath = rdir.join(DRIVERS_MANIFEST);
+    let old = fs::read_to_string(&mpath).unwrap_or_default();
+    let kept: Vec<&str> = old.split("\n\n").filter(|b| !b.trim().is_empty() && !b.contains(&format!("component={}\n", name))).collect();
+    let mut out = String::new();
+    for b in kept { out.push_str(b.trim_end()); out.push_str("\n\n"); }
+    out.push_str(&stanza);
+    write_atomic(&rdir.join(&fname), &data)?;
+    write_atomic(&mpath, out.as_bytes())?;
+    Ok(format!("{} {} added ({})", name, h.version, match trust { image::Trust::Signed(id) => format!("signed by key {}", id), image::Trust::Unsigned => "unsigned".to_string() }))
 }
 
 pub fn official_keys() -> &'static [Key] { KEYS }
@@ -138,6 +191,7 @@ mod tests {
         let e = |board: &str, chip: &str| Entry {
             component: "k".into(), board: board.into(), chip: chip.into(), version: "1".into(), file: "k.cat".into(),
             size: 1, sha256: "0".repeat(64), payload_sha256: String::new(),
+            kind: String::new(), key: String::new(), compatible: String::new(), buses: String::new(), catcall: String::new(),
         };
         assert!(applies(&e("tdeck_plus", "esp32s3"), "tdeck_plus"));
         assert!(applies(&e("any", "any"), "tdeck_plus"));
@@ -148,7 +202,8 @@ mod tests {
     #[test]
     fn a_wrong_size_or_hash_is_refused_before_the_signature_is_looked_at() {
         let e = Entry { component: "k".into(), board: "any".into(), chip: "esp32s3".into(), version: "1".into(),
-                        file: "k.cat".into(), size: 4, sha256: sha256_hex(b"abcd"), payload_sha256: String::new() };
+                        file: "k.cat".into(), size: 4, sha256: sha256_hex(b"abcd"), payload_sha256: String::new(),
+                        kind: String::new(), key: String::new(), compatible: String::new(), buses: String::new(), catcall: String::new() };
         assert!(check_file(&e, b"abc", &[]).unwrap_err().contains("manifest says 4"));
         assert!(check_file(&e, b"abce", &[]).unwrap_err().contains("hash in the manifest"));
     }

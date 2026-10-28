@@ -90,9 +90,8 @@ fn role_may_sign(role: u8, image_type: u8, subtype: u8) -> bool {
     }
 }
 
-/// Checks a whole image against `keys`: layout, key and role, the payload hash, then the signature. `chip` is the chip the
-/// image must be for. Returns the header on success.
-pub fn verify(data: &[u8], chip: u16, keys: &[Key]) -> Result<Header, VerifyError> {
+/// The header and layout checks that need no key: magic, versions, type, chip, payload inside the file.
+fn parse(data: &[u8], chip: u16) -> Result<Header, VerifyError> {
     if data.len() < HEADER_SIZE {
         return Err(VerifyError::TooShort);
     }
@@ -127,12 +126,23 @@ pub fn verify(data: &[u8], chip: u16, keys: &[Key]) -> Result<Header, VerifyErro
     if (h.payload_offset as usize) < header_size || end > data.len() as u64 {
         return Err(VerifyError::BadLayout);
     }
+    Ok(h)
+}
+
+fn payload_matches(data: &[u8], h: &Header) -> bool {
+    let end = h.payload_offset as usize + h.payload_size as usize;
+    Sha256::digest(&data[h.payload_offset as usize..end])[..] == h.payload_sha256[..]
+}
+
+/// Checks a whole image against `keys`: layout, key and role, the payload hash, then the signature. `chip` is the chip the
+/// image must be for. Returns the header on success.
+pub fn verify(data: &[u8], chip: u16, keys: &[Key]) -> Result<Header, VerifyError> {
+    let h = parse(data, chip)?;
     let key = keys.iter().find(|k| k.id == h.key_id).ok_or(VerifyError::NoKey(h.key_id))?;
     if !role_may_sign(key.role, h.image_type, (h.flags & 0xFF) as u8) {
         return Err(VerifyError::RoleMismatch);
     }
-    let payload = &data[h.payload_offset as usize..end as usize];
-    if Sha256::digest(payload)[..] != h.payload_sha256[..] {
+    if !payload_matches(data, &h) {
         return Err(VerifyError::BadHash);
     }
     let digest = Sha256::digest(&data[..SIGNED_LEN]);
@@ -143,6 +153,40 @@ pub fn verify(data: &[u8], chip: u16, keys: &[Key]) -> Result<Header, VerifyErro
     let sig = Signature::from_slice(&data[SIGNED_LEN..HEADER_SIZE]).map_err(|_| VerifyError::BadSignature)?;
     vk.verify_prehash(&digest, &sig).map_err(|_| VerifyError::BadSignature)?;
     Ok(h)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Trust {
+    Signed(u8),
+    Unsigned,
+}
+
+pub const MOD_DRIVER: u8 = 5;
+
+/// A driver file for developer mode: signed by an official key if it is, otherwise unsigned, which a device only loads in
+/// developer mode. Either way the file has to be a well-formed PURR module of the driver kind for this chip with an intact payload,
+/// so a damaged or mislabelled file is refused here, not left for the device to find out.
+pub fn inspect_driver(data: &[u8], chip: u16, keys: &[Key]) -> Result<(Header, Trust), VerifyError> {
+    match verify(data, chip, keys) {
+        Ok(h) => {
+            if h.image_type != IMG_MODULE || (h.flags & 0xFF) as u8 != MOD_DRIVER {
+                return Err(VerifyError::BadType);
+            }
+            let id = h.key_id;
+            Ok((h, Trust::Signed(id)))
+        }
+        Err(VerifyError::NoKey(_)) | Err(VerifyError::RoleMismatch) | Err(VerifyError::BadSignature) => {
+            let h = parse(data, chip)?;
+            if h.image_type != IMG_MODULE || (h.flags & 0xFF) as u8 != MOD_DRIVER {
+                return Err(VerifyError::BadType);
+            }
+            if !payload_matches(data, &h) {
+                return Err(VerifyError::BadHash);
+            }
+            Ok((h, Trust::Unsigned))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -223,6 +267,26 @@ mod tests {
         key.role = 4;                                    // a developer key may not sign a kernel
         let img = make(b"x", &sk, IMG_MODULE, 1);
         assert_eq!(verify(&img, CHIP_ESP32S3, &[key]), Err(VerifyError::RoleMismatch));
+    }
+
+    #[test]
+    fn unsigned_driver_is_accepted_only_as_unsigned_and_only_if_intact() {
+        let (sk, key) = test_key();
+        let good = make(b"driver payload", &sk, IMG_MODULE, MOD_DRIVER as u16);
+        let dev = Key { role: 4, ..key };                 // a developer key may sign drivers
+        let (_, t) = inspect_driver(&good, CHIP_ESP32S3, &[dev]).unwrap();
+        assert_eq!(t, Trust::Signed(9));
+        // no key known to this client: the same file is "unsigned", not refused
+        let (_, t) = inspect_driver(&good, CHIP_ESP32S3, &[]).unwrap();
+        assert_eq!(t, Trust::Unsigned);
+        // a flipped payload byte is refused either way
+        let mut bad = good.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert_eq!(inspect_driver(&bad, CHIP_ESP32S3, &[]).unwrap_err(), VerifyError::BadHash);
+        // a kernel is not a driver
+        let kernel = make(b"k", &sk, IMG_MODULE, 1);
+        assert_eq!(inspect_driver(&kernel, CHIP_ESP32S3, &[]).unwrap_err(), VerifyError::BadType);
     }
 
     #[test]

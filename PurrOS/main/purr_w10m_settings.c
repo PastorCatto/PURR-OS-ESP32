@@ -1470,14 +1470,14 @@ static void page_developer(void)
     }
 
     cm_space(s_body, 6);
-    cm_title(s_body, "Unsigned apps");
-    s_sec_unsigned_sw = cm_switch(s_body, "Allow unsigned apps", 0, sec_unsigned_cb);
+    cm_title(s_body, "Unsigned apps and drivers");
+    s_sec_unsigned_sw = cm_switch(s_body, "Allow unsigned apps and drivers", 0, sec_unsigned_cb);
     lv_obj_add_state(s_sec_unsigned_sw, LV_STATE_DISABLED);          /* until the status says developer mode is active */
-    cm_dim(s_body, "Only apps in your own folder (/home/<you>/apps) can run unsigned, and only while developer "
-                   "mode is active. The system's apps, modules and drivers always need a signature. "
+    cm_dim(s_body, "Apps in your own folder (/home/<you>/apps) and driver files in /boot/drivers can load unsigned, "
+                   "and only while developer mode is active. The system's apps and modules always need a signature. "
                    "Turning developer mode off turns this off too.");
-    s_sec_warn = cm_dim(s_body, "WARNING: an unsigned app runs with the same access as the system. Only install "
-                                "apps you built or trust.");
+    s_sec_warn = cm_dim(s_body, "WARNING: an unsigned app runs with the same access as the system, and an unsigned driver is "
+                                "code inside the kernel. Only install ones you built or trust.");
     lv_obj_set_style_text_color(s_sec_warn, lv_color_hex(0xFFB900), 0);
     lv_obj_add_flag(s_sec_warn, LV_OBJ_FLAG_HIDDEN);
     if (!acting_admin()) {

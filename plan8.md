@@ -131,3 +131,37 @@ who signs (the portal key, role per `SECURITY.md` 6.2); how a user mirrors it (t
 - **Update service** (Windows-Update style): one background check that handles app updates and **driver updates** (display and bus modules). Drivers stay on the
   official/community-reviewed tiers only and keep the ABI-version refusal already in place. Folded into this plan, not a new plan file.
 Open: key revocation (a published list the store checks), and whether driver updates need a second confirmation on the device.
+
+### Driver compatibility and the update page (owner, 2026-10-28)
+- **Driver ABI as a range.** A driver declares the lowest and highest ABI it works with (`abi_min`, `abi_max`); the OS runs it when its own bus/ABI
+  version falls inside that range (today the check is exact: a driver built for another ABI is refused). The driver's own version is independent of the ABI.
+  If a driver breaks on a newer OS, the repo index marks that driver version as bad (flagged, not deleted), the update service stops offering it and
+  offers the fixed version when there is one. The index entry carries the ABI range and a `blocked` list per OS version.
+- **Settings > Devices (and a general Updates page):** software updates, driver updates, and "update from a file": the user gives the loader a
+  pre-downloaded image to write. Scope rule: that path may write **only the kernel slot** (where the core OS lives). It never writes the bootloader,
+  boot package, KittenOS (recovery) or the loader. The recovery and loader are updated only by the loader itself, on purpose, with its own
+  signed-image checks. All images are still checked against the boot key before anything is written.
+Open: how a driver's min/max is declared (module header fields vs manifest), and whether KittenOS may update itself in-place from the update page
+(the owner says recovery is updated by the loader only, so no).
+
+### Driver foundation + "Find hardware" (owner, 2026-10-28)
+Goal: flash a base system on an ESP32 board whose only working part is the chip, then add drivers as time goes on, and update drivers independently of the OS.
+Decided by the owner:
+- Developer mode accepts **unsigned drivers** (and unsigned keys) as well as unsigned apps. Built 2026-10-28: `load_relocatable_image` (commands.c) loads an unsigned driver from
+  `/boot/drivers` when developer mode is active and the "Allow unsigned apps and drivers" switch is on; the payload hash is still checked; revoked keys and DEV_LOCKED still win.
+- **Updates panel > "Find hardware"**: one button. It scans without asking questions where it can, downloads the drivers for what it found, and maps each driver to the
+  pins it found the hardware on. A guided mode (it asks before driving any output) stays for what a passive scan cannot find.
+- Drivers are installed and updated on their own, separate from the OS (driver ABI range, plan8 section above).
+Design (to build, in this order):
+1. **Hardware report** (read-only, no outputs driven): board fingerprint match against the board database (power-enable pin first, e.g. T-Deck GPIO10), then per bus:
+   I2C pins found by pull-up sensing on non-reserved GPIOs (never flash/PSRAM/USB/strapping pins), address scan + ID-register match; known SPI pin maps from the
+   database with the read-ID command per chip (ST7789 RDDID, SX1262 GetStatus, W5500 version register, SD CMD0); UART listen at common baud rates. Output: a list of
+   {device, bus, pins, confidence}.
+2. **Device database** in the repo (signed, versioned): chip ID signatures -> driver name, compatible, bus, default pins; includes power-enable pins of known boards.
+3. **Install**: for each match, fetch the driver from the index (ABI range checked, signature/tier shown; unsigned only in dev mode), write `/boot/drivers/<name>.cat`, write the
+   pins into the **discovered board profile** (`/etc/board.conf`), load. The registry's pin-conflict rule still applies.
+4. **Settings > Updates**: Find hardware, Drivers (installed, versions, update each), Software. The recovery client's `--dev` role serves unsigned/dev drivers
+   (built 2026-10-28: `broken-kitten-recovery add-driver` + `serve --dev`, drivers.manifest with `type=driver`) for the developer's board bring-up.
+Safety: passive first; anything that drives an output only on pins that appear in some known board's map and are not reserved, or after the owner confirms; a profile is saved only
+after the owner confirms it once.
+Cannot be found: parts wired straight to a pin with no bus and no known map (the owner maps them by hand: guided mode, or a hand-written board.conf shared back to the repo).

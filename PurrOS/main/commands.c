@@ -4609,6 +4609,15 @@ static int path_in_user_apps(const char *path)
            (strncmp(after_name, "/apps/", 6) == 0 || strncmp(after_name, "/devapps/", 9) == 0);
 }
 
+/* A driver file in /boot/drivers. Developer mode with the "unsigned" switch on may load one that has no trusted signature (onboarding new
+ * hardware); the same rule as for an unsigned app: its hash must still match, a revoked key is still refused, and nothing outside
+ * /boot/drivers qualifies. Drivers are native code in the kernel, which is why this needs developer mode and can never apply to a
+ * device whose signed trust block says DEV_LOCKED. */
+static int path_in_boot_drivers(const char *path)
+{
+    return strncmp(path, PURR_DRIVERS_DIR "/", sizeof(PURR_DRIVERS_DIR)) == 0 && strstr(path, "..") == NULL;
+}
+
 /* Everything after the bytes are in memory: verify the signature, lay the module out, relocate it, map it executable. Takes
  * ownership of rb (malloc'd, len bytes) and frees it. The file version below reads the module from the filesystem; the recovery
  * loader, which has no filesystem, hands in the baked-in driver modules directly (purr_loader_load_drivers). */
@@ -4642,6 +4651,17 @@ static purr_load_result_t load_relocatable_image(uint8_t *rb, size_t len, const 
         purr_sha256(rb + hdr.payload_offset, hdr.payload_size, digest);
         if (memcmp(digest, hdr.payload_sha256, PURR_SHA256_LEN) == 0) {
             ESP_LOGW(log_tag, "%s: UNSIGNED APP, loaded because developer mode allows it", path);
+            vr = PURR_V_OK;
+        }
+    }
+    if ((vr == PURR_V_NO_KEY || vr == PURR_V_ROLE_MISMATCH || vr == PURR_V_BAD_SIGNATURE) &&
+        expected_image_type == PURR_IMG_MODULE && hdr.image_type == PURR_IMG_MODULE &&
+        PURR_FLAGS_SUBTYPE(hdr.flags) == PURR_MOD_DRIVER && path_in_boot_drivers(path) &&
+        purr_security_unsigned_apps_allowed() && (uint64_t)hdr.payload_offset + hdr.payload_size <= len) {
+        uint8_t digest[PURR_SHA256_LEN];
+        purr_sha256(rb + hdr.payload_offset, hdr.payload_size, digest);
+        if (memcmp(digest, hdr.payload_sha256, PURR_SHA256_LEN) == 0) {
+            ESP_LOGW(log_tag, "%s: UNSIGNED DRIVER, loaded because developer mode allows it", path);
             vr = PURR_V_OK;
         }
     }

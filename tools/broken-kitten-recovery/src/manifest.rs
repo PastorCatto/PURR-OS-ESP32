@@ -12,6 +12,11 @@ pub struct Entry {
     pub size: usize,
     pub sha256: String,
     pub payload_sha256: String,
+    pub kind: String,
+    pub key: String,
+    pub compatible: String,
+    pub buses: String,
+    pub catcall: String,
 }
 
 fn hex64(s: &str) -> bool { s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()) }
@@ -35,6 +40,7 @@ pub fn parse(text: &str) -> Vec<Entry> {
                 component: get("component"), board: get("board"), chip: get("chip"), version: get("version"),
                 file: get("file"), size, sha256: get("sha256").to_lowercase(),
                 payload_sha256: get("payload_sha256").to_lowercase(),
+                kind: get("type"), key: get("key"), compatible: get("compatible"), buses: get("buses"), catcall: get("catcall"),
             };
             if size > 0 && hex64(&e.sha256) && safe_name(&e.file) && (e.payload_sha256.is_empty() || hex64(&e.payload_sha256)) {
                 out.push(e);
