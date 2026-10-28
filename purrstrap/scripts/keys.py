@@ -342,7 +342,7 @@ def inspect(ctx, path):
 
 
 # -- trust block -------------------------------------------------------
-def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys, out):
+def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys, out, installed=False, force_loader=False, dev_recovery=False, force_recovery=False, auto_reinstall=False):
     """Build a purrcfg partition image carrying a SIGNED trust block (plan3.md): the secure mode,
     the development-mode lock, revocations and override keys, signed with a boot-role key. Flash
     it at the purrcfg partition (or hand it to the device's `trust apply`) to set the device's
@@ -388,7 +388,12 @@ def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys,
     signed = pcfg.trust_signed_bytes(secure_mode, trust_flags, revoked, pcfg.keys_blob(slots))
     der_sig = private_key.sign(sha256(signed), ec.ECDSA(utils.Prehashed(hashes.SHA256())))
     cfg = pcfg.build_cfg(secure_mode=secure_mode, trust_flags=trust_flags, revoked=revoked,
-                         slots=slots, flags=pcfg.CFGF_DEV_MODE if dev_mode else 0,
+                         slots=slots,
+                         flags=((0 if installed else pcfg.CFGF_FRESH) | (pcfg.CFGF_DEV_MODE if dev_mode else 0) |
+                                (pcfg.CFGF_FORCE_LOADER if force_loader else 0) |
+                                (pcfg.CFGF_DEV_RECOVERY if dev_recovery else 0) |
+                                (pcfg.CFGF_FORCE_RECOVERY if force_recovery else 0) |
+                                (pcfg.CFGF_AUTO_REINSTALL if auto_reinstall else 0)),
                          tighten=pcfg.SECURE[tighten], seq=1, trust_sig=der_sig_to_raw(der_sig))
     dest = out or "purrcfg.bin"
     os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
@@ -397,6 +402,7 @@ def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys,
     ctx.ok(f"{dest}: signed trust block, mode {mode}"
            f"{', development mode LOCKED' if dev_locked else ''}"
            f"{', development mode ON' if dev_mode else ''}"
+           f"{'' if installed else ', FRESH (never reached a healthy boot)'}"
            f"{f', {len(slots)} override key(s)' if slots else ''}"
            f"{f', revokes {revoke}' if revoke else ''}")
     ctx.info("flash it at the purrcfg partition (0xF000 on the current layout); the device's "
@@ -455,6 +461,16 @@ SCRIPT = Script(
                              help="a production device: development mode is refused outright"),
                        Param("dev_mode", "bool", default=False,
                              help="start with development mode ON (unsigned; a development board)"),
+                       Param("installed", "bool", default=False,
+                             help="the image already holds a working system: do not set FRESH (it is on by default)"),
+                       Param("dev_recovery", "bool", default=False,
+                             help="let recovery pull from a local dev server (honoured only while development mode is on)"),
+                       Param("auto_reinstall", "bool", default=False,
+                             help="the recovery loader runs unattended and installs by itself (for a test device or the VM)"),
+                       Param("force_recovery", "bool", default=False,
+                             help="boot KittenOS once (a one-shot request, for a test device or the VM)"),
+                       Param("force_loader", "bool", default=False,
+                             help="boot the recovery loader once (a one-shot request, for a test device or the VM)"),
                        Param("tighten", "choice", default="off", choices=tuple(pcfg.SECURE),
                              help="an unsigned floor on the mode (can only tighten)"),
                        Param("revoke", "str", default="", help="key ids to revoke, e.g. 3,5"),

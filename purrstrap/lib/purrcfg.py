@@ -23,6 +23,13 @@ OFF_TRUST_SIG, OFF_CRC = 684, 748
 
 SECURE = {"off": 0, "warn": 1, "enforce": 2}
 CFGF_DEV_MODE = 1 << 8
+CFGF_FORCE_RECOVERY = 1 << 3   # one-shot: boot KittenOS once
+CFGF_AUTO_REINSTALL = 1 << 5  # the loader runs unattended (the failure ladder normally sets this)
+CFGF_FORCE_LOADER = 1 << 4   # one-shot: boot the recovery loader once (a test device or VM can start in recovery)
+CFGF_BAD_KERNEL = 1 << 11     # the kernel slot is marked bad: the bootloader will not launch it (a reset sets this)
+CFGF_BAD_KITTENOS = 1 << 12   # the same for KittenOS
+CFGF_FRESH = 1 << 9
+CFGF_DEV_RECOVERY = 1 << 10   # recovery may pull from a local dev server (the bootloader honours it only in development mode)          # on by default: the device has never reached a healthy boot of the full OS
 TRUSTF_DEV_LOCKED = 1 << 0
 ROLE_IDS = {"boot": 1, "system": 2, "owner": 3, "developer": 4, "vendor": 5}
 
@@ -49,7 +56,7 @@ def keys_blob(slots):
     return b"".join(slots) + b"\x00" * ((KEY_SLOTS - len(slots)) * KEY_SLOT_SIZE)
 
 
-def build_cfg(secure_mode=SECURE["warn"], trust_flags=0, revoked=0, slots=(), flags=0,
+def build_cfg(secure_mode=SECURE["warn"], trust_flags=0, revoked=0, slots=(), flags=CFGF_FRESH,
               tighten=0, seq=1, trust_sig=b"\x00" * 64):
     """A sealed purr_cfg_t: defaults for everything but the trust fields."""
     cfg = bytearray(CFG_SIZE)

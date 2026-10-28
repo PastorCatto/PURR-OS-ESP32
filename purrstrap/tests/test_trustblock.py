@@ -110,15 +110,21 @@ class TrustBlockToolTests(unittest.TestCase):
         img = self.read()
         self.assertEqual(len(img), pcfg.PARTITION_SIZE)
         f = pcfg.parse_cfg(img)
-        self.assertEqual((f["secure_mode"], f["trust_flags"], f["flags"], f["tighten"]), (2, 0, 0, 0))
+        self.assertEqual((f["secure_mode"], f["trust_flags"], f["flags"], f["tighten"]), (2, 0, pcfg.CFGF_FRESH, 0))      # FRESH is on by default
         self.verify_signature(img)
 
     def test_dev_lock_and_dev_mode(self):
         self.assertEqual(self.build(dev_locked=True, dev_mode=True), 0)
         f = pcfg.parse_cfg(self.read())
         self.assertEqual(f["trust_flags"], pcfg.TRUSTF_DEV_LOCKED)
-        self.assertEqual(f["flags"], pcfg.CFGF_DEV_MODE)
+        self.assertEqual(f["flags"], pcfg.CFGF_DEV_MODE | pcfg.CFGF_FRESH)
         self.verify_signature(self.read())
+
+    def test_installed_image_is_not_fresh(self):
+        self.assertEqual(self.build(installed=True), 0)
+        self.assertEqual(pcfg.parse_cfg(self.read())["flags"], 0)
+        self.assertEqual(self.build(installed=True, dev_mode=True), 0)
+        self.assertEqual(pcfg.parse_cfg(self.read())["flags"], pcfg.CFGF_DEV_MODE)
 
     def test_revocations_keys_and_tighten(self):
         self.assertEqual(self.build(mode="warn", tighten="enforce", revoke="3, 5",

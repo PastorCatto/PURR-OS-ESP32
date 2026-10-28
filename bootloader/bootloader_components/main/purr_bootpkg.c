@@ -132,6 +132,21 @@ static int mmap_read(void *ctx, uint32_t offset, void *buf, uint32_t len)
     return 0;
 }
 
+/* Whether the loaded package understands progress calls (purr_abi.h): its version is 0.2 or later. A package
+ * from before that would read a negative nparts as a count, so it is never sent one. */
+static bool s_pkg_progress;
+
+static bool version_at_least_0_2(const char *v)
+{
+    int major = 0, minor = 0, i = 0;
+    while (v[i] >= '0' && v[i] <= '9') major = major * 10 + (v[i++] - '0');
+    if (v[i] == '.') {
+        i++;
+        while (v[i] >= '0' && v[i] <= '9') minor = minor * 10 + (v[i++] - '0');
+    }
+    return major > 0 || minor >= 2;
+}
+
 // Returns the entry address, or 0 with a reason logged.
 static uint32_t load_package(void)
 {
@@ -213,6 +228,7 @@ static uint32_t load_package(void)
             memset((void *)(PURR_PKG_S3_DATA + p.data_size), 0, p.bss_size);
             __asm__ __volatile__("memw; isync");
             entry = p.entry;
+            s_pkg_progress = version_at_least_0_2(h.version);
             ESP_LOGI(TAG, "bootpkg %.12s loaded (key id %u, %s): code %u, data %u, bss %u bytes",
                      h.version, (unsigned)h.key_id, purr_verify_name(vr),
                      (unsigned)p.text_size, (unsigned)p.data_size, (unsigned)p.bss_size);
@@ -244,6 +260,15 @@ uint8_t purr_looks_bootable(const esp_partition_pos_t *pos)
            (first & 0xFF) == 0xE9;   /* an ESP app image */
 }
 
+/* Tells the package which slot is being verified and how far along (thousandths), so it can draw it. */
+static void stage(uint32_t entry, const char *label, int done, int total)
+{
+    if (s_pkg_progress) {
+        ((purr_pkg_entry_fn)entry)(&s_services, (const purr_boot_part_t *)label, -PURR_PKG_STAGE_VERIFY,
+                                   total > 0 ? done * 1000 / total : 0);
+    }
+}
+
 bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index,
                       bool (*usable)(int index))
 {
@@ -251,6 +276,12 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
     if (entry == 0) {
         return false;
     }
+    {
+        const purr_trust_t *t = purr_bootcfg_trust();      /* the package's status chips read this */
+        s_services.secure_state = (t->mode & 3u) | (t->dev ? PURR_SECST_DEV : 0u) |
+                                  (t->signature_ok ? PURR_SECST_SIGNED : 0u);
+    }
+    int total = bs->app_count + (bs->factory.size != 0 ? 1 : 0), done = 0;
 
     /* The menu's list: the kernel slot first (PurrOS/SPEC.md's fallback chain), then KittenOS
      * (the factory slot). Only ever one kernel-style slot now -- the whole point of
@@ -267,6 +298,7 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
             name[8] = '\0';
         }
         set_name(&parts[n], name);
+        stage(entry, name, done++, total);
         parts[n].bootable = usable(i);
         map[n] = i;
         if (i == preferred) {
@@ -276,6 +308,7 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
     }
     if (bs->factory.size != 0 && n < PURR_PKG_MAX_PARTS) {
         set_name(&parts[n], "KittenOS");
+        stage(entry, "KittenOS", done++, total);
         parts[n].bootable = usable(FACTORY_INDEX);
         map[n] = FACTORY_INDEX;
         if (preferred == FACTORY_INDEX) {
@@ -284,13 +317,9 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
         n++;
     }
 
+    stage(entry, "slots", total, total);                   /* the bar is full before the menu takes over */
     ESP_LOGI(TAG, "starting the boot menu");
     flush_log();
-    {
-        const purr_trust_t *t = purr_bootcfg_trust();
-        s_services.secure_state = (t->mode & 3u) | (t->dev ? PURR_SECST_DEV : 0u) |
-                                  (t->signature_ok ? PURR_SECST_SIGNED : 0u);
-    }
     int choice = ((purr_pkg_entry_fn)entry)(&s_services, parts, n, menu_preferred);
     if (choice == PURR_PKG_CHOICE_INTERNET_RECOVERY) {
         if (bs->test.size == 0) {

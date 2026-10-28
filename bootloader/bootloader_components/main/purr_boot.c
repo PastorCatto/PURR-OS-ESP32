@@ -7,11 +7,17 @@
 /* Our own lines stay at INFO even though the rest of the bootloader logs at WARN. */
 #define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include "bootloader_init.h"
+#if CONFIG_IDF_TARGET_ESP32S3
+#include "soc/soc.h"
+#include "soc/system_reg.h"
+#endif
 #include "bootloader_utility.h"
 #include "purr_bootcfg.h"
 #include "purr_bootpkg.h"
 #include "purr_handoff.h"
+#include "purr_reason.h"
 #include "purr_slotverify.h"
 
 static const char *TAG = "purr_boot";
@@ -33,6 +39,7 @@ static const purr_cfg_t *s_cfg;
 static uint8_t s_mode;            /* the secure_mode in force for this boot */
 static bool s_ignore_once;        /* IGNORE_ONCE: let a failed slot boot even in enforce */
 static struct { bool done; purr_slot_verdict_t v; } s_cache[NSLOTS];
+static bool marked_bad(int index);
 
 static int cache_ix(int index)
 {
@@ -66,11 +73,83 @@ static const purr_slot_verdict_t *slot_verdict(int index)
     return &s_cache[c].v;
 }
 
+/* Why the device is being sent to the recovery loader, as PURR_RR_* flags (purr_abi.h), for the loader's first page. Looks at
+ * the two system slots (the kernel and KittenOS): damaged, unsigned or altered images, nothing usable at all, and whether this
+ * is a first run (the FRESH flag, with nothing installed). Verifies a slot that was not verified yet, so it is only called
+ * when the loader is the slot being launched. */
+static uint16_t recovery_reasons(const purr_cfg_t *cfg, bool have_cfg, bool ladder, bool requested)
+{
+    uint16_t r = 0;
+    bool fresh = (cfg->flags & PURR_CFGF_FRESH) != 0;
+    bool any_usable = false;
+    bool reset_pending = false;
+    for (int i = 0; i < 2; i++) {
+        int idx = i == 0 ? 0 : FACTORY_INDEX;
+        const esp_partition_pos_t *pos = slot_pos(idx);
+        if (pos == NULL) {
+            continue;
+        }
+        if (marked_bad(idx)) {                  /* a reset is waiting for its reinstall: that is a request, not damage */
+            reset_pending = true;
+            continue;
+        }
+        if (!purr_looks_bootable(pos)) {
+            if (!fresh) {
+                r |= PURR_RR_DAMAGED;           /* a slot that was once installed and no longer looks like an image */
+            }
+            continue;
+        }
+        const purr_slot_verdict_t *v = slot_verdict(idx);
+        if (s_mode != PURR_SECURE_OFF && !v->verified) {
+            r |= purr_reason_from_verify(v->result);
+        } else {
+            any_usable = true;
+        }
+    }
+    if (reset_pending) {
+        r |= PURR_RR_REQUESTED;
+    }
+    if (!any_usable && !reset_pending) {
+        r |= PURR_RR_NO_SYSTEM;
+        if (fresh) {
+            r |= PURR_RR_BLANK;
+        }
+    }
+    if (ladder) {
+        r |= PURR_RR_REPEATED;
+    }
+    if (requested) {
+        r |= PURR_RR_REQUESTED;
+    }
+    if (!have_cfg) {
+        r |= PURR_RR_CONFIG;
+    }
+    return r;
+}
+
+/* A slot a reset marked BAD (PURR_CFGF_BAD_*). Only honoured while the recovery loader is there to take over, so a missing loader can
+ * never leave the device with nothing to start. */
+static bool marked_bad(int index)
+{
+    if (s_cfg == NULL || index == TEST_APP_INDEX) {
+        return false;
+    }
+    uint32_t bit = index == FACTORY_INDEX ? PURR_CFGF_BAD_KITTENOS : PURR_CFGF_BAD_KERNEL;
+    if ((s_cfg->flags & bit) == 0) {
+        return false;
+    }
+    const esp_partition_pos_t *loader = slot_pos(TEST_APP_INDEX);
+    return loader != NULL && purr_looks_bootable(loader);
+}
+
 /* Also the boot menu's predicate (purr_bootpkg_run), so it never offers what this refuses. */
 bool purr_slot_usable(int index)
 {
     const esp_partition_pos_t *pos = slot_pos(index);
     if (pos == NULL || !purr_looks_bootable(pos)) {
+        return false;
+    }
+    if (marked_bad(index)) {
         return false;
     }
     if (s_mode != PURR_SECURE_ENFORCE) {
@@ -90,8 +169,26 @@ bool purr_slot_usable(int index)
     return false;
 }
 
+#if CONFIG_IDF_TARGET_ESP32S3
+/* Real-hardware crash loop (plan1.md): after a restart called from a task on core 1, IDF's esp_restart_noos can leave core 1 spinning
+ * in its last loop while this bootloader runs. The next app's start-up sees the core's clock already on and so does not reset it
+ * (cpu_start.c "OpenOCD may have already enabled clock"), and once the new image overwrites the code the core was spinning in, it
+ * dies with IllegalInstruction right after "cpu_start: Multicore app". So: hold the app CPU in reset with its clock off. The app then
+ * starts it the normal way. */
+static void park_app_cpu(void)
+{
+    SET_PERI_REG_MASK(SYSTEM_CORE_1_CONTROL_0_REG, SYSTEM_CONTROL_CORE_1_RUNSTALL);
+    SET_PERI_REG_MASK(SYSTEM_CORE_1_CONTROL_0_REG, SYSTEM_CONTROL_CORE_1_RESETING);
+    CLEAR_PERI_REG_MASK(SYSTEM_CORE_1_CONTROL_0_REG, SYSTEM_CONTROL_CORE_1_CLKGATE_EN);
+    WRITE_PERI_REG(SYSTEM_CORE_1_CONTROL_1_REG, 0);
+}
+#endif
+
 void __attribute__((noreturn)) call_start_cpu0(void)
 {
+#if CONFIG_IDF_TARGET_ESP32S3
+    park_app_cpu();
+#endif
     if (bootloader_init() != ESP_OK) {
         bootloader_reset();
     }
@@ -209,6 +306,7 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     }
 
     bool ladder_chose_loader = (boot_index == TEST_APP_INDEX && tier == k_tier2);
+    bool menu_chose = false;               /* the boot menu picked the slot */
 
     /* A recovery request (the shell's "reboot recovery") skips the menu and starts KittenOS
      * once. "reboot loader" does the same for the recovery loader (the "test" slot,
@@ -252,6 +350,7 @@ void __attribute__((noreturn)) call_start_cpu0(void)
         int chosen;
         if (purr_bootpkg_run(&bs, boot_index, &chosen, purr_slot_usable)) {
             boot_index = chosen;
+            menu_chose = true;
         }
     }
 
@@ -322,9 +421,17 @@ void __attribute__((noreturn)) call_start_cpu0(void)
     } else if (!have_cfg) {
         state = PURR_BOOT_CONFIG_DEFAULT;
     }
+    bool devrec = trust->dev && (cfg.flags & PURR_CFGF_DEV_RECOVERY) != 0;   /* only ever in development mode */
     uint8_t secure_state = (uint8_t)((s_mode & 3u) | (trust->dev ? PURR_SECST_DEV : 0u) |
+                                     (devrec ? PURR_SECST_DEVREC : 0u) |
                                      (trust->signature_ok ? PURR_SECST_SIGNED : 0u));
-    purr_handoff_write(state, key_id, flags_used, secure_state);
+    uint16_t reasons = 0;
+    if (boot_index == TEST_APP_INDEX) {      /* the loader is starting: tell it why (its first page lists them) */
+        bool requested = (flags_used & PURR_CFGF_FORCE_LOADER) != 0 || menu_chose;
+        reasons = recovery_reasons(&cfg, have_cfg, ladder_chose_loader, requested);
+        ESP_LOGI(TAG, "recovery reasons: 0x%x", (unsigned)reasons);
+    }
+    purr_handoff_write(state, key_id, flags_used, secure_state, reasons);
 
     ESP_LOGI(TAG, "booting app slot %d", boot_index);
     bootloader_utility_load_boot_image(&bs, boot_index);

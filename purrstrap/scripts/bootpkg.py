@@ -28,7 +28,7 @@ BOARDS = {
 # sight/log line, same reason the recovery releases this repo publishes are named
 # (JumpingJaguar1, ...).
 HW_SOURCE = {"tdeck": "pkg_hw.c", "tdeck_plus": "pkg_hw.c", "waveshare154": "pkg_hw_epd.c"}
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # Re-exported under their original names: purrstrap/tests/test_bootpkg.py reads these.
 HEADER_FORMAT = pimg.HEADER_FORMAT
@@ -74,7 +74,7 @@ def find_tool(prefix, name, env=None):
 
 
 def compile_args(repo_root, board):
-    return ["-Os", "-std=gnu11", "-ffreestanding", "-fno-builtin", "-mlongcalls",
+    return ["-Os", "-std=gnu11", f'-DPKG_VERSION="{VERSION}"', "-ffreestanding", "-fno-builtin", "-mlongcalls",
             "-ffunction-sections", "-fdata-sections", "-Wall", "-Wextra", "-Werror",
             "-I", os.path.join(repo_root, PKG_DIR, "src"),
             "-I", os.path.join(repo_root, PKG_DIR, "boards"),
@@ -84,6 +84,7 @@ def compile_args(repo_root, board):
 
 def sources(repo_root, board):
     return [os.path.join(repo_root, PKG_DIR, "src", "pkg_main.c"),
+            os.path.join(repo_root, PKG_DIR, "src", "pkg_ui.c"),
             os.path.join(repo_root, PKG_DIR, "src", HW_SOURCE[board]),
             os.path.join(repo_root, "PurrOS", "components", "coreos", "src", "purr_menu.c"),
             os.path.join(repo_root, "PurrOS", "components", "kernel", "src",

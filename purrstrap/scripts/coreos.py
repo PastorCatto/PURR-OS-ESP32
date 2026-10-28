@@ -124,24 +124,34 @@ def child_env(env=None):
             if not k.upper().startswith(("MSYS", "MINGW"))}
 
 
-def build_dir_name(board, profile):
-    return f"build/{board}-{profile}"
+# A flavor changes how the same board and profile are built, through one more settings overlay
+# (PurrOS/sdkconfig.flavor.<name>). "standard" is no overlay. "vm": no radio, a W5500 Ethernet
+# controller instead (plan4.md), for running in the emulator.
+FLAVORS = ("standard", "vm")
 
 
-def idf_args(board, profile):
-    d = build_dir_name(board, profile)
-    defaults = ";".join(("sdkconfig.defaults", f"sdkconfig.board.{board}",
-                         f"sdkconfig.profile.{profile}"))
+def build_dir_name(board, profile, flavor="standard"):
+    return f"build/{board}-{profile}" + ("" if flavor == "standard" else f"-{flavor}")
+
+
+def idf_args(board, profile, flavor="standard"):
+    d = build_dir_name(board, profile, flavor)
+    overlays = ["sdkconfig.defaults", f"sdkconfig.board.{board}", f"sdkconfig.profile.{profile}"]
+    if flavor != "standard":
+        overlays.append(f"sdkconfig.flavor.{flavor}")
+    defaults = ";".join(overlays)
     return ["idf.py", "-B", d, "-D", f"IDF_TARGET={BOARDS[board]}",
             "-D", f"SDKCONFIG={d}/sdkconfig",
             "-D", f"SDKCONFIG_DEFAULTS={defaults}"]
 
 
 # -- project checks ----------------------------------------------------
-def project_problems(project, board, profile):
+def project_problems(project, board, profile, flavor="standard"):
     """Files the build needs that are missing, as readable strings."""
     needed = ["CMakeLists.txt", "sdkconfig.defaults", f"sdkconfig.board.{board}",
               f"sdkconfig.profile.{profile}", f"partitions/{board}.csv"]
+    if flavor != "standard":
+        needed.append(f"sdkconfig.flavor.{flavor}")
     return [f"{PROJECT_DIR}/{n} is missing" for n in needed
             if not os.path.isfile(os.path.join(project, n))]
 
@@ -219,25 +229,25 @@ def next_build_number(project):
     return n
 
 
-def build(ctx, board, profile, clean):
+def build(ctx, board, profile, clean, flavor="standard"):
     project = _project(ctx)
-    problems = project_problems(project, board, profile)
+    problems = project_problems(project, board, profile, flavor)
     if problems:
-        ctx.error(f"cannot build {board}/{profile}:")
+        ctx.error(f"cannot build {board}/{profile}{'' if flavor == 'standard' else '/' + flavor}:")
         for line in problems:
             ctx.info(f"    {line}")
         return 1
     idf = _require_idf(ctx)
     if idf is None:
         return 1
-    bdir = os.path.join(project, build_dir_name(board, profile))
+    bdir = os.path.join(project, build_dir_name(board, profile, flavor))
     if clean and os.path.isdir(bdir):
         ctx.info(f"removing {bdir}")
         shutil.rmtree(bdir)
     build_number = next_build_number(project)
     project_ver = f"internaldirty{DEV_VERSION_BASE}-{build_number}"
     ctx.info(f"building {board}/{profile} into {bdir} (version {project_ver})")
-    code = ctx.run(wrap(idf, idf_args(board, profile) +
+    code = ctx.run(wrap(idf, idf_args(board, profile, flavor) +
                         ["-D", f"PROJECT_VER={project_ver}", "build"]), cwd=project,
                    env=child_env(),
                    log_path=os.path.join(bdir, "purrstrap-build.log"))
@@ -447,7 +457,9 @@ SCRIPT = Script(
                help="build one board and profile",
                params=(_BOARD, _PROFILE,
                        Param("clean", "bool", default=False,
-                             help="delete the build directory first"))),
+                             help="delete the build directory first"),
+                       Param("flavor", "choice", default="standard", choices=FLAVORS,
+                             help="standard, or vm: no radio, a W5500 Ethernet controller instead"))),
         Action("clean", "Clean", clean,
                help="delete one build directory", params=(_BOARD, _PROFILE)),
         Action("size", "Size", size,

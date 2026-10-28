@@ -22,10 +22,11 @@ _Static_assert(CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE >= sizeof(purr_handoff_
                "CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE is smaller than purr_handoff_t");
 
 void purr_handoff_write(uint8_t boot_state, uint8_t key_id_used, uint8_t flags_used,
-                        uint8_t secure_state)
+                        uint8_t secure_state, uint16_t recovery_reasons)
 {
     purr_handoff_t h;
     purr_handoff_make(&h, boot_state, key_id_used, flags_used, PURR_BOOTLOADER_VERSION, secure_state);
+    purr_handoff_set_reasons(&h, recovery_reasons);
 
     rtc_retain_mem_t *rtc = bootloader_common_get_rtc_retain_mem();
 

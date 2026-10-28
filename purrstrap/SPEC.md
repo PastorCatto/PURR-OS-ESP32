@@ -16,7 +16,10 @@ command line, so the two drifted apart.
 - **A broken subscript never breaks the tool.** Import errors, bad
   declarations and missing dependencies are shown per subscript and everything
   else keeps working.
-- **Standard library only.** Nothing to install. Python 3.9 or newer.
+- **Standard library only.** Nothing to install. Python 3.11 or newer (raised from 3.9
+  2026-10-18, AppSDK/SPEC.md section 10: the app manifest format decision needs `tomllib`,
+  stdlib-only from 3.11; the dev environment already runs 3.11, so this is a documented floor,
+  not an environment change).
 - **Documentation lives with the code.** Each subscript's title, description
   and per-action help text is the documentation, and `list` prints it. This spec
   covers only the contract.

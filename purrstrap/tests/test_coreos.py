@@ -86,6 +86,24 @@ class CommandTests(unittest.TestCase):
                       "sdkconfig.profile.recovery", args)
         self.assertIn("IDF_TARGET=esp32s3", coreos.idf_args("tdeck_plus", "full"))
 
+    def test_vm_flavor_adds_its_overlay_and_its_own_build_directory(self):
+        args = coreos.idf_args("tdeck_plus", "full", "vm")
+        self.assertEqual(args[:3], ["idf.py", "-B", "build/tdeck_plus-full-vm"])
+        self.assertIn("SDKCONFIG=build/tdeck_plus-full-vm/sdkconfig", args)
+        self.assertIn("SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.board.tdeck_plus;"
+                      "sdkconfig.profile.full;sdkconfig.flavor.vm", args)
+        # the standard flavor is unchanged, and keeps its old directory
+        self.assertEqual(coreos.build_dir_name("tdeck_plus", "full"), "build/tdeck_plus-full")
+        self.assertEqual(coreos.build_dir_name("tdeck_plus", "full", "standard"), "build/tdeck_plus-full")
+        self.assertNotIn("sdkconfig.flavor", ";".join(coreos.idf_args("tdeck_plus", "full")))
+
+    def test_vm_flavor_overlay_file_is_required(self):
+        # the repo's real PurrOS/ has it; a tree without it is reported like any missing file
+        real = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "PurrOS")
+        self.assertEqual(coreos.project_problems(real, "tdeck_plus", "full", "vm"), [])
+        problems = coreos.project_problems(tempfile.mkdtemp(), "tdeck_plus", "full", "vm")
+        self.assertTrue(any("sdkconfig.flavor.vm" in p for p in problems))
+
     def test_wrap_active_is_unchanged(self):
         idf = coreos.Idf("active")
         self.assertEqual(coreos.wrap(idf, ["idf.py", "build"]), ["idf.py", "build"])
