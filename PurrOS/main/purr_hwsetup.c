@@ -305,6 +305,40 @@ static int download_driver(const source_t *s, const purr_manifest_entry_t *e, in
     return rc;
 }
 
+/* Makes sure a driver for `compatible` is loaded: already registered this boot, or fetched from the index (s_idx, cnt entries) and loaded through the
+ * normal loader. 0 on success, else why. */
+static int ensure_driver(const char *compatible, const source_t *src, int nsrc, int cnt, char *why, size_t whycap)
+{
+    if (purr_driver_registered(compatible)) {
+        return 0;
+    }
+    const purr_manifest_entry_t *e = NULL;
+    for (int k = 0; k < cnt; k++) {
+        if (strcmp(s_idx->entries[k].compatible, compatible) == 0) {
+            e = &s_idx->entries[k];
+            break;
+        }
+    }
+    if (e == NULL) {
+        snprintf(why, whycap, "no driver for \"%s\" is listed yet", compatible);
+        return -1;
+    }
+    char path[64];
+    int ok = -1;
+    for (int si = 0; si < nsrc && ok != 0; si++) {
+        ok = download_driver(&src[si], e, 0, path, sizeof(path), why, whycap);
+    }
+    if (ok != 0) {
+        return -1;
+    }
+    if (purr_driver_load_file(path) != 0) {
+        purr_fs_remove(purr_login_fs(), path);
+        snprintf(why, whycap, "the %s driver was refused (it must be signed unless developer mode allows it)", compatible);
+        return -1;
+    }
+    return 0;
+}
+
 /* ---------------------------------------------------------------- set up */
 
 int purr_hwsetup_install(const purr_hwscan_report_t *rep, void (*progress)(const char *), char *summary, size_t cap)
@@ -341,38 +375,12 @@ int purr_hwsetup_install(const purr_hwscan_report_t *rep, void (*progress)(const
         if (!f->known || purr_hwsetup_is_set_up(f)) {
             continue;
         }
-        if (!purr_driver_registered(f->match.compatible)) {
-            const purr_manifest_entry_t *e = NULL;
-            for (int k = 0; k < cnt; k++) {
-                if (strcmp(s_idx->entries[k].compatible, f->match.compatible) == 0) {
-                    e = &s_idx->entries[k];
-                    break;
-                }
-            }
-            if (e == NULL) {
-                failed++;
-                snprintf(first_fail, sizeof(first_fail), "no driver for \"%s\" is listed yet", f->match.compatible);
-                continue;
-            }
-            say(progress, "Getting the %s driver...", f->match.compatible);
-            char path[64], why[96] = "";
-            /* try each source's directory until one has the file */
-            int ok = -1;
-            for (int si = 0; si < nsrc && ok != 0; si++) {
-                ok = download_driver(&src[si], e, 0, path, sizeof(path), why, sizeof(why));
-            }
-            if (ok != 0) {
-                failed++;
-                snprintf(first_fail, sizeof(first_fail), "%s", why);
-                continue;
-            }
-            say(progress, "Loading it...");
-            if (purr_driver_load_file(path) != 0) {
-                purr_fs_remove(purr_login_fs(), path);
-                failed++;
-                snprintf(first_fail, sizeof(first_fail), "the %s driver was refused (it must be signed unless developer mode allows it)", f->match.compatible);
-                continue;
-            }
+        char why[96] = "";
+        say(progress, "Getting the %s driver...", f->match.compatible);
+        if (ensure_driver(f->match.compatible, src, nsrc, cnt, why, sizeof(why)) != 0) {
+            failed++;
+            snprintf(first_fail, sizeof(first_fail), "%s", why);
+            continue;
         }
         purr_hwp_dev_t d = {0};
         snprintf(d.compatible, sizeof(d.compatible), "%s", f->match.compatible);
@@ -522,4 +530,131 @@ int purr_hwsetup_update_drivers(void (*progress)(const char *), char *summary, s
     s_idx = NULL;
     snprintf(summary, cap, updated ? "Updated %d driver(s). Restart to use them." : "All drivers are up to date.", updated);
     return updated;
+}
+
+/* ---------------------------------------------------------------- by hand */
+
+int purr_hwsetup_add_manual(const char *compatible, int sda, int scl, int addr, char *summary, size_t cap)
+{
+    summary[0] = '\0';
+    if (!purr_fs_mounted(purr_login_fs())) {
+        snprintf(summary, cap, "The file system is not ready.");
+        return -1;
+    }
+    purr_hwp_dev_t d = {0};
+    snprintf(d.compatible, sizeof(d.compatible), "%s", compatible);
+    snprintf(d.label, sizeof(d.label), "%s (added by hand)", compatible);
+    d.sda = sda;
+    d.scl = scl;
+    d.addr = (uint8_t)addr;
+    purr_hwp_t trial = s_prof;
+    int r = purr_hwp_add(&trial, &d, purr_hw_reserved_s3());
+    if (r < 0 || addr < 0 || addr > 255) {
+        snprintf(summary, cap, "Not accepted: the pins must be free GPIOs (not flash, USB or boot), different, and the address 0x08-0x77.");
+        return -1;
+    }
+    if (r == 1) {
+        snprintf(summary, cap, "That device is already in the profile.");
+        return 0;
+    }
+    source_t src[2];
+    int nsrc = sources(src, 2);
+    s_idx = calloc(1, sizeof(*s_idx));
+    if (s_idx == NULL) {
+        snprintf(summary, cap, "Out of memory.");
+        return -1;
+    }
+    int cnt = 0;
+    for (int i = 0; i < nsrc; i++) {
+        cnt = load_index(&src[i], cnt);
+    }
+    char why[96] = "";
+    int rc = ensure_driver(compatible, src, nsrc, cnt, why, sizeof(why));
+    free(s_idx);
+    s_idx = NULL;
+    if (rc != 0) {
+        snprintf(summary, cap, "%s.", why);
+        return -1;
+    }
+    s_prof = trial;
+    if (save_profile() != 0) {
+        snprintf(summary, cap, "Added, but the profile could not be saved: it will be forgotten at restart.");
+    }
+    rebuild_board();
+    purr_drivers_bind_extra(&s_board);
+    const char *name = s_prof.dev[s_prof.count - 1].name;
+    snprintf(summary, cap, "Added %s: %s.", name, purr_device_state(name) == PURR_DEV_BOUND ? "running" : "saved, but the driver did not bind (see the log)");
+    return 0;
+}
+
+int purr_hwsetup_remove(const char *name, char *summary, size_t cap)
+{
+    for (int i = 0; i < s_prof.count; i++) {
+        if (strcmp(s_prof.dev[i].name, name) == 0) {
+            for (int j = i; j < s_prof.count - 1; j++) {
+                s_prof.dev[j] = s_prof.dev[j + 1];
+            }
+            s_prof.count--;
+            save_profile();
+            snprintf(summary, cap, "Removed %s. It stops at the next restart.", name);
+            return 0;
+        }
+    }
+    snprintf(summary, cap, "No device called %s in the profile.", name);
+    return -1;
+}
+
+int purr_hwsetup_read_text(const char *name, char *out, size_t cap)
+{
+    uint8_t buf[48] = {0};
+    int n = purr_device_read(name, buf, sizeof(buf));
+    if (n < 0) {
+        snprintf(out, cap, "%s: no reading (not set up, not running, or the driver has nothing to read)", name);
+        return -1;
+    }
+    int text = n > 1;
+    for (int i = 0; i < n && text; i++) {
+        text = buf[i] >= 32 && buf[i] < 127;
+    }
+    if (text) {
+        snprintf(out, cap, "%s: %s", name, (const char *)buf);
+        return 0;
+    }
+    size_t k = (size_t)snprintf(out, cap, "%s:", name);
+    for (int i = 0; i < n && k + 5 < cap; i++) {
+        k += (size_t)snprintf(out + k, cap - k, " %d", buf[i]);
+    }
+    return 0;
+}
+
+int purr_hwsetup_cmd(purr_cli_t *cli, int argc, char **argv)
+{
+    char msg[160];
+    if (argc >= 6 && strcmp(argv[1], "add") == 0) {
+        int r = purr_hwsetup_add_manual(argv[2], atoi(argv[3]), atoi(argv[4]), (int)strtol(argv[5], NULL, 0), msg, sizeof(msg));
+        purr_cli_printf(cli, "%s\n", msg);
+        return r == 0 ? 0 : 1;
+    }
+    if (argc >= 3 && strcmp(argv[1], "read") == 0) {
+        int r = purr_hwsetup_read_text(argv[2], msg, sizeof(msg));
+        purr_cli_printf(cli, "%s\n", msg);
+        return r == 0 ? 0 : 1;
+    }
+    if (argc >= 3 && strcmp(argv[1], "remove") == 0) {
+        int r = purr_hwsetup_remove(argv[2], msg, sizeof(msg));
+        purr_cli_printf(cli, "%s\n", msg);
+        return r == 0 ? 0 : 1;
+    }
+    if (argc == 1) {
+        purr_hwp_t p;
+        int n = purr_hwsetup_profile(&p);
+        purr_cli_printf(cli, "%d device(s) in /etc/board.conf\n", n);
+        for (int i = 0; i < n; i++) {
+            purr_cli_printf(cli, "  %-18s driver \"%s\"  pins %d/%d  addr 0x%02X  %s\n", p.dev[i].name, p.dev[i].compatible, p.dev[i].sda, p.dev[i].scl,
+                            p.dev[i].addr, purr_device_state(p.dev[i].name) == PURR_DEV_BOUND ? "running" : "not running");
+        }
+        return 0;
+    }
+    purr_cli_printf(cli, "usage: hwdev | hwdev add <driver> <sda> <scl> <addr> | hwdev read <name> | hwdev remove <name>\n");
+    return 1;
 }

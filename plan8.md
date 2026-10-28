@@ -190,3 +190,13 @@ test_driver +bind_extra; the Rust client 13). NOT run on a device or in the VM (
 Test plan (one session): flash the image; let it restore; sign in; Settings > Updates > Find hardware; with a BME280 on free GPIOs (SDA/SCL with pull-ups) expect "BME280 sensor ... driver bme280",
 then Set up; restart; "found by scan ... driver bme280" without "(not running)". Without a sensor expect "Nothing new answered". Check the log line "N free pins looked at" and that keyboard/touch still work after a scan.
 Known gaps: the sensor has no UI/shell reader yet (read() returns text; nothing calls it); no SPI/UART discovery; the index source in secure mode is the official server only; updates need a restart.
+
+### Add by hand + keyboard backlight driver (2026-10-28)
+- Settings > Updates > "Add a device by hand" (driver name, SDA, SCL, address) and the shell `hwdev [add <driver> <sda> <scl> <addr> | read <name> | remove <name>]`: for hardware whose wiring the
+  owner knows, or that sits on a bus the scan skips because the board already uses its pins. Fetches the driver if needed (same index, same checks), writes /etc/board.conf, binds. Tapping a
+  discovered device on the Updates page asks its driver for a reading (`purr_hwsetup_read_text`).
+- `Modules/drivers/kbd_backlight_module.c` (kbd-backlight 1.0.0, signed with the developer key, in the 1.0.3 drivers.manifest and out/devrepo): the T-Deck keyboard controller at 0x55 takes [0x01, level]
+  to set the key backlight (from LilyGO's published keyboard firmware, NOT verified on this unit). Each read steps the level off/64/128/255 so a tap shows the effect. Test: Updates > Add a device by hand:
+  `kbd-backlight`, 18, 8, `0x55` (or `hwdev add kbd-backlight 18 8 0x55`), then tap it. If the keys stay dark, the command is wrong for this controller revision: nothing else is affected.
+- Fixed while here: the Updates page kept stale pointers to its lists after leaving the page; they are cleared on every page change now.
+- The two drivers are in out/devrepo/recovery for the dev server and in ~/Desktop/PURR-OS-release-1.0.3/JumpingJaguar2 (previous copy: -prev3); out/hw/tdeck_plus-blank-flash.bin rebuilt.

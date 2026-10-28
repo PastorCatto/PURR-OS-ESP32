@@ -4183,6 +4183,7 @@ static const purr_cmd_t s_cmds[] = {
     {"revoke", "revoke <app> <permission>: the app asks again (admin)", purr_perms_cmd},
 #if CONFIG_PURR_PROFILE_FULL
     {"hwscan", "hwscan [power <gpio>]: look for attached hardware (I2C), reading only", purr_hwscan_cmd},
+    {"hwdev", "hwdev [add <driver> <sda> <scl> <addr> | read <name> | remove <name>]: devices set up by hand or by Find hardware", purr_hwsetup_cmd},
 #endif
     {"power", "power [screen on|off | timeout <seconds|never>]: sleep state, wake locks and alarms",
      purr_power_cmd},

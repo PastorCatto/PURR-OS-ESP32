@@ -604,6 +604,7 @@ static void net_forget_cb(lv_event_t *e)
 
 static purr_hwscan_report_t s_hw;
 static lv_obj_t *s_hw_list, *s_hw_setup_btn, *s_drv_list;
+static lv_obj_t *s_man_drv, *s_man_sda, *s_man_scl, *s_man_addr;
 
 static int hw_run(job_t *j)
 {
@@ -745,6 +746,63 @@ static void drv_update_cb(lv_event_t *e)
     job_start(j);
 }
 
+static int hw_read_run(job_t *j)
+{
+    return purr_hwsetup_read_text(j->a, j->msg, sizeof(j->msg)) == 0 ? 0 : -1;
+}
+
+static void hw_read_done(job_t *j)
+{
+    say(j->msg, j->rc == 0);
+}
+
+/* Tap a discovered device: ask its driver for a reading (a sensor's values; the keyboard backlight steps its brightness). */
+static void hw_row_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    static purr_hwp_t p;
+    if (purr_hwsetup_profile(&p) <= i || i < 0) {
+        return;
+    }
+    job_t *j = job_new(hw_read_run, hw_read_done);
+    if (j == NULL) {
+        return;
+    }
+    snprintf(j->a, sizeof(j->a), "%s", p.dev[i].name);
+    say("Reading...", 1);
+    job_start(j);
+}
+
+static int hw_add_run(job_t *j)
+{
+    int sda = 0, scl = 0, addr = 0;
+    if (sscanf(j->b, "%d %d %i", &sda, &scl, &addr) != 3) {
+        snprintf(j->msg, sizeof(j->msg), "Give the driver name, two pin numbers and an address like 0x55.");
+        return -1;
+    }
+    return purr_hwsetup_add_manual(j->a, sda, scl, addr, j->msg, sizeof(j->msg)) == 0 ? 0 : -1;
+}
+
+static void hw_add_done(job_t *j)
+{
+    say(j->msg, j->rc == 0);
+}
+
+static void hw_add_cb(lv_event_t *e)
+{
+    (void)e;
+    job_t *j = job_new(hw_add_run, hw_add_done);
+    if (j == NULL) {
+        say("Out of memory.", 0);
+        return;
+    }
+    snprintf(j->a, sizeof(j->a), "%s", lv_textarea_get_text(s_man_drv));
+    snprintf(j->b, sizeof(j->b), "%s %s %s", lv_textarea_get_text(s_man_sda), lv_textarea_get_text(s_man_scl), lv_textarea_get_text(s_man_addr));
+    j->stack = 12288;
+    say("Adding...", 1);
+    job_start(j);
+}
+
 static void page_updates(void)
 {
     cm_title(s_body, "Hardware");
@@ -777,8 +835,22 @@ static void page_updates(void)
         char sub[160];
         snprintf(sub, sizeof(sub), "found by scan: pins %d / %d, driver \"%s\"%s", prof.dev[i].sda, prof.dev[i].scl, prof.dev[i].compatible,
                  purr_device_state(prof.dev[i].name) == PURR_DEV_BOUND ? "" : " (not running)");
-        cm_row(s_body, prof.dev[i].label[0] ? prof.dev[i].label : prof.dev[i].name, sub, 0, NULL, NULL);
+        cm_row(s_body, prof.dev[i].label[0] ? prof.dev[i].label : prof.dev[i].name, sub, 1, hw_row_cb, (void *)(intptr_t)i);
     }
+    if (np > 0) {
+        cm_dim(s_body, "Tap a found device to take a reading from its driver.");
+    }
+
+    cm_space(s_body, 4);
+    cm_title(s_body, "Add a device by hand");
+    cm_dim(s_body, "For hardware you know the wiring of, or that sits on a bus Find hardware does not scan (for example the T-Deck keyboard's "
+                   "backlight: driver kbd-backlight, pins 18 and 8, address 0x55).");
+    s_man_drv = cm_input(s_body, "Driver name", 0);
+    s_man_sda = cm_input(s_body, "SDA pin", 0);
+    s_man_scl = cm_input(s_body, "SCL pin", 0);
+    s_man_addr = cm_input(s_body, "Address, like 0x55", 0);
+    lv_obj_t *ab = cm_button(s_body, "Add this device", hw_add_cb, NULL);
+    lv_obj_set_width(ab, LV_PCT(100));
 
     cm_space(s_body, 4);
     cm_title(s_body, "Drivers");
@@ -1766,6 +1838,7 @@ static void show_page(page_t page)
     s_status = NULL;
     s_net_state = s_net_list = s_net_form = s_net_ssid = s_net_pass = NULL;
     s_app_list = s_app_src = NULL;
+    s_hw_list = s_hw_setup_btn = s_drv_list = s_man_drv = s_man_sda = s_man_scl = s_man_addr = NULL;
     s_time_now = NULL;
     s_acct_auto_sw = s_acct_auto_pw = NULL;
     s_sec_state = s_sec_boot = s_sec_trust = s_sec_slot = s_sec_active = NULL;
