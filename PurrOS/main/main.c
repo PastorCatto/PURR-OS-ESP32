@@ -207,10 +207,14 @@ void app_main(void)
     }
     BOOT_STEP(0, "Starting services");
 
+#if !CONFIG_PURR_PROFILE_RECOVERY                /* KittenOS does not look at apps at all: it wipes, formats, verifies and restores */
     purr_apps_setup(&boot_cli);
+#endif
     purr_settings_setup();              /* /etc/system.conf: time zone, clock format; before any UI reads them */
     purr_power_sys_start();             /* screen timeout and wake locks; reads its settings from system.conf */
+#if !CONFIG_PURR_PROFILE_RECOVERY
     purr_catrt_setup(&boot_cli);
+#endif
     BOOT_STEP(1, "Starting network");
     purr_net_setup(&boot_cli);
     BOOT_STEP(2, "Preparing the shell");

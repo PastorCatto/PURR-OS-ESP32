@@ -152,3 +152,53 @@ Decisions from the owner:
 - Boot menu (F7): kept; no change decided yet beyond the BAD-slot greying already done.
 - Also here: the bootloader reset crash-loop (park_app_cpu) hardware check, moved from plan1.
 Open design for this item: the desktop restore tool (name, protocol: reuse `purrstrap dev serve` discovery, signed images only).
+
+### Recovery tool and KittenOS scope (owner, 2026-10-28)
+- Desktop restore tool: **broken-kitten-recovery** ("broken kitty recovery"), one self-contained executable for Windows, macOS and Linux that does the
+  whole safe restore. Also allowed on consumer devices: during the recovery loader's update channels, the device looks on the network for a trusted
+  source (a proxy, or a machine holding signed, verified images) and may use it. Trust is by signature, never by address. The GitHub emergency pull
+  (Q5) waits until this tool has been tested.
+- KittenOS must not touch apps: no app manager, no scan of installed apps at boot. Its job is to wipe, format the file system, verify (security,
+  signatures) and restore. Done 2026-10-28: the recovery profile no longer runs `purr_apps_setup` or `purr_catrt_setup` at boot (stdrec 5% free).
+- Still to do: the stage-2 module installs must reuse the kernel's own verification (the app manager and verifier belong to the kernel/CoreOS, not
+  to KittenOS). Options: (a) stage 2 only downloads and the kernel verifies on first boot; (b) KittenOS keeps a minimal verify-and-write path for
+  signed modules; (c) run the kernel's verifier from inside recovery (chroot-like). Recommendation: (a) for apps, (b) for the few modules the first
+  boot needs.
+
+### Must verify (owner, 2026-10-28)
+KittenOS and the recovery loader must keep working signature verification for everything they write (kernel, modules, KittenOS, loader image
+checks) after the app manager is gone from KittenOS. Add an explicit test: recovery profile boots, restores from a signed source, refuses a bad
+signature and a tampered image. Run in the VM (unattended recovery with a corrupted image) before the next release.
+
+### Emergency mode + verification test, VM (2026-10-28)
+- Built: `purr_recovery_emergency()` (purr_recovery_src.c). When the official manifest cannot be fetched and the bootloader allowed a dev server, the loader
+  finds a dev server on the LAN, checks it has recovery files for this board, and restores from it. Needs DEV_MODE + DEV_RECOVERY; not remembered across boots.
+- Test 1 (VM, blank device, official URL set to `.../JumpingJaguar3/recovery.manifest`): "Couldn't reach the install server" -> "emergency mode: using dev
+  server" -> kernel 1.0.0 and kittenos 1.0.0 installed. Pass.
+- Test 2 (same, one byte of the served kernel flipped): "download does not match the manifest (size or hash)"; the kernel was not written; KittenOS (untouched
+  file) installed; the loader ended with "Something went wrong while installing. Power it off and on to try again." and did not restart. Pass.
+- Not covered yet: a correct hash with a bad signature (needs a re-signed image with a wrong key), a tampered KittenOS image, hardware, and the case where the
+  dev server is also bad. After KittenOS has no app manager the stage 2 modules still go through the old verify path.
+
+### Verified relay for secure mode (owner idea, 2026-10-28; design, not built)
+A PC/Mac client (part of broken-kitten-recovery) downloads the official images, verifies them (hash and signature against the official key, plus the
+version floor), and serves them on the LAN. The device may pull from it even in secure (enforce) mode, which today is refused because the dev-server
+channel needs developer mode.
+- **The device never trusts the relay's word.** The relay announces "verified" for the user's benefit, but the loader checks every image itself against
+  the boot key, in enforce mode strictly (`purr_image_verify` + slot trailer check, already how restore works), whatever the source. A lying relay can only
+  waste time or serve an older signed image, and a below-floor image is rejected by the trailer check ("the bootloader would reject it").
+  That is why this is safe to allow without developer mode: the channel is a transport, not a trust source.
+- **Needed on the device:** a recovery source kind "relay" separate from "dev server": allowed in any secure mode, local addresses only (`purr_repo.h` rule),
+  verification forced strict for relay sources (never "accepted because secure mode is off"), and the saved source remembers the relay's id.
+- **Needed on the relay:** announce `relay` in the discovery line, serve `recovery.manifest` with hashes, its checks logged for the owner.
+- **Open (owner):** attended recovery asks "Use <name> at <address>?" on the device before pulling anything; unattended automatic recovery only uses a relay that
+  was paired earlier (its id saved while the owner was present), so a stranger's laptop on the network is never picked up silently.
+
+### Relay decisions (owner, 2026-10-28)
+- **Unattended recovery** may pull from a relay on its own, since the device verifies every image itself. Attended recovery always shows the relay's name and address
+  and asks first.
+- If verification fails in unattended mode: **dev mode** flashes anyway (existing "accepted because secure mode is off" behaviour); **not dev mode**, it fails and
+  the log says why.
+- The relay client also carries a **dev role**: when the system image is signed but drivers are not (onboarding new hardware), the client pushes the new drivers from
+  the developer's machine, and the client does the verifying for them.
+- The client is **broken-kitten-recovery**, written in Rust for Windows, macOS and Linux: `tools/broken-kitten-recovery/`.

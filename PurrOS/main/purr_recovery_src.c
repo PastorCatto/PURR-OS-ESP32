@@ -124,3 +124,23 @@ int purr_recovery_verify(const char *base, char *msg, size_t cap)
     snprintf(msg, cap, "Verified. It has PURR OS %s for this device.", e->version);
     return 0;
 }
+
+int purr_recovery_emergency(void)
+{
+    if (!purr_recovery_dev_allowed() || (load_once(), s_base[0] != '\0')) {
+        return -1;                                  /* not allowed, or a dev server is already the source and it was the one that failed */
+    }
+    static purr_lan_server_t found[4];
+    int n = purr_lan_discover(found, 4, 4000);
+    for (int i = 0; i < n; i++) {
+        char msg[96];
+        if (purr_recovery_verify(found[i].base, msg, sizeof(msg)) == 0) {
+            ESP_LOGW(TAG, "emergency mode: using dev server \"%s\" at %s", found[i].name, found[i].base);
+            snprintf(s_base, sizeof(s_base), "%s", found[i].base);
+            snprintf(s_name, sizeof(s_name), "%s", found[i].name);
+            return 0;
+        }
+        ESP_LOGW(TAG, "emergency mode: %s is no use: %s", found[i].base, msg);
+    }
+    return -1;
+}

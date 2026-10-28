@@ -715,8 +715,13 @@ static int restore_components(int include_kernel)
     size_t manifest_len = 0;
     if (purr_fetch_alloc(purr_recovery_manifest_url(), &manifest_buf, &manifest_len,
                          MAX_MANIFEST_SIZE) != ESP_OK) {
-        status("Couldn't reach the install server.");
-        return -1;
+        status("Couldn't reach the install server. Looking for a dev server (emergency mode)...");
+        if (purr_recovery_emergency() != 0 ||
+            purr_fetch_alloc(purr_recovery_manifest_url(), &manifest_buf, &manifest_len, MAX_MANIFEST_SIZE) != ESP_OK) {
+            status("Couldn't reach the install server.");
+            return -1;
+        }
+        status("Emergency mode: restoring from a dev server on this network");
     }
     purr_manifest_t man;
     purr_manifest_parse(&man, (const char *)manifest_buf, manifest_len);

@@ -27,6 +27,11 @@ int purr_recovery_verify(const char *base, char *msg, size_t cap);
 /* Use this server from now on (remembered for the next boot), or NULL for the official one. Ignored unless allowed. */
 void purr_recovery_use(const purr_lan_server_t *server);
 
+/* Emergency mode: the official server could not be used. If the bootloader allowed a dev server, look for one on the local network, check it
+ * has recovery files for this device and use it from now on (not remembered across boots unless the owner picked it on the setup page).
+ * 0 if one was found and is now the source; -1 if not allowed or nothing usable answered. Blocks for a few seconds: a worker task. */
+int purr_recovery_emergency(void);
+
 /* The files to fetch. Returned pointers stay valid until the next call to the same function. */
 const char *purr_recovery_manifest_url(void);
 const char *purr_recovery_modules_url(void);
