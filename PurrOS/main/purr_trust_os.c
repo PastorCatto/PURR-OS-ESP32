@@ -94,9 +94,9 @@ int purr_secure_set_dev(int on)
         return -2;
     }
     if (on) {
-        cfg.flags |= PURR_CFGF_DEV_MODE;
+        cfg.flags |= PURR_CFGF_DEV_MODE | PURR_CFGF_DEV_RECOVERY;      /* recovery may use a dev server only while developer mode is on */
     } else {
-        cfg.flags &= ~PURR_CFGF_DEV_MODE;
+        cfg.flags &= ~(PURR_CFGF_DEV_MODE | PURR_CFGF_DEV_RECOVERY);
     }
     return purr_cfg_store(&fl, &cfg) == 0 ? 0 : -1;
 }

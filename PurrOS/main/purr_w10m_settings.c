@@ -741,7 +741,7 @@ static void drv_update_cb(lv_event_t *e)
         say("Out of memory.", 0);
         return;
     }
-    j->stack = 12288;
+    j->stack = 10240;
     say("Checking for driver updates...", 1);
     job_start(j);
 }

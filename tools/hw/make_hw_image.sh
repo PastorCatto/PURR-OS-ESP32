@@ -22,7 +22,11 @@ for f in $BL $PT $REL/JumpingJaguar1/loader_tdeck_plus.cat $REL/JumpingJaguar1/b
   [[ -f $f ]] || { echo "missing $f"; exit 1; }
 done
 ps coreos slot-image --file $REL/JumpingJaguar1/loader_tdeck_plus.cat --board tdeck_plus --slot loader --out $W/loader_slot.bin >/dev/null
-ps keys trust-block --key signing_keys/boot.key --mode enforce --force-loader --out $W/purrcfg.bin >/dev/null
+# DEV_RECOVERY=1 (the default while debugging) sets the bootloader's DEV_RECOVERY flag, so recovery offers the dev server once developer mode
+# is on. Release images: build with DEV_RECOVERY=0.
+tb=(--mode enforce --force-loader)
+[[ ${DEV_RECOVERY-1} == 0 ]] || tb+=(--dev-recovery)
+ps keys trust-block --key signing_keys/boot.key $tb --out $W/purrcfg.bin >/dev/null
 $PY - "$OUT" "$W" "$BL" "$PT" "$REL" "$UIA" <<'PYEOF'
 import sys
 out, w, bl, pt, rel, uia = sys.argv[1:7]

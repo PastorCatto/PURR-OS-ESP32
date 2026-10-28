@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_heap_caps.h"
 
 #include "esp_log.h"
 #include "sdkconfig.h"
@@ -192,6 +193,13 @@ static int sources(source_t *out, int max)
     return n;
 }
 
+/* The index and the parsed manifest are about 4 KB each: take them from PSRAM when there is some, internal RAM is the scarce kind. */
+static void *big_calloc(size_t n)
+{
+    void *p = heap_caps_calloc(1, n, MALLOC_CAP_SPIRAM);
+    return p != NULL ? p : calloc(1, n);
+}
+
 static int fetch(const source_t *s, const char *url, uint8_t **out, size_t *len, size_t max)
 {
     if (!s->local) {
@@ -224,7 +232,7 @@ static int load_index(const source_t *s, int have)
     if (fetch(s, s->index_url, &buf, &len, INDEX_MAX) != 0) {
         return have;
     }
-    purr_manifest_t *mp = malloc(sizeof(*mp));
+    purr_manifest_t *mp = big_calloc(sizeof(*mp));
     if (mp == NULL) {
         free(buf);
         return have;
@@ -358,7 +366,7 @@ int purr_hwsetup_install(const purr_hwscan_report_t *rep, void (*progress)(const
     }
     source_t src[2];
     int nsrc = sources(src, 2);
-    s_idx = calloc(1, sizeof(*s_idx));
+    s_idx = big_calloc(sizeof(*s_idx));
     if (s_idx == NULL) {
         snprintf(summary, cap, "Out of memory.");
         return -1;
@@ -478,7 +486,7 @@ int purr_hwsetup_update_drivers(void (*progress)(const char *), char *summary, s
     int ninst = purr_hwsetup_list_drivers(inst, PURR_HWSETUP_MAX_DRIVERS);
     source_t src[2];
     int nsrc = sources(src, 2);
-    s_idx = calloc(1, sizeof(*s_idx));
+    s_idx = big_calloc(sizeof(*s_idx));
     if (s_idx == NULL) {
         snprintf(summary, cap, "Out of memory.");
         return -1;
@@ -559,7 +567,7 @@ int purr_hwsetup_add_manual(const char *compatible, int sda, int scl, int addr, 
     }
     source_t src[2];
     int nsrc = sources(src, 2);
-    s_idx = calloc(1, sizeof(*s_idx));
+    s_idx = big_calloc(sizeof(*s_idx));
     if (s_idx == NULL) {
         snprintf(summary, cap, "Out of memory.");
         return -1;
