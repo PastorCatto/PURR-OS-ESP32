@@ -1,0 +1,24 @@
+name = "myapp"
+version = "0.1.0"
+description = "A short description"
+class = "unprivileged"
+kind = "command-line"
+sdk_version = "0.1.0"
+entry = "myapp_entry"
+
+[catcalls]
+console = "1.0"
+
+[permissions]
+requests = []
+
+[runtime]
+stack_bytes = 8192
+heap_bytes = 16384
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "My App"
+icon = ""
