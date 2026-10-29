@@ -122,20 +122,24 @@ Rule 2 is the community path. Limits that always apply to rule 2: the app is **u
 as usual; and the package must be an `app`. Drivers and the system keep the existing rules (`Drivers/SPEC.md`): the key bag, or developer mode.
 In an **untrusted** repository the same install is allowed only with developer mode on, and the app is marked DEV like any other.
 
-## 6. The Store service (the companion)
+## 6. The Store's companion
 
-A background **service** (`[service]` entry of the Store package, `plan5.md`: about 64 KB, a wake window on an alarm, no screen) that owns every install:
+A small background app, **storesvc** (a daemon with no screen), plus the OS's own **store engine** (the `store` catcall, `purr_store.c`) that does the work. The engine
+owns every install; the Store app and the companion are two clients of it, so closing the Store never interrupts an install.
 
-- **install, update, remove** apps (`/apps/store/...`), by request of the Store app or on its own schedule (a check about every 12 hours on Wi-Fi; the owner can turn it off);
-- **assets and extras:** fetch and place them, checking the signed index and each file's SHA-256. `target=flash` goes to `/assets/<name>/` (system) or the user's home;
-  `target=sd` goes to `/sd/purr/<name>/` when an SD card is mounted. If an item needs an SD card and none is present, the service says so and does nothing;
-- **space:** refuses when the destination would be more than 90 % full, and says how much is needed;
-- **updates of the Store itself:** the Store app and the service are items in the official repository like any other. The service downloads a new version of either,
-  stages it, and swaps it in when neither is running (the old copy stays until the new one has started once);
-- **notifications:** "3 app updates" through the notification path (the `notify` permission), never a prompt;
-- **limits:** one transfer at a time, resumable by version, never writes outside its folders, and never installs from an untrusted repository without developer mode.
+- **install, update, remove** apps (`/home/<user>/apps/<name>/`, with a receipt), asset and extra files, by request of the Store app or on the companion's schedule
+  (a check every `store.check_hours` hours, 12 by default; the first one about 90 seconds after start);
+- **updates by themselves:** the companion posts a notification ("3 updates ready in the Store"). If the owner turned on `store.auto_update`, it then installs them too;
+- **assets and extras:** `target=flash` goes to `/home/<user>/assets/<name>/<dest>`; `target=sd` goes to `/sd/purr/<name>/<dest>` when an SD card is mounted. An item
+  that needs an SD card when there is none says so and installs nothing. (There is no SD driver yet: `/sd` is simply absent until one exists.) A version file records what is installed;
+- **space:** a flash download is refused if it would take the file system past 90 % full, and says how much it needs;
+- **updates of the Store itself:** the Store app and the companion are items in the official repository like any other. An update replaces the package on disk; it takes
+  effect the next time the app starts (the old copy stays running until then);
+- **limits:** one job at a time, never writes outside its folders, never installs from an untrusted repository without developer mode.
 
-The Store app is only a window onto the service: it lists, shows details and permissions, and asks the service to act. Closing the app never interrupts an install.
+A background app cannot be asked for a permission, so the companion's one permission ("install-apps") is granted by the Store's own seeding (section 9).
+When the OS has a service runtime (`plan5.md`: the `[service]` entry of a package, a wake window on an alarm), the companion becomes the second entry of the Store's package
+and its timers become an alarm; nothing else changes.
 
 ## 7. Maintainers
 
@@ -150,10 +154,14 @@ A repository chooses its own rules inside this format: categories, what it accep
 
 ## 9. Pre-installed
 
-- The Store app and its service are packages in the **official** repository (and also listed in `modules.manifest` of each release). **Setup (OOBE) downloads them
-  with the other modules**, and adds the official repository to `/etc/repos.conf` (official tier, endorsement checked).
-- Updates of both are ordinary items afterwards (section 6).
-- A device that cannot reach the network at setup gets them at the first online start; the Store tile appears when the package is on the device.
+- The Store app and its companion are **built into the firmware** (`tools/release/gen_builtin_apps.py` writes `purr_builtin_apps.c`). They are trusted because they ride inside
+  the kernel image, which is checked against the boot key before it runs; they carry no signature of their own. The first time an account signs in, they are installed into
+  that account's apps folder (a receipt names the built-in table and their hash; a marker in the home folder remembers, so removing the Store sticks) and the companion is
+  granted its permission and started. No network is needed, and setup (OOBE) stays as it is.
+- The official repository is **not** added silently. The Store's first page offers "Set up the Store" (administrators), which adds the official address
+  (`PURR_REPO_OFFICIAL_URL`, the release JumpingJaguar3), shows its fingerprint, and installs the Store's own updates from it. An endorsed repository becomes **official**
+  at once; until the project endorses it, it is shown as **community**.
+- Updates of both are ordinary items afterwards (section 6): a newer Store in the repository replaces the built-in one, with a receipt from that repository.
 
 ## 10. Open
 

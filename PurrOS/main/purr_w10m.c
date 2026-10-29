@@ -1027,6 +1027,18 @@ static void *note_ui(void *arg)
     return NULL;
 }
 
+static void *apps_changed_ui(void *arg)
+{
+    (void)arg;
+    w10m_apps_changed();
+    return NULL;
+}
+
+void w10m_apps_changed_post(void)
+{
+    purr_ui_service_run(apps_changed_ui, NULL, NULL);
+}
+
 void w10m_note_post(const char *title, const char *text)
 {
     note_req_t r;

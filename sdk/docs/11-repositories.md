@@ -1,0 +1,40 @@
+# Running a repository
+
+A repository is a folder of files on any web host (a GitHub release is perfect) that lists apps, assets and extras, and holds them. People add it to their device, and the Store shows what is in it. **Whoever runs a repository signs it.** The full format is in `Repositories/SPEC.md`; this is how to do it.
+
+## Make one
+
+```
+bin/purr repo init myrepo --name "My Apps" --maintainer "me" --url "https://github.com/me/my-apps"
+```
+
+It asks for a password and makes a key for the repository (`myrepo/keys/repo.key`, protected by that password) and a `repo.toml`. **The key is your repository's identity.** Anyone who adds your repository trusts this key; if you lose it, you have to start a new repository, and if it leaks, someone else can publish as you. Keep `keys/` out of git (it already is in `.gitignore`).
+
+## Add things
+
+```
+bin/purr repo add myrepo build/clock.cat --title "Clock" --desc "Tells the time" --category tools --source https://github.com/me/clock --perms keep-awake
+bin/purr repo add myrepo wallpaper.bin --type asset --name sunset --version 1.0 --dest wallpapers/sunset.bin --target any --title "Sunset wallpaper"
+```
+
+- An **app** is a `.cat` (built with `purr build`). It may be signed by you, by the app's author, or not at all: your repository's signature on the index is what vouches for it. The Store shows people the permissions it asks for (`--perms`).
+- An **asset** or **extra** is any file. `--dest` is where it goes under the item's folder (no `..`). `--target flash`, `sd` or `any`; add `--needs-sd` in the metadata if it cannot work without a card.
+
+## Build and publish
+
+```
+bin/purr repo build myrepo            # flat: for a GitHub release; add --layout tree for a plain web host
+bin/purr repo verify myrepo/out
+```
+
+`build` writes `repo.json`, `index.json`, a signature file for each, and the packages. **Upload every file** in `myrepo/out` as the assets of one GitHub release (flat layout), or to your web host (tree layout). `verify` checks a folder or an `https://` address the way a device does, so run it on the real address after you upload.
+
+People add it with the address of the release, like `https://github.com/me/my-apps/releases/download/v1`. The Store shows the name, your name and the **fingerprint** (the id, in groups of four letters) and asks them to confirm. Publish the fingerprint somewhere people can compare it (the README of the repository is a good place).
+
+## Trust, in short
+
+- **official**: the project endorsed your key (only the project can).
+- **community**: people added it and confirmed your fingerprint. This is the normal case.
+- **untrusted**: something does not match (a bad signature, or a changed key). It works only with developer mode on, and the Store says so.
+
+If you ever change the key, it is a different repository: everyone has to add it again and confirm the new fingerprint. That is on purpose.

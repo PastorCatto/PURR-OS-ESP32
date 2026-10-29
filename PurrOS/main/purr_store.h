@@ -27,4 +27,20 @@ int purr_store_cmd(purr_cli_t *cli, int argc, char **argv);
 /* First-run setup: add the official repository and install the Store and its companion. Blocking; call from a worker with a big stack. 0, or -1 with msg. */
 int purr_store_bootstrap(char *msg, size_t cap);
 
+
+/* The Store and its companion, built into the firmware (tools/release/gen_builtin_apps.py), so a new account has them without a network. */
+typedef struct {
+    const char *name;
+    const char *version;
+    const uint8_t *data;
+    uint32_t len;
+    uint8_t sha256[32];
+} purr_builtin_app_t;
+extern const purr_builtin_app_t purr_builtin_apps[];
+extern const int purr_builtin_apps_count;
+
+/* After a sign-in: puts the built-in apps in this user's apps folder, once (a marker in their home remembers, so removing the Store sticks), gives the
+ * companion the one permission it needs, and starts it. Runs on its own task. */
+void purr_store_session_started(void);
+
 #endif

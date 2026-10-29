@@ -46,6 +46,8 @@ void w10m_perm_init(void);
 
 /* Rebuilds the tiles and the app list from the installed apps. UI task only. */
 void w10m_apps_changed(void);
+/* The same from any task. */
+void w10m_apps_changed_post(void);
 
 /* The Developer Portal: its own app, a sheet over the start screen; opens only in developer mode. */
 void w10m_devportal_build(void);

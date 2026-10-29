@@ -65,3 +65,4 @@ PurrOS/components/coreos/test/host/fuzz/crash-*.bin
 
 # local build outputs and signed test packages (tools/vm)
 out/
+repos/*/keys/

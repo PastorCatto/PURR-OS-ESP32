@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 
 #include "commands.h"
+#include "purr_store.h"
 #include "purr_clock.h"
 #include "purr_kbdlight.h"
 #include "login.h"
@@ -98,6 +99,9 @@ void purr_session_started(void)
      * boot, before any login) -- this is the first point /home/<name> ownership can
      * actually be assigned by name. */
     purr_fs_permissions_migrate();
+#if CONFIG_PURR_PROFILE_FULL
+    purr_store_session_started();               /* the built-in Store and its companion, once per account */
+#endif
     /* The apps that were waiting for a user start now. */
     purr_catrt_user_logged_in();
 }

@@ -206,6 +206,15 @@ static void test_the_trusted_list_is_untrusted_input(void)
     CHECK_EQ(purr_repos_parse("", 0, &back), 0);
 }
 
+static void test_the_official_address_is_allowed(void)
+{
+    char why[80];
+    CHECK(purr_repo_url_allowed(PURR_REPO_STORE, PURR_REPO_OFFICIAL_URL, why, sizeof(why)));
+    CHECK(purr_repo_url_allowed(PURR_REPO_STORE, "https://raw.githubusercontent.com/me/apps/main", why, sizeof(why)));
+    CHECK(!purr_repo_url_allowed(PURR_REPO_STORE, "http://example.org/apps", why, sizeof(why)));      /* a store is https only */
+    CHECK(!purr_repo_url_allowed(PURR_REPO_STORE, "https://user:pw@example.org/", why, sizeof(why)));
+}
+
 static void test_format2_index_rules(void)
 {
     purr_repo_index_t idx;
@@ -243,6 +252,7 @@ int main(void)
     test_release_file_refusals();
     test_the_trusted_list();
     test_the_trusted_list_is_untrusted_input();
+    test_the_official_address_is_allowed();
     test_format2_index_rules();
     TK_DONE("test_repo_trust");
 }

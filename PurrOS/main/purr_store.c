@@ -71,6 +71,7 @@ static struct {
     purr_repo_add_class_t cls;
 } s_pending;
 
+static TaskHandle_t s_job_task;                     /* the task running the current job (it may rebuild the item list while the job is busy) */
 static purr_store_item_t *s_items;
 static int s_nitems, s_nupdates, s_items_dirty = 1;
 
@@ -501,7 +502,7 @@ static void asset_version(const purr_repo_app_t *a, char *out, size_t cap)
 static void rebuild_items(void)
 {
     lock();
-    if (!s_items_dirty && s_items != NULL) {
+    if (s_items != NULL && (!s_items_dirty || (s_job.busy && xTaskGetCurrentTaskHandle() != s_job_task))) {   /* a job is using the shared scratch buffer: show what we had */
         unlock();
         return;
     }
@@ -927,6 +928,7 @@ static int run_job(void)
 static void job_task(void *arg)
 {
     (void)arg;
+    s_job_task = xTaskGetCurrentTaskHandle();
     s_job.msg[0] = '\0';
     s_job.rc = run_job();
     snprintf(s_last, sizeof(s_last), "%s", s_job.msg);
@@ -1202,6 +1204,14 @@ int purr_store_vouches(const char *path, const uint8_t *data, size_t len)
     if (memcmp(mine, sha, 32) != 0) {
         return 0;                                    /* not the file that was installed */
     }
+    if (strcmp(repo, "builtin") == 0) {              /* it rides inside the signed firmware: it counts if it is still exactly what the firmware carries */
+        for (int i = 0; i < purr_builtin_apps_count; i++) {
+            if (strcmp(purr_builtin_apps[i].name, name) == 0 && memcmp(purr_builtin_apps[i].sha256, mine, 32) == 0) {
+                return 1;
+            }
+        }
+        return 0;
+    }
     return receipt_vouches(name, repo, idx8, sha);
 }
 
@@ -1231,7 +1241,16 @@ void purr_store_mark_vouched(purr_app_registry_t *reg, const char *apps_root)
             }
         }
         if (ok < 0) {
-            ok = receipt_vouches(a->name, repo, idx8, sha);
+            ok = 0;
+            if (strcmp(repo, "builtin") == 0) {
+                for (int b = 0; b < purr_builtin_apps_count; b++) {
+                    if (strcmp(purr_builtin_apps[b].name, a->name) == 0 && memcmp(purr_builtin_apps[b].sha256, sha, 32) == 0) {
+                        ok = 1;
+                    }
+                }
+            } else {
+                ok = receipt_vouches(a->name, repo, idx8, sha);
+            }
             if (ncache < 8) {
                 snprintf(cache[ncache].name, sizeof(cache[ncache].name), "%s", a->name);
                 memcpy(cache[ncache].sha, sha, 8);
@@ -1243,6 +1262,74 @@ void purr_store_mark_vouched(purr_app_registry_t *reg, const char *apps_root)
             a->verified = 1;
             a->signer_role = PURR_ROLE_VENDOR;
         }
+    }
+}
+
+/* ------------------------------------------------------------------ the built-in Store, seeded at first sign-in */
+
+static void ensure_exec_once(const char *app)
+{
+    static uint8_t buf[4300];
+    uint32_t n = 0;
+    if (read_file("/etc/apps.conf", buf, sizeof(buf) - 64, &n) < 0) {
+        n = 0;
+        buf[0] = '\0';
+    }
+    if (strstr((const char *)buf, app) != NULL && strstr((const char *)buf, "exec-once") != NULL) {
+        return;
+    }
+    n += (uint32_t)snprintf((char *)buf + n, sizeof(buf) - n, "%sexec-once = %s\n", n > 0 && buf[n - 1] != '\n' ? "\n" : "", app);
+    purr_fs_write(fs(), "/etc/apps.conf", buf, n);
+    char err[80];
+    purr_catrt_reload(err, sizeof(err));
+}
+
+static void seed_task(void *arg)
+{
+    (void)arg;
+    const char *u = user_name();
+    char marker[80], root[80];
+    snprintf(marker, sizeof(marker), "/home/%s/.store-seeded", u);
+    snprintf(root, sizeof(root), "/home/%s/apps", u);
+    int is_dir = 0;
+    uint32_t sz = 0;
+    if (u[0] != '\0' && purr_fs_stat(fs(), marker, &is_dir, &sz) != 0) {
+        char msg[80];
+        int ok = 0;
+        for (int i = 0; i < purr_builtin_apps_count; i++) {
+            const purr_builtin_app_t *b = &purr_builtin_apps[i];
+            char folder[120], pkg[140];
+            snprintf(folder, sizeof(folder), "%s/%s", root, b->name);
+            snprintf(pkg, sizeof(pkg), "%s/package.cat", folder);
+            if (purr_fs_stat(fs(), pkg, &is_dir, &sz) == 0) {
+                ok++;                                    /* already there (an update from a repository, or put there by hand) */
+                continue;
+            }
+            char full[65];
+            hex_of(b->sha256, 32, full);
+            if (purr_apps_install_vouched(b->data, b->len, b->name, "builtin", "00000000", full, msg, sizeof(msg)) == 0) {
+                ok++;
+            } else {
+                ESP_LOGW(TAG, "built-in %s: %s", b->name, msg);
+            }
+        }
+        if (ok == purr_builtin_apps_count) {
+            purr_catrt_perm_put("storesvc", PURR_PERM_INSTALL_APPS, PURR_PERM_ALWAYS);          /* a background app cannot be asked: the Store grants its own companion */
+            ensure_exec_once("storesvc");
+            char out[120];
+            purr_catrt_dispatch("exec storesvc", out, sizeof(out));        /* start it now; exec-once does it from the next sign-in */
+            purr_fs_write(fs(), marker, "1\n", 2);
+            w10m_apps_changed_post();
+            ESP_LOGI(TAG, "the Store and its companion are installed for %s", u);
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+void purr_store_session_started(void)
+{
+    if (purr_builtin_apps_count > 0 && xTaskCreate(seed_task, "store-seed", 12288, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "could not start the Store seeding task");
     }
 }
 
