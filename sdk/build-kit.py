@@ -355,11 +355,6 @@ def main():
         copy("PurrOS/components/littlefs/" + h, "PurrOS/components/littlefs/" + h)
     shutil.rmtree(os.path.join(KIT, "sdk", "purrsdk", "__pycache__"), ignore_errors=True)
 
-    say("The device's built-in public keys...")
-    os.makedirs(os.path.join(KIT, "keys", "default"), exist_ok=True)
-    for f in glob.glob(os.path.join(ROOT, "PurrOS", "components", "coreos", "keys", "*.pub.bin")):
-        shutil.copy2(f, os.path.join(KIT, "keys", "default"))
-
     say("The prebuilt parts...")
     images = a.images
     if not images:

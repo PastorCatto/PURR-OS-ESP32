@@ -32,10 +32,9 @@ def load_dir(path):
 
 
 def default_dir():
-    """The device's built-in key bag: the kit ships it in keys/default; a checkout has it
-    in the coreos component."""
+    """The device's built-in key bag: the public keys in the coreos component (the kit carries the same folder)."""
     here = os.path.dirname(os.path.abspath(__file__))
-    for rel in (("..", "..", "keys", "default"), ("..", "..", "PurrOS", "components", "coreos", "keys")):
+    for rel in (("..", "..", "PurrOS", "components", "coreos", "keys"),):
         p = os.path.abspath(os.path.join(here, *rel))
         if os.path.isdir(p) and load_dir(p):
             return p
