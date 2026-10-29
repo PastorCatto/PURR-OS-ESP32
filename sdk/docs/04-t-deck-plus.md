@@ -11,7 +11,7 @@ The goal for this board is **100 % supported**: every part has a driver you can 
 | Battery | ADC on GPIO 4 behind a 1:2 divider | `battery-adc` | built, not yet compared with a multimeter |
 | GPS | u-blox MIA-M10Q, UART, TX 43 / RX 44, 38400 baud (LilyGO) | `gnss-nmea` | written, tested against a scripted receiver |
 | LoRa | SX1262, SPI shared with the display, CS 9, BUSY 13, DIO1 45 (LilyGO) | `lora-sx126x` | written, tested against a scripted chip |
-| Trackball | five GPIOs (LilyGO) | none yet | template |
+| Trackball | five GPIOs (LilyGO) | `trackball-gpio` | written, tested against scripted pins; which pin is which direction is to verify |
 | SD card | SPI shared, CS 39 | none yet | template |
 | Speaker | I2S | none yet | template |
 

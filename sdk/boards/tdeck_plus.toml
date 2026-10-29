@@ -132,8 +132,8 @@ down = 15
 left = 1
 right = 2
 click = 0
-status = "template"
-note = "Five GPIOs (LilyGO). Click is GPIO 0, the boot strapping pin."
+status = "written"
+note = "Five GPIOs (LilyGO). Click is GPIO 0, the boot strapping pin. Which pin is which direction is to verify on the unit."
 
 [[device]]
 name = "sd0"

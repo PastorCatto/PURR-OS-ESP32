@@ -84,7 +84,7 @@ Not in Studio tonight: the emulator (separate job; the "Run" tile is a placehold
 | Battery | ADC GPIO 4 behind a 1:2 divider | `battery-adc` | built; not yet read on the device |
 | GPS | u-blox MIA-M10Q, UART, TX 43 / RX 44 | `gnss-nmea` | written tonight; host-tested only |
 | LoRa | SX1262, SPI shared with the display, CS 9, RST 17, DIO1 45, BUSY 13 | `lora-sx126x` | written tonight; host-tested only |
-| Trackball | five GPIOs (up, down, left, right, click) | not yet | template only |
+| Trackball | five GPIOs (up, down, left, right, click) | `trackball-gpio` | written tonight; tested against scripted pins |
 | SD card | SPI shared, CS 39 | not yet | template only |
 | Speaker, microphone | I2S | not yet | template only |
 | Wi-Fi, Bluetooth | the ESP32-S3's own radios | Wi-Fi is in the kernel; Bluetooth has no stack | `wifi` and `bluetooth` classes defined, templates written |

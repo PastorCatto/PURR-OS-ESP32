@@ -128,3 +128,24 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
 - `kbd-backlight`: now a board device on the T-Deck Plus (0x55 on the keyboard's wires). `read()` is the control channel: `[0xA5, level]` sets the nearest of the four steps, `[0xA6, x]` reports it.
   The level is the setting `keyboard.backlight` (0 off, 1 low, 2 medium, 3 high), switched off with the screen.
 - Both are baked into the firmware like the keyboard driver (`s_temp_drivers`), so they work with no network, and are also published in drivers.manifest.
+
+### 4.4 Bus ABI 6, driver classes and named-value config (2026-10-28)
+- **UART in the bus table.** `uart_open(port, tx, rx, baud, rx_buffer)` (ports 1 and 2; a handle is the port plus one), `uart_write`, `uart_read(handle, buf, cap, timeout_ms)`, `uart_set_baud`, `uart_close`.
+  Port 0 is the console and is not offered. `PURR_DRIVER_BUS_ABI_VERSION` is 6; `PURR_DRIVER_BUS_ABI_MIN` stays 4.
+- **Classes.** A driver of ABI 6 may declare `class_id` and `ops` (purr_driver_class.h). The kernel keeps a registry of bound drivers by class: `purr_class_find()` / `purr_class_ops()`. A driver built for ABI 4 or 5 has no such
+  fields and `purr_driver_class_id()` never reads them. Classes: `GNSS` (1), `LORA` (2), `MODEM` (3), `WIFI` (4), `HCI` (5). Every ops table starts with `uint32_t version`; a field is only ever added at the end.
+- **Named-value config.** `purr_kv_cfg_t` is up to 12 `{key[8], int32}` pairs. A board device or a line of `/etc/board.conf` that is not I2C carries its pins and settings this way (`bus=uart`, `tx=43`, `baud=38400`), and the driver reads
+  them with `purr_kv(cfg, "key", fallback)`. Keys that name a pin (tx rx cs rst busy dio1 dio2 pwr pps int en irq mosi miso sclk bck ws din dout mclk) are checked against the chip's reserved pins when the file is read.
+
+## 6a. Reference drivers by class (2026-10-28)
+| Driver | Class | Bus | Notes |
+|---|---|---|---|
+| `gnss-nmea` | GNSS | UART | GGA, RMC, GSV; checksum checked; fixed point, no libc |
+| `lora-sx126x` | LORA | SPI | SX1261/62/68: image calibration by band, TCXO on DIO3, RF switch on DIO2, LDRO, sync word; probe checks GetStatus |
+| `modem-at` | MODEM | UART | 3GPP AT commands: CEREG/CREG, CSQ, COPS, CGSN, CGDCONT/CGAUTH/CGACT, CGPADDR; sockets are not offered |
+| `wifi-esp-at` | WIFI | UART | Espressif AT firmware: scan, join, TCP sockets in passive receive mode |
+| `hci-h4` | HCI | UART | H4 framing, HCI_Reset; no flow control (not in the bus table) |
+| `trackball-gpio` | none | GPIO | `read()` returns `[dx, dy, click, 0]` |
+
+All are freestanding. A module has no libc, so a driver that copies structs or initialises arrays defines its own `memcpy` and `memset` (and `modules.py` compiles with `-fno-tree-loop-distribute-patterns` so those loops stay loops).
+They are tested by running the real driver against a Python bus (`sdk/tests/driverhost.py`, `test_drivers_host.py`).

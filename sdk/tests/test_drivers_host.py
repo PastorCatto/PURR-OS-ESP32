@@ -619,3 +619,44 @@ class HciH4(unittest.TestCase):
         self.assertEqual(ops.read(ld.handle, buf, 32, 100), -2)
         bus.outq += bytes([4, 0x13, 5, 1, 2])                                          # promises 5 bytes, delivers 2
         self.assertEqual(ops.read(ld.handle, buf, 32, 100), -2)
+
+
+class FakeBall(dh.Bus):
+    def __init__(self):
+        super().__init__()
+        self.level = {3: 1, 15: 1, 1: 1, 2: 1, 0: 1}
+
+    def gpio_get(self, pin):
+        return self.level.get(pin, 1)
+
+
+@unittest.skipUnless(helpers.clang(), "needs a C compiler")
+class Trackball(unittest.TestCase):
+    def load(self):
+        bus = FakeBall()
+        ld = dh.Loaded(os.path.join(DRIVERS, "trackball_gpio_module.c"), "trackball_gpio_entry", bus, dh.kv_cfg(up=3, down=15, left=1, right=2, click=0))
+        self.assertEqual(ld.probe(), 0)
+        self.addCleanup(ld.remove)
+        return ld, bus
+
+    def read(self, ld):
+        buf = C.create_string_buffer(4)
+        self.assertEqual(ld.drv.read(ld.handle, buf, 4), 4)
+        return tuple(b if b < 128 else b - 256 for b in buf.raw[:3])
+
+    def test_steps_and_click(self):
+        ld, bus = self.load()
+        self.assertEqual(self.read(ld), (0, 0, 0))                 # the first read only learns where the lines are
+        bus.level[2] = 0                                          # one step right
+        self.assertEqual(self.read(ld), (1, 0, 0))
+        self.assertEqual(self.read(ld), (0, 0, 0))                 # no change, no step
+        bus.level[2] = 1
+        bus.level[3] = 0                                          # a step up
+        self.assertEqual(self.read(ld), (1, -1, 0))                # the right line went back (a step), and up is negative
+        bus.level[0] = 0
+        self.assertEqual(self.read(ld)[2], 1)                      # the click is active low
+
+    def test_probe_needs_at_least_one_pin(self):
+        bus = FakeBall()
+        ld = dh.Loaded(os.path.join(DRIVERS, "trackball_gpio_module.c"), "trackball_gpio_entry", bus, dh.kv_cfg())
+        self.assertEqual(ld.probe(), -1)
