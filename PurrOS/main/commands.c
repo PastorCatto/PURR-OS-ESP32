@@ -42,6 +42,18 @@
 #include "purr_catrt_storage.h"
 #include "purr_catrt_files.h"
 #include "purr_catrt_devices.h"
+#include "purr_store.h"
+
+/* The Store (repositories, receipts) is part of the full system only: the recovery profile and the loader have no use for it and no room. */
+#if CONFIG_PURR_PROFILE_FULL
+#define STORE_VOUCHES(path, rb, len) purr_store_vouches(path, rb, len)
+#define STORE_MARK_VOUCHED(reg, root) purr_store_mark_vouched(reg, root)
+#define STORE_INIT() purr_catrt_store_init()
+#else
+#define STORE_VOUCHES(path, rb, len) 0
+#define STORE_MARK_VOUCHED(reg, root) ((void)0)
+#define STORE_INIT() ((void)0)
+#endif
 #include "purr_settings.h"
 #include "purr_power_plat.h"
 #include "purr_hwscan_plat.h"
@@ -685,6 +697,55 @@ int purr_devapps_install_url(const char *url, const purr_repo_app_t *app, char *
     purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, (uint32_t)got);
     if (r != PURR_APP_OK) {
         snprintf(msg, cap, "%s", purr_app_result_name(r));
+        return -1;
+    }
+    snprintf(msg, cap, "installed");
+    return 0;
+}
+
+const purr_keybag_t *purr_os_keybag(void)
+{
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    return env.bag;
+}
+
+int purr_apps_install_vouched(const uint8_t *data, size_t len, const char *name, const char *repo_id, const char *idx8, const char *sha_hex, char *msg, size_t cap)
+{
+    if (!purr_fs_mounted(&s_fs) || purr_login_current()->name[0] == '\0') {
+        snprintf(msg, cap, "sign in first");
+        return -1;
+    }
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    ensure_user_home(purr_login_current()->name);
+    purr_fs_mkdir(&s_fs, root);
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        snprintf(msg, cap, "out of memory");
+        return -1;
+    }
+    static purr_app_registry_t reg;
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);    /* before the package is copied over the buffer */
+    cfg.secure_mode = PURR_SECURE_OFF;               /* the repository's signed index stands for the package; the receipt is what the loader checks */
+    if (len > APP_SCRATCH_CAP) {
+        snprintf(msg, cap, "the package is too big");
+        return -1;
+    }
+    memcpy(scratch, data, len);
+    purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, (uint32_t)len);
+    if (r != PURR_APP_OK) {
+        snprintf(msg, cap, "%s", purr_app_result_name(r));
+        return -1;
+    }
+    char path[120], rc[160];
+    snprintf(path, sizeof(path), "%s/%s/receipt", root, name);
+    int n = snprintf(rc, sizeof(rc), "repo=%s\nidx=%s\nsha=%s\n", repo_id, idx8, sha_hex);
+    if (purr_fs_write(&s_fs, path, rc, (uint32_t)n) < 0) {
+        purr_appmgr_remove(&s_appmgr_fs, root, name);
+        snprintf(msg, cap, "could not save the receipt");
         return -1;
     }
     snprintf(msg, cap, "installed");
@@ -4507,6 +4568,7 @@ static const purr_cmd_t s_cmds[] = {
     {"revoke", "revoke <app> <permission>: the app asks again (admin)", purr_perms_cmd},
 #if CONFIG_PURR_PROFILE_FULL
     {"hwscan", "hwscan [power <gpio>]: look for attached hardware (I2C), reading only", purr_hwscan_cmd},
+    {"store", "store [repos | list | add <url> | confirm | refresh | check | install <name> <repo-id> | remove <name> <repo-id> | bootstrap]: repositories and the Store", purr_store_cmd},
     {"gps", "gps [fix | watch | power on|off | rate <hz>]: the GPS receiver", purr_gps_cmd},
     {"radio", "radio config <MHz> [...] | tx <text> | rx [seconds] | sleep: the LoRa radio", purr_radio_cmd},
     {"modem", "modem [status | power on|off | connect <apn> | disconnect | at <cmd>]: a cellular modem", purr_modem_cmd},
@@ -4584,6 +4646,7 @@ static void core_table_apps_scan(purr_app_registry_t *out_reg)
     purr_cfg_t cfg;
     purr_appmgr_env_t env = apps_env(&cfg);
     purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, out_reg);
+    STORE_MARK_VOUCHED(out_reg, root);               /* what a trusted repository vouches for shows and runs like any app */
 }
 
 void purr_apps_scan_current_user(purr_app_registry_t *out_reg)
@@ -4986,6 +5049,14 @@ static purr_load_result_t load_relocatable_image(uint8_t *rb, size_t len, const 
             ESP_LOGW(log_tag, "%s: UNSIGNED APP, loaded because developer mode allows it", path);
             vr = PURR_V_OK;
         }
+    }
+    /* A trusted repository's signed index stands for the package (Repositories/SPEC.md section 5): an unprivileged app with a receipt that matches these
+     * exact bytes. Never a module or a driver, and never an app in any folder but a user's own apps. */
+    if ((vr == PURR_V_NO_KEY || vr == PURR_V_ROLE_MISMATCH || vr == PURR_V_BAD_SIGNATURE) &&
+        expected_image_type == PURR_IMG_APP && hdr.image_type == PURR_IMG_APP && path_in_user_apps(path) &&
+        STORE_VOUCHES(path, rb, len)) {
+        ESP_LOGI(log_tag, "%s: vouched for by a trusted repository", path);
+        vr = PURR_V_OK;
     }
     if ((vr == PURR_V_NO_KEY || vr == PURR_V_ROLE_MISMATCH || vr == PURR_V_BAD_SIGNATURE) &&
         expected_image_type == PURR_IMG_MODULE && hdr.image_type == PURR_IMG_MODULE &&
@@ -5390,6 +5461,7 @@ void purr_catrt_setup(purr_cli_t *cli)
     purr_catrt_storage_init();
     purr_catrt_files_init();
     purr_catrt_devices_init();
+    STORE_INIT();
     purr_catrt_power_init();
     esp_err_t e = purr_catrt_start(&plat);
     purr_cli_printf(cli, "apps: runtime %s\n", e == ESP_OK ? "up" : "did not start");

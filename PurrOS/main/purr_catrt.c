@@ -70,6 +70,7 @@ static rtdev_t s_dev[PURR_RT_MAX_APPS];
 static EXT_RAM_BSS_ATTR purr_rt_t s_rt;
 static const void *s_files_table;
 static const void *s_devices_table;
+static const void *s_store_table;
 static const void *s_ui_table, *s_storage_table;       /* registered by purr_catrt_ui.c / purr_catrt_storage.c */
 static purr_catrt_ui_lifecycle_fn s_ui_lifecycle;
 static void (*s_storage_release)(int slot);
@@ -733,6 +734,11 @@ void purr_catrt_set_devices(const void *table)
     s_devices_table = table;
 }
 
+void purr_catrt_set_store(const void *table)
+{
+    s_store_table = table;
+}
+
 int purr_catrt_caller(char *name, size_t cap)
 {
     rtdev_t *d = cur_dev();
@@ -851,6 +857,9 @@ static const void *catcall_get(const char *name, uint32_t min_version)
     if (strcmp(name, "storage") == 0 && s_storage_table != NULL &&
         min_version <= ((const uint32_t *)s_storage_table)[0]) {
         return s_storage_table;
+    }
+    if (strcmp(name, "store") == 0 && s_store_table != NULL && min_version <= ((const uint32_t *)s_store_table)[0]) {
+        return s_store_table;
     }
     if (strcmp(name, "devices") == 0 && s_devices_table != NULL && min_version <= ((const uint32_t *)s_devices_table)[0]) {
         return s_devices_table;

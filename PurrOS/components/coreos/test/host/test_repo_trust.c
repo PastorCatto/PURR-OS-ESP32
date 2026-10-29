@@ -50,6 +50,8 @@ static void test_python_repository_verifies_in_c(void)
     CHECK(clock != NULL);
     CHECK_EQ(clock->type, PURR_REPO_ITEM_APP);
     CHECK_EQ(clock->vouched, 1);
+    CHECK_STR(clock->perms, "keep-awake");
+    CHECK_STR(clock->category, "tools");
     CHECK_EQ(purr_repo_check_package(clock, fx_comm_pkg, fx_comm_pkg_len), PURR_REPO_PKG_OK);
     const purr_repo_app_t *font = purr_repo_index_find(&idx, "mono-font");
     CHECK(font != NULL);

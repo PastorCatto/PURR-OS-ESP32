@@ -364,6 +364,30 @@ static int parse_app(jp_t *j, purr_repo_app_t *a, int *valid)
             }
             else if (strcmp(key, "dest") == 0)    r = jp_string(j, a->dest, sizeof(a->dest));
             else if (strcmp(key, "min_os") == 0)  r = jp_string(j, a->min_os, sizeof(a->min_os));
+            else if (strcmp(key, "category") == 0) r = jp_string(j, a->category, sizeof(a->category));
+            else if (strcmp(key, "perms") == 0) {          /* an array of names, kept as one comma separated line (cut off if it is long) */
+                if (jp_peek(j) != '[') return -1;
+                j->p++;
+                size_t pn = 0;
+                if (jp_peek(j) != ']') {
+                    for (;;) {
+                        char one[24];
+                        int pl = jp_string(j, one, sizeof(one));
+                        if (pl == -1) return -1;
+                        if (pl >= 0 && pn + 1 + (size_t)pl < sizeof(a->perms)) {
+                            if (pn > 0) a->perms[pn++] = ',';
+                            memcpy(a->perms + pn, one, (size_t)pl);
+                            pn += (size_t)pl;
+                            a->perms[pn] = '\0';
+                        }
+                        int c = jp_peek(j);
+                        if (c == ',') { j->p++; continue; }
+                        if (c == ']') break;
+                        return -1;
+                    }
+                }
+                j->p++;
+            }
             else if (strcmp(key, "needs_sd") == 0) { if (jp_int(j, &n) != 0) return -1; a->needs_sd = n != 0; }
             else if (strcmp(key, "signed") == 0) {
                 int c = jp_peek(j);

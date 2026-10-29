@@ -396,6 +396,7 @@ static int tier_from(const char *s)
     if (strcmp(s, "official") == 0) return PURR_TIER_OFFICIAL;
     if (strcmp(s, "community") == 0) return PURR_TIER_COMMUNITY;
     if (strcmp(s, "yours") == 0) return PURR_TIER_YOURS;
+    if (strcmp(s, "untrusted") == 0) return PURR_TIER_UNTRUSTED;
     return -1;
 }
 
@@ -450,8 +451,8 @@ int purr_repos_parse(const char *text, size_t len, purr_repos_t *out)
         memcpy(key, text + s, kl);
         key[kl] = '\0';
         if (strcmp(key, "id") == 0 && vl == PURR_RT_ID_HEX) memcpy(e.id, val, PURR_RT_ID_HEX + 1);
-        else if (strcmp(key, "name") == 0) snprintf(e.name, sizeof(e.name), "%s", val);
-        else if (strcmp(key, "url") == 0) snprintf(e.url, sizeof(e.url), "%s", val);
+        else if (strcmp(key, "name") == 0) snprintf(e.name, sizeof(e.name), "%.39s", val);
+        else if (strcmp(key, "url") == 0) snprintf(e.url, sizeof(e.url), "%.95s", val);
         else if (strcmp(key, "pub") == 0) have_pub = hex_decode(val, vl, e.pub, PURR_PUBKEY_LEN) == 0;
         else if (strcmp(key, "tier") == 0) { int t = tier_from(val); if (t >= 0) { e.tier = (uint8_t)t; have_tier = 1; } }
         else if (strcmp(key, "layout") == 0) e.flat = strcmp(val, "tree") != 0;

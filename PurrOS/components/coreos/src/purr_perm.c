@@ -12,6 +12,7 @@ static const struct {
     {"shared-storage", "see and change the files in your home folder"},
     {"system-files", "read the system's files (read-only)"},
     {"manage-devices", "find and set up hardware, and update drivers and the system"},
+    {"install-apps", "install, update and remove apps and downloads"},
 };
 
 const char *purr_perm_name(int perm)

@@ -67,6 +67,8 @@ typedef struct {
     uint8_t vouched;                    /* the index is signed by a trusted repository, which stands for the package (format 2, store kind) */
     char dest[PURR_REPO_DEST_LEN];      /* an asset or extra: its path under the destination folder */
     char min_os[12];                    /* the oldest OS it works on, "" for any */
+    char perms[48];                     /* the permissions an app asks for, comma separated, for the Store to show */
+    char category[16];
 } purr_repo_app_t;
 
 #define PURR_REPO_ITEM_APP    0

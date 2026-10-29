@@ -1,0 +1,26 @@
+name = "storesvc"
+version = "1.0.0"
+description = "The Store's companion: checks the repositories for updates in the background and, if you have asked, installs them"
+class = "unprivileged"
+kind = "daemon"
+sdk_version = "0.1.0"
+entry = "storesvc_entry"
+
+[catcalls]
+console = "1.0"
+sched = "1.0"
+store = "1.0"
+
+[permissions]
+requests = ["install-apps"]
+
+[runtime]
+stack_bytes = 8192
+heap_bytes = 4096
+threads = 1
+background = true
+saves_state = false
+
+[display]
+name = "Store companion"
+icon = ""

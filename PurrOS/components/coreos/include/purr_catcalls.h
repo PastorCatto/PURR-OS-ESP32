@@ -10,7 +10,7 @@
  * catcall (a timer, an open file, a subscription) is owned by that app and released when it
  * stops (AppRuntime/SPEC.md section 9).
  *
- * Catcall names, for catcall_get: "console", "app", "sched", "storage", "system", "event", "ctl", "ui", "power", "files", "devices".
+ * Catcall names, for catcall_get: "console", "app", "sched", "storage", "system", "event", "ctl", "ui", "power", "files", "devices", "store".
  */
 #ifndef PURR_CATCALLS_H
 #define PURR_CATCALLS_H
@@ -273,6 +273,68 @@ typedef struct {
     int  (*info)(const char *what, char *out, size_t cap);
     void (*restart)(void);
 } purr_cc_devices_t;
+
+/* -------------------------------------------------------------------- store */
+/* Repositories, and installing, updating and removing what they offer (Repositories/SPEC.md): what the Store app and its companion may do.
+ * One dangerous permission, "install-apps": the first call asks (PURR_STORE_ASK until answered, then PURR_APPEV_PERM). Adding or removing a repository
+ * also needs an administrator, because it decides what the device trusts.
+ *
+ * Work that takes time runs on its own task: start() returns at once, and when it ends the app gets PURR_APPEV_UI with the name "job" (arg 0 = it worked,
+ * 1 = it did not, 2 = it worked and has something to confirm: after "repo-add"); result() holds a sentence. One job at a time (PURR_STORE_BUSY).
+ *
+ * start(what, a, b) with what =
+ *   "repo-add"      fetch the release file at the address a (https), check it, and hold it for confirmation: pending() then describes it
+ *   "repo-confirm"  trust the repository that is pending (the person has read its name and fingerprint)
+ *   "repo-remove"   forget the repository whose id is a (its apps stay installed but stop being vouched for: they ask to be reinstalled)
+ *   "refresh"       fetch the signed index of repository a (or all, if a is "") and check it
+ *   "install"       install item a of repository b (an app, an asset or an extra); an update is an install of the newer version
+ *   "update-all"    install every update that is offered
+ *   "remove"        remove item a (b = its repository id)
+ *   "check"         refresh, then count the updates; if there are any, a notification says so (what a schedule calls)
+ *   "bootstrap"     add the official repository and install the Store and its companion (what setup calls)
+ * item(i) lists what the trusted repositories offer, from their last refresh. updates() counts the items with a newer version. */
+#define PURR_STORE_OK       0
+#define PURR_STORE_BAD     -1
+#define PURR_STORE_DENIED  -2
+#define PURR_STORE_ASK     -3
+#define PURR_STORE_BUSY    -4
+
+#define PURR_STORE_NOT_INSTALLED 0
+#define PURR_STORE_INSTALLED     1
+#define PURR_STORE_UPDATE        2
+
+typedef struct {
+    char name[32];
+    char title[32];
+    char version[16];
+    char installed[16];                 /* the installed version, "" if none */
+    char desc[80];
+    char repo[40];                      /* the repository's name */
+    char repo_id[20];
+    char tier[12];                      /* "official", "community" or "yours" */
+    char perms[48];                     /* comma separated */
+    char category[16];
+    uint32_t size;
+    uint8_t type;                       /* 0 app, 1 asset, 2 extra */
+    uint8_t target;                     /* 0 flash, 1 SD card, 2 either */
+    uint8_t needs_sd;
+    uint8_t state;                      /* PURR_STORE_* */
+} purr_store_item_t;
+
+typedef struct {
+    uint32_t version;                                   /* 1 */
+    int  (*is_admin)(void);
+    int  (*start)(const char *what, const char *a, const char *b);
+    int  (*result)(char *out, size_t cap);              /* the last job's sentence; its length */
+    int  (*pending)(char *out, size_t cap);             /* what "repo-add" found, to show before confirming: name, maintainer, fingerprint, tier */
+    int  (*repo)(int i, char *name, size_t ncap, char *info, size_t icap, char *id, size_t idcap);   /* a trusted repository: 1 if there is a row i */
+    int  (*item_count)(void);
+    int  (*item)(int i, purr_store_item_t *out);        /* 0 or a negative PURR_STORE_* */
+    int  (*updates)(void);
+    int  (*sd_present)(void);
+    /* A Store setting (keys starting "store."): "store.auto_update" (1 = install updates when a check finds them), "store.check_hours" (how often to check). */
+    int  (*setting)(const char *key, int fallback);
+} purr_cc_store_t;
 
 #ifdef __cplusplus
 }

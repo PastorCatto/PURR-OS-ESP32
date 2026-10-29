@@ -1014,6 +1014,27 @@ static void add_note(const char *title, const char *text)
     w10m_banner(line, 0);
 }
 
+typedef struct {
+    char title[32], text[96];
+} note_req_t;
+
+static void *note_ui(void *arg)
+{
+    note_req_t *r = arg;
+    if (s_cc_notes != NULL) {
+        add_note(r->title, r->text);
+    }
+    return NULL;
+}
+
+void w10m_note_post(const char *title, const char *text)
+{
+    note_req_t r;
+    snprintf(r.title, sizeof(r.title), "%s", title != NULL ? title : "");
+    snprintf(r.text, sizeof(r.text), "%s", text != NULL ? text : "");
+    purr_ui_service_run(note_ui, &r, NULL);
+}
+
 static void clear_notes(lv_event_t *e)
 {
     (void)e;

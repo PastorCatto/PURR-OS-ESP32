@@ -113,6 +113,14 @@ void purr_swap_setup(purr_cli_t *cli);
  * is mounted. */
 void purr_apps_scan_current_user(purr_app_registry_t *out_reg);
 
+/* The key bag this device checks signatures against (the built-in keys plus the trust block's). */
+const purr_keybag_t *purr_os_keybag(void);
+
+/* Installs an app a trusted repository vouches for (Repositories/SPEC.md section 5): the package is already downloaded and checked against the repository's
+ * signed index. It goes into the signed-in user's apps folder with a receipt (repo, index copy, package hash) that the loader checks. Worker task only.
+ * 0 on success; msg says what happened. */
+int purr_apps_install_vouched(const uint8_t *data, size_t len, const char *name, const char *repo_id, const char *idx8, const char *sha_hex, char *msg, size_t cap);
+
 /* The kernel<->CoreOS call table (purr_kernel_table.h), for main.c's own boot orchestration
  * (run_login()/run_shell()) to call through instead of touching purr_kernel_key()/
  * purr_login_*() directly -- written this way now so the same code needs no rewriting once it

@@ -98,6 +98,7 @@ int purr_catrt_post_event(int slot, int type, int arg, const char *name);
 /* The power code registers to hear when an app stops and when it leaves the front. */
 void purr_catrt_set_files(const void *table);
 void purr_catrt_set_devices(const void *table);
+void purr_catrt_set_store(const void *table);
 void purr_catrt_set_power(const void *table, void (*stopped)(int slot, const char *name), void (*paused)(int slot));
 
 #ifdef __cplusplus

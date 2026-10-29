@@ -31,6 +31,9 @@ void w10m_busy_end(void);
 void w10m_banner(const char *msg, int bad);
 void w10m_banner_post(const char *msg, int bad);
 
+/* A new notification (the notification shade and the strip) from any task. */
+void w10m_note_post(const char *title, const char *text);
+
 /* The button (from w10m_button) that was pressed last, or NULL if it has since been deleted. UI task only. */
 lv_obj_t *w10m_last_button(void);
 

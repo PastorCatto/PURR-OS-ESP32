@@ -1030,7 +1030,7 @@ static void perm_section(void)
         cm_text(s_body, s_perm_apps[i]);
         for (int p = 0; p < PURR_PERM_COUNT; p++) {
             static const char *const label[PURR_PERM_COUNT] = {"Keep the device awake", "Wake on a schedule", "See and change your files", "Read system files",
-                                                               "Manage devices and updates"};
+                                                               "Manage devices and updates", "Install and update apps"};
             lv_obj_t *sw = cm_switch(s_body, label[p], purr_catrt_perm_get(s_perm_apps[i], p) == PURR_PERM_ALWAYS,
                                      perm_cb);
             lv_obj_set_user_data(sw, (void *)(intptr_t)(i * PURR_PERM_COUNT + p));
