@@ -135,7 +135,6 @@ static lv_obj_t *s_status;              /* the status strip */
 static lv_obj_t *s_clock;
 static lv_obj_t *s_batt, *s_batt_body, *s_batt_fill, *s_batt_nub;     /* the battery icon in the strip, hidden when there is no reading */
 static lv_obj_t *s_status_dev;          /* "DEV" / "UNSIGNED OK" badge while developer mode is active */
-static lv_obj_t *s_status_user;         /* the signed-in user's name, at the left of the strip */
 static lv_obj_t *s_net;
 static lv_obj_t *s_allapps;             /* the round button at the end of the tiles */
 static lv_obj_t *s_allapps_circle, *s_allapps_arrow, *s_allapps_label;
@@ -411,18 +410,19 @@ static void battery_icon_set(int pct)
     lv_obj_set_style_border_color(s_batt_body, c, 0);
 }
 
-/* Keeps the icons in a row, right to left: clock, battery (when there is a reading), then the network. The clock's width changes with the time. */
+/* The icons in a row from the left (network, then battery when there is a reading); the clock alone at the far right. There is no user name in the strip. */
 static void status_layout(void)
 {
     lv_obj_update_layout(s_status);
     lv_obj_align(s_clock, LV_ALIGN_RIGHT_MID, -6, 0);
-    lv_obj_t *prev = s_clock;
-    if (s_batt != NULL && !lv_obj_has_flag(s_batt, LV_OBJ_FLAG_HIDDEN)) {
-        lv_obj_align_to(s_batt, prev, LV_ALIGN_OUT_LEFT_MID, -8, 0);
-        prev = s_batt;
-    }
+    int x = 6;
     if (s_net != NULL) {
-        lv_obj_align_to(s_net, prev, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+        int w = lv_obj_get_width(s_net), vw = w * 160 / 256;           /* the icon is drawn at 160/256 of its size, around its middle */
+        lv_obj_align(s_net, LV_ALIGN_LEFT_MID, x - (w - vw) / 2, 0);
+        x += vw + 8;
+    }
+    if (s_batt != NULL && !lv_obj_has_flag(s_batt, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_align(s_batt, LV_ALIGN_LEFT_MID, x, 0);
     }
 }
 
@@ -489,14 +489,8 @@ static void build_status(void)
         s_net = lv_image_create(s_status);
         lv_image_set_src(s_net, net);
         lv_image_set_scale(s_net, 160);          /* the icons are drawn for a bigger panel */
-        lv_obj_align(s_net, LV_ALIGN_RIGHT_MID, -56, 0);
+        lv_obj_align(s_net, LV_ALIGN_LEFT_MID, 6, 0);
     }
-    s_status_user = lv_label_create(s_status);
-    lv_label_set_text(s_status_user, purr_login_current()->name[0] ? purr_login_current()->name : "");
-    lv_obj_set_style_text_font(s_status_user, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(s_status_user, lv_color_white(), 0);
-    lv_obj_align(s_status_user, LV_ALIGN_LEFT_MID, 6, 0);
-
     s_status_dev = lv_label_create(s_status);
     lv_obj_set_style_text_font(s_status_dev, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_status_dev, lv_color_hex(0xFFB900), 0);
@@ -1359,7 +1353,6 @@ static void *signin_done_cb(void *arg)
             lv_indev_set_group(kb, NULL);                 /* the keyboard is free for apps again */
         }
         ESP_LOGI(TAG, "signed in as %s", j->name);
-        lv_label_set_text(s_status_user, j->name);
         purr_theme_load_user(j->name);
         purr_session_started();
         apps_refresh();
