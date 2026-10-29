@@ -78,6 +78,25 @@ static int rel_ok(const char *s)
     return 1;
 }
 
+/* A destination inside an asset folder: relative, plain characters, no climbing, not hidden. */
+static int dest_ok(const char *s)
+{
+    size_t n = strlen(s);
+    if (n == 0 || n >= PURR_REPO_DEST_LEN || s[0] == '/' || s[0] == '.') {
+        return 0;
+    }
+    if (strstr(s, "..") != NULL || strstr(s, "//") != NULL || strstr(s, "/.") != NULL) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!is_alnum((unsigned char)c) && c != '.' && c != '_' && c != '-' && c != '/') {
+            return 0;
+        }
+    }
+    return s[n - 1] != '/';
+}
+
 int purr_repo_hex_to_sha256(const char *hex, uint8_t out[32])
 {
     if (strlen(hex) != 64) {
@@ -323,6 +342,29 @@ static int parse_app(jp_t *j, purr_repo_app_t *a, int *valid)
             else if (strcmp(key, "updated") == 0) { if (jp_int(j, &n) != 0) return -1; a->updated = n > 0 ? (uint32_t)n : 0; }
             else if (strcmp(key, "abi") == 0)     { if (jp_int(j, &n) != 0) return -1; a->abi = (n > 0 && n < 256) ? (uint8_t)n : 0; }
             else if (strcmp(key, "key_id") == 0)  { if (jp_int(j, &n) != 0) return -1; a->key_id = (n > 0 && n < 256) ? (uint8_t)n : 0; }
+            else if (strcmp(key, "type") == 0) {
+                char v[8];
+                r = jp_string(j, v, sizeof(v));
+                if (r >= 0) {
+                    if (strcmp(v, "app") == 0) a->type = PURR_REPO_ITEM_APP;
+                    else if (strcmp(v, "asset") == 0) a->type = PURR_REPO_ITEM_ASSET;
+                    else if (strcmp(v, "extra") == 0) a->type = PURR_REPO_ITEM_EXTRA;
+                    else ok = 0;                          /* a kind of item this OS does not know */
+                } else if (r == -2) ok = 0;
+            }
+            else if (strcmp(key, "target") == 0) {
+                char v[8];
+                r = jp_string(j, v, sizeof(v));
+                if (r >= 0) {
+                    if (strcmp(v, "flash") == 0) a->target = PURR_REPO_TARGET_FLASH;
+                    else if (strcmp(v, "sd") == 0) a->target = PURR_REPO_TARGET_SD;
+                    else if (strcmp(v, "any") == 0) a->target = PURR_REPO_TARGET_ANY;
+                    else ok = 0;
+                } else if (r == -2) ok = 0;
+            }
+            else if (strcmp(key, "dest") == 0)    r = jp_string(j, a->dest, sizeof(a->dest));
+            else if (strcmp(key, "min_os") == 0)  r = jp_string(j, a->min_os, sizeof(a->min_os));
+            else if (strcmp(key, "needs_sd") == 0) { if (jp_int(j, &n) != 0) return -1; a->needs_sd = n != 0; }
             else if (strcmp(key, "signed") == 0) {
                 int c = jp_peek(j);
                 if (c == 't') { if (jp_lit(j, "true") != 0) return -1; a->signed_claim = 1; }
@@ -343,6 +385,12 @@ static int parse_app(jp_t *j, purr_repo_app_t *a, int *valid)
     if (ok && (!name_ok(a->name) || !version_ok(a->version) || !rel_ok(a->url) ||
                a->size == 0 || a->size > PURR_REPO_MAX_PACKAGE ||
                purr_repo_hex_to_sha256(sha_hex, a->sha256) != 0)) {
+        ok = 0;
+    }
+    if (ok && a->type != PURR_REPO_ITEM_APP && !dest_ok(a->dest)) {
+        ok = 0;                                          /* an asset or extra must say where it goes, and plainly */
+    }
+    if (ok && a->type == PURR_REPO_ITEM_APP && a->dest[0] != '\0') {
         ok = 0;
     }
     if (ok && a->title[0] == '\0') {
@@ -455,7 +503,7 @@ int purr_repo_index_parse(const char *json, size_t len, purr_repo_index_t *out,
             return -1;
         }
     }
-    if (!have_format || out->format != PURR_REPO_FORMAT) {
+    if (!have_format || (out->format != PURR_REPO_FORMAT && out->format != PURR_REPO_FORMAT_STORE)) {
         set_err(err, errcap, "unsupported index format");
         return -1;
     }
@@ -466,6 +514,13 @@ int purr_repo_index_parse(const char *json, size_t len, purr_repo_index_t *out,
             return -1;
         }
         out->kind = *kind;
+        if (out->format == PURR_REPO_FORMAT_STORE && *kind != PURR_REPO_STORE) {
+            set_err(err, errcap, "only a store repository uses format 2");
+            return -1;
+        }
+        for (int i = 0; i < out->count; i++) {            /* a signed format-2 index stands for its packages */
+            out->apps[i].vouched = out->format == PURR_REPO_FORMAT_STORE && *kind == PURR_REPO_STORE;
+        }
         int kept = 0;
         for (int i = 0; i < out->count; i++) {
             if (purr_repo_app_allowed(*kind, &out->apps[i], NULL, 0)) {
@@ -491,7 +546,7 @@ const purr_repo_app_t *purr_repo_index_find(const purr_repo_index_t *idx, const 
 
 int purr_repo_app_allowed(purr_repo_kind_t kind, const purr_repo_app_t *app, char *why, size_t whycap)
 {
-    if (kind == PURR_REPO_STORE && !app->signed_claim) {
+    if (kind == PURR_REPO_STORE && !app->signed_claim && !app->vouched) {
         set_err(why, whycap, "a store only offers signed apps");
         return 0;
     }

@@ -26,12 +26,18 @@ extern "C" {
 #endif
 
 #define PURR_REPO_FORMAT       1
+#define PURR_REPO_FORMAT_STORE 2        /* the signed index of a store repository (Repositories/SPEC.md) */
+
+/* The official repository: the release JumpingJaguar3 of the project's repository. A PLACEHOLDER until that release is published (JumpingJaguar1 holds the
+ * recovery images and JumpingJaguar2 the drivers and modules). Its layout is flat: repo.json, index.json, their .sig files and the packages are all assets. */
+#define PURR_REPO_OFFICIAL_URL "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar3"
 #define PURR_REPO_MAX_APPS     32
 #define PURR_REPO_NAME_LEN     32       /* app name, as in the app manager */
 #define PURR_REPO_VERSION_LEN  16
 #define PURR_REPO_TITLE_LEN    32
 #define PURR_REPO_DESC_LEN     80
 #define PURR_REPO_URL_LEN      96       /* an app's package path, relative to the repository */
+#define PURR_REPO_DEST_LEN     64       /* where an asset or extra is written, relative to its folder */
 #define PURR_REPO_ID_LEN       24
 #define PURR_REPO_MAX_PACKAGE  (512u * 1024u)   /* the app manager's scratch buffer */
 #define PURR_REPO_MAX_INDEX    (24u * 1024u)    /* an index larger than this is refused */
@@ -54,7 +60,21 @@ typedef struct {
     uint8_t abi;                        /* app ABI the package was built for, 0 if unknown */
     uint8_t key_id;                     /* the key it claims to be signed with; 0 if none */
     uint8_t signed_claim;               /* the repository says it is signed (the package decides) */
+    /* Format 2 (Repositories/SPEC.md): */
+    uint8_t type;                       /* PURR_REPO_ITEM_* */
+    uint8_t target;                     /* PURR_REPO_TARGET_* */
+    uint8_t needs_sd;                   /* cannot work without an SD card */
+    uint8_t vouched;                    /* the index is signed by a trusted repository, which stands for the package (format 2, store kind) */
+    char dest[PURR_REPO_DEST_LEN];      /* an asset or extra: its path under the destination folder */
+    char min_os[12];                    /* the oldest OS it works on, "" for any */
 } purr_repo_app_t;
+
+#define PURR_REPO_ITEM_APP    0
+#define PURR_REPO_ITEM_ASSET  1
+#define PURR_REPO_ITEM_EXTRA  2
+#define PURR_REPO_TARGET_FLASH 0
+#define PURR_REPO_TARGET_SD    1
+#define PURR_REPO_TARGET_ANY   2
 
 typedef struct {
     int format;

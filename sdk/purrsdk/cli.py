@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from . import __version__, boards, brand, configs, doctor, flash, formats, inspector, keys, minitoml, projects, release, runner, workspace
+from . import __version__, boards, brand, configs, doctor, flash, formats, inspector, keys, minitoml, projects, release, repo, runner, workspace
 
 TTY = sys.stdout.isatty()
 COL = {"ok": "92", "warn": "93", "bad": "91", "info": "96", "dim": "90"}
@@ -242,6 +242,49 @@ def cmd_flash(a):
     return 0 if r["ok"] else 1
 
 
+def cmd_repo(a):
+    try:
+        if a.action == "init":
+            pw = password(a, "Choose a password for the repository's key: ")
+            r = repo.init(a.folder, a.name or os.path.basename(os.path.abspath(a.folder)), a.maintainer or "", a.url or "", pw, a.description or "")
+            print(paint("Made the repository.", "ok") + " id " + repo.pretty_fingerprint(r["id"]))
+            print("Add packages with `purr repo add %s FILE`, then `purr repo build %s`." % (a.folder, a.folder))
+            print("Keep keys/repo.key private (it is already in .gitignore).")
+        elif a.action == "add":
+            m = repo.add(a.folder, a.file, a.title or "", a.desc or "", a.category or "", a.source or "", (a.perms or "").split(",") if a.perms else [], a.type, a.target, a.dest or "",
+                         a.min_os or "", "", None, a.version)
+            print(paint("Added ", "ok") + "%s %s (%s)" % (m["name"], m["version"], m["type"]))
+        elif a.action == "build":
+            pw = password(a, "Repository key password: ")
+            out = a.out or os.path.join(a.folder, "out")
+            r = repo.build(a.folder, out, pw, a.layout)
+            print(paint("Built ", "ok") + "%d item(s), repository %s, into %s" % (r["apps"], repo.pretty_fingerprint(r["id"]), out))
+            for f in r["files"]:
+                print("   " + f)
+            print("Upload them as the assets of a release (flat), or to your web host (tree).")
+        elif a.action == "release":
+            pw = password(a, "Repository key password: ")
+            out = a.out or os.path.join(a.folder, "out", "JumpingJaguar3")
+            r = repo.build(a.folder, out, pw, "flat")
+            print(paint("Built the release folder ", "ok") + out + " (%d item(s)). Upload every file in it as an asset of the JumpingJaguar3 release." % r["apps"])
+        elif a.action == "endorse":
+            pw = password(a, "System key password: ")
+            e = repo.endorse(a.folder, resolve_key(ws_of(a), a.key), a.key_id, pw)
+            print(paint("Endorsed ", "ok") + "repository %s with key %d. Rebuild to include it." % (repo.pretty_fingerprint(e["repo_id"]), e["key_id"]))
+        elif a.action == "verify":
+            r = repo.verify(a.folder, [ws_of(a).keys])
+            print("%s: %s, repository %s, %d item(s), %s layout" % (r["name"] or "?", paint(r["tier"], "ok" if r["ok"] else "bad"), repo.pretty_fingerprint(r["id"]) if r["id"] else "?", r["apps"], r.get("layout", "?")))
+            for n in r["notes"]:
+                line("info", "", n)
+            for pr in r["problems"]:
+                line("bad", "", pr)
+            return 0 if r["ok"] else 1
+    except repo.RepoError as e:
+        print(paint("Not this time: ", "bad") + str(e))
+        return 1
+    return 0
+
+
 def cmd_run(a):
     exe = os.environ.get("PURR_EMULATOR")
     if not exe:
@@ -354,6 +397,17 @@ def build_parser():
     s.add_argument("--offset", default="0x0", help="0x0 for a full flash image")
     s.add_argument("--yes", action="store_true", help="do not ask")
     s.set_defaults(fn=cmd_flash)
+
+    s = sub.add_parser("repo", help="make and run a repository of apps (init, add, build, release, endorse, verify)")
+    s.add_argument("action", choices=("init", "add", "build", "release", "endorse", "verify"))
+    s.add_argument("folder", help="the repository folder (for `add`, the folder; for `verify`, a folder or https address)")
+    s.add_argument("file", nargs="?", help="for `add`: the package")
+    s.add_argument("--name"); s.add_argument("--maintainer"); s.add_argument("--url"); s.add_argument("--description")
+    s.add_argument("--title"); s.add_argument("--desc"); s.add_argument("--category"); s.add_argument("--source"); s.add_argument("--perms", help="comma separated")
+    s.add_argument("--type", choices=repo.TYPES); s.add_argument("--target", default="flash", choices=repo.TARGETS); s.add_argument("--dest"); s.add_argument("--min-os"); s.add_argument("--version")
+    s.add_argument("--layout", default="flat", choices=("flat", "tree")); s.add_argument("--out")
+    s.add_argument("--key", help="for `endorse`: the project key a device trusts (today the boot key)"); s.add_argument("--key-id", type=int, default=1)
+    s.set_defaults(fn=cmd_repo)
 
     s = sub.add_parser("run", help="run an image in the emulator (when one is installed)")
     s.add_argument("image")

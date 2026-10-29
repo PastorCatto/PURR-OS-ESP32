@@ -92,7 +92,7 @@ static void test_malformed_documents(void)
     CHECK_EQ(parse("{", &idx, NULL), -1);
     CHECK_EQ(parse("{\"format\":1,\"apps\":[", &idx, NULL), -1);
     CHECK_EQ(parse("{\"format\":1,\"apps\":[{\"name\":\"a\"", &idx, NULL), -1);
-    CHECK_EQ(parse("{\"format\":2,\"apps\":[]}", &idx, NULL), -1);          /* a format we do not know */
+    CHECK_EQ(parse("{\"format\":3,\"apps\":[]}", &idx, NULL), -1);          /* a format we do not know */
     CHECK_EQ(parse("{\"apps\":[]}", &idx, NULL), -1);                       /* no format at all */
     CHECK_EQ(parse("{\"format\":1,\"repo\":{\"kind\":\"cloud\"},\"apps\":[]}", &idx, NULL), -1);
     CHECK_EQ(parse("{\"format\":1,\"apps\":[]}", &idx, NULL), 0);           /* empty is fine */

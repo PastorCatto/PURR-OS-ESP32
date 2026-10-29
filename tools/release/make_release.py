@@ -33,6 +33,7 @@ from lib import image as pimg  # noqa: E402
 PY = os.path.expanduser("~/.espressif/python_env/idf5.3_py3.9_env/bin/python")
 RELEASE1 = "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar1/"
 RELEASE2 = "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar2/"
+RELEASE3 = "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar3/"      # the official app repository (placeholder until it exists): `purr repo release`
 CHIPS = {pimg.CHIP_ANY: "any", pimg.CHIP_ESP32: "esp32", pimg.CHIP_ESP32S3: "esp32s3"}
 
 
