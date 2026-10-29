@@ -886,20 +886,6 @@ static void mark_install_success_ex(bool unattended, bool continue_install)
 
 static void mark_install_success(bool unattended) { mark_install_success_ex(unattended, true); }
 
-/* A reset that keeps the data (the recovery app's "Reinstall PURR OS"): the kernel was marked BAD and the device is not being wiped
- * (FRESH is not set). The loader has the RAM that KittenOS does not, so it puts the kernel back itself, and since the modules and the
- * files are still there, PURR OS can start straight away: no KittenOS stage 2. */
-static bool restoring_in_place(void)
-{
-    purr_flash_t fl;
-    purr_cfg_t cfg;
-    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
-        return false;
-    }
-    return (cfg.flags & PURR_CFGF_BAD_KERNEL) != 0 && (cfg.flags & PURR_CFGF_FRESH) == 0;
-}
-
-
 /* ------------------------------------------------------------ auto mode (RecoveryLoader/SPEC.md
  * section 2.1): no Wi-Fi shell offer, no menu -- nothing summoned a person to answer one. Only
  * the saved recovery network is tried; a full component restore follows, then a normal restart
@@ -929,12 +915,11 @@ static void run_auto_mode(void)
     }
     status("connected");
 
-    bool in_place = restoring_in_place();
     if (restore_components(1) != 0) {
         halt("automatic recovery failed");
     }
 
-    mark_install_success_ex(true, !in_place);
+    mark_install_success_ex(true, true);
     status("done. restarting...");
     purr_console_flush();
     vTaskDelay(pdMS_TO_TICKS(1500));
@@ -1083,12 +1068,13 @@ static int job_restore(oobe_job_t *job, void *arg)
         connect_saved_or_halt();
     }
     /* Normally only what KittenOS needs to restart; KittenOS asks for the account, installs the kernel and the modules, and does the rest.
-     * After a reset the kernel comes from here as well (this task has the RAM), and an in-place restore needs nothing more. */
-    bool in_place = restoring_in_place();
+     * After a reset the kernel comes from here as well (this task has the RAM). Every install, a reset that keeps the data included, ends by
+     * starting KittenOS, which shows its second stage (the setup for a new device, "Just a few more minutes" for an existing one) and then
+     * restarts into PURR OS by itself. */
     if (restore_components(1) != 0) {
         halt("Something went wrong while installing. Power it off and on to try again.");
     }
-    mark_install_success_ex(s_auto != 0, !in_place);
+    mark_install_success_ex(s_auto != 0, true);
     oobe_job_report(job, "All done. Restarting...", 1000);
     return 0;
 }
