@@ -163,3 +163,8 @@ Open: whether a service is a second entry in the same package (manifest `[servic
 - **Over the cap:** the oldest frozen/unloaded-candidate app is closed and the shell shows a short notice ("Closed Notes to free memory"). If the app has
   a companion service still running, the notice says so ("Closed Meshtastic; its service is still running"). Before closing, the app gets a
   `PURR_APPEV_SAVE` event (save now); apps may also autosave.
+
+## Boot menu key mapping (owner, 2026-10-28)
+The bootloader's menu opens when Space is held at power-on. The key is meant to be a setting the owner can map to any key, and the SDK should expose that mapping (so a
+keyboard layout or a custom board can choose its own). Stored with the boot configuration; the bootloader reads it before the boot package loads. Not built: the quieter
+bootloader redesign (menu only when needed, Fast startup, 20 s fall-through, "PURR OS!" logo) is waiting on the owner's approval of the preview.
