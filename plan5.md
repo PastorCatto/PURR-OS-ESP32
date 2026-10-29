@@ -168,3 +168,19 @@ Open: whether a service is a second entry in the same package (manifest `[servic
 The bootloader's menu opens when Space is held at power-on. The key is meant to be a setting the owner can map to any key, and the SDK should expose that mapping (so a
 keyboard layout or a custom board can choose its own). Stored with the boot configuration; the bootloader reads it before the boot package loads. Not built: the quieter
 bootloader redesign (menu only when needed, Fast startup, 20 s fall-through, "PURR OS!" logo) is waiting on the owner's approval of the preview.
+
+## Owner answers before the overnight start (2026-10-28)
+- **Flavors:** both, source later. The first kit repackages and re-signs prebuilt OS parts with the developer's keys and settings (no ESP-IDF); building from source is a separate, later download.
+- **Python:** bundle a standalone Python (about 30-40 MB), so the kit needs nothing installed.
+- **Hosts:** this Mac only for the first kit. The folder layout stays host-neutral (`purr-sdk-<version>-<host>/`), so Linux and Windows kits can follow.
+- **Emulator:** I may run it while the owner is away, for the kit's smoke tests only: one short run at a time, stopped when done (see memory no-emulator-runs: the owner does not want it run otherwise).
+- Defaults I chose (change on request): kit files carry a placeholder licence notice (`LICENSE-TODO`) until the owner picks one; the kit is built into `~/Desktop/PURR-SDK/` and the repo keeps only its sources under `sdk/`.
+
+## Overnight build (owner away, 2026-10-28): scope as the owner set it
+- Independent drivers for **LTE, Wi-Fi, Bluetooth, GPS, LoRa** (driver classes, templates, reference drivers, host tests).
+- The server part: `purr serve` (dev server and repository tooling) inside the kit.
+- A self-contained **Python UI app (PURR Studio)**, Metro design language, friendly voice, drag-and-drop of a pre-built image to verify it and see what to do next, and many tools
+  for creating and configuring every part of the OS.
+- The emulator is NOT part of this job (the owner works on it separately as a fork of the ESP32 emulator): leave a hook only.
+- The end goal: a 100 % supported T-Deck Plus built through the SDK, GPS and LoRa included. Inventory and status: `sdk/DESIGN.md`.
+- Design details and order of work: `sdk/DESIGN.md`. Nothing is released, flashed or put on the dev server tonight.
