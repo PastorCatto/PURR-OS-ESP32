@@ -64,6 +64,9 @@ static const purr_i2c_dev_cfg_t s_kbd_light_cfg = {.port = 0, .sda = 18, .scl = 
  * lora-sx126x), so with no driver loaded they simply report "no driver". The radio's reset is left unset: LilyGO wires it to GPIO 17, the touch controller's
  * reset, and sharing that line would reset the touch chip too. */
 static const purr_kv_cfg_t s_gps_cfg = {.count = 4, .kv = {{"port", 1}, {"tx", 43}, {"rx", 44}, {"baud", 38400}}};
+/* The SD card slot shares the display's and the radio's SPI bus (its own chip select, GPIO 39, is held high at start-up: idle_high_pins). The "sd-spi" driver drives
+ * that line itself because a card wants it held low for a whole command, its answer and the data; hz is the speed after start-up (start-up is always 400 kHz). */
+static const purr_kv_cfg_t s_sd_cfg = {.count = 2, .kv = {{"cs", 39}, {"hz", 20000000}}};
 static const purr_kv_cfg_t s_lora_cfg = {.count = 6, .kv = {{"cs", 9}, {"rst", -1}, {"busy", 13}, {"dio1", 45}, {"tcxo_mv", 1800}, {"dio2sw", 1}}};
 
 /* F-02: the registry's view of this board's two devices, pointing at the same
@@ -103,6 +106,11 @@ static const purr_device_t s_devices[] = {
         .name = "gps0", .compatible = "gnss-nmea", .priority = PURR_PRI_OPTIONAL,
         .extra_pins = {43, 44, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
         .cfg = &s_gps_cfg,
+    },
+    {
+        .name = "sd0", .compatible = "sd-spi", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {39, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_sd_cfg,
     },
     {
         .name = "lora0", .compatible = "lora-sx126x", .priority = PURR_PRI_OPTIONAL,

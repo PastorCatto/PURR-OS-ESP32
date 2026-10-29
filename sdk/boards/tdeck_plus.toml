@@ -107,6 +107,17 @@ status = "written"
 note = "NMEA sentences; the driver is host-tested against a scripted receiver."
 
 [[device]]
+name = "sd0"
+compatible = "sd-spi"
+class = "storage"
+bus = "spi"
+priority = "optional"
+cs = 39                        # LilyGO: shared SPI with the display and the radio; the driver runs this line itself (a card wants it low for a whole command)
+hz = 20000000                  # the speed after start-up; start-up itself is always 400 kHz
+status = "written"
+note = "SD card in SPI mode; the driver is host-tested against a model of the card, not yet run on a unit."
+
+[[device]]
 name = "lora0"
 compatible = "lora-sx126x"
 class = "lora"
@@ -134,15 +145,6 @@ right = 2
 click = 0
 status = "written"
 note = "Five GPIOs (LilyGO). Click is GPIO 0, the boot strapping pin. Which pin is which direction is to verify on the unit."
-
-[[device]]
-name = "sd0"
-compatible = "sd-spi"
-class = "storage"
-bus = "spi"
-priority = "optional"
-cs = 39
-status = "template"
 
 [[device]]
 name = "speaker"

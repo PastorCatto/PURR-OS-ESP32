@@ -215,3 +215,13 @@ extras; cross-checked against the Python tooling), `purr_store.c` (the engine, t
 its companion (`Apps/storesvc`, timers; becomes the `[service]` entry when services exist), `purr repo` and Studio's repository tool, `tools/release/make_jj3.sh`, `sdk/docs/11-repositories.md`.
 The Store and its companion are **built into the firmware** (`tools/release/gen_builtin_apps.py`, regenerate when they change) and installed for each account at first sign-in.
 Not decided / still open: the repository key and its passphrase (the owner makes it: `tools/release/make_jj3.sh`), endorsing it with the boot key, revocation, bundles, SD card driver.
+
+### The SD card, 2026-10-29
+- **Driver** `sd-spi` 1.0.0 (`Modules/drivers/sd_spi_module.c`, class BLOCK, bus ABI 7): SD/SDHC/SDXC in SPI mode, started lazily (400 kHz, then 20 MHz), chip select by hand, bus lock per conversation. Host-tested against `FakeSdCard`, a byte-level model of the card
+  (`sdk/tests/test_drivers_host.py`, 16 tests: SDHC and SDSC, single and multi-block reads and writes, bounds, no card, card put back, 3.3 V refusal, lock balance, CS discipline). **Not run on the unit.**
+- **Kernel**: `spi_lock/spi_unlock` in the bus table (a mutex `purr_kernel.c` also takes in `spi_transfer`), BLOCK class and `purr_block_ops_t`.
+- **OS**: `main/purr_sd.c` mounts FAT at `/sd` (FatFs diskio over the block ops, LFN on the heap: `CONFIG_FATFS_LFN_HEAP` in sdkconfig.defaults), lazily and with a 3 s retry; shell `sd [status|mount|unmount|ls|test]`
+  (`sd test` writes 64 KB, reads it back, compares, times it). The Store's engine goes through `x_read/x_write/...` which pick flash or `/sd` by path. Board device `sd0` (cs 39) in `tdeck_plus.c` and `tdeck_plus.toml`.
+- **Getting the driver**: `sd-spi` is not baked into the firmware. Device Manager > Drivers > "Get N missing drivers" (job `get-drivers`, `hwdev get`) downloads the driver for each built-in device that has none, from the official
+  server or the dev server, and `sd0` binds at once. It is in `out/devrepo/recovery/drivers.manifest` (unsigned: developer mode only; sign it with the developer key for the official server).
+- FAT12/16/32 only (no exFAT in ESP-IDF's FatFs): a 64 GB+ card must be formatted FAT32. Files app does not browse `/sd` yet.

@@ -12,7 +12,7 @@ The goal for this board is **100 % supported**: every part has a driver you can 
 | GPS | u-blox MIA-M10Q, UART, TX 43 / RX 44, 38400 baud (LilyGO) | `gnss-nmea` | written, tested against a scripted receiver |
 | LoRa | SX1262, SPI shared with the display, CS 9, BUSY 13, DIO1 45 (LilyGO) | `lora-sx126x` | written, tested against a scripted chip |
 | Trackball | five GPIOs (LilyGO) | `trackball-gpio` | written, tested against scripted pins; which pin is which direction is to verify |
-| SD card | SPI shared, CS 39 | none yet | template |
+| SD card | SPI shared, CS 39 | `sd-spi` (host-tested; not yet run on a unit) | written |
 | Speaker | I2S | none yet | template |
 
 ## Things to check on the unit

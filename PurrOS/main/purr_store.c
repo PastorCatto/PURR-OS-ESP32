@@ -27,6 +27,7 @@
 #include "commands.h"
 #include "login.h"
 #include "purr_brand.h"
+#include "purr_sd.h"
 #include "purr_catcalls.h"
 #include "purr_catrt.h"
 #include "purr_catrt_power.h"
@@ -82,6 +83,32 @@ static purr_fs_t *fs(void)
     return purr_login_fs();
 }
 
+/* The files the Store touches live on the flash file system, or under /sd on the card; these pick by path. */
+static int x_read(const char *path, purr_fs_read_fn cb, void *ctx)
+{
+    return purr_sd_is_path(path) ? purr_sd_read(path, cb, ctx) : purr_fs_read(fs(), path, cb, ctx);
+}
+
+static int x_write(const char *path, const void *data, uint32_t len)
+{
+    return purr_sd_is_path(path) ? purr_sd_write(path, data, len) : purr_fs_write(fs(), path, data, len);
+}
+
+static int x_mkdir(const char *path)
+{
+    return purr_sd_is_path(path) ? purr_sd_mkdir(path) : purr_fs_mkdir(fs(), path);
+}
+
+static int x_remove(const char *path)
+{
+    return purr_sd_is_path(path) ? purr_sd_remove(path) : purr_fs_remove(fs(), path);
+}
+
+static int x_list(const char *path, purr_fs_list_fn cb, void *ctx)
+{
+    return purr_sd_is_path(path) ? purr_sd_list(path, cb, ctx) : purr_fs_list(fs(), path, cb, ctx);
+}
+
 static void lock(void)
 {
     if (s_lock == NULL) {
@@ -123,7 +150,7 @@ static int rb_cb(void *ctx, const void *data, uint32_t len)
 static int read_file(const char *path, uint8_t *buf, uint32_t cap, uint32_t *len_out)
 {
     rb_t r = {buf, cap > 0 ? cap - 1 : 0, 0, 0};
-    if (purr_fs_read(fs(), path, rb_cb, &r) < 0 || r.over) {
+    if (x_read(path, rb_cb, &r) < 0 || r.over) {
         return -1;
     }
     buf[r.len] = '\0';
@@ -140,11 +167,11 @@ static void mkdirs(const char *path)
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            purr_fs_mkdir(fs(), tmp);
+            x_mkdir(tmp);
             *p = '/';
         }
     }
-    purr_fs_mkdir(fs(), tmp);
+    x_mkdir(tmp);
 }
 
 static void hex_of(const uint8_t *d, size_t n, char *out)
@@ -476,9 +503,7 @@ static void assets_root(char *out, size_t cap)
 
 static int sd_present_now(void)
 {
-    int is_dir = 0;
-    uint32_t sz = 0;
-    return purr_fs_stat(fs(), "/sd", &is_dir, &sz) == 0 && is_dir;
+    return purr_sd_present();
 }
 
 static void asset_version(const purr_repo_app_t *a, char *out, size_t cap)
@@ -603,7 +628,7 @@ static void rm_tree(const char *path, int depth)
     }
     for (int pass = 0; pass < 8; pass++) {                 /* a folder of more than 24 entries is emptied in several passes */
         d->n = 0;
-        purr_fs_list(fs(), path, dl_cb, d);
+        x_list(path, dl_cb, d);
         if (d->n == 0) {
             break;
         }
@@ -613,7 +638,7 @@ static void rm_tree(const char *path, int depth)
             if (d->dir[i]) {
                 rm_tree(sub, depth + 1);
             }
-            purr_fs_remove(fs(), sub);
+            x_remove(sub);
         }
     }
     free(d);
@@ -757,13 +782,13 @@ static int install_item(const char *name, const char *repo_id)
             *sl = '\0';
             mkdirs(folder);
         }
-        if (purr_fs_write(fs(), file, pkg, (uint32_t)got) < 0) {
+        if (x_write(file, pkg, (uint32_t)got) < 0) {
             setmsg("Could not write %s.", a->dest);
             goto done;
         }
         char vfile[200];
         snprintf(vfile, sizeof(vfile), "%s/.version", dest);
-        purr_fs_write(fs(), vfile, a->version, (uint32_t)strlen(a->version));
+        x_write(vfile, a->version, (uint32_t)strlen(a->version));
         setmsg("Saved %s %s.", a->title, a->version);
     }
     rc = 0;
@@ -794,7 +819,7 @@ static int remove_item(const char *name, const char *repo_id)
                 snprintf(dir, sizeof(dir), "/sd/purr/%s", name);
                 if (sd_present_now()) {
                     rm_tree(dir, 0);
-                    purr_fs_remove(fs(), dir);
+                    x_remove(dir);
                 }
             }
             s_items_dirty = 1;

@@ -246,6 +246,7 @@ typedef struct {
  *   "find"            look for attached hardware (I2C), reading only
  *   "setup"           set up everything the last "find" recognised
  *   "update-drivers"  download newer versions of the installed drivers
+ *   "get-drivers"     get the driver of every built-in device that has none (the SD card's, the GPS's...); they start at once
  *   "add"             add a device by hand: a = driver name, b = "<sda> <scl> <addr>"
  *   "read"            a reading from a running device: a = its name
  *   "remove"          remove a found device from the profile: a = its name
@@ -255,8 +256,8 @@ typedef struct {
  *   "dev-find"        look for developer servers on the network
  *   "dev-use"         use developer server number a (from list("servers"))
  *   "dev-set"         use the developer server at the typed address a
- * list(what, i, a, acap, b, bcap): row i of "found", "profile", "board", "drivers" or "servers" (a = title, b = a line under it); 1 if there is such a row, 0 if not.
- * info(what, out, cap): "versions" (kernel and KittenOS), "devserver" (the one in use), "dev-mode" ("1" or "0"), "to-set-up" (how many found devices are not set up).
+ * list(what, i, a, acap, b, bcap): row i of "found", "profile", "board", "missing" (built-in devices with no driver), "drivers" or "servers" (a = title, b = a line under it); 1 if there is such a row, 0 if not.
+ * info(what, out, cap): "versions" (kernel and KittenOS), "devserver" (the one in use), "dev-mode" ("1" or "0"), "to-set-up" (how many found devices are not set up), "missing" (how many built-in devices have no driver).
  * restart() restarts the device (after an update or new drivers). */
 #define PURR_DEVICES_OK       0
 #define PURR_DEVICES_BAD     -1

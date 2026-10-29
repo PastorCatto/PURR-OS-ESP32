@@ -4569,6 +4569,7 @@ static const purr_cmd_t s_cmds[] = {
 #if CONFIG_PURR_PROFILE_FULL
     {"hwscan", "hwscan [power <gpio>]: look for attached hardware (I2C), reading only", purr_hwscan_cmd},
     {"store", "store [repos | list | add <url> | confirm | refresh | check | install <name> <repo-id> | remove <name> <repo-id> | bootstrap]: repositories and the Store", purr_store_cmd},
+    {"sd", "sd [status | mount | unmount | ls [path] | test]: the SD card at /sd", purr_sd_cmd},
     {"gps", "gps [fix | watch | power on|off | rate <hz>]: the GPS receiver", purr_gps_cmd},
     {"radio", "radio config <MHz> [...] | tx <text> | rx [seconds] | sleep: the LoRa radio", purr_radio_cmd},
     {"modem", "modem [status | power on|off | connect <apn> | disconnect | at <cmd>]: a cellular modem", purr_modem_cmd},

@@ -50,6 +50,13 @@ int purr_hwsetup_list_drivers(purr_hwsetup_driver_t *out, int max);
 /* Downloads newer versions of the installed drivers. Returns how many were updated, < 0 if the index could not be read. */
 int purr_hwsetup_update_drivers(void (*progress)(const char *), char *summary, size_t cap);
 
+/* The built-in (board) devices that have no driver and are not running: how many there are, and when i >= 0 the name and driver name of the i-th. */
+int purr_hwsetup_missing(char *name, size_t cap, int i, char *compat, size_t ccap);
+
+/* Downloads and loads the driver of every such device (from the official server, or the dev server in developer mode), checked like any driver; the devices bind at once and
+ * the files stay in /boot/drivers for the next start. Returns how many were got (summary says what happened). */
+int purr_hwsetup_get_missing(void (*progress)(const char *), char *summary, size_t cap);
+
 /* Maps a device by hand (the owner knows where it is wired, or it sits on a bus the scan does not look at): fetches the driver if it is not loaded,
  * adds the device and its pins to the profile and binds it. 0 on success, -1 with the reason in summary. */
 int purr_hwsetup_add_manual(const char *compatible, int sda, int scl, int addr, char *summary, size_t cap);
@@ -58,7 +65,7 @@ int purr_hwsetup_remove(const char *name, char *summary, size_t cap);
 /* One reading from a running device's driver as a line of text ("bme280_0: T=23.45C ...", or the bytes). 0, or -1 with the reason in out. */
 int purr_hwsetup_read_text(const char *name, char *out, size_t cap);
 
-/* The shell command: hwdev | hwdev add <driver> <sda> <scl> <addr> | hwdev read <name> | hwdev remove <name> */
+/* The shell command: hwdev | hwdev get | hwdev add <driver> <sda> <scl> <addr> | hwdev read <name> | hwdev remove <name> */
 int purr_hwsetup_cmd(purr_cli_t *cli, int argc, char **argv);
 
 #ifdef __cplusplus

@@ -9,6 +9,8 @@
 #include "freertos/task.h"
 #include "purr_driver.h"
 #include "purr_driver_class.h"
+#include "purr_sd.h"
+#include "esp_timer.h"
 
 static int no_driver(purr_cli_t *cli, const char *what, const char *compat)
 {
@@ -201,5 +203,122 @@ int purr_modem_cmd(purr_cli_t *cli, int argc, char **argv)
         return n >= 0 ? 0 : 1;
     }
     purr_cli_printf(cli, "usage: modem [status | power on|off | connect <apn> [user pass] | disconnect | at <command>]\n");
+    return 1;
+}
+
+/* ---------------------------------------------------------------- sd */
+
+static void sd_ls_cb(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    purr_cli_t *cli = ctx;
+    if (is_dir) {
+        purr_cli_printf(cli, "  %s/\n", name);
+    } else {
+        purr_cli_printf(cli, "  %-32s %u\n", name, (unsigned)size);
+    }
+}
+
+static const char *card_name(uint8_t card)
+{
+    return card == PURR_BLOCK_CARD_SDHC ? "SDHC/SDXC (block addressed)" : card == PURR_BLOCK_CARD_SDSC ? "SD (byte addressed)" : "unknown";
+}
+
+typedef struct {
+    uint32_t pos;
+    int bad;
+} sd_verify_t;
+
+static int sd_verify_cb(void *ctx, const void *data, uint32_t len)
+{
+    sd_verify_t *v = ctx;
+    const uint8_t *p = data;
+    for (uint32_t i = 0; i < len; i++, v->pos++) {
+        if (p[i] != (uint8_t)(v->pos * 31u + (v->pos >> 8))) {
+            v->bad++;
+        }
+    }
+    return 0;
+}
+
+int purr_sd_cmd(purr_cli_t *cli, int argc, char **argv)
+{
+    const char *sub = argc >= 2 ? argv[1] : "status";
+    char why[100];
+    if (strcmp(sub, "status") == 0) {
+        purr_sd_status_t st;
+        purr_sd_status(&st);
+        purr_cli_printf(cli, "driver   %s\n", st.driver ? "loaded (sd-spi)" : "not loaded");
+        if (!st.mounted) {
+            purr_cli_printf(cli, "card     not mounted: %s\n", st.why[0] ? st.why : "no reason given");
+            return 1;
+        }
+        purr_cli_printf(cli, "card     %s, %u sectors (%u MB)\n", card_name(st.card), (unsigned)st.sectors, (unsigned)(st.sectors / 2048));
+        purr_cli_printf(cli, "mounted  /sd, %u MB of %u MB free\n", (unsigned)(st.free_bytes >> 20), (unsigned)(st.total_bytes >> 20));
+        return 0;
+    }
+    if (strcmp(sub, "mount") == 0) {
+        if (purr_sd_mount(why, sizeof(why)) != 0) {
+            purr_cli_printf(cli, "sd: %s\n", why);
+            return 1;
+        }
+        purr_cli_printf(cli, "mounted at /sd\n");
+        return 0;
+    }
+    if (strcmp(sub, "unmount") == 0 || strcmp(sub, "eject") == 0) {
+        purr_sd_unmount();
+        purr_cli_printf(cli, "unmounted; it is safe to take the card out\n");
+        return 0;
+    }
+    if (strcmp(sub, "ls") == 0) {
+        const char *path = argc >= 3 ? argv[2] : "/sd";
+        if (!purr_sd_is_path(path) || purr_sd_list(path, sd_ls_cb, cli) != 0) {
+            purr_cli_printf(cli, "sd ls: cannot list %s (is the card mounted? try: sd)\n", path);
+            return 1;
+        }
+        return 0;
+    }
+    if (strcmp(sub, "test") == 0) {
+        /* writes 64 KB to /sd/purr-test.bin, reads it back and compares it, and removes it: the quickest proof that the driver, the bus and the file system agree */
+        enum { TOTAL = 65536, PIECE = 4096 };
+        static uint8_t buf[PIECE];
+        if (!purr_sd_present()) {
+            purr_sd_status_t st;
+            purr_sd_status(&st);
+            purr_cli_printf(cli, "sd test: %s\n", st.why[0] ? st.why : "no card");
+            return 1;
+        }
+        const char *path = "/sd/purr-test.bin";
+        FILE *f = fopen(path, "wb");
+        if (f == NULL) {
+            purr_cli_printf(cli, "sd test: could not create %s\n", path);
+            return 1;
+        }
+        int64_t t0 = esp_timer_get_time();
+        int ok = 1;
+        for (uint32_t pos = 0; pos < TOTAL && ok; pos += PIECE) {
+            for (uint32_t i = 0; i < PIECE; i++) {
+                buf[i] = (uint8_t)((pos + i) * 31u + ((pos + i) >> 8));
+            }
+            ok = fwrite(buf, 1, PIECE, f) == PIECE;
+        }
+        ok = (fclose(f) == 0) && ok;
+        int64_t t1 = esp_timer_get_time();
+        if (!ok) {
+            purr_cli_printf(cli, "sd test: the write failed\n");
+            purr_sd_remove(path);
+            return 1;
+        }
+        sd_verify_t v = {0, 0};
+        int rc = purr_sd_read(path, sd_verify_cb, &v);
+        int64_t t2 = esp_timer_get_time();
+        purr_sd_remove(path);
+        if (rc != 0 || v.pos != TOTAL || v.bad != 0) {
+            purr_cli_printf(cli, "sd test: FAILED (read rc=%d, %u bytes back, %d wrong)\n", rc, (unsigned)v.pos, v.bad);
+            return 1;
+        }
+        purr_cli_printf(cli, "sd test: ok. wrote 64 KB in %u ms, read it back in %u ms, all bytes right\n", (unsigned)((t1 - t0) / 1000), (unsigned)((t2 - t1) / 1000));
+        return 0;
+    }
+    purr_cli_printf(cli, "usage: sd [status | mount | unmount | ls [path] | test]\n");
     return 1;
 }

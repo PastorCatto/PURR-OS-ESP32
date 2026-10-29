@@ -84,6 +84,9 @@ static int run(void)
     if (strcmp(w, "update-drivers") == 0) {
         return purr_hwsetup_update_drivers(NULL, m, mc) >= 0 ? 0 : -1;
     }
+    if (strcmp(w, "get-drivers") == 0) {
+        return purr_hwsetup_get_missing(NULL, m, mc) > 0 ? 0 : -1;
+    }
     if (strcmp(w, "add") == 0) {
         int sda = 0, scl = 0, addr = 0;
         if (sscanf(s_job.b, "%d %d %i", &sda, &scl, &addr) != 3) {
@@ -237,6 +240,15 @@ static int cc_list(const char *what, int i, char *a, size_t acap, char *b, size_
         snprintf(b, bcap, "driver \"%s\"%s", bd->devices[i].compatible, purr_device_state(bd->devices[i].name) == PURR_DEV_BOUND ? "" : " (no driver loaded)");
         return 1;
     }
+    if (strcmp(what, "missing") == 0) {
+        char dev[32], compat[32];
+        if (i >= purr_hwsetup_missing(dev, sizeof(dev), i, compat, sizeof(compat))) {
+            return 0;
+        }
+        put(a, acap, dev);
+        snprintf(b, bcap, "needs the \"%s\" driver", compat);
+        return 1;
+    }
     if (strcmp(what, "drivers") == 0) {
         static purr_hwsetup_driver_t drv[PURR_HWSETUP_MAX_DRIVERS];
         int n = purr_hwsetup_list_drivers(drv, PURR_HWSETUP_MAX_DRIVERS);
@@ -281,6 +293,8 @@ static int cc_info(const char *what, char *out, size_t cap)
         snprintf(out, cap, "%d", purr_security_dev_active() ? 1 : 0);
     } else if (strcmp(what, "to-set-up") == 0) {
         snprintf(out, cap, "%d", to_set_up());
+    } else if (strcmp(what, "missing") == 0) {
+        snprintf(out, cap, "%d", purr_hwsetup_missing(NULL, 0, -1, NULL, 0));
     } else if (strcmp(what, "bootloader-update") == 0) {
         snprintf(out, cap, "%d", purr_sysupdate_includes_bootloader() ? 1 : 0);
     } else {

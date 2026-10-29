@@ -39,7 +39,7 @@ static int s_retry_job;
 /* buttons and the message label under each */
 static int s_pair_btn[MAX_PAIRS], s_pair_msg[MAX_PAIRS], s_npair;
 static int s_row[MAX_ROWS], s_row_kind[MAX_ROWS], s_nrow;       /* kind 1: a found device (item page), 2: a developer server (use it) */
-static int h_find, h_setup, h_drv, h_add, h_read, h_remove, h_check, h_install, h_reinstall, h_src, h_devfind, h_devset;
+static int h_find, h_setup, h_drv, h_getdrv, h_add, h_read, h_remove, h_check, h_install, h_reinstall, h_src, h_devfind, h_devset;
 static int h_driver, h_sda, h_scl, h_addr, h_srvaddr;
 static int h_home_row[8];
 
@@ -311,6 +311,19 @@ NO_OPT static void show_drivers(void)
     if (n == 0) {
         ui->label("No downloaded drivers yet. The ones the system came with are part of the system.", PURR_UI_ROLE_DIM);
     }
+    char mc[8];
+    h_getdrv = 0;
+    if (dv->info("missing", mc, sizeof(mc)) > 0 && to_int(mc) > 0) {
+        char t[TXT];
+        put(t, "Get ", sizeof(t));
+        append_num(t, to_int(mc), sizeof(t));
+        append(t, to_int(mc) == 1 ? " missing driver" : " missing drivers", sizeof(t));
+        h_getdrv = action(t);
+        ui->label("The built-in hardware below has no driver yet. They are downloaded from the official server, or from your developer server when one is in use.", PURR_UI_ROLE_DIM);
+        for (int i = 0; i < 12 && dv->list("missing", i, a, sizeof(a), b, sizeof(b)) == 1; i++) {
+            ui->row(a, b);
+        }
+    }
     h_drv = action("Update drivers");
     ui->label("Drivers update on their own, apart from the system. They must be signed; in developer mode with unsigned drivers allowed, they can be unsigned. Updated drivers start after a restart.", PURR_UI_ROLE_DIM);
 }
@@ -510,6 +523,8 @@ NO_OPT static void on_click(int h)
     } else if (s_page == PG_DRIVERS) {
         if (h == h_drv) {
             begin_job(J_DRV, "update-drivers", "", "", "Checking for driver updates...");
+        } else if (h_getdrv > 0 && h == h_getdrv) {
+            begin_job(J_DRV, "get-drivers", "", "", "Getting the drivers...");
         }
     } else if (s_page == PG_UPDATE) {
         if (h_src > 0 && h == h_src) {

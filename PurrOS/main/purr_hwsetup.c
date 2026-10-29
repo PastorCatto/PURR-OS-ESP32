@@ -442,6 +442,88 @@ int purr_hwsetup_install(const purr_hwscan_report_t *rep, void (*progress)(const
     return 0;
 }
 
+/* ---------------------------------------------------------------- built-in devices that have no driver yet */
+
+static int board_needs_driver(const purr_device_t *d)
+{
+    return purr_device_state(d->name) != PURR_DEV_BOUND && !purr_driver_registered(d->compatible);
+}
+
+int purr_hwsetup_missing(char *names, size_t cap, int i, char *compat, size_t ccap)
+{
+    const purr_board_t *bd = purr_board();
+    int n = 0;
+    for (int k = 0; k < bd->device_count; k++) {
+        if (!board_needs_driver(&bd->devices[k])) {
+            continue;
+        }
+        if (n == i && names != NULL) {
+            snprintf(names, cap, "%s", bd->devices[k].name);
+            if (compat != NULL) {
+                snprintf(compat, ccap, "%s", bd->devices[k].compatible);
+            }
+        }
+        n++;
+    }
+    return n;
+}
+
+int purr_hwsetup_get_missing(void (*progress)(const char *), char *summary, size_t cap)
+{
+    summary[0] = '\0';
+    if (!purr_fs_mounted(purr_login_fs())) {
+        snprintf(summary, cap, "The file system is not ready.");
+        return -1;
+    }
+    if (purr_hwsetup_missing(NULL, 0, -1, NULL, 0) == 0) {
+        snprintf(summary, cap, "Every built-in device has its driver.");
+        return 0;
+    }
+    source_t src[2];
+    int nsrc = sources(src, 2);
+    s_idx = big_calloc(sizeof(*s_idx));
+    if (s_idx == NULL) {
+        snprintf(summary, cap, "Out of memory.");
+        return -1;
+    }
+    say(progress, "Reading the driver list...");
+    int cnt = 0;
+    for (int i = 0; i < nsrc; i++) {
+        cnt = load_index(&src[i], cnt);
+    }
+    const purr_board_t *bd = purr_board();
+    int got = 0, failed = 0;
+    char got_names[64] = "", first_fail[110] = "";
+    for (int k = 0; k < bd->device_count; k++) {
+        const purr_device_t *d = &bd->devices[k];
+        if (!board_needs_driver(d)) {
+            continue;
+        }
+        char why[80] = "";
+        say(progress, "Getting the %s driver...", d->compatible);
+        if (ensure_driver(d->compatible, src, nsrc, cnt, why, sizeof(why)) != 0) {
+            failed++;
+            if (first_fail[0] == '\0') {
+                snprintf(first_fail, sizeof(first_fail), "%s", why);
+            }
+            continue;
+        }
+        got++;
+        size_t l = strlen(got_names);
+        snprintf(got_names + l, sizeof(got_names) - l, "%s%s", l ? ", " : "", d->compatible);
+    }
+    free(s_idx);
+    s_idx = NULL;
+    if (got > 0 && failed > 0) {
+        snprintf(summary, cap, "Got %.60s. Not the others: %.60s.", got_names, first_fail);
+    } else if (got > 0) {
+        snprintf(summary, cap, "Got %.100s.", got_names);
+    } else {
+        snprintf(summary, cap, "Could not get a driver: %.100s.", first_fail);
+    }
+    return got;
+}
+
 /* ---------------------------------------------------------------- the installed drivers and updates */
 
 typedef struct { purr_hwsetup_driver_t *out; int max, n; } ls_t;
@@ -657,6 +739,12 @@ int purr_hwsetup_read_text(const char *name, char *out, size_t cap)
 int purr_hwsetup_cmd(purr_cli_t *cli, int argc, char **argv)
 {
     char msg[160];
+    if (argc >= 2 && strcmp(argv[1], "get") == 0) {
+        char summary[160];
+        purr_hwsetup_get_missing(NULL, summary, sizeof(summary));
+        purr_cli_printf(cli, "%s\n", summary);
+        return 0;
+    }
     if (argc >= 6 && strcmp(argv[1], "add") == 0) {
         int r = purr_hwsetup_add_manual(argv[2], atoi(argv[3]), atoi(argv[4]), (int)strtol(argv[5], NULL, 0), msg, sizeof(msg));
         purr_cli_printf(cli, "%s\n", msg);
@@ -682,6 +770,6 @@ int purr_hwsetup_cmd(purr_cli_t *cli, int argc, char **argv)
         }
         return 0;
     }
-    purr_cli_printf(cli, "usage: hwdev | hwdev add <driver> <sda> <scl> <addr> | hwdev read <name> | hwdev remove <name>\n");
+    purr_cli_printf(cli, "usage: hwdev | hwdev get | hwdev add <driver> <sda> <scl> <addr> | hwdev read <name> | hwdev remove <name>\n");
     return 1;
 }
