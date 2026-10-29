@@ -28,6 +28,7 @@ static int s_online;                             /* an address has been handed o
 static int64_t s_synced_us;                      /* esp_timer time of the last sync, 0 = none yet */
 static time_t s_last_saved;
 static char s_server[48];
+static int64_t s_asked_us;                       /* when the last "sync now" went out; 0 once it was answered */
 
 static int rd_cb(void *ctx, const void *data, uint32_t n)
 {
@@ -81,6 +82,7 @@ static void synced_cb(struct timeval *tv)
 {
     (void)tv;
     s_synced_us = esp_timer_get_time();
+    s_asked_us = 0;
     ESP_LOGI(TAG, "time synced from %s", s_server);
     save_time();
 }
@@ -120,11 +122,19 @@ void purr_clock_set_ntp_enabled(int on)
     }
 }
 
-void purr_clock_sync_now(void)
+int purr_clock_sync_now(void)
 {
     if (s_online && purr_clock_ntp_enabled()) {
+        s_asked_us = esp_timer_get_time();
         start_sntp();                             /* stopping and starting again asks at once */
+        return 1;
     }
+    return 0;
+}
+
+int purr_clock_busy(void)
+{
+    return s_asked_us != 0 && esp_timer_get_time() - s_asked_us < 8LL * 1000000;
 }
 
 static void ip_cb(void *arg, esp_event_base_t base, int32_t id, void *data)

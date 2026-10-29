@@ -133,6 +133,10 @@ static lv_obj_t *s_shade;               /* a dark veil over it so the tiles read
 static lv_obj_t *s_start;               /* the scrolling start screen */
 static lv_obj_t *s_status;              /* the status strip */
 static lv_obj_t *s_clock;
+static lv_obj_t *s_busy_msg;            /* what the strip says while something works */
+static lv_obj_t *s_busy_dot[5];         /* the five dots that run along the strip's lower edge */
+static int s_busy_state;                /* 0 idle, 1 working, 2 showing "Done" */
+static lv_timer_t *s_busy_done_timer;
 static lv_obj_t *s_batt, *s_batt_body, *s_batt_fill, *s_batt_nub;     /* the battery icon in the strip, hidden when there is no reading */
 static lv_obj_t *s_status_dev;          /* "DEV" / "UNSIGNED OK" badge while developer mode is active */
 static lv_obj_t *s_net;
@@ -410,6 +414,157 @@ static void battery_icon_set(int pct)
     lv_obj_set_style_border_color(s_batt_body, c, 0);
 }
 
+/* ---------------------------------------------------------------- the status bar while something works
+ *
+ * Windows Phone's own numbers (its indeterminate progress bar): five 4 px dots in the accent colour, each starting 200 ms after the one before. A dot
+ * rushes over the first third of the width in 0.5 s (an ease-out), crawls through the middle third in 1.5 s, and rushes out over the last third in 0.5 s,
+ * 2.5 s in all, then is gone. The run repeats every 4.4 s. */
+
+#define BUSY_DOTS 5
+#define BUSY_CYCLE_MS 4400
+#define BUSY_STEP_MS 200
+#define BUSY_SPAN_MS 2500
+#define BUSY_DOT 4
+#define BUSY_MARGIN 12
+
+/* 1 - (e^(1-x) - 1) / (e - 1), in thousandths, at x = 0, 1/16 ... 1: the exponential ease-out (exponent 1) the original uses. */
+static const uint16_t k_ease_out[17] = {0, 96, 186, 270, 350, 425, 495, 561, 622, 681, 735, 787, 835, 880, 923, 962, 1000};
+
+static int ease_out(int x)                      /* x and the result in thousandths */
+{
+    if (x <= 0) {
+        return 0;
+    }
+    if (x >= 1000) {
+        return 1000;
+    }
+    int i = x * 16 / 1000, frac = x * 16 - i * 1000;
+    return k_ease_out[i] + ((int)k_ease_out[i + 1] - (int)k_ease_out[i]) * frac / 1000;
+}
+
+static int dot_progress(int t)                  /* how far along the width a dot is t ms after it began, in thousandths */
+{
+    if (t < 500) {
+        return 330 * ease_out(t * 2) / 1000;
+    }
+    if (t < 2000) {
+        return 330 + 330 * (t - 500) / 1500;
+    }
+    return 660 + 340 * ease_out((t - 2000) * 2) / 1000;
+}
+
+static void busy_anim_cb(void *var, int32_t v)
+{
+    (void)var;
+    int range = lv_obj_get_width(s_status) - 2 * BUSY_MARGIN - BUSY_DOT;
+    for (int i = 0; i < BUSY_DOTS; i++) {
+        int local = v - i * BUSY_STEP_MS;
+        if (local >= 0 && local < BUSY_SPAN_MS) {
+            lv_obj_set_x(s_busy_dot[i], BUSY_MARGIN + dot_progress(local) * range / 1000);
+            lv_obj_remove_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void busy_fade_cb(void *var, int32_t v)  /* v 0 = the icons, 255 = the message */
+{
+    (void)var;
+    lv_obj_set_style_opa(s_busy_msg, (lv_opa_t)v, 0);
+    if (s_net != NULL) {
+        lv_obj_set_style_opa(s_net, (lv_opa_t)(255 - v), 0);
+    }
+    if (s_batt != NULL) {
+        lv_obj_set_style_opa(s_batt, (lv_opa_t)(255 - v), 0);
+    }
+}
+
+static void busy_fade(int to_message)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_busy_msg);
+    lv_anim_set_exec_cb(&a, busy_fade_cb);
+    lv_anim_set_values(&a, lv_obj_get_style_opa(s_busy_msg, 0), to_message ? 255 : 0);
+    lv_anim_set_duration(&a, 180);
+    lv_anim_start(&a);
+}
+
+static void busy_done_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_busy_done_timer = NULL;                   /* a one-shot timer deletes itself */
+    s_busy_state = 0;
+    busy_fade(0);
+}
+
+void w10m_busy_begin(const char *msg)
+{
+    if (s_status == NULL || s_busy_msg == NULL) {
+        return;
+    }
+    if (s_busy_done_timer != NULL) {            /* another action started during the "Done" */
+        lv_timer_delete(s_busy_done_timer);
+        s_busy_done_timer = NULL;
+    }
+    lv_label_set_text(s_busy_msg, msg != NULL && msg[0] ? msg : "Working...");
+    for (int i = 0; i < BUSY_DOTS; i++) {
+        lv_obj_set_style_bg_color(s_busy_dot[i], purr_theme_accent_color(), 0);
+    }
+    if (s_busy_state != 1) {
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, s_busy_msg);
+        lv_anim_set_exec_cb(&a, busy_anim_cb);
+        lv_anim_set_values(&a, 0, BUSY_CYCLE_MS);
+        lv_anim_set_duration(&a, BUSY_CYCLE_MS);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_path_cb(&a, lv_anim_path_linear);
+        lv_anim_start(&a);
+    }
+    if (s_busy_state == 0) {
+        busy_fade(1);
+    }
+    s_busy_state = 1;
+}
+
+void w10m_busy_end(void)
+{
+    if (s_busy_state != 1) {
+        return;
+    }
+    lv_anim_delete(s_busy_msg, busy_anim_cb);
+    for (int i = 0; i < BUSY_DOTS; i++) {
+        lv_obj_add_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_label_set_text(s_busy_msg, "Done");
+    s_busy_state = 2;
+    s_busy_done_timer = lv_timer_create(busy_done_cb, 500, NULL);
+    lv_timer_set_repeat_count(s_busy_done_timer, 1);
+}
+
+static void busy_build(lv_obj_t *parent)
+{
+    s_busy_msg = lv_label_create(parent);
+    lv_obj_set_style_text_font(s_busy_msg, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_busy_msg, lv_color_white(), 0);
+    lv_label_set_long_mode(s_busy_msg, LV_LABEL_LONG_DOT);               /* a long message is cut off with "..." */
+    lv_obj_set_width(s_busy_msg, 240);
+    lv_obj_align(s_busy_msg, LV_ALIGN_LEFT_MID, 6, -2);
+    lv_obj_set_style_opa(s_busy_msg, LV_OPA_TRANSP, 0);
+    for (int i = 0; i < BUSY_DOTS; i++) {
+        s_busy_dot[i] = lv_obj_create(parent);
+        lv_obj_remove_style_all(s_busy_dot[i]);
+        lv_obj_set_size(s_busy_dot[i], BUSY_DOT, BUSY_DOT);
+        lv_obj_set_pos(s_busy_dot[i], BUSY_MARGIN, STATUS_H - BUSY_DOT);
+        lv_obj_set_style_bg_opa(s_busy_dot[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(s_busy_dot[i], purr_theme_accent_color(), 0);
+        lv_obj_remove_flag(s_busy_dot[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 /* The icons in a row from the left (network, then battery when there is a reading); the clock alone at the far right. There is no user name in the strip. */
 static void status_layout(void)
 {
@@ -483,6 +638,7 @@ static void build_status(void)
     lv_obj_align(s_clock, LV_ALIGN_RIGHT_MID, -6, 0);
 
     battery_icon_build(s_status);
+    busy_build(s_status);
 
     const lv_image_dsc_t *net = img("wifi_icon");
     if (net != NULL) {

@@ -19,8 +19,11 @@ void purr_clock_boot(void);
 int purr_clock_ntp_enabled(void);
 void purr_clock_set_ntp_enabled(int on);                 /* saves it and acts on it now */
 
-/* Asks for a sync right away (needs a network). Returns at once; the result shows in purr_clock_status(). */
-void purr_clock_sync_now(void);
+/* Asks for a sync right away (needs a network). Returns at once, 1 if a request went out (0: automatic time is off, or there is no network);
+ * the result shows in purr_clock_status(). */
+int purr_clock_sync_now(void);
+/* 1 while that request has not been answered (at most about 8 seconds), so the status bar can show it working. */
+int purr_clock_busy(void);
 
 /* One line for the screen: "Synced 3 min ago (pool.ntp.org)", "Waiting for the network...", "Automatic time is off", "Not synced yet". */
 void purr_clock_status(char *out, size_t cap);

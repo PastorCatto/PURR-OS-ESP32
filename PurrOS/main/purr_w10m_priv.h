@@ -20,6 +20,12 @@ void w10m_save_display(void);                       /* remember the brightness (
 /* Shows or hides the DEV badge in the status strip (developer mode, unsigned apps). UI task only. */
 void w10m_dev_badge_update(void);
 
+/* The status bar while something works (the Windows Phone look): the network and battery icons give way to a short message, five dots run along the
+ * bar's lower edge, and when the work ends the message says "Done" for half a second and the icons come back. UI task only. A second begin while
+ * one is running just changes the message; end without a begin does nothing. Long messages are cut off with "...". */
+void w10m_busy_begin(const char *msg);
+void w10m_busy_end(void);
+
 /* Puts an app window (a sheet over the start screen) at the right depth: above the other sheets, beneath the lock
  * screen and the status strip. UI task only. */
 void w10m_place_sheet(lv_obj_t *sheet);

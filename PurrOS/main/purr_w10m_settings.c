@@ -138,8 +138,13 @@ static lv_obj_t *cm_input(lv_obj_t *parent, const char *placeholder, int secret)
 }
 
 /* The page's result line: good news in the accent colour, bad news in amber. */
+static char s_say_text[64];
+static uint32_t s_say_tick;                     /* when say() last spoke: a job started right after takes these words to the status bar */
+
 static void say(const char *text, int good)
 {
+    snprintf(s_say_text, sizeof(s_say_text), "%s", text);
+    s_say_tick = lv_tick_get();
     if (s_status == NULL) {
         return;
     }
@@ -191,6 +196,7 @@ static void *job_ui_cb(void *arg)
 {
     job_t *j = arg;
     s_busy = 0;
+    w10m_busy_end();                            /* the status bar's dots stop whether or not this page is still showing */
     if (j->gen == s_gen && j->done != NULL) {
         j->done(j);
     }
@@ -234,6 +240,9 @@ static int job_start(job_t *j)
         free(j);
         say("Out of memory.", 0);
         return -1;
+    }
+    if (s_say_text[0] != '\0' && lv_tick_elaps(s_say_tick) < 400) {       /* "Looking...", "Adding...": the words that went with this action */
+        w10m_busy_begin(s_say_text);
     }
     return 0;
 }
@@ -1702,11 +1711,30 @@ static void ntp_cb(lv_event_t *e)
     ntp_text();
 }
 
+static lv_timer_t *s_ntp_timer;
+
+static void ntp_poll_cb(lv_timer_t *t)
+{
+    if (!purr_clock_busy()) {
+        w10m_busy_end();
+        lv_timer_delete(t);
+        s_ntp_timer = NULL;
+        ntp_text();
+    }
+}
+
 static void ntp_sync_cb(lv_event_t *e)
 {
     (void)e;
-    purr_clock_sync_now();
-    say("Asking for the time...", 1);
+    if (purr_clock_sync_now()) {
+        say("Asking for the time...", 1);
+        w10m_busy_begin("Asking for the time...");
+        if (s_ntp_timer == NULL) {
+            s_ntp_timer = lv_timer_create(ntp_poll_cb, 200, NULL);
+        }
+    } else {
+        say(purr_clock_ntp_enabled() ? "Not online yet." : "Automatic time is off.", 0);
+    }
     ntp_text();
 }
 
