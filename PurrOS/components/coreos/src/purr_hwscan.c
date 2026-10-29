@@ -22,6 +22,21 @@ purr_pinmask_t purr_hw_reserved_s3(void)
     return m;
 }
 
+purr_pinmask_t purr_hw_reserved_hard_s3(void)
+{
+    purr_pinmask_t m = 0;
+    for (int p = 19; p <= 20; p++) {
+        m |= PURR_PINBIT(p);                    /* USB */
+    }
+    for (int p = 22; p <= 37; p++) {
+        m |= PURR_PINBIT(p);                    /* not on the chip (22-25), flash (26-32), octal PSRAM (33-37) */
+    }
+    for (int p = 49; p < 64; p++) {
+        m |= PURR_PINBIT(p);
+    }
+    return m;
+}
+
 int purr_hw_candidate_pins(purr_pinmask_t reserved, purr_pinmask_t in_use, int *out, int max)
 {
     int n = 0;

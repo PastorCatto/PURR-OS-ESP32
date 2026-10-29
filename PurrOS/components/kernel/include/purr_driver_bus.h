@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define PURR_DRIVER_BUS_ABI_VERSION 5u
+#define PURR_DRIVER_BUS_ABI_VERSION 6u
 /* The oldest bus table layout this kernel still serves. The table only ever grows at the end (see Drivers/SPEC.md section 4.1), so a driver
  * built against any version from this one up to the current works unchanged: the driver's version is independent of the OS's. Raise this
  * only if a slot is ever moved, which the append-only rule forbids. */
@@ -97,6 +97,14 @@ typedef struct {
      * several samples. -1 if the pin is not an ADC pin or the converter could not be set up. The pin must not be one a driver already uses
      * for something else. */
     int (*adc_read_mv)(int pin);
+
+    /* ABI 6: a UART, for drivers of GPS receivers, modems, Bluetooth controllers and AT modules. The console UART (port 0) is not available. A handle of 0 is
+     * never valid. The pins must be ones the driver's device claimed (its cfg's tx and rx), and PURR_PIN_NONE means "not connected". */
+    uint32_t (*uart_open)(int port, int tx_pin, int rx_pin, int baud, size_t rx_buffer);   /* port 1 or 2; 0 on failure */
+    int (*uart_write)(uint32_t handle, const uint8_t *data, size_t len);                   /* bytes written (all of them, blocking), or < 0 */
+    int (*uart_read)(uint32_t handle, uint8_t *buf, size_t cap, uint32_t timeout_ms);      /* bytes read, 0 if none arrived in time, or < 0 */
+    int (*uart_set_baud)(uint32_t handle, int baud);                                        /* 0 or < 0 */
+    void (*uart_close)(uint32_t handle);
 } purr_driver_bus_table_t;
 
 /* core -> module direction (Modules/SPEC.md section 6, scoped to drivers): called once per

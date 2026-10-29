@@ -26,6 +26,10 @@ typedef uint64_t purr_pinmask_t;
  * and numbers that do not exist (22-25, 49 and up). */
 purr_pinmask_t purr_hw_reserved_s3(void);
 
+/* Only what can never be driven: flash and PSRAM, USB, the pins the chip does not have. The strapping pins (0, 3, 45, 46) are allowed: a board's own
+ * wiring may use them (the T-Deck's LoRa DIO1 is GPIO 45), and a person naming a pin by hand knows which it is. A scan never uses this mask. */
+purr_pinmask_t purr_hw_reserved_hard_s3(void);
+
 /* The pins a scan may look at, lowest first: everything except `reserved` and `in_use`. Returns how many were written. */
 int purr_hw_candidate_pins(purr_pinmask_t reserved, purr_pinmask_t in_use, int *out, int max);
 

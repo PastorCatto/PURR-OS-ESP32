@@ -1,4 +1,5 @@
 #include "purr_driver.h"
+#include "purr_driver_class.h"
 
 #include <string.h>
 
@@ -226,6 +227,56 @@ void purr_driver_unregister(const purr_driver_t *drv)
             s_registered_count--;
             break;
         }
+    }
+}
+
+uint32_t purr_driver_class_id(const purr_driver_t *drv)
+{
+    if (drv == NULL || (drv->bus_abi != 0 && drv->bus_abi < 6)) {
+        return 0;                 /* built before the class fields existed: they are not there to read */
+    }
+    return drv->class_id;
+}
+
+int purr_class_find(uint32_t class_id, purr_class_entry_t *out, int max)
+{
+    int n = 0;
+    for (int i = 0; i < s_record_count; i++) {
+        const device_record_t *r = &s_records[i];
+        if (r->state != PURR_DEV_BOUND || r->driver == NULL || purr_driver_class_id(r->driver) != class_id ||
+            class_id == 0 || r->driver->ops == NULL) {
+            continue;
+        }
+        if (out != NULL && n < max) {
+            out[n] = (purr_class_entry_t){.device = r->name, .class_id = class_id, .ops = r->driver->ops, .handle = r->handle};
+        }
+        n++;
+    }
+    return n;
+}
+
+const void *purr_class_ops(uint32_t class_id, void **handle_out)
+{
+    purr_class_entry_t e;
+    if (purr_class_find(class_id, &e, 1) < 1) {
+        return NULL;
+    }
+    if (handle_out != NULL) {
+        *handle_out = e.handle;
+    }
+    return e.ops;
+}
+
+const char *purr_drv_class_name(uint32_t class_id)
+{
+    switch (class_id) {
+    case 0: return "none";
+    case 1: return "gnss";
+    case 2: return "lora";
+    case 3: return "modem";
+    case 4: return "wifi";
+    case 5: return "hci";
+    default: return "?";
     }
 }
 

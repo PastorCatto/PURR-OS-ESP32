@@ -8,6 +8,7 @@
 #include "driver/i2c_master.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
+#include "driver/uart.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
@@ -443,6 +444,59 @@ static int bus_adc_read_mv(int pin)
     return mv;
 }
 
+/* UARTs for drivers (bus ABI 6): ports 1 and 2; port 0 is the console. A handle is the port number plus one. */
+static uint8_t s_uart_open[3];
+
+static uint32_t bus_uart_open(int port, int tx_pin, int rx_pin, int baud, size_t rx_buffer)
+{
+    if (port < 1 || port > 2 || baud < 300 || s_uart_open[port]) {
+        return 0;
+    }
+    uart_config_t cfg = {
+        .baud_rate = baud, .data_bits = UART_DATA_8_BITS, .parity = UART_PARITY_DISABLE, .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, .source_clk = UART_SCLK_DEFAULT,
+    };
+    int tx = tx_pin == PURR_PIN_NONE ? UART_PIN_NO_CHANGE : tx_pin, rx = rx_pin == PURR_PIN_NONE ? UART_PIN_NO_CHANGE : rx_pin;
+    if (uart_param_config((uart_port_t)port, &cfg) != ESP_OK || uart_set_pin((uart_port_t)port, tx, rx, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK ||
+        uart_driver_install((uart_port_t)port, (int)(rx_buffer < 256 ? 1024 : rx_buffer), 0, 0, NULL, 0) != ESP_OK) {
+        return 0;
+    }
+    s_uart_open[port] = 1;
+    return (uint32_t)(port + 1);
+}
+
+static int bus_uart_write(uint32_t h, const uint8_t *data, size_t len)
+{
+    if (h < 2 || h > 3 || !s_uart_open[h - 1]) {
+        return -1;
+    }
+    return uart_write_bytes((uart_port_t)(h - 1), data, len);
+}
+
+static int bus_uart_read(uint32_t h, uint8_t *buf, size_t cap, uint32_t timeout_ms)
+{
+    if (h < 2 || h > 3 || !s_uart_open[h - 1]) {
+        return -1;
+    }
+    return uart_read_bytes((uart_port_t)(h - 1), buf, (uint32_t)cap, pdMS_TO_TICKS(timeout_ms));
+}
+
+static int bus_uart_set_baud(uint32_t h, int baud)
+{
+    if (h < 2 || h > 3 || !s_uart_open[h - 1] || baud < 300) {
+        return -1;
+    }
+    return uart_set_baudrate((uart_port_t)(h - 1), (uint32_t)baud) == ESP_OK ? 0 : -1;
+}
+
+static void bus_uart_close(uint32_t h)
+{
+    if (h >= 2 && h <= 3 && s_uart_open[h - 1]) {
+        uart_driver_delete((uart_port_t)(h - 1));
+        s_uart_open[h - 1] = 0;
+    }
+}
+
 static const purr_driver_bus_table_t s_bus_table = {
     .abi_version = PURR_DRIVER_BUS_ABI_VERSION,
     .spi_add_device = bus_spi_add_device,
@@ -462,6 +516,11 @@ static const purr_driver_bus_table_t s_bus_table = {
     .backlight_init = bus_backlight_init,
     .backlight_set = bus_backlight_set,
     .adc_read_mv = bus_adc_read_mv,
+    .uart_open = bus_uart_open,
+    .uart_write = bus_uart_write,
+    .uart_read = bus_uart_read,
+    .uart_set_baud = bus_uart_set_baud,
+    .uart_close = bus_uart_close,
 };
 
 const purr_driver_bus_table_t *purr_driver_bus_table(void)

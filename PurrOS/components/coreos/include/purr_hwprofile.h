@@ -8,10 +8,23 @@
  *   device=bme280_0         a name, unique in the file
  *   compatible=bme280       the driver that serves it
  *   label=BME280 sensor     for people
- *   bus=i2c                 only I2C so far
+ *   bus=i2c                 i2c (the default for an old file), or uart, spi, gpio or any word for a device configured by named values
  *   sda=21
  *   scl=22
  *   addr=0x76
+ *
+ * A device that is not I2C lists its settings as more key=value lines ("tx=43", "rx=44", "baud=38400"), up to 12 of them, keys up to 7 letters. Keys
+ * that name a pin (tx rx cs rst busy dio1 dio2 pwr pps int en irq mosi miso sclk bck ws din dout mclk) must hold -1 (not connected) or a pin the chip
+ * can drive. The driver reads them back with purr_kv(). Example, a GPS:
+ *
+ *   device=gps0
+ *   compatible=gnss-nmea
+ *   label=GPS receiver
+ *   bus=uart
+ *   port=1
+ *   tx=43
+ *   rx=44
+ *   baud=38400
  */
 #ifndef PURR_HWPROFILE_H
 #define PURR_HWPROFILE_H
@@ -30,13 +43,31 @@ extern "C" {
 #define PURR_HWP_COMPAT   32
 #define PURR_HWP_LABEL    40
 
+#define PURR_HWP_KV 12                 /* the same as PURR_KV_MAX in purr_board.h (the kernel's own header; this component cannot include it) */
+#define PURR_HWP_BUS 6
+
+typedef struct {
+    char key[8];
+    int32_t val;
+} purr_hwp_kv_t;
+
 typedef struct {
     char name[PURR_HWP_NAME];
     char compatible[PURR_HWP_COMPAT];
     char label[PURR_HWP_LABEL];
     int sda, scl;
     uint8_t addr;
+    char bus[PURR_HWP_BUS];            /* "i2c" (or empty, an old entry), "uart", "spi", ... */
+    uint8_t nkv;                       /* the named values below, for a device that is not I2C */
+    purr_hwp_kv_t kv[PURR_HWP_KV];
 } purr_hwp_dev_t;
+
+/* 1 if the key names a pin (and so is checked against the reserved pins). */
+int purr_hwp_key_is_pin(const char *key);
+/* The value of a key, or the fallback. */
+int32_t purr_hwp_kv_get(const purr_hwp_dev_t *d, const char *key, int32_t fallback);
+/* Sets or adds a key. 0, or -1 if the key is bad (empty, too long, characters) or the list is full. */
+int purr_hwp_kv_set(purr_hwp_dev_t *d, const char *key, int32_t val);
 
 typedef struct {
     purr_hwp_dev_t dev[PURR_HWP_MAX];

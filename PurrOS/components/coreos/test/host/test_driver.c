@@ -2,6 +2,7 @@
 
 #include "purr_board.h"
 #include "purr_driver.h"
+#include "purr_driver_class.h"
 #include "testkit.h"
 
 /* ---------------------------------------------------------------- fake drivers */
@@ -384,6 +385,89 @@ static void test_bind_extra_for_discovered_devices(void)
     purr_pins_reset();
 }
 
+
+/* ---------------------------------------------------------------- driver classes (bus ABI 6) */
+
+static int fake_get_fix(void *h, purr_gnss_fix_t *out)
+{
+    (void)h;
+    memset(out, 0, sizeof(*out));
+    out->valid = 1;
+    out->lat_e7 = 515000000;
+    return 1;
+}
+static const purr_gnss_ops_t s_gnss_ops = {.version = 1, .get_fix = fake_get_fix};
+
+static const purr_driver_t s_gnss_driver = {
+    .name = "gnss", .compatible = "fake-gnss", .probe = ok_probe, .remove = ok_remove,
+    .bus_abi = 6, .class_id = PURR_DRV_CLASS_GNSS, .ops = &s_gnss_ops,
+};
+/* A driver built for ABI 5: the kernel must never read its (absent) class fields. We fake the "garbage past the end" by setting them non-zero. */
+static const purr_driver_t s_old_driver = {
+    .name = "old", .compatible = "fake-old", .probe = ok_probe, .remove = ok_remove,
+    .bus_abi = 5, .class_id = PURR_DRV_CLASS_LORA, .ops = &s_gnss_ops,
+};
+/* A compiled-in driver (bus_abi 0) may carry a class: it is built with the same header as the kernel. */
+static const purr_driver_t s_builtin_lora = {
+    .name = "lora", .compatible = "fake-lora", .probe = ok_probe, .remove = ok_remove,
+    .bus_abi = 0, .class_id = PURR_DRV_CLASS_LORA, .ops = &s_gnss_ops,
+};
+
+static void test_driver_classes(void)
+{
+    purr_pins_reset();
+    purr_driver_registry_reset();
+    static const purr_device_t devs[] = {
+        {.name = "gps0", .compatible = "fake-gnss", .extra_pins = {43, 44, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE}},
+        {.name = "old0", .compatible = "fake-old", .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE}},
+        {.name = "lora0", .compatible = "fake-lora", .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE}},
+    };
+    purr_board_t b = {.name = "fake", .devices = devs, .device_count = 3};
+    const purr_driver_t *table[] = {&s_gnss_driver, &s_old_driver, &s_builtin_lora};
+    purr_drivers_bind(&b, table, 3);
+    CHECK_EQ(purr_device_state("gps0"), PURR_DEV_BOUND);
+    CHECK_EQ(purr_device_state("old0"), PURR_DEV_BOUND);
+
+    CHECK_EQ((int)purr_driver_class_id(&s_gnss_driver), PURR_DRV_CLASS_GNSS);
+    CHECK_EQ((int)purr_driver_class_id(&s_old_driver), 0);          /* too old to have a class: never read */
+    CHECK_EQ((int)purr_driver_class_id(&s_builtin_lora), PURR_DRV_CLASS_LORA);
+    CHECK_EQ((int)purr_driver_class_id(NULL), 0);
+
+    purr_class_entry_t e[4];
+    CHECK_EQ(purr_class_find(PURR_DRV_CLASS_GNSS, e, 4), 1);
+    CHECK(strcmp(e[0].device, "gps0") == 0);
+    CHECK(e[0].ops == &s_gnss_ops);
+    CHECK_EQ(purr_class_find(PURR_DRV_CLASS_LORA, e, 4), 1);        /* the built-in one only; the ABI 5 driver is not a LoRa radio */
+    CHECK(strcmp(e[0].device, "lora0") == 0);
+    CHECK_EQ(purr_class_find(PURR_DRV_CLASS_MODEM, e, 4), 0);
+    CHECK_EQ(purr_class_find(0, e, 4), 0);                          /* "no class" is not something to ask for */
+
+    void *h = NULL;
+    const purr_gnss_ops_t *ops = purr_class_ops(PURR_DRV_CLASS_GNSS, &h);
+    CHECK(ops != NULL && h != NULL);
+    purr_gnss_fix_t fix;
+    CHECK_EQ(ops->get_fix(h, &fix), 1);
+    CHECK_EQ((int)fix.lat_e7, 515000000);
+    CHECK(purr_class_ops(PURR_DRV_CLASS_HCI, NULL) == NULL);
+
+    purr_driver_unregister(&s_gnss_driver);                          /* unbinding takes it out of the class registry too */
+    CHECK_EQ(purr_class_find(PURR_DRV_CLASS_GNSS, e, 4), 0);
+    CHECK(strcmp(purr_drv_class_name(PURR_DRV_CLASS_HCI), "hci") == 0);
+    purr_driver_registry_reset();
+    purr_pins_reset();
+}
+
+static void test_kv_config(void)
+{
+    purr_kv_cfg_t c = {.count = 3, .kv = {{"tx", 43}, {"rx", 44}, {"baud", 38400}}};
+    CHECK_EQ((int)purr_kv(&c, "tx", -1), 43);
+    CHECK_EQ((int)purr_kv(&c, "baud", 9600), 38400);
+    CHECK_EQ((int)purr_kv(&c, "cs", -7), -7);                        /* absent: the fallback */
+    CHECK_EQ((int)purr_kv(&c, "t", -7), -7);                         /* a prefix is not a match */
+    CHECK_EQ((int)purr_kv(&c, "txx", -7), -7);
+    CHECK_EQ((int)purr_kv(NULL, "tx", 5), 5);
+}
+
 int main(void)
 {
     test_matching_binds_a_device();
@@ -404,5 +488,7 @@ int main(void)
     test_unregister_calls_remove_and_frees_the_device();
     test_unregister_releases_pins_for_a_fresh_claim();
     test_register_after_unregister_rebinds_to_the_new_driver();
+    test_driver_classes();
+    test_kv_config();
     TK_DONE("test_driver");
 }

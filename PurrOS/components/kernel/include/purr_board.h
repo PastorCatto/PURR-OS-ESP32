@@ -103,6 +103,37 @@ typedef struct {
     int mul, div;
 } purr_adc_dev_cfg_t;
 
+/* The cfg of a device that is configured by data: a short list of named integers ("tx=43 rx=44 baud=38400"). It is how a driver for any bus (a UART
+ * GPS, an SPI LoRa radio, a modem) gets its pins and settings without a C struct of its own, from the board file or the discovered profile. Keys are at
+ * most 7 characters. A driver asks for what it needs with purr_kv() and says what to use when the key is absent. */
+#define PURR_KV_MAX 12
+
+typedef struct {
+    uint8_t count;
+    struct {
+        char key[8];
+        int32_t val;
+    } kv[PURR_KV_MAX];
+} purr_kv_cfg_t;
+
+static inline int32_t purr_kv(const purr_kv_cfg_t *c, const char *key, int32_t fallback)
+{
+    if (c == NULL) {
+        return fallback;
+    }
+    for (int i = 0; i < c->count && i < PURR_KV_MAX; i++) {
+        const char *a = c->kv[i].key, *b = key;
+        while (*a != '\0' && *a == *b) {
+            a++;
+            b++;
+        }
+        if (*a == '\0' && *b == '\0') {
+            return c->kv[i].val;
+        }
+    }
+    return fallback;
+}
+
 /* One entry in a board's device list (section 3, section 5's driver-matching target).
  * `compatible` matches a purr_driver_t's own `compatible` (purr_driver.h) -- the kernel never
  * calls a driver by name. `extra_pins` are the device's own pins beyond whatever bus it's

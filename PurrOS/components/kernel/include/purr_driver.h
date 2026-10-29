@@ -47,7 +47,14 @@ typedef struct {
      * gpio_write() was inserted ahead of it (ABI 3 to 4) and put the whole UI task to sleep for
      * 12.8 days. Compiled-in drivers leave it 0; only the module loader checks it. */
     uint32_t bus_abi;
+    /* Bus ABI 6 and later: what kind of driver this is and the interface it offers (purr_driver_class.h). Only meaningful when bus_abi is 6 or more
+     * (or 0, for a compiled-in driver); a driver built for an older ABI does not have these fields, and purr_driver_class_id() never reads them. */
+    uint32_t class_id;            /* PURR_DRV_CLASS_*, 0 for none */
+    const void *ops;              /* the class's ops table, whose first field is its version */
 } purr_driver_t;
+
+/* The driver's class, or 0 for none or for a driver too old to have one. Always use this, never drv->class_id. */
+uint32_t purr_driver_class_id(const purr_driver_t *drv);
 
 /* One device's outcome, kernel/SPEC.md section 5. PURR_DEV_UNBOUND is a device
  * purr_drivers_bind_all() has not reached yet (or was never called) -- distinct from any
@@ -130,6 +137,21 @@ void purr_driver_unregister(const purr_driver_t *drv);
 /* Test-only, same spirit as purr_pins_reset(): clears the registered-drivers list without
  * calling anyone's remove(). Real boot never calls this. */
 void purr_driver_registry_reset(void);
+
+/* ---------------------------------------------------------------- driver classes */
+
+typedef struct {
+    const char *device;           /* the device's name */
+    uint32_t class_id;
+    const void *ops;              /* the ops table of the class; cast to purr_gnss_ops_t and the like */
+    void *handle;                 /* pass to every ops function */
+} purr_class_entry_t;
+
+/* The bound devices whose driver is of this class, up to max, in the order they were bound. Returns how many there are (which may be more than max). */
+int purr_class_find(uint32_t class_id, purr_class_entry_t *out, int max);
+
+/* The first such device's ops table (and handle), or NULL if there is none. */
+const void *purr_class_ops(uint32_t class_id, void **handle_out);
 
 purr_device_state_t purr_device_state(const char *device_name);
 

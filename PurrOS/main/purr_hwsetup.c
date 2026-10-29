@@ -35,6 +35,7 @@ static purr_hwp_t s_prof;
 static purr_board_t s_board;                         /* a copy of the real board with the discovered devices as its device list */
 static purr_device_t s_devs[PURR_HWP_MAX];
 static purr_i2c_dev_cfg_t s_cfg[PURR_HWP_MAX];
+static purr_kv_cfg_t s_kv[PURR_HWP_MAX];
 static char s_dev_name[PURR_HWP_MAX][PURR_HWP_NAME], s_dev_compat[PURR_HWP_MAX][PURR_HWP_COMPAT];
 
 static void rebuild_board(void)
@@ -44,13 +45,31 @@ static void rebuild_board(void)
         const purr_hwp_dev_t *d = &s_prof.dev[i];
         snprintf(s_dev_name[i], sizeof(s_dev_name[i]), "%s", d->name);
         snprintf(s_dev_compat[i], sizeof(s_dev_compat[i]), "%s", d->compatible);
-        s_cfg[i] = (purr_i2c_dev_cfg_t){.port = 1, .sda = d->sda, .scl = d->scl, .addr = d->addr, .hz = 100000};
-        s_devs[i] = (purr_device_t){.name = s_dev_name[i], .compatible = s_dev_compat[i], .priority = PURR_PRI_OPTIONAL, .cfg = &s_cfg[i]};
+        s_devs[i] = (purr_device_t){.name = s_dev_name[i], .compatible = s_dev_compat[i], .priority = PURR_PRI_OPTIONAL};
         for (int k = 0; k < PURR_MAX_EXTRA_PINS; k++) {
             s_devs[i].extra_pins[k] = PURR_PIN_NONE;
         }
-        s_devs[i].extra_pins[0] = d->sda;            /* claimed in the pin registry: a second device cannot take them */
-        s_devs[i].extra_pins[1] = d->scl;
+        if (d->bus[0] != '\0' && strcmp(d->bus, "i2c") != 0) {
+            /* A device configured by named values (a GPS on a UART, a LoRa radio on SPI): its driver reads them with purr_kv(); every pin it names is
+             * claimed in the pin registry, so a second device cannot take it. */
+            _Static_assert(PURR_HWP_KV == PURR_KV_MAX, "the profile's value list and the kernel's must be the same size");
+            memset(&s_kv[i], 0, sizeof(s_kv[i]));
+            int slot = 0;
+            for (int k = 0; k < d->nkv && k < PURR_KV_MAX; k++) {
+                memcpy(s_kv[i].kv[k].key, d->kv[k].key, sizeof(s_kv[i].kv[k].key));
+                s_kv[i].kv[k].val = d->kv[k].val;
+                s_kv[i].count++;
+                if (purr_hwp_key_is_pin(d->kv[k].key) && d->kv[k].val >= 0 && slot < PURR_MAX_EXTRA_PINS) {
+                    s_devs[i].extra_pins[slot++] = d->kv[k].val;
+                }
+            }
+            s_devs[i].cfg = &s_kv[i];
+        } else {
+            s_cfg[i] = (purr_i2c_dev_cfg_t){.port = 1, .sda = d->sda, .scl = d->scl, .addr = d->addr, .hz = 100000};
+            s_devs[i].cfg = &s_cfg[i];
+            s_devs[i].extra_pins[0] = d->sda;        /* claimed in the pin registry: a second device cannot take them */
+            s_devs[i].extra_pins[1] = d->scl;
+        }
     }
     s_board.devices = s_devs;
     s_board.device_count = s_prof.count;
