@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define PURR_DRIVER_BUS_ABI_VERSION 6u
+#define PURR_DRIVER_BUS_ABI_VERSION 7u
 /* The oldest bus table layout this kernel still serves. The table only ever grows at the end (see Drivers/SPEC.md section 4.1), so a driver
  * built against any version from this one up to the current works unchanged: the driver's version is independent of the OS's. Raise this
  * only if a slot is ever moved, which the append-only rule forbids. */
@@ -105,6 +105,13 @@ typedef struct {
     int (*uart_read)(uint32_t handle, uint8_t *buf, size_t cap, uint32_t timeout_ms);      /* bytes read, 0 if none arrived in time, or < 0 */
     int (*uart_set_baud)(uint32_t handle, int baud);                                        /* 0 or < 0 */
     void (*uart_close)(uint32_t handle);
+
+    /* ABI 7: holds the shared SPI bus for a whole conversation. A driver that selects its device with a GPIO instead of the hardware chip select (an SD card:
+     * a command, then its answer, then the data, all with the line held low) must keep every other device off the bus until it is done, or the display's
+     * next chunk of pixels lands in the middle of its command. Every spi_transfer() waits for the lock, so the others just wait their turn. Calls nest;
+     * unlock as many times as you locked. Keep it short: nothing else draws while it is held. */
+    void (*spi_lock)(void);
+    void (*spi_unlock)(void);
 } purr_driver_bus_table_t;
 
 /* core -> module direction (Modules/SPEC.md section 6, scoped to drivers): called once per

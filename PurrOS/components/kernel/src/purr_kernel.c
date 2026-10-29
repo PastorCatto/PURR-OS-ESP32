@@ -20,6 +20,7 @@
 #include "esp_memory_utils.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
@@ -224,6 +225,24 @@ static uint32_t bus_spi_add_device(int host, int cs_pin, int mode, int clock_hz)
     return store_handle(dev);
 }
 
+/* One lock for the shared SPI bus (ABI 7): every transfer takes it, and a driver can hold it across a conversation (bus_spi_lock). */
+static SemaphoreHandle_t s_spi_lock;
+
+static void bus_spi_lock(void)
+{
+    if (s_spi_lock == NULL) {
+        return;
+    }
+    xSemaphoreTakeRecursive(s_spi_lock, portMAX_DELAY);
+}
+
+static void bus_spi_unlock(void)
+{
+    if (s_spi_lock != NULL) {
+        xSemaphoreGiveRecursive(s_spi_lock);
+    }
+}
+
 static int bus_spi_transfer(uint32_t handle, const uint8_t *tx, uint8_t *rx, size_t len)
 {
     spi_device_handle_t dev = (spi_device_handle_t)handle_at(handle);
@@ -234,7 +253,10 @@ static int bus_spi_transfer(uint32_t handle, const uint8_t *tx, uint8_t *rx, siz
     t.length = len * 8;
     t.tx_buffer = tx;
     t.rx_buffer = rx;
-    return spi_device_transmit(dev, &t) == ESP_OK ? 0 : -1;
+    bus_spi_lock();
+    esp_err_t e = spi_device_transmit(dev, &t);
+    bus_spi_unlock();
+    return e == ESP_OK ? 0 : -1;
 }
 
 static uint32_t bus_i2c_add_device(int port, int sda_pin, int scl_pin, uint16_t addr, int clock_hz)
@@ -521,6 +543,8 @@ static const purr_driver_bus_table_t s_bus_table = {
     .uart_read = bus_uart_read,
     .uart_set_baud = bus_uart_set_baud,
     .uart_close = bus_uart_close,
+    .spi_lock = bus_spi_lock,
+    .spi_unlock = bus_spi_unlock,
 };
 
 const purr_driver_bus_table_t *purr_driver_bus_table(void)
@@ -552,6 +576,9 @@ void purr_drivers_bind_all(const purr_board_t *board)
 
 esp_err_t purr_kernel_init(void)
 {
+    if (s_spi_lock == NULL) {
+        s_spi_lock = xSemaphoreCreateRecursiveMutex();
+    }
     const purr_board_t *b = purr_board();
     ESP_LOGI(TAG, "board: %s", b->name);
 

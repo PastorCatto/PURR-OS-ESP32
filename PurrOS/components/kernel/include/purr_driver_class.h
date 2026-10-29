@@ -27,8 +27,9 @@ extern "C" {
 #define PURR_DRV_CLASS_MODEM  3     /* a cellular modem (LTE, LTE-M, NB-IoT, GSM) */
 #define PURR_DRV_CLASS_WIFI   4     /* a Wi-Fi interface that is not the chip's own */
 #define PURR_DRV_CLASS_HCI    5     /* a Bluetooth controller, as an HCI transport */
+#define PURR_DRV_CLASS_BLOCK  6     /* a block device: an SD card, an eMMC, a flash chip with sectors */
 
-const char *purr_drv_class_name(uint32_t class_id);   /* "gnss", "lora", "modem", "wifi", "hci", "none", "?" */
+const char *purr_drv_class_name(uint32_t class_id);   /* "gnss", "lora", "modem", "wifi", "hci", "block", "none", "?" */
 
 /* ---------------------------------------------------------------- GNSS (GPS) */
 
@@ -167,6 +168,31 @@ typedef struct {
     int (*write)(void *h, uint8_t type, const uint8_t *data, size_t len);          /* one HCI packet, `type` is PURR_HCI_*; 0 or < 0 */
     int (*read)(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms);           /* one packet with its type as the first byte; its length, 0 if none in time */
 } purr_hci_ops_t;
+
+/* ---------------------------------------------------------------- block devices (SD cards) */
+
+#define PURR_BLOCK_CARD_NONE 0
+#define PURR_BLOCK_CARD_SDSC 1      /* up to 2 GB, byte addressed on the wire */
+#define PURR_BLOCK_CARD_SDHC 2      /* SDHC and SDXC */
+
+typedef struct {
+    uint32_t sectors;           /* how many */
+    uint32_t sector_size;       /* bytes, 512 for an SD card */
+    uint8_t removable;
+    uint8_t writable;
+    uint8_t card;               /* PURR_BLOCK_CARD_* */
+    uint8_t reserved;
+} purr_block_info_t;
+
+typedef struct {
+    uint32_t version;                                       /* 1 */
+    /* The device's size, starting the card first if it has not been. 0, or < 0 when there is no card (or it did not answer). A card that was taken out and
+     * put back is found again by the next call. */
+    int (*info)(void *h, purr_block_info_t *out);
+    int (*read)(void *h, uint32_t lba, uint8_t *buf, uint32_t count);               /* count sectors; 0 or < 0 */
+    int (*write)(void *h, uint32_t lba, const uint8_t *buf, uint32_t count);        /* 0 or < 0 */
+    int (*sync)(void *h);                                   /* waits until the card is done writing */
+} purr_block_ops_t;
 
 #ifdef __cplusplus
 }

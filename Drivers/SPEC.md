@@ -133,9 +133,19 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
 - **UART in the bus table.** `uart_open(port, tx, rx, baud, rx_buffer)` (ports 1 and 2; a handle is the port plus one), `uart_write`, `uart_read(handle, buf, cap, timeout_ms)`, `uart_set_baud`, `uart_close`.
   Port 0 is the console and is not offered. `PURR_DRIVER_BUS_ABI_VERSION` is 6; `PURR_DRIVER_BUS_ABI_MIN` stays 4.
 - **Classes.** A driver of ABI 6 may declare `class_id` and `ops` (purr_driver_class.h). The kernel keeps a registry of bound drivers by class: `purr_class_find()` / `purr_class_ops()`. A driver built for ABI 4 or 5 has no such
-  fields and `purr_driver_class_id()` never reads them. Classes: `GNSS` (1), `LORA` (2), `MODEM` (3), `WIFI` (4), `HCI` (5). Every ops table starts with `uint32_t version`; a field is only ever added at the end.
+  fields and `purr_driver_class_id()` never reads them. Classes: `GNSS` (1), `LORA` (2), `MODEM` (3), `WIFI` (4), `HCI` (5), `BLOCK` (6, ABI 7). Every ops table starts with `uint32_t version`; a field is only ever added at the end.
 - **Named-value config.** `purr_kv_cfg_t` is up to 12 `{key[8], int32}` pairs. A board device or a line of `/etc/board.conf` that is not I2C carries its pins and settings this way (`bus=uart`, `tx=43`, `baud=38400`), and the driver reads
   them with `purr_kv(cfg, "key", fallback)`. Keys that name a pin (tx rx cs rst busy dio1 dio2 pwr pps int en irq mosi miso sclk bck ws din dout mclk) are checked against the chip's reserved pins when the file is read.
+
+### 4.5 Bus ABI 7, the shared SPI bus lock, and the BLOCK class (2026-10-29)
+- **`spi_lock()` / `spi_unlock()`** (appended to the table; `PURR_DRIVER_BUS_ABI_VERSION` is 7, `_MIN` stays 4). The T-Deck Plus's display, radio and SD card are one SPI bus. `spi_transfer()` already takes the bus for a single call; a driver
+  whose conversation is several calls (an SD card: command, answer, data, with its chip select held low in between) takes the lock around the whole of it, so a screen update cannot land in the middle. The lock is recursive.
+- **Chip select by hand.** A driver that must hold the line low across calls makes its SPI devices with `cs = PURR_PIN_NONE` and drives the pin itself with `gpio_set_output` / `gpio_write`. The board file lists the pin in `idle_high_pins`
+  so it is high from the start.
+- **Class `BLOCK` (6)**: `purr_block_ops_t {version, info, read, write, sync}` over 512-byte sectors. `info` fills `purr_block_info_t {sectors, sector_size, removable, writable, card, reserved}` and fails when there is no card.
+  A removable device is started lazily by its first call and found again after it was taken out.
+- **What sits on top** (main/purr_sd.c): FatFs, mounted as `/sd` through the C library's file calls, over the `sd0` device's block ops. Nothing formats a card. FAT12/16/32 only: ESP-IDF's FatFs has no exFAT, so a card of 64 GB
+  or more has to be formatted FAT32 on a computer first.
 
 ## 6a. Reference drivers by class (2026-10-28)
 | Driver | Class | Bus | Notes |
@@ -146,6 +156,7 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
 | `wifi-esp-at` | WIFI | UART | Espressif AT firmware: scan, join, TCP sockets in passive receive mode |
 | `hci-h4` | HCI | UART | H4 framing, HCI_Reset; no flow control (not in the bus table) |
 | `trackball-gpio` | none | GPIO | `read()` returns `[dx, dy, click, 0]` |
+| `sd-spi` | BLOCK | SPI | SD, SDHC and SDXC in SPI mode: 74+ clocks, CMD0/8, ACMD41, CMD58, CMD16, CSD for the size; CMD17/18/12 reads, CMD24/25 writes; started at 400 kHz, then `hz` (20 MHz); chip select by hand, bus lock held per conversation |
 
 All are freestanding. A module has no libc, so a driver that copies structs or initialises arrays defines its own `memcpy` and `memset` (and `modules.py` compiles with `-fno-tree-loop-distribute-patterns` so those loops stay loops).
 They are tested by running the real driver against a Python bus (`sdk/tests/driverhost.py`, `test_drivers_host.py`).

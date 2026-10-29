@@ -111,6 +111,16 @@ class HciOps(C.Structure):
                 ("read", C.CFUNCTYPE(C.c_int, PTR, PTR, C.c_size_t, c_u32))]
 
 
+class BlockInfo(C.Structure):
+    _fields_ = [("sectors", c_u32), ("sector_size", c_u32), ("removable", c_u8), ("writable", c_u8), ("card", c_u8), ("reserved", c_u8)]
+
+
+class BlockOps(C.Structure):
+    _fields_ = [("version", c_u32), ("info", C.CFUNCTYPE(C.c_int, PTR, C.POINTER(BlockInfo))),
+                ("read", C.CFUNCTYPE(C.c_int, PTR, c_u32, PTR, c_u32)), ("write", C.CFUNCTYPE(C.c_int, PTR, c_u32, PTR, c_u32)),
+                ("sync", C.CFUNCTYPE(C.c_int, PTR))]
+
+
 def kv_cfg(**values):
     cfg = KVCfg()
     cfg.count = len(values)
@@ -127,6 +137,9 @@ class Bus:
         self.t_us = 0
         self.gpio = {}
         self.log = []
+        self.lock_depth = 0
+        self.lock_max = 0
+        self.dma = []
 
     # SPI
     def spi_add_device(self, host, cs, mode, hz): return 1
@@ -144,6 +157,13 @@ class Bus:
     def uart_read(self, handle, cap, timeout_ms): return b""
     def uart_set_baud(self, handle, baud): return 0
     def uart_close(self, handle): pass
+    # the shared SPI bus
+    def spi_lock(self): self.lock_depth += 1; self.lock_max = max(self.lock_max, self.lock_depth)
+    def spi_unlock(self): self.lock_depth -= 1
+    def dma_alloc(self, n):
+        buf = C.create_string_buffer(n)
+        self.dma.append(buf)
+        return C.addressof(buf)
 
     def table(self):
         """The ctypes bus table; keep the returned object alive as long as the driver is used."""
@@ -180,7 +200,7 @@ class Bus:
             ("gpio_write", T(None, C.c_int, C.c_int), b.gpio_write),
             ("delay_ms", T(None, c_u32), b.delay_ms),
             ("now_us", T(C.c_uint64), b.now_us),
-            ("dma_alloc", T(PTR, C.c_size_t), lambda n: None),
+            ("dma_alloc", T(PTR, C.c_size_t), b.dma_alloc),
             ("backlight_init", T(C.c_int, C.c_int), lambda p: 0),
             ("backlight_set", T(None, c_u8), lambda v: None),
             ("adc_read_mv", T(C.c_int, C.c_int), lambda p: -1),
@@ -189,6 +209,8 @@ class Bus:
             ("uart_read", T(C.c_int, c_u32, PTR, C.c_size_t, c_u32), uart_read),
             ("uart_set_baud", T(C.c_int, c_u32, C.c_int), b.uart_set_baud),
             ("uart_close", T(None, c_u32), b.uart_close),
+            ("spi_lock", T(None), b.spi_lock),
+            ("spi_unlock", T(None), b.spi_unlock),
         ]
         fields = [("abi_version", c_u32)] + [(n, t) for n, t, _ in funcs]
 
@@ -196,7 +218,7 @@ class Bus:
             _fields_ = fields
 
         tab = Table()
-        tab.abi_version = 6
+        tab.abi_version = 7
         keep = []
         for n, t, f in funcs:
             cb = t(f)

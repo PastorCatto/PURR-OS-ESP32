@@ -660,3 +660,338 @@ class Trackball(unittest.TestCase):
         bus = FakeBall()
         ld = dh.Loaded(os.path.join(DRIVERS, "trackball_gpio_module.c"), "trackball_gpio_entry", bus, dh.kv_cfg())
         self.assertEqual(ld.probe(), -1)
+
+
+class FakeSdCard(dh.Bus):
+    """An SD card in SPI mode, byte by byte: the wire protocol of the SD Physical Layer spec (section 7), enough of it for a driver to start the card and move blocks.
+
+    CS is the GPIO the driver drives itself; a card whose CS is high does not hear the bus and does not drive MISO (the bus reads 0xFF)."""
+    CS = 39
+
+    def __init__(self, sectors=4096, high=True, v2=True, present=True, acmd41_tries=3):
+        super().__init__()
+        self.sectors, self.high, self.v2, self.present = sectors, high, v2, present
+        self.mem = bytearray(i % 251 for i in range(sectors * 512))
+        self.devs = {}                       # handle -> (cs, hz)
+        self.idle = False
+        self.inited = False
+        self.acmd41_left = acmd41_tries
+        self.app = False                     # the next command is an application command (after CMD55)
+        self.frame = bytearray()
+        self.outq = []
+        self.mode = "cmd"                    # cmd, wtoken, data
+        self.multi_write = False
+        self.stream = None
+        self.gap = 0
+        self.wlba = 0
+        self.wdata = bytearray()
+        self.cmds = []
+        self.bad = []                        # protocol violations the test checks for
+        self.bus_hz_seen = set()
+        self.spi_cs_args = []
+        self.written_tokens = []
+
+    def spi_add_device(self, host, cs, mode, hz):
+        h = len(self.devs) + 1
+        self.devs[h] = (cs, hz)
+        self.spi_cs_args.append(cs)
+        return h
+
+    def gpio_write(self, pin, level):
+        if pin == self.CS and level == 1 and self.gpio.get(pin, 1) == 0:   # deselected mid-conversation: whatever it was doing is dropped
+            self.frame = bytearray()
+            self.stream = None
+            if self.mode != "cmd":
+                self.mode = "cmd"
+        self.gpio[pin] = level
+
+    def spi_transfer(self, handle, tx, n):
+        hz = self.devs[handle][1]
+        out = bytearray()
+        for b in tx:
+            out.append(self.byte(b, hz))
+        return bytes(out)
+
+    def addr(self, arg):
+        return arg if self.high else arg // 512
+
+    def byte(self, b, hz):
+        if not self.present or self.gpio.get(self.CS, 1) != 0:
+            return 0xFF
+        self.bus_hz_seen.add(hz)
+        if self.outq:
+            o = self.outq.pop(0)
+        elif self.stream is not None:
+            if self.gap < 2:
+                self.gap += 1
+                o = 0xFF
+            else:
+                self.gap = 0
+                blk = bytes(self.mem[self.stream * 512:(self.stream + 1) * 512])
+                self.outq = [0xFE] + list(blk) + [0x12, 0x34]
+                self.stream += 1
+                o = self.outq.pop(0)
+        else:
+            o = 0xFF
+        self.feed(b, hz)
+        return o
+
+    def feed(self, b, hz):
+        if self.mode == "cmd":
+            if not self.frame:
+                if b & 0xC0 == 0x40:
+                    self.frame.append(b)
+                    if b & 0x3F == 12:       # a stop cancels the stream the moment its first byte arrives
+                        self.stream = None
+                        self.outq = []
+                return
+            self.frame.append(b)
+            if len(self.frame) == 6:
+                f, self.frame = bytes(self.frame), bytearray()
+                self.run(f[0] & 0x3F, int.from_bytes(f[1:5], "big"), f[5], hz)
+        elif self.mode == "wtoken":
+            if b == (0xFC if self.multi_write else 0xFE):
+                self.mode, self.wdata = "data", bytearray()
+            elif b == 0xFD and self.multi_write:
+                self.mode = "cmd"
+                self.outq = [0xFF] + [0x00] * 3
+            elif b != 0xFF:
+                self.bad.append("unexpected byte 0x%02X waiting for a data token" % b)
+        elif self.mode == "data":
+            self.wdata.append(b)
+            if len(self.wdata) == 514:
+                if self.wlba >= self.sectors:
+                    self.outq = [0x0D]
+                else:
+                    self.mem[self.wlba * 512:(self.wlba + 1) * 512] = self.wdata[:512]
+                    self.outq = [0x05] + [0x00] * 4
+                self.wlba += 1
+                self.mode = "wtoken" if self.multi_write else "cmd"
+
+    def run(self, cmd, arg, crc, hz):
+        self.cmds.append((("A" if self.app else "") + str(cmd), arg))
+        app, self.app = self.app, False
+        if not self.inited and hz > 400000 and cmd != 0:
+            self.bad.append("command %d at %d Hz before the card was started" % (cmd, hz))
+        if cmd == 0:
+            if crc != 0x95:
+                self.bad.append("CMD0 with CRC 0x%02X" % crc)
+            self.idle, self.inited = True, False
+            self.outq = [0xFF, 0x01]
+        elif cmd == 8:
+            if not self.v2:
+                self.outq = [0xFF, 0x05]
+            else:
+                if crc != 0x87:
+                    self.bad.append("CMD8 with CRC 0x%02X" % crc)
+                self.outq = [0xFF, 0x01, 0x00, 0x00, arg >> 8 & 0xF, arg & 0xFF]
+        elif cmd == 55:
+            self.app = True
+            self.outq = [0xFF, 0x01 if self.idle else 0x00]
+        elif cmd == 41 and app:
+            if self.v2 and self.high and not arg & 0x40000000:
+                self.bad.append("ACMD41 without the HCS bit on a version 2 card")
+            self.acmd41_left -= 1
+            if self.acmd41_left <= 0:
+                self.idle, self.inited = False, True
+                self.outq = [0xFF, 0x00]
+            else:
+                self.outq = [0xFF, 0x01]
+        elif cmd == 58:
+            self.outq = [0xFF, 0x00, 0xC0 if self.high else 0x80, 0xFF, 0x80, 0x00]
+        elif cmd == 16:
+            self.outq = [0xFF, 0x00 if arg == 512 else 0x40]
+        elif cmd == 9:
+            self.outq = [0xFF, 0x00, 0xFF, 0xFE] + list(self.csd()) + [0xAB, 0xCD]
+        elif cmd in (17, 18):
+            a = self.addr(arg)
+            if not self.inited:
+                self.outq = [0xFF, 0x05]
+            elif a >= self.sectors:
+                self.outq = [0xFF, 0x40]
+            elif cmd == 17:
+                self.outq = [0xFF, 0x00, 0xFF, 0xFE] + list(self.mem[a * 512:(a + 1) * 512]) + [0x12, 0x34]
+            else:
+                self.outq = [0xFF, 0x00]
+                self.stream, self.gap = a, 0
+        elif cmd == 12:
+            self.outq = [0xFF, 0x00, 0x00, 0x00]
+        elif cmd in (24, 25):
+            a = self.addr(arg)
+            if not self.inited or a >= self.sectors:
+                self.outq = [0xFF, 0x40]
+            else:
+                self.outq = [0xFF, 0x00]
+                self.mode, self.wlba, self.multi_write = "wtoken", a, cmd == 25
+        else:
+            self.outq = [0xFF, 0x05]
+
+    def csd(self):
+        c = bytearray(16)
+        if self.high:                        # CSD version 2: C_SIZE = sectors / 1024 - 1
+            cs = self.sectors // 1024 - 1
+            c[0] = 0x40
+            c[7], c[8], c[9] = cs >> 16 & 0x3F, cs >> 8 & 0xFF, cs & 0xFF
+        else:                                # version 1: 512-byte blocks, READ_BL_LEN 9, C_SIZE_MULT 7 (x512), C_SIZE = sectors / 512 - 1
+            cs = self.sectors // 512 - 1
+            c[5] = 9
+            c[6], c[7], c[8] = cs >> 10 & 3, cs >> 2 & 0xFF, (cs & 3) << 6
+            c[9], c[10] = 3, 0x80
+        return bytes(c)
+
+
+@unittest.skipUnless(helpers.clang(), "needs a C compiler")
+class SdSpi(unittest.TestCase):
+    def load(self, **card):
+        bus = FakeSdCard(**card)
+        ld = dh.Loaded(os.path.join(DRIVERS, "sd_spi_module.c"), "sd_spi_entry", bus, dh.kv_cfg(cs=39, hz=20000000), compatible=b"sd-spi")
+        self.assertEqual(ld.probe(), 0)
+        self.addCleanup(ld.remove)
+        return ld, bus, ld.ops(dh.BlockOps)
+
+    def info(self, ld, ops):
+        out = dh.BlockInfo()
+        rc = ops.info(ld.handle, C.byref(out))
+        return rc, out
+
+    def read(self, ld, ops, lba, count):
+        buf = C.create_string_buffer(512 * count)
+        rc = ops.read(ld.handle, lba, C.addressof(buf), count)
+        return rc, buf.raw
+
+    def write(self, ld, ops, lba, data):
+        buf = C.create_string_buffer(data, len(data))
+        return ops.write(ld.handle, lba, C.addressof(buf), len(data) // 512)
+
+    def test_it_is_a_block_driver_for_the_current_bus(self):
+        ld, bus, ops = self.load()
+        self.assertEqual(ld.drv.class_id, 6)
+        self.assertEqual(ld.drv.bus_abi, 7)
+        self.assertEqual(ld.drv.name, b"sd-spi")
+
+    def test_the_slot_is_not_touched_until_someone_wants_the_card(self):
+        ld, bus, ops = self.load()
+        self.assertEqual(bus.cmds, [])
+        self.assertEqual(bus.gpio[39], 1)                          # deselected from the start: the card must not hear the display
+        self.assertEqual(set(bus.spi_cs_args), {-1})               # the driver runs its own chip select
+
+    def test_an_sdhc_card_starts_and_reports_its_size(self):
+        ld, bus, ops = self.load(sectors=8192)
+        rc, i = self.info(ld, ops)
+        self.assertEqual(rc, 0)
+        self.assertEqual((i.sectors, i.sector_size, i.card, i.removable, i.writable), (8192, 512, 2, 1, 1))
+        self.assertEqual([c for c, _ in bus.cmds][:5], ["0", "8", "55", "A41", "55"][:5])
+        self.assertEqual(bus.bad, [])
+
+    def test_a_card_is_started_slowly_then_run_fast(self):
+        ld, bus, ops = self.load()
+        self.info(ld, ops)
+        self.read(ld, ops, 0, 1)
+        self.assertEqual(bus.bad, [])
+        self.assertIn(400000, bus.bus_hz_seen)
+        self.assertIn(20000000, bus.bus_hz_seen)
+
+    def test_an_old_sdsc_card_is_byte_addressed(self):
+        ld, bus, ops = self.load(sectors=2048 * 8, high=False, v2=False)
+        rc, i = self.info(ld, ops)
+        self.assertEqual(rc, 0)
+        self.assertEqual((i.sectors, i.card), (2048 * 8, 1))
+        self.assertIn(("16", 512), bus.cmds)
+        rc, data = self.read(ld, ops, 3, 1)
+        self.assertEqual(rc, 0)
+        self.assertEqual(data, bytes(bus.mem[3 * 512:4 * 512]))
+        self.assertIn(("17", 3 * 512), bus.cmds)                   # a byte address, not a block number
+
+    def test_single_and_multiple_block_reads(self):
+        ld, bus, ops = self.load()
+        rc, data = self.read(ld, ops, 7, 1)
+        self.assertEqual((rc, data), (0, bytes(bus.mem[7 * 512:8 * 512])))
+        rc, data = self.read(ld, ops, 100, 5)
+        self.assertEqual((rc, data), (0, bytes(bus.mem[100 * 512:105 * 512])))
+        self.assertIn(("18", 100), bus.cmds)
+        self.assertIn(("12", 0), bus.cmds)
+        self.assertEqual(bus.bad, [])
+        rc, data = self.read(ld, ops, 4090, 6)                     # the last sectors
+        self.assertEqual((rc, data), (0, bytes(bus.mem[4090 * 512:4096 * 512])))
+
+    def test_reading_past_the_end_is_refused(self):
+        ld, bus, ops = self.load()
+        self.assertEqual(self.read(ld, ops, 4096, 1)[0], -1)
+        self.assertEqual(self.read(ld, ops, 4095, 2)[0], -1)
+        self.assertEqual(self.read(ld, ops, 0, 0)[0], -1)
+
+    def test_single_and_multiple_block_writes(self):
+        ld, bus, ops = self.load()
+        one = bytes((i * 7) & 0xFF for i in range(512))
+        self.assertEqual(self.write(ld, ops, 20, one), 0)
+        self.assertEqual(bytes(bus.mem[20 * 512:21 * 512]), one)
+        many = bytes((i * 13 + 5) & 0xFF for i in range(512 * 4))
+        self.assertEqual(self.write(ld, ops, 50, many), 0)
+        self.assertEqual(bytes(bus.mem[50 * 512:54 * 512]), many)
+        self.assertEqual(bytes(bus.mem[54 * 512:55 * 512]), bytes(i % 251 for i in range(54 * 512, 55 * 512)))   # the next sector is untouched
+        self.assertEqual(self.read(ld, ops, 50, 4), (0, many))
+        self.assertEqual(bus.bad, [])
+        self.assertEqual(ops.sync(ld.handle), 0)
+
+    def test_writing_past_the_end_is_refused(self):
+        ld, bus, ops = self.load()
+        self.assertEqual(self.write(ld, ops, 4095, bytes(1024)), -1)
+
+    def test_no_card_is_an_error_not_a_hang(self):
+        ld, bus, ops = self.load(present=False)
+        self.assertEqual(self.info(ld, ops)[0], -1)
+        self.assertEqual(self.read(ld, ops, 0, 1)[0], -1)
+        self.assertEqual(bus.gpio[39], 1)
+
+    def test_a_card_put_in_later_is_found(self):
+        ld, bus, ops = self.load(present=False)
+        self.assertEqual(self.info(ld, ops)[0], -1)
+        bus.present = True
+        self.assertEqual(self.info(ld, ops)[0], 0)
+
+    def test_a_card_taken_out_and_put_back_is_started_again(self):
+        ld, bus, ops = self.load()
+        self.assertEqual(self.read(ld, ops, 1, 1)[0], 0)
+        bus.present = False
+        self.assertEqual(self.read(ld, ops, 1, 1)[0], -1)
+        bus.present = True
+        bus.inited = False
+        bus.acmd41_left = 2
+        self.assertEqual(self.read(ld, ops, 1, 1)[0], 0)           # the failed call dropped the card; the next one restarts it
+
+    def test_a_card_that_does_not_take_3v3_is_refused(self):
+        bus = FakeSdCard()
+        orig = bus.run
+
+        def run(cmd, arg, crc, hz):
+            orig(cmd, arg, crc, hz)
+            if cmd == 8:
+                bus.outq = [0xFF, 0x01, 0x00, 0x00, 0x00, 0x00]
+        bus.run = run
+        ld = dh.Loaded(os.path.join(DRIVERS, "sd_spi_module.c"), "sd_spi_entry", bus, dh.kv_cfg(cs=39), compatible=b"sd-spi")
+        self.assertEqual(ld.probe(), 0)
+        self.assertEqual(self.info(ld, ld.ops(dh.BlockOps))[0], -1)
+
+    def test_the_bus_is_locked_for_every_conversation_and_always_released(self):
+        ld, bus, ops = self.load()
+        self.info(ld, ops)
+        self.assertEqual(bus.lock_depth, 0)
+        self.read(ld, ops, 0, 3)
+        self.write(ld, ops, 9, bytes(512))
+        self.read(ld, ops, 99999, 1)
+        self.assertEqual(bus.lock_depth, 0)
+        self.assertGreaterEqual(bus.lock_max, 1)
+        bus.present = False
+        self.read(ld, ops, 0, 1)
+        self.assertEqual(bus.lock_depth, 0)
+
+    def test_the_card_is_deselected_after_every_call(self):
+        ld, bus, ops = self.load()
+        for call in (lambda: self.info(ld, ops), lambda: self.read(ld, ops, 0, 2), lambda: self.write(ld, ops, 1, bytes(512)), lambda: ops.sync(ld.handle)):
+            call()
+            self.assertEqual(bus.gpio[39], 1)
+
+    def test_probe_needs_a_chip_select(self):
+        bus = FakeSdCard()
+        ld = dh.Loaded(os.path.join(DRIVERS, "sd_spi_module.c"), "sd_spi_entry", bus, dh.kv_cfg(), compatible=b"sd-spi")
+        self.assertEqual(ld.probe(), -1)

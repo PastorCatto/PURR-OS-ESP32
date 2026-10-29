@@ -276,6 +276,7 @@ const char *purr_drv_class_name(uint32_t class_id)
     case 3: return "modem";
     case 4: return "wifi";
     case 5: return "hci";
+    case 6: return "block";
     default: return "?";
     }
 }
