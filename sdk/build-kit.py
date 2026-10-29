@@ -280,7 +280,8 @@ IN A TERMINAL
 
 READ
   sdk/docs/           the guides (they are also in Studio, under "docs")
-  Modules/drivers/    real drivers to learn from: display, touch, keyboard, GPS, LoRa and more
+  Modules/drivers/    real drivers to learn from: display, touch, keyboard, GPS, LoRa, modem, Wi-Fi, Bluetooth, trackball
+  reference-drivers/  those drivers already built for the T-Deck Plus (unsigned: sign them with your key)
   sdk/boards/         the T-Deck Plus, described as data
 
 Built %(date)s from PURR OS sources. See LICENSE-TODO.
@@ -375,6 +376,14 @@ def main():
         say("  %d files from %s" % (n, images))
     else:
         say("  (no release folder found: the kit will have no prebuilt parts; pass --images)")
+
+    drivers = [f for f in glob.glob(os.path.join(ROOT, "out", "drivers", "*.cat"))]
+    if drivers:
+        os.makedirs(os.path.join(KIT, "reference-drivers"), exist_ok=True)
+        for f in drivers:
+            shutil.copy2(f, os.path.join(KIT, "reference-drivers", os.path.basename(f)))
+        write(os.path.join(KIT, "reference-drivers", "README.txt"), "The reference drivers, built for the T-Deck Plus and NOT signed.\nSign them with your key (bin/purr sign FILE --key developer) before a device will take them,\nor build them yourself from Modules/drivers/ (bin/purr new driver ...).\n")
+        say("  %d reference drivers (unsigned)" % len(drivers))
 
     py_name = None
     if not a.no_python:

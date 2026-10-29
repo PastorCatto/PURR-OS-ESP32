@@ -64,8 +64,9 @@ class Boards(unittest.TestCase):
         text, n = boards.to_profile(boards.load(REF))
         self.assertIn("device=gps0\ncompatible=gnss-nmea", text)
         self.assertIn("bus=uart", text)
-        self.assertNotIn("trackball", text)               # templates are not written
-        self.assertEqual(n, 3)
+        self.assertIn("device=trackball\ncompatible=trackball-gpio", text)
+        self.assertNotIn("sd0", text)                    # templates (no driver yet) are not written
+        self.assertEqual(n, 4)
 
 
 class Templates(unittest.TestCase):
