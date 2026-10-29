@@ -98,6 +98,7 @@ def component_entry(path, name, board, filename, version):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True, help="version for kernel, loader and KittenOS, e.g. 1.0.0")
+    ap.add_argument("--loader-version", help="version for the recovery loader if it differs from --version (default: the same)")
     ap.add_argument("--board", default="tdeck_plus")
     ap.add_argument("--out", required=True)
     ap.add_argument("--key", default=os.path.join(ROOT, "signing_keys", "boot.key"))
@@ -125,12 +126,13 @@ def main():
     b = a.board
 
     # ---- new images, signed with the boot key
+    loader_v = a.loader_version or a.version
     kernel = os.path.join(r1, "kernel_%s.cat" % b)
     loader = os.path.join(r1, "loader_%s.cat" % b)
     kitten = os.path.join(r1, "kittenos_%s.kitt" % b)
     bootpkg = os.path.join(r1, "bootpkg_%s.cat" % b)
     ps("coreos", "package-component", "--component", "kernel", "--file", a.full, "--version", a.version, "--board", b, "--out", kernel)
-    ps("coreos", "package-component", "--component", "loader", "--file", a.minimal, "--version", a.version, "--board", b, "--out", loader)
+    ps("coreos", "package-component", "--component", "loader", "--file", a.minimal, "--version", loader_v, "--board", b, "--out", loader)
     from coreos import pimg as cpimg, CHIP_IDS, BOARDS, PACKAGE_KIND  # the same call mkimage_dbg.sh makes
     t, name = PACKAGE_KIND["recovery"]
     with open(a.rec, "rb") as fh, open(kitten, "wb") as out_fh:
@@ -146,7 +148,7 @@ def main():
     bp = pimg.header_fields(pimg.parse_header(open(bootpkg, "rb").read()))["version"]
     new = [component_entry(kernel, "kernel", b, os.path.basename(kernel), a.version),
            component_entry(kitten, "kittenos", b, os.path.basename(kitten), a.version),
-           component_entry(loader, "loader", b, os.path.basename(loader), a.version),
+           component_entry(loader, "loader", b, os.path.basename(loader), loader_v),
            component_entry(bootpkg, "bootpkg", b, os.path.basename(bootpkg), bp)]
     shutil.copyfile(a.legal, os.path.join(r1, "legal.txt"))
 
