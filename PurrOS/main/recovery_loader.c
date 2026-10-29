@@ -540,6 +540,27 @@ static int partition_trailer_ok(const esp_partition_t *p, uint8_t want_type, uin
     return purr_slot_trailer_check(&env, p, want_type, want_subtype) == PURR_V_OK;
 }
 
+/* 1 if the server lists a NEWER version of this component than the one sitting in the slot. The payload hash alone cannot tell: a relabelled or
+ * re-signed image with the same bytes has the same hash, so it would be "already good" forever. The installed version is read from the slot's
+ * signed header (the trailer, or the container itself for the boot package); if it cannot be read, the other checks decide as before. */
+static int installed_is_older(const esp_partition_t *p, const purr_manifest_entry_t *entry)
+{
+    uint32_t want, have;
+    if (p == NULL || entry == NULL || purr_version_parse(entry->version, strlen(entry->version), &want) != 0) {
+        return 0;
+    }
+    purr_image_header_t h;
+    if (purr_slot_trailer_header(p, &h) != 0) {
+        if (esp_partition_read(p, 0, &h, sizeof(h)) != ESP_OK || h.magic != PURR_IMAGE_MAGIC) {
+            return 0;
+        }
+    }
+    if (purr_version_parse(h.version, strnlen(h.version, sizeof(h.version)), &have) != 0) {
+        return 0;
+    }
+    return want > have;
+}
+
 /* Whether what's already sitting in `p` verifies as image_type/subtype right now, without
  * touching the network -- so a restore only ever writes the components that actually need it.
  * Only meaningful for a component whose partition holds the WHOLE signed container (bootpkg;
@@ -752,7 +773,7 @@ static int restore_components(int include_kernel)
         const purr_manifest_entry_t *kentry = purr_manifest_find(&man, "kernel", CONFIG_IDF_TARGET,
                                                                   purr_board()->name);
         if (kp != NULL && !purr_slot_marked_bad(kp) && partition_matches_manifest(kp, kentry) &&    /* F-14 */
-            partition_trailer_ok(kp, PURR_IMG_MODULE, PURR_MOD_KERNEL)) {
+            partition_trailer_ok(kp, PURR_IMG_MODULE, PURR_MOD_KERNEL) && !installed_is_older(kp, kentry)) {
             status("kernel: already good");
         } else if (fetch_and_install_module("kernel", "kernel", PURR_MOD_KERNEL, &man) != 0) {
             failures++;
@@ -763,7 +784,8 @@ static int restore_components(int include_kernel)
     wiz_progress(step++, steps, 0);
     const esp_partition_t *bp = esp_partition_find_first(ESP_PARTITION_TYPE_ANY,
                                                           ESP_PARTITION_SUBTYPE_ANY, "bootpkg");
-    if (bp != NULL && partition_verify_in_place(bp, PURR_IMG_MODULE, PURR_MOD_BOOTPKG)) {
+    const purr_manifest_entry_t *bentry = purr_manifest_find(&man, "bootpkg", CONFIG_IDF_TARGET, purr_board()->name);
+    if (bp != NULL && partition_verify_in_place(bp, PURR_IMG_MODULE, PURR_MOD_BOOTPKG) && !installed_is_older(bp, bentry)) {
         status("The boot menu is already good");
     } else if (fetch_and_install_module("bootpkg", "bootpkg", PURR_MOD_BOOTPKG, &man) != 0) {
         status("The boot menu couldn't be updated, carrying on without it");     /* optional: never stops the restore */
@@ -777,7 +799,7 @@ static int restore_components(int include_kernel)
     const purr_manifest_entry_t *kosentry = purr_manifest_find(&man, "kittenos", CONFIG_IDF_TARGET,
                                                                  purr_board()->name);
     if (kop != NULL && !purr_slot_marked_bad(kop) && partition_matches_manifest(kop, kosentry) &&    /* F-14 */
-        partition_trailer_ok(kop, PURR_IMG_RECOVERY, 0)) {
+        partition_trailer_ok(kop, PURR_IMG_RECOVERY, 0) && !installed_is_older(kop, kosentry)) {
         status("KittenOS is already good");
     } else {
         const purr_manifest_entry_t *entry = kosentry;
