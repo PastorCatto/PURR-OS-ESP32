@@ -77,3 +77,15 @@ first built into the shell by mistake and was taken back out. A sideloaded app c
 ### Decided (owner, 2026-10-28)
 Shared apps, separate data: sideloaded/dev-mode apps live in one shared `/apps` (visible to every user), each user's data stays under their own home. The owner will
 reproduce the second-user "filesystem error" themselves; do not spend VM time on it.
+
+
+## Files app and the `files` catcall (2026-10-28)
+Scope chosen by the owner: A (home folder) and B (everything, read-only) in one app; C (everything, writable for admins) is a separate, later version.
+- `files` catcall (`purr_catcalls.h`, `main/purr_catrt_files.c`): absolute paths in the signed-in user's view; list, stat, read (offset), mkdir, remove, rename, copy
+  (whole files up to 64 KB). Two new dangerous permissions in `purr_perm`: `shared-storage` (the user's home, read and write) and `system-files` (anywhere
+  else, read-only, administrators only). Asked at first use like `power` (`purr_catrt_perm_gate`, answer `PURR_APPEV_PERM`). `permissions.conf` can be read, never
+  written through this. The file system's own owner checks still apply underneath.
+- `Apps/files/` (kind ui, sideloaded, 4.8 KB): places (Home, System files for admins), folder list (folders first), item page (View/Open, Copy, Rename,
+  Delete with a second tap), text viewer (first 2000 bytes), new folder, paste. Published to the dev server only; not built into the shell.
+- No SD card: nothing mounts one yet (plan8/browser idea, shared SPI bus unverified).
+- Not run on a device or in the VM yet.

@@ -1,3 +1,4 @@
+#include "esp_attr.h"
 #include "purr_ui_assets.h"
 
 #include <string.h>
@@ -35,7 +36,7 @@ typedef struct {
     uint8_t reserved[3];
 } dir_entry_t;
 
-static purr_asset_t s_assets[MAX_ASSETS];
+static EXT_RAM_BSS_ATTR purr_asset_t s_assets[MAX_ASSETS];
 static int s_count;
 static esp_partition_mmap_handle_t s_mmap_handle;
 static int s_mapped;

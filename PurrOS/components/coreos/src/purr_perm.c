@@ -9,6 +9,8 @@ static const struct {
 } k_perm[PURR_PERM_COUNT] = {
     {"keep-awake", "keep the device awake"},
     {"wake-alarm", "wake the device on a schedule (uses battery)"},
+    {"shared-storage", "see and change the files in your home folder"},
+    {"system-files", "read the system's files (read-only)"},
 };
 
 const char *purr_perm_name(int perm)

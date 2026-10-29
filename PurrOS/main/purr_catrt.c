@@ -5,6 +5,7 @@
  * time. Each app has its own task that runs its callbacks. The manager waits for a callback to
  * return (with a timeout); an app never waits for the manager, so the two cannot deadlock.
  */
+#include "esp_attr.h"
 #include "purr_catrt.h"
 
 #include <stdio.h>
@@ -64,7 +65,8 @@ typedef struct {
 } rtdev_t;
 
 static rtdev_t s_dev[PURR_RT_MAX_APPS];
-static purr_rt_t s_rt;
+static EXT_RAM_BSS_ATTR purr_rt_t s_rt;
+static const void *s_files_table;
 static const void *s_ui_table, *s_storage_table;       /* registered by purr_catrt_ui.c / purr_catrt_storage.c */
 static purr_catrt_ui_lifecycle_fn s_ui_lifecycle;
 static void (*s_storage_release)(int slot);
@@ -717,6 +719,11 @@ void purr_catrt_set_storage(const void *table, void (*release)(int slot))
     s_storage_release = release;
 }
 
+void purr_catrt_set_files(const void *table)
+{
+    s_files_table = table;
+}
+
 int purr_catrt_caller(char *name, size_t cap)
 {
     rtdev_t *d = cur_dev();
@@ -835,6 +842,9 @@ static const void *catcall_get(const char *name, uint32_t min_version)
     if (strcmp(name, "storage") == 0 && s_storage_table != NULL &&
         min_version <= ((const uint32_t *)s_storage_table)[0]) {
         return s_storage_table;
+    }
+    if (strcmp(name, "files") == 0 && s_files_table != NULL && min_version <= ((const uint32_t *)s_files_table)[0]) {
+        return s_files_table;
     }
     if (strcmp(name, "sched") == 0 && min_version <= s_cc_sched.version) {
         return &s_cc_sched;

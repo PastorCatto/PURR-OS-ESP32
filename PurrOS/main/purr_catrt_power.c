@@ -147,6 +147,12 @@ static int gate(int perm, int *slot_out)
     return rc;
 }
 
+int purr_catrt_perm_gate(int perm)
+{
+    int slot;
+    return gate(perm, &slot);
+}
+
 int purr_catrt_perm_answer(int answer, char *next_app, size_t cap, int *next_perm, int *next_denials)
 {
     lock();

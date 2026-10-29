@@ -1,3 +1,4 @@
+#include "esp_attr.h"
 #include "purr_userstore.h"
 
 #include <string.h>
@@ -34,7 +35,7 @@ int purr_userstore_load(purr_fs_t *fs, purr_user_list_t *users, purr_shadow_list
         return -1;
     }
 
-    static char buf[BUF_LEN];
+    static EXT_RAM_BSS_ATTR char buf[BUF_LEN];
     accum_t a = {buf, sizeof(buf), 0};
     if (purr_fs_read(fs, PASSWD_PATH, accumulate, &a) == 0) {
         purr_user_list_parse(users, buf, a.len);
@@ -54,7 +55,7 @@ int purr_userstore_save(purr_fs_t *fs, const purr_user_list_t *users, const purr
     }
     purr_fs_mkdir(fs, "/etc");                    /* ignored if it already exists */
 
-    static char buf[BUF_LEN];
+    static EXT_RAM_BSS_ATTR char buf[BUF_LEN];
     int n = purr_user_list_format(users, buf, sizeof(buf));
     if (n < 0 || purr_fs_write(fs, PASSWD_PATH, buf, (uint32_t)n) != 0) {
         return -1;

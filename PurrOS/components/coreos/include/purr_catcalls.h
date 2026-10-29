@@ -10,7 +10,7 @@
  * catcall (a timer, an open file, a subscription) is owned by that app and released when it
  * stops (AppRuntime/SPEC.md section 9).
  *
- * Catcall names, for catcall_get: "console", "app", "sched", "storage", "system", "event", "ctl", "ui", "power".
+ * Catcall names, for catcall_get: "console", "app", "sched", "storage", "system", "event", "ctl", "ui", "power", "files".
  */
 #ifndef PURR_CATCALLS_H
 #define PURR_CATCALLS_H
@@ -204,6 +204,32 @@ typedef struct {
     void (*done)(void);
     int  (*screen_is_on)(void);
 } purr_cc_power_t;
+
+/* -------------------------------------------------------------------- files */
+/* Files outside the app's own folder, for a file manager. Paths are absolute, in the signed-in user's view ("/home/<user>/..."); ".." and
+ * "." are refused. Two dangerous permissions (Permissions/SPEC.md), asked at first use like `power`: a call answers PURR_FILES_ASK until the
+ * user decides, then the app gets PURR_APPEV_PERM and calls again.
+ *   "shared-storage": read and change files under the user's home folder.
+ *   "system-files":   read (never change) files anywhere else; administrators only.
+ * The permission file /home/<user>/permissions.conf can be read but never changed through this. A file is copied whole (at most 64 KB). */
+#define PURR_FILES_OK      0
+#define PURR_FILES_BAD    -1    /* a bad path, a missing file, or the file system refused */
+#define PURR_FILES_DENIED -2
+#define PURR_FILES_ASK    -3    /* the user is being asked: wait for PURR_APPEV_PERM, then call again */
+
+typedef struct {
+    uint32_t version;                                   /* 1 */
+    int  (*home)(char *buf, size_t cap);                /* "/home/<user>"; returns its length, or < 0 */
+    int  (*is_admin)(void);                             /* 1 if "system-files" can ever be granted to this user */
+    int  (*list)(const char *path, void (*cb)(const char *name, int is_dir, uint32_t size, void *ctx), void *ctx);
+    int  (*stat)(const char *path, uint32_t *size, int *is_dir);
+    /* Up to len bytes of the file starting at offset; returns the bytes read (0 at the end), or < 0. */
+    int  (*read)(const char *path, uint32_t offset, void *buf, size_t len);
+    int  (*mkdir)(const char *path);
+    int  (*remove)(const char *path);                   /* a file or an empty folder */
+    int  (*rename)(const char *from, const char *to);
+    int  (*copy)(const char *from, const char *to);     /* a file, not a folder */
+} purr_cc_files_t;
 
 #ifdef __cplusplus
 }

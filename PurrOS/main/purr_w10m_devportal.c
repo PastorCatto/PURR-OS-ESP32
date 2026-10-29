@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -45,7 +46,7 @@ static lv_obj_t *s_armed;
 
 static purr_repo_server_t s_server;              /* the one in use */
 static int s_have_server;
-static purr_repo_index_t s_idx;                  /* its apps */
+static EXT_RAM_BSS_ATTR purr_repo_index_t s_idx;                  /* its apps */
 static int s_idx_ok;
 static purr_app_registry_t s_reg;                /* what is in devapps */
 static char s_runq[1600];
@@ -507,7 +508,7 @@ static int connect_run(job_t *j)
         snprintf(j->msg, sizeof(j->msg), "%s", err);
         return -1;
     }
-    static purr_repo_index_t probe;
+    static EXT_RAM_BSS_ATTR purr_repo_index_t probe;
     if (purr_repo_dev_index(base, &probe, err, sizeof(err)) != 0) {
         snprintf(j->msg, sizeof(j->msg), "%s", err);
         return -1;

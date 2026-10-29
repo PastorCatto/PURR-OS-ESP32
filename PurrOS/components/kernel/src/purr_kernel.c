@@ -443,6 +443,15 @@ esp_err_t purr_kernel_init(void)
     const purr_board_t *b = purr_board();
     ESP_LOGI(TAG, "board: %s", b->name);
 
+    /* Backlight off before anything else: the panel is reset and re-initialised below and by the display driver, and until it has been
+     * painted black it shows white. The driver turns the backlight on (at 0) and the first frame is drawn before the level is raised. */
+    for (int i = 0; i < b->device_count; i++) {
+        const purr_display_cfg_t *dc = (const purr_display_cfg_t *)b->devices[i].cfg;
+        if (strcmp(b->devices[i].compatible, "st7789") == 0 && dc != NULL && dc->backlight != PURR_PIN_NONE) {
+            pin_out(dc->backlight, 0);
+        }
+    }
+
     /* The peripheral rail first. Nothing on it answers until it is on. */
     if (b->power_pin != PURR_PIN_NONE) {
         pin_out(b->power_pin, 1);

@@ -29,6 +29,10 @@ void purr_catrt_perm_set_ui(purr_perm_show_fn show);
 #define PURR_ANSWER_NEVER  3
 int purr_catrt_perm_answer(int answer, char *next_app, size_t cap, int *next_perm, int *next_denials);
 
+/* May the calling app use this permission now? PURR_POWER_OK (0), PURR_POWER_DENIED, or PURR_POWER_ASK (a prompt is up: wait for
+ * PURR_APPEV_PERM, then call again). Other catcalls (files) gate with it too. */
+int purr_catrt_perm_gate(int perm);
+
 /* Settings and the shell: one app's saved decision, and changing it. state is PURR_PERM_*. */
 int purr_catrt_perm_get(const char *app, int perm);
 int purr_catrt_perm_put(const char *app, int perm, int state);     /* 0, or -1; saves; a revoke takes effect now */

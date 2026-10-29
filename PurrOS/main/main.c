@@ -193,12 +193,12 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(2000));
         }
     }
-    if (d->set_brightness) {
-        d->set_brightness(255);
-    }
     purr_console_init(d);
     purr_console_flush();   /* paint whatever's already buffered (the "starting"/fs-mount
                               * lines) immediately instead of waiting for the next flush. */
+    if (d->set_brightness) {
+        d->set_brightness(255);                 /* only now: the panel shows white until something has been drawn on it */
+    }
     /* The boot menu's hand-off screen carries on while the kernel starts: the same frame, a stage line and a bar,
      * instead of the log text (which is still in the serial log). The text console comes back if the shell is
      * the text one, or a login is asked for. Full profile on the colour T-Deck boards only. */

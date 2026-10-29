@@ -21,7 +21,9 @@ extern "C" {
 /* The permissions this table knows. More are added here as catcalls need them (Permissions/SPEC.md section 2). */
 #define PURR_PERM_KEEP_AWAKE 0      /* "keep-awake": hold the screen or the CPU awake */
 #define PURR_PERM_WAKE_ALARM 1      /* "wake-alarm": wake the device on a schedule */
-#define PURR_PERM_COUNT      2
+#define PURR_PERM_SHARED_STORAGE 2  /* "shared-storage": see and change files outside the app's own folder (the user's home) */
+#define PURR_PERM_SYSTEM_FILES   3  /* "system-files": read system files, read-only (administrators only) */
+#define PURR_PERM_COUNT      4
 
 /* What the user has said about one permission of one app. */
 #define PURR_PERM_ASK    0          /* not decided: ask at first use */

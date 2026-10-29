@@ -46,7 +46,8 @@ app's own storage folder, `system` (read-only battery, time, memory), audio outp
 | `radio` | LoRa and similar radios |
 | `gps` | Location, as parsed fixes |
 | `gps-raw` | The raw GPS stream (`gps_raw`) |
-| `shared-storage` | Files and the SD card outside the app's own folder |
+| `shared-storage` | Files outside the app's own folder: the signed-in user's home, read and write (`files` catcall). The SD card is not mounted by any driver yet. |
+| `system-files` | Reading (never changing) the rest of the file system through the `files` catcall. Administrators only. |
 | `input-monitor` | Reading keys while the app is not focused |
 | `audio-input` | The microphone (a later catcall) |
 | `system-settings` | Brightness, time and similar settings |

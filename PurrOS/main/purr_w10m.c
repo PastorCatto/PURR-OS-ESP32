@@ -10,6 +10,7 @@
  * downwards. A change of orientation re-runs the same routine, so there is one layout to keep
  * right, not two.
  */
+#include "esp_attr.h"
 #include "purr_w10m.h"
 
 #include <stdio.h>
@@ -61,7 +62,7 @@ typedef struct {
     int ok;
 } img_slot_t;
 
-static img_slot_t s_imgs[128];
+static EXT_RAM_BSS_ATTR img_slot_t s_imgs[128];
 static int s_nimgs;
 
 /* The original art, as exported: LVGL native RGB565, or RGB565 with a separate alpha plane. The
