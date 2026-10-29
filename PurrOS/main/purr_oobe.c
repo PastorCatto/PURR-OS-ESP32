@@ -32,6 +32,7 @@ static int s_npages, s_idx, s_part;
 
 static lv_obj_t *s_sheet, *s_head, *s_body, *s_bar, *s_back, *s_next, *s_next_label;
 static lv_obj_t *s_bg_label, *s_bg_bar;                  /* the background install, above the bottom bar */
+static lv_obj_t *s_strip_lbl, *s_strip_bar;              /* the loader's and the finishing page's strip: a status line and a thin bar up top */
 static lv_obj_t *s_status;                               /* the page's one-line result */
 static lv_group_t *s_group;
 static lv_timer_t *s_timer;
@@ -95,6 +96,28 @@ static void job_start(purr_oobe_job_t kind, const char *a, const char *b)
 
 static void wifi_list_build(void);
 static void srv_list_build(void);
+
+/* The strip (the same look as part 2's background-install line): 24 px with the status on the right and a 3 px bar on its lower edge.
+ * On while the loader restores or the system finishes; off on every other page of those parts, which get the room back. */
+static void strip_set(int on)
+{
+    if (s_strip_lbl == NULL) {
+        return;
+    }
+    int h = lv_display_get_vertical_resolution(NULL);
+    if (on) {
+        lv_obj_remove_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_strip_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_local_style_prop(s_strip_lbl, LV_STYLE_TEXT_COLOR, 0);      /* a failure turned it amber */
+        lv_label_set_text(s_strip_lbl, "Starting...");
+        lv_bar_set_value(s_strip_bar, 0, LV_ANIM_OFF);
+    } else {
+        lv_obj_add_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_strip_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_align(s_body, LV_ALIGN_TOP_LEFT, 0, on ? HEAD_H : 0);
+    lv_obj_set_height(s_body, h - (on ? HEAD_H : 0) - BAR_H);
+}
 
 static void bg_update(void)
 {
@@ -448,14 +471,10 @@ static void relay_cb(lv_event_t *e)
 
 static void page_restoring(void)
 {
+    strip_set(1);
+    s_stage = s_strip_lbl;
+    s_progress = s_strip_bar;
     w10m_title(s_body, "Okay, getting this sorted out.");
-    s_stage = w10m_text(s_body, "Starting...");
-    s_progress = lv_bar_create(s_body);
-    lv_obj_set_width(s_progress, LV_PCT(100));
-    lv_obj_set_height(s_progress, 8);
-    style_bar(s_progress);
-    lv_bar_set_range(s_progress, 0, 1000);
-    lv_bar_set_value(s_progress, 0, LV_ANIM_OFF);
     w10m_dim(s_body, "This takes a few minutes. Keep it charged or plugged in.");
     s_relay_btn = w10m_button(s_body, "Use a recovery computer", relay_cb, NULL);
     lv_obj_set_width(s_relay_btn, LV_PCT(100));
@@ -470,14 +489,10 @@ static void page_restoring(void)
  * system finishing its work and not as the recovery menu. The install itself is the background job; restarts into PURR OS when it ends. */
 static void page_finishing(void)
 {
+    strip_set(1);
+    s_stage = s_strip_lbl;
+    s_progress = s_strip_bar;
     w10m_title(s_body, "Just a few more minutes");
-    s_stage = w10m_text(s_body, "Starting...");
-    s_progress = lv_bar_create(s_body);
-    lv_obj_set_width(s_progress, LV_PCT(100));
-    lv_obj_set_height(s_progress, 8);
-    style_bar(s_progress);
-    lv_bar_set_range(s_progress, 0, 1000);
-    lv_bar_set_value(s_progress, 0, LV_ANIM_OFF);
     w10m_dim(s_body, "Your files are safe. PURR OS starts by itself when this is done. Keep it charged or plugged in.");
     lv_obj_add_flag(s_next, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_back, LV_OBJ_FLAG_HIDDEN);
@@ -640,6 +655,7 @@ static void show_page(int idx)
     s_job_active = -1;
     s_status = NULL;
     s_progress = s_stage = s_legal_label = s_srv_list = s_relay_btn = NULL;
+    strip_set(0);                                               /* a page that wants the strip turns it back on */
     lv_obj_clean(s_body);
     lv_group_remove_all_objs(s_group);
     lv_obj_remove_flag(s_next, LV_OBJ_FLAG_HIDDEN);
@@ -758,6 +774,24 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
     lv_obj_align(s_bg_bar, LV_ALIGN_TOP_LEFT, 0, HEAD_H - 2);
     lv_obj_add_flag(s_bg_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_bg_bar, LV_OBJ_FLAG_HIDDEN);
+
+    s_strip_lbl = s_strip_bar = NULL;
+    if (part != PURR_OOBE_PART_FIRSTBOOT) {                     /* part 2 has its own header line above; the others borrow the same look */
+        s_strip_lbl = lv_label_create(s_sheet);
+        lv_obj_set_style_text_font(s_strip_lbl, &lv_font_montserrat_12, 0);
+        purr_theme_apply(s_strip_lbl, PURR_TH_DIM);
+        lv_label_set_long_mode(s_strip_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+        lv_obj_set_width(s_strip_lbl, w - 20);
+        lv_obj_set_style_text_align(s_strip_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_align(s_strip_lbl, LV_ALIGN_TOP_LEFT, 10, 5);
+        s_strip_bar = lv_bar_create(s_sheet);
+        lv_obj_set_size(s_strip_bar, w, 3);
+        lv_bar_set_range(s_strip_bar, 0, 1000);
+        style_bar(s_strip_bar);
+        lv_obj_align(s_strip_bar, LV_ALIGN_TOP_LEFT, 0, HEAD_H - 2);
+        lv_obj_add_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_strip_bar, LV_OBJ_FLAG_HIDDEN);
+    }
 
     s_body = lv_obj_create(s_sheet);
     lv_obj_remove_style_all(s_body);

@@ -87,6 +87,8 @@ static void status(const char *line)
     purr_console_flush();
 }
 
+static void status_step(const char *text);
+
 static void statusf(const char *fmt, ...)
 {
     char buf[96];
@@ -613,7 +615,7 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
     }
     char url[256];
     resolve_url(purr_recovery_manifest_url(), entry->file, url, sizeof(url));
-    status(purr_recovery_source_name() != NULL ? "Downloading PURR OS from your dev server" : "Downloading PURR OS");
+    status_step(purr_recovery_source_name() != NULL ? "Downloading PURR OS from your dev server" : "Downloading PURR OS");
 
     uint8_t *image = NULL;
     size_t image_len = 0;
@@ -717,6 +719,18 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
  * running again (section 2.1). */
 /* The screen's bar: which step of how many, and how much of the download in progress has arrived. */
 static int s_step, s_steps = 1;
+
+/* The wizard's strip says which of the steps is running ("... · step 2 of 3"). */
+static void status_step(const char *text)
+{
+    if (s_wizard && s_steps > 1) {
+        char b[96];
+        snprintf(b, sizeof(b), "%s · step %d of %d", text, s_step < s_steps ? s_step + 1 : s_steps, s_steps);
+        status(b);
+        return;
+    }
+    status(text);
+}
 static bool s_setup;        /* the wizard is only collecting the network details (no saved network); the restore runs after the restart */
 
 static void wiz_progress(int step, int steps, int within)
@@ -811,7 +825,7 @@ static int restore_components(int include_kernel)
             failures++;
         } else {
             resolve_url(purr_recovery_manifest_url(), entry->file, url, sizeof(url));
-            status(purr_recovery_source_name() != NULL ? "Downloading PURR OS from your dev server" : "Downloading PURR OS");
+            status_step(purr_recovery_source_name() != NULL ? "Downloading PURR OS from your dev server" : "Downloading PURR OS");
             uint8_t got_hash[PURR_SHA256_LEN];
             if (purr_fetch_alloc(url, &image, &image_len, MAX_IMAGE_SIZE) != ESP_OK) {
                 status("The download didn't finish.");
