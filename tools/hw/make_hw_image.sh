@@ -22,10 +22,9 @@ for f in $BL $PT $REL/JumpingJaguar1/loader_tdeck_plus.cat $REL/JumpingJaguar1/b
   [[ -f $f ]] || { echo "missing $f"; exit 1; }
 done
 ps coreos slot-image --file $REL/JumpingJaguar1/loader_tdeck_plus.cat --board tdeck_plus --slot loader --out $W/loader_slot.bin >/dev/null
-# DEV_RECOVERY=1 (the default while debugging) sets the bootloader's DEV_RECOVERY flag, so recovery offers the dev server once developer mode
-# is on. Release images: build with DEV_RECOVERY=0.
+# DEV_RECOVERY=1 (the default while debugging) sets the bootloader's DEV_RECOVERY flag, so recovery offers the dev server (developer mode comes on with it). Release images: build with DEV_RECOVERY=0.
 tb=(--mode enforce --force-loader)
-[[ ${DEV_RECOVERY-1} == 0 ]] || tb+=(--dev-recovery)
+[[ ${DEV_RECOVERY-1} == 0 ]] || tb+=(--dev-recovery --dev-mode)      # the bootloader honours DEV_RECOVERY only while developer mode is on, and a blank device has no KittenOS to switch it on
 ps keys trust-block --key signing_keys/boot.key $tb --out $W/purrcfg.bin >/dev/null
 $PY - "$OUT" "$W" "$BL" "$PT" "$REL" "$UIA" <<'PYEOF'
 import sys

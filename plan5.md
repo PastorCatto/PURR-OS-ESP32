@@ -152,3 +152,14 @@ Open: whether a service is a second entry in the same package (manifest `[servic
 - A service is a second entry in the same package (manifest `[service]` section): one install, one signature, one update.
 - The background cap is computed at boot from the PSRAM size, not fixed. 8 MB: 3 user apps + 2 services. 4 MB: 2 user + 1 service.
   2 MB: 1 user + 1 service. Other sizes interpolate (a table in firmware, one row per size class); a Kconfig override can lower it.
+
+### App lifecycle, decided (owner, 2026-10-28)
+- **Leaving the screen:** the UI half is unloaded. An app that is mid file transfer, holds an open connection, or is talking to hardware does not stay
+  frozen as a whole: its UI is closed and a small **companion service** (the `[service]` entry in the same package) carries on, finishes its turn
+  and closes cleanly. Frozen apps (anything that must keep its memory) still count against the user slots (3 / 2 / 1 by PSRAM).
+- **Services:** no UI, about 64 KB, CPU wake window only, no screen wake lock. A service may post a **notification** (messaging apps such as Meshtastic);
+  the notification wakes the screen. That goes through the permissions manager (`notify` permission). Permissions are asked at first launch; "just
+  once" and "don't allow" ask again every time (current behaviour, keep). Three wake-window overruns in a row switch the service off and tell the user.
+- **Over the cap:** the oldest frozen/unloaded-candidate app is closed and the shell shows a short notice ("Closed Notes to free memory"). If the app has
+  a companion service still running, the notice says so ("Closed Meshtastic; its service is still running"). Before closing, the app gets a
+  `PURR_APPEV_SAVE` event (save now); apps may also autosave.
