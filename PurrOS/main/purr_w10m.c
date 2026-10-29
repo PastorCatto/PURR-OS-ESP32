@@ -492,12 +492,99 @@ static void busy_fade(int to_message)
     lv_anim_start(&a);
 }
 
+static lv_timer_t *s_banner_timer;      /* a message is holding the strip (5 seconds) */
+static char s_busy_text[64];            /* the words of the work in progress, put back after a banner */
+static int s_banner_busy;               /* work was in progress when the banner took over */
+
+static void busy_start_anim(void)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_busy_msg);
+    lv_anim_set_exec_cb(&a, busy_anim_cb);
+    lv_anim_set_values(&a, 0, BUSY_CYCLE_MS);
+    lv_anim_set_duration(&a, BUSY_CYCLE_MS);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_linear);
+    lv_anim_start(&a);
+}
+
 static void busy_done_cb(lv_timer_t *t)
 {
     (void)t;
     s_busy_done_timer = NULL;                   /* a one-shot timer deletes itself */
     s_busy_state = 0;
     busy_fade(0);
+}
+
+static void banner_end_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_banner_timer = NULL;
+    lv_obj_set_style_text_color(s_busy_msg, lv_color_white(), 0);
+    if (s_banner_busy && s_busy_state == 1) {   /* the work is still going: its words and dots come back */
+        lv_label_set_text(s_busy_msg, s_busy_text);
+        busy_start_anim();
+    } else {
+        s_busy_state = 0;
+        busy_fade(0);
+    }
+    s_banner_busy = 0;
+}
+
+/* Any status, error or new notification takes over the strip for 5 seconds (an error in amber). A second one replaces the first and restarts
+ * the five seconds. Work in progress pauses behind it and comes back. */
+void w10m_banner(const char *msg, int bad)
+{
+    if (s_status == NULL || s_busy_msg == NULL || msg == NULL || msg[0] == '\0') {
+        return;
+    }
+    if (s_busy_done_timer != NULL) {
+        lv_timer_delete(s_busy_done_timer);
+        s_busy_done_timer = NULL;
+    }
+    if (s_banner_timer != NULL) {
+        lv_timer_delete(s_banner_timer);
+        s_banner_timer = NULL;
+    } else {
+        s_banner_busy = s_busy_state == 1;
+    }
+    if (s_busy_state == 1) {
+        lv_anim_delete(s_busy_msg, busy_anim_cb);
+        for (int i = 0; i < BUSY_DOTS; i++) {
+            lv_obj_add_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    lv_label_set_text(s_busy_msg, msg);
+    lv_obj_set_style_text_color(s_busy_msg, bad ? lv_color_hex(0xFFB900) : lv_color_white(), 0);
+    if (s_busy_state == 0) {
+        busy_fade(1);
+    }
+    if (s_busy_state != 1) {
+        s_busy_state = 2;
+    }
+    s_banner_timer = lv_timer_create(banner_end_cb, 5000, NULL);
+    lv_timer_set_repeat_count(s_banner_timer, 1);
+}
+
+typedef struct {
+    char msg[96];
+    int bad;
+} banner_req_t;
+
+static void *banner_ui(void *arg)
+{
+    banner_req_t *r = arg;
+    w10m_banner(r->msg, r->bad);
+    return NULL;
+}
+
+/* The same from any task (an app's catcall, a worker). */
+void w10m_banner_post(const char *msg, int bad)
+{
+    banner_req_t r = {.bad = bad};
+    snprintf(r.msg, sizeof(r.msg), "%s", msg != NULL ? msg : "");
+    purr_ui_service_run(banner_ui, &r, NULL);
 }
 
 void w10m_busy_begin(const char *msg)
@@ -509,20 +596,19 @@ void w10m_busy_begin(const char *msg)
         lv_timer_delete(s_busy_done_timer);
         s_busy_done_timer = NULL;
     }
-    lv_label_set_text(s_busy_msg, msg != NULL && msg[0] ? msg : "Working...");
+    if (s_banner_timer != NULL) {               /* a new action cuts a banner short */
+        lv_timer_delete(s_banner_timer);
+        s_banner_timer = NULL;
+        lv_obj_set_style_text_color(s_busy_msg, lv_color_white(), 0);
+        s_banner_busy = 0;
+    }
+    snprintf(s_busy_text, sizeof(s_busy_text), "%s", msg != NULL && msg[0] ? msg : "Working...");
+    lv_label_set_text(s_busy_msg, s_busy_text);
     for (int i = 0; i < BUSY_DOTS; i++) {
         lv_obj_set_style_bg_color(s_busy_dot[i], purr_theme_accent_color(), 0);
     }
     if (s_busy_state != 1) {
-        lv_anim_t a;
-        lv_anim_init(&a);
-        lv_anim_set_var(&a, s_busy_msg);
-        lv_anim_set_exec_cb(&a, busy_anim_cb);
-        lv_anim_set_values(&a, 0, BUSY_CYCLE_MS);
-        lv_anim_set_duration(&a, BUSY_CYCLE_MS);
-        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-        lv_anim_set_path_cb(&a, lv_anim_path_linear);
-        lv_anim_start(&a);
+        busy_start_anim();
     }
     if (s_busy_state == 0) {
         busy_fade(1);
@@ -533,6 +619,11 @@ void w10m_busy_begin(const char *msg)
 void w10m_busy_end(void)
 {
     if (s_busy_state != 1) {
+        return;
+    }
+    if (s_banner_timer != NULL) {               /* a banner is on the strip: let it finish, the work is over */
+        s_banner_busy = 0;
+        s_busy_state = 2;
         return;
     }
     lv_anim_delete(s_busy_msg, busy_anim_cb);
@@ -918,6 +1009,9 @@ static void add_note(const char *title, const char *text)
     purr_theme_apply(b, PURR_TH_DIM);
     lv_obj_move_to_index(n, 0);
     lv_obj_add_flag(s_cc_empty, LV_OBJ_FLAG_HIDDEN);
+    char line[96];
+    snprintf(line, sizeof(line), "%s: %s", title, text);          /* a new notification takes the strip for 5 seconds */
+    w10m_banner(line, 0);
 }
 
 static void clear_notes(lv_event_t *e)

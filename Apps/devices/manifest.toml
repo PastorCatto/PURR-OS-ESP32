@@ -1,0 +1,27 @@
+name = "devices"
+version = "1.0.0"
+description = "Device Manager: find and add hardware, drivers, the developer server, and system updates (administrators)"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "devices_entry"
+
+[catcalls]
+console = "1.0"
+ui = "2.0"
+app = "1.0"
+devices = "1.0"
+
+[permissions]
+requests = ["manage-devices"]
+
+[runtime]
+stack_bytes = 8192
+heap_bytes = 24576
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "Device Manager"
+icon = ""

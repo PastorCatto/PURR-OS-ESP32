@@ -44,6 +44,8 @@ static int s_row[MAX_ENTRIES];
 static int s_n, s_more;
 
 static int h_home, h_sys, h_open, h_copy, h_rename, h_delete, h_paste, h_ok, h_ta;
+static int s_pair_btn[6], s_pair_msg[6], s_npair;       /* each action button and the message line under it */
+static int s_cur_msg;                                   /* the line under the button that was just pressed */
 static char s_view[VIEW_MAX + 1];
 
 /* ---------------------------------------------------------------- tiny string helpers */
@@ -155,6 +157,48 @@ NO_OPT static void fmt_size(char *out, uint32_t b)
     append(out, unit, 24);
 }
 
+/* ---------------------------------------------------------------- messages */
+
+/* The status strip at the top of the screen, 5 seconds (ui version 2). */
+NO_OPT static void status(const char *t, int bad)
+{
+    if (ui->version >= 2 && ui->status != NULL) {
+        ui->status(t, bad);
+    }
+}
+
+/* An error: the strip, and the line right under the button that failed. */
+NO_OPT static void fail(const char *t)
+{
+    status(t, 1);
+    if (s_cur_msg > 0) {
+        ui->set_text(s_cur_msg, t);
+    }
+}
+
+/* A button with its (empty) message line under it. */
+NO_OPT static int action(const char *text)
+{
+    int b = ui->button(text);
+    int m = ui->label("", PURR_UI_ROLE_DIM);
+    if (s_npair < 6) {
+        s_pair_btn[s_npair] = b;
+        s_pair_msg[s_npair] = m;
+        s_npair++;
+    }
+    return b;
+}
+
+NO_OPT static void mark_pressed(int h)
+{
+    s_cur_msg = 0;
+    for (int i = 0; i < s_npair; i++) {
+        if (s_pair_btn[i] == h) {
+            s_cur_msg = s_pair_msg[i];
+        }
+    }
+}
+
 /* ---------------------------------------------------------------- the directory */
 
 NO_OPT static void list_cb(const char *name, int is_dir, uint32_t size, void *ctx)
@@ -256,13 +300,15 @@ NO_OPT static void show_dir(const char *path)
     sort_entries();
     s_page = PG_DIR;
     s_armed = 0;
+    s_npair = 0;
+    s_cur_msg = 0;
     ui->clear();
     ui->win_back(1);
     ui->win_action(s_sys ? PURR_UI_ACT_NONE : PURR_UI_ACT_PLUS);
     ui->win_title(same(path, "/") ? "System files" : base_of(path));
     h_paste = 0;
     if (!s_sys && s_clip[0]) {
-        h_paste = ui->button("Paste here");
+        h_paste = action("Paste here");
     }
     if (s_n == 0) {
         ui->label("This folder is empty.", PURR_UI_ROLE_DIM);
@@ -289,6 +335,8 @@ NO_OPT static void show_item(const char *path)
     put(s_item, path, PATH_LEN);
     s_page = PG_ITEM;
     s_armed = 0;
+    s_npair = 0;
+    s_cur_msg = 0;
     ui->clear();
     ui->win_back(1);
     ui->win_action(PURR_UI_ACT_NONE);
@@ -306,10 +354,10 @@ NO_OPT static void show_item(const char *path)
     h_copy = h_rename = h_delete = 0;
     if (!s_sys) {
         if (!is_dir) {
-            h_copy = ui->button("Copy");
+            h_copy = action("Copy");
         }
-        h_rename = ui->button("Rename");
-        h_delete = ui->button("Delete");
+        h_rename = action("Rename");
+        h_delete = action("Delete");
     }
 }
 
@@ -346,6 +394,8 @@ NO_OPT static void show_name(int kind)
 {
     s_name_kind = kind;
     s_page = PG_NAME;
+    s_npair = 0;
+    s_cur_msg = 0;
     ui->clear();
     ui->win_back(1);
     ui->win_action(PURR_UI_ACT_NONE);
@@ -357,7 +407,7 @@ NO_OPT static void show_name(int kind)
         }
         ui->focus(h_ta);
     }
-    h_ok = ui->button("OK");
+    h_ok = action("OK");
 }
 
 /* ---------------------------------------------------------------- actions */
@@ -381,7 +431,7 @@ NO_OPT static void do_name_ok(void)
     char typed[NAME_LEN];
     ui->get_text(h_ta, typed, sizeof(typed));
     if (!name_ok(typed)) {
-        ui->win_title("Not a good name");
+        fail("Not a good name: no slashes, and not empty.");
         return;
     }
     char path[PATH_LEN];
@@ -396,9 +446,10 @@ NO_OPT static void do_name_ok(void)
         rc = fl->rename(s_item, path);
     }
     if (rc != PURR_FILES_OK) {
-        ui->win_title(rc == PURR_FILES_BAD ? "That did not work" : "Not allowed");
+        fail(rc == PURR_FILES_BAD ? "That did not work (is the name taken?)" : "Not allowed");
         return;
     }
+    status(s_name_kind ? "Renamed" : "Folder made", 0);
     show_dir(s_cwd);
 }
 
@@ -409,14 +460,15 @@ NO_OPT static void do_paste(void)
     uint32_t sz;
     int d;
     if (fl->stat(dst, &sz, &d) == PURR_FILES_OK) {          /* never overwrite: make the user rename or delete first */
-        ui->win_title("That name is already here");
+        fail("That name is already here. Rename or delete it first.");
         return;
     }
     int rc = fl->copy(s_clip, dst);
     if (rc != PURR_FILES_OK) {
-        ui->win_title("Could not copy it");
+        fail("Could not copy it (too big, or no room).");
         return;
     }
+    status("Pasted", 0);
     show_dir(s_cwd);
 }
 
@@ -450,6 +502,7 @@ NO_OPT static void go_back(void)
 
 NO_OPT static void on_click(int h)
 {
+    mark_pressed(h);
     if (s_page == PG_PLACES) {
         if (h == h_home) {
             s_sys = 0;
@@ -483,19 +536,23 @@ NO_OPT static void on_click(int h)
             }
         } else if (h_copy > 0 && h == h_copy) {
             put(s_clip, s_item, PATH_LEN);
-            ui->win_title("Copied. Open a folder to paste");
+            status("Copied. Open a folder to paste it.", 0);
         } else if (h_rename > 0 && h == h_rename) {
             show_name(1);
         } else if (h_delete > 0 && h == h_delete) {
             if (!s_armed) {
                 s_armed = 1;
-                ui->win_title("Delete? Tap again");
+                status("Delete? Tap again to be sure.", 0);
+                if (s_cur_msg > 0) {
+                    ui->set_text(s_cur_msg, "Tap Delete again to delete it.");
+                }
             } else {
                 int rc = fl->remove(s_item);
                 if (rc != PURR_FILES_OK) {
                     s_armed = 0;
-                    ui->win_title(rc == PURR_FILES_BAD ? "Folder not empty, or in use" : "Not allowed");
+                    fail(rc == PURR_FILES_BAD ? "Folder not empty, or in use." : "Not allowed.");
                 } else {
+                    status("Deleted", 0);
                     show_dir(s_cwd);
                 }
             }

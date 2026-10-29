@@ -1,5 +1,5 @@
 name = "files"
-version = "1.0.0"
+version = "1.1.0"
 description = "File manager: browse, copy, rename and delete in your home folder; administrators can also read system files"
 class = "unprivileged"
 kind = "ui"
@@ -8,7 +8,7 @@ entry = "files_entry"
 
 [catcalls]
 console = "1.0"
-ui = "1.0"
+ui = "2.0"
 app = "1.0"
 files = "1.0"
 

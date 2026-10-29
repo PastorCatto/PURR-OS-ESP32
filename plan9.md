@@ -89,3 +89,11 @@ Scope chosen by the owner: A (home folder) and B (everything, read-only) in one 
   Delete with a second tap), text viewer (first 2000 bytes), new folder, paste. Published to the dev server only; not built into the shell.
 - No SD card: nothing mounts one yet (plan8/browser idea, shared SPI bus unverified).
 - Not run on a device or in the VM yet.
+
+### Files app: the "going back" hard lock, 2026-10-29 (owner report), and what I changed
+Not reproduced (the VM was left alone): found by reading. Real defects fixed in the runtime, any of which can freeze the UI: (1) `teardown` destroyed the app's window **before** stopping the app, so a late event
+(a second Back tap, a permission answer) made the dying app call `ui->...` and create a ghost window for a dead slot; apps now get no catcalls once they are closing (`purr_catrt_caller` refuses) and the window is
+destroyed after the app task has stopped. (2) Settings > Apps > Permissions had labels for only 2 of 4 permissions (a NULL label for any app that had asked for files access). (3) App task stack 6144 -> 8192
+(littlefs runs on the app's stack for a listing). Files 1.1.0: status messages and errors under the failing button. **Needs the owner to try it on the device**; if it still locks, `Back` at the top level (close) is the
+first thing to look at.
+- New catcall `devices` and the Device Manager app (`Apps/devices/`, 1.0.0), published to the dev server (unsigned).

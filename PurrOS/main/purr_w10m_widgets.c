@@ -79,9 +79,29 @@ lv_obj_t *w10m_dropdown(lv_obj_t *parent, const char *options, int selected, int
     return dd;
 }
 
+static lv_obj_t *s_last_button;
+
+static void last_button_cb(lv_event_t *e)
+{
+    lv_obj_t *b = lv_event_get_target(e);
+    if (lv_event_get_code(e) == LV_EVENT_DELETE) {
+        if (s_last_button == b) {
+            s_last_button = NULL;
+        }
+    } else {
+        s_last_button = b;
+    }
+}
+
+lv_obj_t *w10m_last_button(void)
+{
+    return s_last_button;
+}
+
 lv_obj_t *w10m_button(lv_obj_t *parent, const char *text, lv_event_cb_t cb, void *ud)
 {
     lv_obj_t *b = lv_button_create(parent);
+    lv_obj_add_event_cb(b, last_button_cb, LV_EVENT_ALL, NULL);               /* so an error can be shown right under the button that failed */
     lv_obj_t *l = lv_label_create(b);
     lv_label_set_text(l, text);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);

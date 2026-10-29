@@ -31,7 +31,7 @@
 static const char *TAG = "rt";
 
 #define APP_QUEUE_DEPTH   8
-#define APP_STACK_BYTES   6144
+#define APP_STACK_BYTES   8192             /* a file listing or a copy runs littlefs on the app's own stack: 6144 was tight */
 #define CALL_TIMEOUT_MS   3000
 #define MAX_TIMERS        4
 #define EVENT_RING        16
@@ -51,6 +51,7 @@ typedef struct {
 
 typedef struct {
     uint8_t in_use;
+    volatile uint8_t closing;     /* teardown has begun: the app's catcalls refuse, so it cannot call into a window that is being deleted */
     int id;                       /* the manager's instance id, set at CREATE */
     TaskHandle_t task;
     QueueHandle_t q;
@@ -68,6 +69,7 @@ typedef struct {
 static rtdev_t s_dev[PURR_RT_MAX_APPS];
 static EXT_RAM_BSS_ATTR purr_rt_t s_rt;
 static const void *s_files_table;
+static const void *s_devices_table;
 static const void *s_ui_table, *s_storage_table;       /* registered by purr_catrt_ui.c / purr_catrt_storage.c */
 static purr_catrt_ui_lifecycle_fn s_ui_lifecycle;
 static void (*s_storage_release)(int slot);
@@ -355,14 +357,12 @@ static int host_load(void *ctx, const char *name, purr_rt_app_t *out)
 
 static void teardown(rtdev_t *d)
 {
+    d->closing = 1;
     if (s_power_stopped != NULL) {
         s_power_stopped((int)(d - s_dev), d->name);       /* its locks, alarms and "just once" grants go with it */
     }
     if (s_storage_release != NULL) {
         s_storage_release((int)(d - s_dev));        /* flush and close what the app left open */
-    }
-    if (s_ui_lifecycle != NULL && d->t2.kind == PURR_APP_KIND_UI) {
-        s_ui_lifecycle((int)(d - s_dev), d->name, PURR_RT_EV_DESTROY);   /* its window and widgets go with it */
     }
     for (int i = 0; i < MAX_TIMERS; i++) {
         if (d->timer[i]) {
@@ -383,6 +383,9 @@ static void teardown(rtdev_t *d)
             vTaskDelete(d->task);
             d->task = NULL;
         }
+    }
+    if (s_ui_lifecycle != NULL && d->t2.kind == PURR_APP_KIND_UI) {      /* only now that the app can no longer call into it */
+        s_ui_lifecycle((int)(d - s_dev), d->name, PURR_RT_EV_DESTROY);   /* its window and widgets go with it */
     }
     if (d->q) {
         vQueueDelete(d->q);
@@ -725,10 +728,15 @@ void purr_catrt_set_files(const void *table)
     s_files_table = table;
 }
 
+void purr_catrt_set_devices(const void *table)
+{
+    s_devices_table = table;
+}
+
 int purr_catrt_caller(char *name, size_t cap)
 {
     rtdev_t *d = cur_dev();
-    if (d == NULL) {
+    if (d == NULL || d->closing) {                      /* a closing app gets no more windows, files or sockets */
         return -1;
     }
     if (name != NULL && cap > 0) {
@@ -843,6 +851,9 @@ static const void *catcall_get(const char *name, uint32_t min_version)
     if (strcmp(name, "storage") == 0 && s_storage_table != NULL &&
         min_version <= ((const uint32_t *)s_storage_table)[0]) {
         return s_storage_table;
+    }
+    if (strcmp(name, "devices") == 0 && s_devices_table != NULL && min_version <= ((const uint32_t *)s_devices_table)[0]) {
+        return s_devices_table;
     }
     if (strcmp(name, "files") == 0 && s_files_table != NULL && min_version <= ((const uint32_t *)s_files_table)[0]) {
         return s_files_table;

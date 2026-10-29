@@ -169,3 +169,10 @@ to show up, so it is not confirmed fixed.
 ### Pinned (owner, 2026-10-28)
 Plan7 D-F stay pinned until the owner is ready; they have their own list of shell changes. Only known slow spot on device: the notification
 shade swipe from the top; everything else is faster than earlier UIs. Do not start D-F unasked.
+
+### Banner, 2026-10-29 (owner)
+- **Any status, error or new notification takes over the status strip for 5 seconds** (`w10m_banner`, `w10m_banner_post`; errors in amber; a second message replaces the first;
+  work in progress pauses behind it and comes back). Wired to: Settings' `say()` (every result line), new notifications (`add_note`), and apps through `ui->status` (ui catcall version 2).
+- **An error also sits under the button that failed**: Settings moves its result line under the last pressed button (`w10m_last_button`); the Files and Device Manager apps put a message line under each action button.
+- **Settings > Devices and About lost Find hardware, Add by hand, Drivers, the developer server, System update and Reinstall.** They are the **Device Manager** app now (`Apps/devices/`, catcall `devices`, permission `manage-devices`, administrators only). Settings points to it.
+- Compile-checked in the full and minimal profiles; **not run on a device or in the VM**.

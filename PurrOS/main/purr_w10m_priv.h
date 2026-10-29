@@ -26,6 +26,14 @@ void w10m_dev_badge_update(void);
 void w10m_busy_begin(const char *msg);
 void w10m_busy_end(void);
 
+/* Any status, error or new notification takes over the strip for 5 seconds (an error in amber); a second one replaces it, and work in progress
+ * pauses behind it. w10m_banner is for the UI task, w10m_banner_post for any other task. */
+void w10m_banner(const char *msg, int bad);
+void w10m_banner_post(const char *msg, int bad);
+
+/* The button (from w10m_button) that was pressed last, or NULL if it has since been deleted. UI task only. */
+lv_obj_t *w10m_last_button(void);
+
 /* Puts an app window (a sheet over the start screen) at the right depth: above the other sheets, beneath the lock
  * screen and the status strip. UI task only. */
 void w10m_place_sheet(lv_obj_t *sheet);

@@ -23,7 +23,8 @@ extern "C" {
 #define PURR_PERM_WAKE_ALARM 1      /* "wake-alarm": wake the device on a schedule */
 #define PURR_PERM_SHARED_STORAGE 2  /* "shared-storage": see and change files outside the app's own folder (the user's home) */
 #define PURR_PERM_SYSTEM_FILES   3  /* "system-files": read system files, read-only (administrators only) */
-#define PURR_PERM_COUNT      4
+#define PURR_PERM_MANAGE_DEVICES 4  /* "manage-devices": find, set up and remove hardware, update drivers and the system (administrators only) */
+#define PURR_PERM_COUNT      5
 
 /* What the user has said about one permission of one app. */
 #define PURR_PERM_ASK    0          /* not decided: ask at first use */

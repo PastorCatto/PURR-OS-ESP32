@@ -41,6 +41,7 @@
 #include "purr_catrt.h"
 #include "purr_catrt_storage.h"
 #include "purr_catrt_files.h"
+#include "purr_catrt_devices.h"
 #include "purr_settings.h"
 #include "purr_power_plat.h"
 #include "purr_hwscan_plat.h"
@@ -5388,6 +5389,7 @@ void purr_catrt_setup(purr_cli_t *cli)
     purr_fs_mkdir(&s_fs, "/apps");
     purr_catrt_storage_init();
     purr_catrt_files_init();
+    purr_catrt_devices_init();
     purr_catrt_power_init();
     esp_err_t e = purr_catrt_start(&plat);
     purr_cli_printf(cli, "apps: runtime %s\n", e == ESP_OK ? "up" : "did not start");

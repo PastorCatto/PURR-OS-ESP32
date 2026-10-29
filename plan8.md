@@ -200,3 +200,8 @@ Known gaps: the sensor has no UI/shell reader yet (read() returns text; nothing 
   `kbd-backlight`, 18, 8, `0x55` (or `hwdev add kbd-backlight 18 8 0x55`), then tap it. If the keys stay dark, the command is wrong for this controller revision: nothing else is affected.
 - Fixed while here: the Updates page kept stale pointers to its lists after leaving the page; they are cleared on every page change now.
 - The two drivers are in out/devrepo/recovery for the dev server and in ~/Desktop/PURR-OS-release-1.0.3/JumpingJaguar2 (previous copy: -prev3); out/hw/tdeck_plus-blank-flash.bin rebuilt.
+
+### Device Manager, 2026-10-29
+Find hardware, Add by hand, Drivers (update), the developer server and System update/Reinstall moved from Settings to the **Device Manager** app (`Apps/devices/`), through the `devices` catcall
+(`purr_catrt_devices.c`: one worker job at a time, `manage-devices` permission, administrators only). Phase 5 (the store backend and "main repo") is still open: it needs the owner's decisions listed in the
+session notes (where the main repo lives, who signs its index, whether the store is an app or part of the shell).

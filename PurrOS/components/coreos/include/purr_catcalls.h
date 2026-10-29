@@ -10,7 +10,7 @@
  * catcall (a timer, an open file, a subscription) is owned by that app and released when it
  * stops (AppRuntime/SPEC.md section 9).
  *
- * Catcall names, for catcall_get: "console", "app", "sched", "storage", "system", "event", "ctl", "ui", "power", "files".
+ * Catcall names, for catcall_get: "console", "app", "sched", "storage", "system", "event", "ctl", "ui", "power", "files", "devices".
  */
 #ifndef PURR_CATCALLS_H
 #define PURR_CATCALLS_H
@@ -168,6 +168,9 @@ typedef struct {
     int  (*get_text)(int h, char *buf, size_t cap);
     void (*focus)(int h);                               /* the keyboard types into this text area */
     void (*remove)(int h);
+    /* Version 2. A message for the status strip at the top of the screen: it takes the strip for 5 seconds (bad = 1: an error, in amber).
+     * Use it for what a button did ("Copied", "Could not delete it"); an error also belongs in the page, next to the button that failed. */
+    void (*status)(const char *msg, int bad);
 } purr_cc_ui_t;
 
 
@@ -230,6 +233,46 @@ typedef struct {
     int  (*rename)(const char *from, const char *to);
     int  (*copy)(const char *from, const char *to);     /* a file, not a folder */
 } purr_cc_files_t;
+
+/* -------------------------------------------------------------------- devices */
+/* Finding and setting up hardware, keeping drivers and the system up to date, and the developer server (what the Device Manager app does).
+ * One dangerous permission, "manage-devices", for administrators only: the first call asks, answers PURR_DEVICES_ASK until they decide, and the app then
+ * gets PURR_APPEV_PERM and calls again.
+ *
+ * Work that takes time runs on its own task: start() returns at once, and when it ends the app gets PURR_APPEV_UI with the name "job" (arg 0 = it worked,
+ * 1 = it did not, 2 = it worked and, for "check", a newer system is out); result() then holds a sentence for the person. One job at a time (start() says PURR_DEVICES_BUSY).
+ *
+ * start(what, a, b) with what =
+ *   "find"            look for attached hardware (I2C), reading only
+ *   "setup"           set up everything the last "find" recognised
+ *   "update-drivers"  download newer versions of the installed drivers
+ *   "add"             add a device by hand: a = driver name, b = "<sda> <scl> <addr>"
+ *   "read"            a reading from a running device: a = its name
+ *   "remove"          remove a found device from the profile: a = its name
+ *   "check"           is a newer system out? a = "official" or "dev"
+ *   "update"          ask the loader to update the system: a = "official" or "dev"   (the job ends with the request set; the device restarts when told to)
+ *   "reinstall"       the same, rewriting the kernel and KittenOS: a = "official" or "dev"
+ *   "dev-find"        look for developer servers on the network
+ *   "dev-use"         use developer server number a (from list("servers"))
+ *   "dev-set"         use the developer server at the typed address a
+ * list(what, i, a, acap, b, bcap): row i of "found", "profile", "board", "drivers" or "servers" (a = title, b = a line under it); 1 if there is such a row, 0 if not.
+ * info(what, out, cap): "versions" (kernel and KittenOS), "devserver" (the one in use), "dev-mode" ("1" or "0"), "to-set-up" (how many found devices are not set up).
+ * restart() restarts the device (after an update or new drivers). */
+#define PURR_DEVICES_OK       0
+#define PURR_DEVICES_BAD     -1
+#define PURR_DEVICES_DENIED  -2
+#define PURR_DEVICES_ASK     -3
+#define PURR_DEVICES_BUSY    -4
+
+typedef struct {
+    uint32_t version;                                   /* 1 */
+    int  (*is_admin)(void);
+    int  (*start)(const char *what, const char *a, const char *b);
+    int  (*result)(char *out, size_t cap);              /* the last job's sentence; its length */
+    int  (*list)(const char *what, int i, char *a, size_t acap, char *b, size_t bcap);
+    int  (*info)(const char *what, char *out, size_t cap);
+    void (*restart)(void);
+} purr_cc_devices_t;
 
 #ifdef __cplusplus
 }

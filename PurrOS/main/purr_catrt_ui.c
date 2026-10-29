@@ -470,12 +470,18 @@ static int cc_get_text(int h, char *buf, size_t cap)
 }
 static void cc_focus(int h) { req_t r = {.op = OP_FOCUS, .i1 = h}; call(&r); }
 static void cc_remove(int h) { req_t r = {.op = OP_REMOVE, .i1 = h}; call(&r); }
+static void cc_status(const char *msg, int bad)
+{
+    if (purr_catrt_caller(NULL, 0) >= 0) {              /* a closing app says nothing */
+        w10m_banner_post(msg, bad);
+    }
+}
 
 static const purr_cc_ui_t s_cc_ui = {
-    .version = 1, .win_title = cc_win_title, .win_action = cc_win_action, .win_back = cc_win_back,
+    .version = 2, .win_title = cc_win_title, .win_action = cc_win_action, .win_back = cc_win_back,
     .clear = cc_clear, .label = cc_label, .button = cc_button, .row = cc_row, .textarea = cc_textarea,
     .spacer = cc_spacer, .set_text = cc_set_text, .get_text = cc_get_text, .focus = cc_focus,
-    .remove = cc_remove,
+    .remove = cc_remove, .status = cc_status,
 };
 
 /* ---------------------------------------------------------------- lifecycle and layout */
