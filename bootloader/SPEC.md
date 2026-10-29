@@ -589,6 +589,33 @@ package load, the display start-up and the countdown.
 
 The logo is "PURR OS!" in bold italic, white with an orange "!", drawn from the 8 x 8 font (each pixel row is a run, leaned a quarter pixel per row, and one pixel wider).
 
+### 9.2 Updating the bootloader over the air (2026-10-28)
+
+The bootloader sits at flash 0x0 (up to the partition table at 0xA000) and the chip's ROM starts it on every power-up. There is no second copy and no way for the chip to
+choose between two, so this is the one component updated with a backup and a rollback of its own. Only KittenOS does it, never the full OS and never the recovery loader.
+
+A release carries it as `component=bootloader` in recovery.manifest: a PURR image of module subtype `PURR_MOD_BOOTLOADER` (9) whose payload is the built `bootloader.bin`, signed by the
+boot key and nothing else (`purr_role_may_sign`). Its version is `PURR_BOOTLOADER_VERSION` (purr_handoff.h, packed like `PURR_VERSION`); the running bootloader reports it in the handoff,
+and an update is only offered when the manifest's is higher.
+
+Flow, on top of the staged-update machinery that already exists for system files (PurrOS/SPEC.md section 6.1, `cfg.update`, `purr_swap_decide`):
+
+1. **Stage** (`purr_net_install_run "bootloader"`, from KittenOS's second stage or `netinstall bootloader`): download, check size and SHA-256 against the manifest, verify the signature, save
+   `/boot/bootloader.kitt.new`, record REQUESTED. The second stage does this only where nobody is typing (the "Just a few more minutes" page, not first-time account setup).
+2. **Swap** (`bootloader_swap` in commands.c, via `purr_swap_setup`), stopping at the first problem and changing nothing until step 4:
+   verify the staged file again; `purr_bootimg_check` the payload (an ESP32-S3 image, at most 40 KB, whose own SHA-256 matches, which the ROM insists on); power check (no battery reading,
+   or at least 50 percent); **backup**: the whole 0xA000 bytes now in flash saved to `/boot/bootloader.bak` and read back byte for byte.
+3. Record MOVING (crash safety), then write: only sectors that differ, last sector first, each read back (`purr_bootupdate_write`). A bad read-back writes the backup straight back from memory.
+4. Record UNCONFIRMED, restart. Reaching a healthy boot confirms it (`purr_mark_boot_healthy`) and raises the bootloader's version floor, so an older image cannot be staged again.
+5. **Rollback**: if it never reaches healthy, the failure ladder (and the quiet start's menu, which falls through to KittenOS after 20 seconds) brings KittenOS back; after three unconfirmed
+   tries `purr_swap_decide` says ROLLBACK and KittenOS writes `/boot/bootloader.bak` back and marks the update FAILED.
+
+What this cannot cover: power lost while step 3 is writing (well under a second, a few sectors) or a new bootloader so broken that the chip does not run it at all. Both leave a board that needs
+the USB flasher (the ROM's download mode always works). The backup and the checks make both unlikely, not impossible.
+
+Tests: `test_bootimg.c` (the image check), `test_bootupdate.c` (the writer on a fake flash: unchanged sectors untouched, last-to-first, a failed sector reported, the backup restores byte for byte,
+the power rule), `test_keybag.c` (only the boot key may sign a bootloader). The whole swap has not been run on a device or in the emulator.
+
 ## 10. Open questions
 
 - Header-first container vs. trailer, pending the IDF loader check (section 3).

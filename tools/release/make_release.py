@@ -99,6 +99,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--version", required=True, help="version for kernel, loader and KittenOS, e.g. 1.0.0")
     ap.add_argument("--loader-version", help="version for the recovery loader if it differs from --version (default: the same)")
+    ap.add_argument("--bootloader", help="the built second-stage bootloader (bootloader.bin) to publish as a signed 'bootloader' component, "
+                    "which KittenOS installs with a backup (bootloader/SPEC.md 9.2)")
+    ap.add_argument("--bootloader-version", help="its version, like 0.3.0 (it must match PURR_BOOTLOADER_VERSION in purr_handoff.h)")
     ap.add_argument("--board", default="tdeck_plus")
     ap.add_argument("--out", required=True)
     ap.add_argument("--key", default=os.path.join(ROOT, "signing_keys", "boot.key"))
@@ -142,7 +145,15 @@ def main():
     ps("bootpkg", "build", "--board", b)
     ps("keys", "sign", "--key", a.key, "--image", os.path.join(ROOT, "bootpkg", "build", b, "bootpkg.bin"), "--out", bootpkg,
        "--key-id", "1")
-    for p in (kernel, loader, kitten, bootpkg):
+    bootldr = None
+    if a.bootloader:
+        if not a.bootloader_version:
+            sys.exit("--bootloader needs --bootloader-version")
+        bootldr = os.path.join(r1, "bootloader_%s.cat" % b)
+        ps("coreos", "package-component", "--component", "bootloader", "--file", a.bootloader, "--version", a.bootloader_version, "--board", b,
+           "--out", bootldr)
+        ps("keys", "sign", "--key", a.key, "--image", bootldr, "--key-id", "1")
+    for p in [kernel, loader, kitten, bootpkg] + ([bootldr] if bootldr else []):
         ps("keys", "verify", "--key", a.pub, "--image", p)
 
     bp = pimg.header_fields(pimg.parse_header(open(bootpkg, "rb").read()))["version"]
@@ -150,6 +161,8 @@ def main():
            component_entry(kitten, "kittenos", b, os.path.basename(kitten), a.version),
            component_entry(loader, "loader", b, os.path.basename(loader), loader_v),
            component_entry(bootpkg, "bootpkg", b, os.path.basename(bootpkg), bp)]
+    if bootldr:
+        new.append(component_entry(bootldr, "bootloader", b, os.path.basename(bootldr), a.bootloader_version))
     shutil.copyfile(a.legal, os.path.join(r1, "legal.txt"))
 
     # ---- carry over what is already published for the other boards and the modules, unchanged
@@ -158,7 +171,7 @@ def main():
         old_text = urllib.request.urlopen(RELEASE1 + "recovery.manifest", timeout=60).read().decode()
         _, old = parse_manifest(old_text)
         for s in old:
-            if s.get("board") == b and s.get("component") in ("kernel", "kittenos", "loader", "bootpkg"):
+            if s.get("board") == b and s.get("component") in ("kernel", "kittenos", "loader", "bootpkg", "bootloader"):
                 notes.append("replaced %s %s %s -> %s" % (s["board"], s["component"], s["version"],
                                                            next(n["version"] for n in new if n["component"] == s["component"])))
                 continue

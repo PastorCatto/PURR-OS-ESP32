@@ -46,7 +46,7 @@ VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.+-]{0,14}$")
 CHIPS = {pimg.CHIP_ANY: "any", pimg.CHIP_ESP32: "esp32", pimg.CHIP_ESP32S3: "esp32s3"}
 MAX_PACKAGE = 512 * 1024
 RECOVERY_DIR = "recovery"
-RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg")      # the files the loader and KittenOS fetch by name
+RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader")      # the files the loader and KittenOS fetch by name
 RECOVERY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")    # a plain file name: no slash, so no way out of the folder
 
 
@@ -231,11 +231,11 @@ def build_recovery_manifests(repo):
     return comps, mods
 
 
-def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules):
+def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader=""):
     rdir = _recovery_dir(dir)
     os.makedirs(rdir, exist_ok=True)
     given = {"kernel": (kernel, ".cat"), "kittenos": (kittenos, ".kitt"), "loader": (loader, ".cat"),
-             "bootpkg": (bootpkg, ".cat")}
+             "bootpkg": (bootpkg, ".cat"), "bootloader": (bootloader, ".cat")}
     for comp, (src, ext) in given.items():
         if not src:
             continue
@@ -472,6 +472,7 @@ SCRIPT = Script(
                        Param("kittenos", "path", default="", help="the KittenOS image (.kitt)"),
                        Param("loader", "path", default="", help="the recovery loader image (.cat)"),
                        Param("bootpkg", "path", default="", help="the boot package image (.cat)"),
+                       Param("bootloader", "path", default="", help="the signed bootloader image (.cat), installed by KittenOS with a backup"),
                        Param("legal", "path", default="", help="the legal and credits text file"),
                        Param("modules", "str", default="", help="module images to host, comma separated"))),
         Action("publish", "Publish an app", publish,

@@ -80,7 +80,7 @@ fn role_may_sign(role: u8, image_type: u8, subtype: u8) -> bool {
     match image_type {
         IMG_OS | IMG_RECOVERY => role == BOOT,
         IMG_MODULE => match subtype {
-            1 | 2 | 6 | 8 => role == BOOT,                       // kernel, coreos, bootpkg, loader
+            1 | 2 | 6 | 8 | 9 => role == BOOT,                   // kernel, coreos, bootpkg, loader, bootloader
             3 | 4 | 7 => role == SYSTEM,                         // app manager, runtime, dev bundle
             5 => matches!(role, SYSTEM | VENDOR | DEVELOPER | OWNER),   // driver
             _ => false,

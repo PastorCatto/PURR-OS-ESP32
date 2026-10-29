@@ -25,6 +25,9 @@ void purr_sysupdate_versions(char kernel[16], char kitten[16]);
  * Returns 1 if something is newer, 0 if up to date, -1 if the server could not be read. msg gets a sentence for the screen. */
 int purr_sysupdate_check(int use_dev, char *msg, size_t cap);
 
+/* 1 if the last purr_sysupdate_check found a newer BOOTLOADER than the one running (it is swapped in by KittenOS with a backup, after the reinstall). */
+int purr_sysupdate_includes_bootloader(void);
+
 /* The developer server for everything: set from a typed address (resolved and checked to be local) or a discovered server.
  * 0 or -1 with err. Developer mode only. */
 int purr_devsrv_set_typed(const char *typed, char *err, size_t errcap);

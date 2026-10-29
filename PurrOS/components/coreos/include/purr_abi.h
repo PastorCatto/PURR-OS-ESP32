@@ -49,6 +49,7 @@ extern "C" {
 #define PURR_MOD_BOOTPKG           6
 #define PURR_MOD_DEVBUNDLE         7
 #define PURR_MOD_LOADER            8     /* recovery loader */
+#define PURR_MOD_BOOTLOADER        9     /* the second-stage bootloader itself (flash 0x0), updated only by KittenOS with a backup (bootloader/SPEC.md 9.2) */
 
 /* Key roles (Keys/SPEC.md section 2) */
 #define PURR_ROLE_NONE             0
@@ -201,6 +202,7 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
 #define PURR_COMP_DEVBUNDLE        6
 #define PURR_COMP_BOOTPKG          7
 #define PURR_COMP_LOADER           8
+#define PURR_COMP_BOOTLOADER       9     /* staged like the system files, but the swap writes flash 0x0 and keeps a backup */
 #define PURR_FLOOR_SLOTS           8
 
 #define PURR_KEY_SLOTS             8            /* override slots in purrcfg */

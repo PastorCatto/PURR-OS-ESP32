@@ -38,6 +38,7 @@ void purr_menu_init(purr_menu_t *m, const purr_menu_part_t *parts, int nparts, i
             add_entry(m, parts[i].label, i);
         }
     }
+    m->timeout_ms = PURR_MENU_TIMEOUT_MS;
     if (m->count == 0) {
         m->no_boot_options = 1;
         add_entry(m, "Internet recovery", -1);
@@ -64,7 +65,7 @@ int purr_menu_seconds_left(const purr_menu_t *m)
     if (!m->counting) {
         return -1;
     }
-    uint32_t left = m->elapsed_ms >= PURR_MENU_TIMEOUT_MS ? 0 : PURR_MENU_TIMEOUT_MS - m->elapsed_ms;
+    uint32_t left = m->elapsed_ms >= m->timeout_ms ? 0 : m->timeout_ms - m->elapsed_ms;
     return (int)((left + 999) / 1000);
 }
 
@@ -105,7 +106,7 @@ purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_menu_key_
     }
 
     m->elapsed_ms += dt_ms;
-    if (m->counting && m->elapsed_ms >= PURR_MENU_TIMEOUT_MS) {
+    if (m->counting && m->elapsed_ms >= m->timeout_ms) {
         m->selected = m->default_sel;                 /* nobody answered: the default, not whatever was highlighted last */
         return choose(m);
     }

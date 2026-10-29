@@ -2075,7 +2075,11 @@ static void upd_go(lv_event_t *e, int force, const char *again, const char *what
 
 static void upd_install_cb(lv_event_t *e)
 {
-    upd_go(e, 0, "Tap again to restart and update", "Restarting into the updater...");
+    if (purr_sysupdate_includes_bootloader()) {
+        upd_go(e, 0, "Tap again: includes the bootloader", "Restarting into the updater...");
+    } else {
+        upd_go(e, 0, "Tap again to restart and update", "Restarting into the updater...");
+    }
 }
 
 static void upd_reinstall_cb(lv_event_t *e)

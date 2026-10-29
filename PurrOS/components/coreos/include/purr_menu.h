@@ -72,6 +72,7 @@ typedef struct {
     int selected;
     int default_sel;                   /* the entry selected first: what an idle menu starts */
     uint32_t elapsed_ms;               /* idle time: a key sets it back to 0 */
+    uint32_t timeout_ms;               /* how long idle before the default starts (PURR_MENU_TIMEOUT_MS unless the caller sets another) */
     uint8_t counting;                  /* a countdown to auto-boot is running */
     uint8_t no_boot_options;           /* the input had nothing bootable */
 } purr_menu_t;

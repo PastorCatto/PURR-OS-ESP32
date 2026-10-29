@@ -59,7 +59,9 @@ static void stage2_progress(size_t got, size_t total)
         s_downloads++;                                  /* one more download finished (the modules are fetched one by one) */
     }
     int per;
-    if (s_step == 0) {
+    if (s_step == 2) {
+        per = 960;                                                       /* the bootloader: a few KB, no bar of its own */
+    } else if (s_step == 0) {
         per = total > 0 ? (int)((uint64_t)got * 450 / total) : 0;       /* the kernel: the first half */
     } else {
         per = 500 + (s_downloads < 8 ? s_downloads * 60 : 480);          /* the modules: the second half, a step per module */
@@ -116,6 +118,11 @@ static int job_stage2(oobe_job_t *job, void *arg)
     if (purr_stage2_step(&cli, 1) != 0) {
         purr_fetch_set_progress(NULL);
         oobe_job_abort(job, "Some modules didn't install. You can add them later from Settings.");
+    }
+    if (purr_login_has_accounts()) {                    /* only where nobody is typing: a restart in the middle of setting up an account would lose it */
+        s_step = 2;
+        oobe_job_report(job, "Checking the bootloader...", 960);
+        purr_stage2_step(&cli, 2);                      /* a newer bootloader is saved with a backup and swapped in; this restarts the device when it does */
     }
     purr_fetch_set_progress(NULL);
     oobe_job_report(job, "System installed", 1000);

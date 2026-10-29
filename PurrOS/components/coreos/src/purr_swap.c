@@ -27,6 +27,7 @@ const char *purr_swap_filename(uint8_t component)
     case PURR_COMP_APPMANAGER: return "appmanager.kitt";
     case PURR_COMP_RUNTIME:    return "runtime.kitt";
     case PURR_COMP_DEVBUNDLE:  return "devbundle.kitt";
+    case PURR_COMP_BOOTLOADER: return "bootloader.kitt";
     default:                   return NULL;
     }
 }

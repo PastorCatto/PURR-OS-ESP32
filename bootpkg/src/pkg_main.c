@@ -118,10 +118,10 @@ static void draw_band(const purr_menu_t *m, const menu_view_t *v)
 /* How much of the countdown is left, 0..1000; 0 once a key has stopped it. */
 static int countdown_per_mille(const purr_menu_t *m)
 {
-    if (!m->counting || m->elapsed_ms >= PURR_MENU_TIMEOUT_MS) {
+    if (!m->counting || m->elapsed_ms >= m->timeout_ms) {
         return 0;
     }
-    return (int)((PURR_MENU_TIMEOUT_MS - m->elapsed_ms) * 1000u / PURR_MENU_TIMEOUT_MS);
+    return (int)((m->timeout_ms - m->elapsed_ms) * 1000u / m->timeout_ms);
 }
 
 static void draw_footer(const purr_menu_t *m)
@@ -327,6 +327,9 @@ static int kbd_menu(const purr_boot_services_t *svc, const purr_boot_part_t *par
 
     purr_menu_t m;
     purr_menu_init(&m, mp, n, preferred);
+    /* A bootloader older than services version 4 shows this menu on EVERY start (it has no idea the menu is now only for trouble), so it must not wait
+     * 20 seconds each time: it keeps the old three. A current bootloader says how long (menu_idle_ms). */
+    m.timeout_ms = svc->version >= 4 && svc->menu_idle_ms >= 1000 ? svc->menu_idle_ms : 3000;
     if (v.problem) {
         purr_menu_add_restart(&m);
     }
@@ -421,6 +424,7 @@ int purr_pkg_entry(const purr_boot_services_t *svc, const purr_boot_part_t *part
 
         purr_menu_t m;
         purr_menu_init(&m, mp, n, preferred);
+        m.timeout_ms = svc->version >= 4 && svc->menu_idle_ms >= 1000 ? svc->menu_idle_ms : 3000;     /* see kbd_menu() */
         menu_view_t view = {mp, preferred};
         ui_chip_t chips[5];
         hw_key();

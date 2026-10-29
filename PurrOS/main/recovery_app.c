@@ -47,6 +47,8 @@ static lv_obj_t *s_sheet, *s_body;
 static lv_group_t *s_group;
 static lv_timer_t *s_timer;
 static lv_obj_t *s_ta_user, *s_ta_pass, *s_status, *s_bar, *s_stage;
+static lv_obj_t *s_strip_lbl, *s_strip_bar;            /* the working screen's strip: a status line and a thin bar up top (the setup wizard's look) */
+#define STRIP_H 24
 static oobe_job_t *s_job;
 static uint16_t s_reasons;
 static int s_open;                         /* damaged system, or no accounts: reinstalling and erasing need no password */
@@ -412,22 +414,40 @@ static void weaken_keep(void)
     w10m_button(s_body, "Back", go_cb, (void *)(intptr_t)SC_WEAKEN);
 }
 
+/* The strip on (the working screen) or off (every other screen). The body moves down to make room and gives it back. */
+static void strip_set(int on)
+{
+    if (s_strip_lbl == NULL) {
+        return;
+    }
+    int h = lv_display_get_vertical_resolution(NULL);
+    if (on) {
+        lv_obj_remove_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_strip_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_local_style_prop(s_strip_lbl, LV_STYLE_TEXT_COLOR, 0);      /* a failure turned it amber */
+        lv_label_set_text(s_strip_lbl, "Starting...");
+        lv_bar_set_value(s_strip_bar, 0, LV_ANIM_OFF);
+    } else {
+        lv_obj_add_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_strip_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_align(s_body, LV_ALIGN_TOP_LEFT, 0, on ? STRIP_H : 0);
+    lv_obj_set_height(s_body, h - (on ? STRIP_H : 0));
+}
+
 static void working(void)
 {
+    strip_set(1);
+    s_stage = s_strip_lbl;
+    s_bar = s_strip_bar;
     heading(s_erase == 1 ? "Erasing..." : "Hang on...");
-    s_stage = w10m_dim(s_body, "");
-    s_bar = lv_bar_create(s_body);
-    lv_obj_set_width(s_bar, LV_PCT(100));
-    lv_obj_set_height(s_bar, 8);
-    lv_bar_set_range(s_bar, 0, 1000);
-    lv_obj_set_style_bg_color(s_bar, lv_color_hex(0x3A3A3A), 0);
-    lv_obj_set_style_bg_color(s_bar, purr_theme_accent_color(), LV_PART_INDICATOR);
     w10m_dim(s_body, "Don't switch it off.");
 }
 
 static void show(screen_t sc)
 {
     s_status = s_stage = s_bar = NULL;
+    strip_set(0);
     lv_obj_clean(s_body);
     lv_group_remove_all_objs(s_group);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
@@ -506,6 +526,21 @@ static void *build_cb(void *arg)
     purr_theme_apply(s_sheet, PURR_TH_SHEET);
     lv_obj_set_size(s_sheet, w, h);
     lv_obj_clear_flag(s_sheet, LV_OBJ_FLAG_SCROLLABLE);
+    s_strip_lbl = lv_label_create(s_sheet);
+    lv_obj_set_style_text_font(s_strip_lbl, &lv_font_montserrat_12, 0);
+    purr_theme_apply(s_strip_lbl, PURR_TH_DIM);
+    lv_label_set_long_mode(s_strip_lbl, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_width(s_strip_lbl, w - 20);
+    lv_obj_set_style_text_align(s_strip_lbl, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(s_strip_lbl, LV_ALIGN_TOP_LEFT, 10, 5);
+    s_strip_bar = lv_bar_create(s_sheet);
+    lv_obj_set_size(s_strip_bar, w, 3);
+    lv_bar_set_range(s_strip_bar, 0, 1000);
+    lv_obj_set_style_bg_color(s_strip_bar, lv_color_hex(0x3A3A3A), 0);
+    lv_obj_set_style_bg_color(s_strip_bar, purr_theme_accent_color(), LV_PART_INDICATOR);
+    lv_obj_align(s_strip_bar, LV_ALIGN_TOP_LEFT, 0, STRIP_H - 2);
+    lv_obj_add_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_strip_bar, LV_OBJ_FLAG_HIDDEN);
     s_body = lv_obj_create(s_sheet);
     lv_obj_remove_style_all(s_body);
     lv_obj_set_size(s_body, w, h);

@@ -11,6 +11,6 @@ void purr_handoff_write(uint8_t boot_state, uint8_t key_id_used, uint8_t flags_u
 
 // Packed bootloader version, carried in the handoff. Bump when the bootloader's behaviour
 // changes in a way the OS could care about.
-#define PURR_BOOTLOADER_VERSION 0x00000200u   /* 0.2.0: handoff v2, trust block, development mode */
+#define PURR_BOOTLOADER_VERSION 0x00030000u   /* 0.3.0, packed like PURR_VERSION (major<<24 | minor<<16 | patch). 0.3.0: the quiet start (boot package 0.3). Earlier builds report 0x00000200 for 0.2.0, which reads as older. */
 
 #endif

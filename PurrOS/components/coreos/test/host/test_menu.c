@@ -41,6 +41,17 @@ static void test_countdown(void)
     CHECK_EQ(r.index, 1);                 /* the preferred one */
 }
 
+static void test_custom_timeout(void)
+{
+    purr_menu_t m;
+    purr_menu_init(&m, two, 2, 1);
+    CHECK_EQ(m.timeout_ms, PURR_MENU_TIMEOUT_MS);
+    m.timeout_ms = 3000;                         /* the old bootloader's three seconds */
+    CHECK_EQ(purr_menu_seconds_left(&m), 3);
+    CHECK_EQ(purr_menu_step(&m, 2999, PURR_KEY_NONE).action, PURR_MENU_ACT_NONE);
+    CHECK_EQ(purr_menu_step(&m, 1, PURR_KEY_NONE).action, PURR_MENU_ACT_BOOT);
+}
+
 static void test_restart_entry(void)
 {
     purr_menu_t m;
@@ -120,6 +131,7 @@ int main(void)
     test_countdown();
     test_keys();
     test_restart_entry();
+    test_custom_timeout();
     test_wasd();
     test_nothing_to_boot();
     TK_DONE("test_menu");

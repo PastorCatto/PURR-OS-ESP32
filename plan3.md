@@ -225,3 +225,8 @@ Design: menu only when needed, "PURR OS!" bold italic logo (white, orange "!"), 
 - The loader now ends every install in KittenOS's second stage (also a reset that keeps the data). Needs one flash of the new loader.
 - Not done: the crash during the old autorun countdown is not located (needs a serial log). The new flow has no countdown screen, but that is not proof the crash is gone.
 - Not on a device yet. A bootloader change is never delivered by recovery: it needs a flash of 0x0 (the blank image has it).
+
+## Bootloader OTA (owner, 2026-10-28)
+Built: `PURR_MOD_BOOTLOADER`, the staged swap with a backup and rollback (`bootloader/SPEC.md` 9.2), the packaging (`make_release.py --bootloader`, `dev recovery --bootloader`), Settings > About lists
+"bootloader X" when newer and says so on the install tap, the Rust client verifies the new component. Bootloader 0.3.0 is published with release 1.0.10; a board flashed earlier reports 0.2.0, so it is
+offered the update (a first real test). Not run on a device: have the USB flasher ready for the first try.

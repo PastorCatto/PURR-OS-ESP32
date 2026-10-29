@@ -323,7 +323,7 @@ def package(ctx, board, profile, version, out):
 # already wrapped by `bootpkg build`) -- plain opaque payload bytes either way, since
 # net_install's partition-level write path never parses the payload itself, only the
 # bootloader does, later, when it tries to boot the partition. All PURR_ROLE_BOOT-only.
-COMPONENT_KIND = {"kernel": pimg.MOD_KERNEL, "loader": pimg.MOD_LOADER}
+COMPONENT_KIND = {"kernel": pimg.MOD_KERNEL, "loader": pimg.MOD_LOADER, "bootloader": pimg.MOD_BOOTLOADER}
 
 
 def package_component(ctx, component, file, version, board, out):

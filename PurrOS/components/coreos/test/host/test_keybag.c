@@ -96,6 +96,10 @@ static void test_roles(void)
     CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_COREOS));
     CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_BOOTPKG));
     CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_LOADER));
+    CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_BOOTLOADER));
+    CHECK(!purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_BOOTLOADER));       /* only the boot key may sign a bootloader */
+    CHECK(!purr_role_may_sign(PURR_ROLE_DEVELOPER, PURR_IMG_MODULE, PURR_MOD_BOOTLOADER));
+    CHECK(!purr_role_may_sign(PURR_ROLE_VENDOR, PURR_IMG_MODULE, PURR_MOD_BOOTLOADER));
     CHECK(!purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_KERNEL));
     CHECK(purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_APPMANAGER));
     CHECK(purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_RUNTIME));

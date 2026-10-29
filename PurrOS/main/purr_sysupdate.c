@@ -13,6 +13,7 @@
 #include "purr_board.h"
 #include "purr_cfgstore.h"
 #include "purr_fetch.h"
+#include "purr_kernel.h"
 #include "purr_manifest.h"
 #include "purr_netrec.h"
 #include "purr_slot_trailer.h"
@@ -82,8 +83,16 @@ static int newer(const purr_manifest_t *m, const char *component, const char *ha
     return 0;
 }
 
+static int s_boot_newer;
+
+int purr_sysupdate_includes_bootloader(void)
+{
+    return s_boot_newer;
+}
+
 int purr_sysupdate_check(int use_dev, char *msg, size_t cap)
 {
+    s_boot_newer = 0;
     char url[160];
     if (use_dev) {
         purr_repo_server_t sv;
@@ -114,6 +123,18 @@ int purr_sysupdate_check(int use_dev, char *msg, size_t cap)
     int any = 0;
     newer(m, "kernel", kv, what, sizeof(what), &any);
     newer(m, "kittenos", ov, what, sizeof(what), &any);
+    {
+        const purr_manifest_entry_t *be = purr_manifest_find(m, "bootloader", CONFIG_IDF_TARGET, purr_board()->name);
+        purr_handoff_t hh;
+        uint32_t want = 0;
+        if (be != NULL && purr_version_parse(be->version, strlen(be->version), &want) == 0 && purr_kernel_handoff(&hh) == 0 &&
+            want > hh.bootloader_version) {
+            size_t n = strlen(what);
+            snprintf(what + n, sizeof(what) - n, "%sbootloader %s", n ? ", " : "", be->version);
+            s_boot_newer = 1;
+            any = 1;
+        }
+    }
     free(m);
     if (any) {
         snprintf(msg, cap, "Newer: %s. You have PURR OS %s, KittenOS %s.", what, kv, ov);

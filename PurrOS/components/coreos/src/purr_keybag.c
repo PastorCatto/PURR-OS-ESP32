@@ -81,6 +81,7 @@ int purr_role_may_sign(uint8_t role, uint8_t image_type, uint8_t subtype)
         case PURR_MOD_COREOS:
         case PURR_MOD_BOOTPKG:
         case PURR_MOD_LOADER:
+        case PURR_MOD_BOOTLOADER:
             return role == PURR_ROLE_BOOT;
         case PURR_MOD_APPMANAGER:
         case PURR_MOD_RUNTIME:

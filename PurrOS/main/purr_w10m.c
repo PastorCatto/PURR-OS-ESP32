@@ -133,7 +133,7 @@ static lv_obj_t *s_shade;               /* a dark veil over it so the tiles read
 static lv_obj_t *s_start;               /* the scrolling start screen */
 static lv_obj_t *s_status;              /* the status strip */
 static lv_obj_t *s_clock;
-static lv_obj_t *s_batt;                /* the battery percent in the strip, hidden when there is no reading */
+static lv_obj_t *s_batt, *s_batt_body, *s_batt_fill, *s_batt_nub;     /* the battery icon in the strip, hidden when there is no reading */
 static lv_obj_t *s_status_dev;          /* "DEV" / "UNSIGNED OK" badge while developer mode is active */
 static lv_obj_t *s_status_user;         /* the signed-in user's name, at the left of the strip */
 static lv_obj_t *s_net;
@@ -370,6 +370,62 @@ static void fmt_hm(const struct tm *tm, char *buf, size_t cap)
     }
 }
 
+/* The Windows Phone / Lumia status bar: the system icons in a row at the right, the battery last before the clock, which is the far right. */
+#define BATT_W 15                       /* the fill's width at 100 % */
+#define BATT_RED 0xE51400               /* 20 % or less */
+
+static void battery_icon_build(lv_obj_t *parent)
+{
+    s_batt = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_batt);
+    lv_obj_set_size(s_batt, 22, 10);
+    lv_obj_clear_flag(s_batt, LV_OBJ_FLAG_SCROLLABLE);
+    s_batt_body = lv_obj_create(s_batt);
+    lv_obj_remove_style_all(s_batt_body);
+    lv_obj_set_size(s_batt_body, 19, 10);
+    lv_obj_set_pos(s_batt_body, 0, 0);
+    lv_obj_clear_flag(s_batt_body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_width(s_batt_body, 1, 0);
+    lv_obj_set_style_border_opa(s_batt_body, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_batt_body, 1, 0);
+    s_batt_fill = lv_obj_create(s_batt_body);
+    lv_obj_remove_style_all(s_batt_fill);
+    lv_obj_set_pos(s_batt_fill, 1, 1);
+    lv_obj_set_size(s_batt_fill, BATT_W, 6);
+    lv_obj_set_style_bg_opa(s_batt_fill, LV_OPA_COVER, 0);
+    s_batt_nub = lv_obj_create(s_batt);
+    lv_obj_remove_style_all(s_batt_nub);
+    lv_obj_set_size(s_batt_nub, 2, 4);
+    lv_obj_set_pos(s_batt_nub, 19, 3);
+    lv_obj_set_style_bg_opa(s_batt_nub, LV_OPA_COVER, 0);
+    lv_obj_add_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void battery_icon_set(int pct)
+{
+    lv_color_t c = pct <= 20 ? lv_color_hex(BATT_RED) : lv_color_white();
+    int w = pct * BATT_W / 100;
+    lv_obj_set_width(s_batt_fill, w < 1 ? 1 : (w > BATT_W ? BATT_W : w));
+    lv_obj_set_style_bg_color(s_batt_fill, c, 0);
+    lv_obj_set_style_bg_color(s_batt_nub, c, 0);
+    lv_obj_set_style_border_color(s_batt_body, c, 0);
+}
+
+/* Keeps the icons in a row, right to left: clock, battery (when there is a reading), then the network. The clock's width changes with the time. */
+static void status_layout(void)
+{
+    lv_obj_update_layout(s_status);
+    lv_obj_align(s_clock, LV_ALIGN_RIGHT_MID, -6, 0);
+    lv_obj_t *prev = s_clock;
+    if (s_batt != NULL && !lv_obj_has_flag(s_batt, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_align_to(s_batt, prev, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+        prev = s_batt;
+    }
+    if (s_net != NULL) {
+        lv_obj_align_to(s_net, prev, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+    }
+}
+
 static void clock_tick(lv_timer_t *timer)
 {
     (void)timer;
@@ -386,12 +442,13 @@ static void clock_tick(lv_timer_t *timer)
     if (s_batt != NULL) {
         int pct;
         if (purr_battery_get(&pct, NULL)) {
-            lv_label_set_text_fmt(s_batt, "%d%%", pct);
+            battery_icon_set(pct);
             lv_obj_remove_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
         }
     }
+    status_layout();
 }
 
 void w10m_dev_badge_update(void)
@@ -421,22 +478,18 @@ static void build_status(void)
     lv_obj_clear_flag(s_status, LV_OBJ_FLAG_SCROLLABLE);
 
     s_clock = lv_label_create(s_status);
-    lv_obj_set_style_text_font(s_clock, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_clock, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_clock, lv_color_white(), 0);
     lv_obj_align(s_clock, LV_ALIGN_RIGHT_MID, -6, 0);
 
-    s_batt = lv_label_create(s_status);
-    lv_obj_set_style_text_font(s_batt, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(s_batt, lv_color_white(), 0);
-    lv_obj_align(s_batt, LV_ALIGN_RIGHT_MID, -72, 0);
-    lv_obj_add_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
+    battery_icon_build(s_status);
 
     const lv_image_dsc_t *net = img("wifi_icon");
     if (net != NULL) {
         s_net = lv_image_create(s_status);
         lv_image_set_src(s_net, net);
         lv_image_set_scale(s_net, 160);          /* the icons are drawn for a bigger panel */
-        lv_obj_align(s_net, LV_ALIGN_RIGHT_MID, -48, 0);
+        lv_obj_align(s_net, LV_ALIGN_RIGHT_MID, -56, 0);
     }
     s_status_user = lv_label_create(s_status);
     lv_label_set_text(s_status_user, purr_login_current()->name[0] ? purr_login_current()->name : "");

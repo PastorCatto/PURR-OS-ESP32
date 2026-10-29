@@ -30,6 +30,8 @@
 #include "purr_relocate.h"
 #include "purr_cfgstore.h"
 #include "purr_swap.h"
+#include "purr_bootimg.h"
+#include "purr_bootupdate.h"
 #include "purr_console.h"
 #include "purr_crypto_mbedtls.h"
 #include "purr_driver.h"
@@ -879,6 +881,7 @@ void purr_continue_install(purr_cli_t *cli)
         purr_net_install_run(cli, "kernel");
     }
     purr_net_install_run(cli, "modules");
+    purr_stage2_step(cli, 2);                          /* the bootloader, if the server has a newer one */
 }
 
 /* Stage 2 for the setup wizard (oobe_firstboot.c): the same installs as purr_continue_install(), one step at a time and without the
@@ -902,6 +905,13 @@ int purr_stage2_take_pending(void)
 
 int purr_stage2_step(purr_cli_t *cli, int step)
 {
+    if (step == 2) {                                    /* the bootloader: staged, then swapped in at once, with a backup; restarts the device when it does */
+        int r = purr_net_install_run(cli, "bootloader");
+        if (r == 0) {
+            purr_swap_setup(cli);
+        }
+        return r;
+    }
     return purr_net_install_run(cli, step == 0 ? "kernel" : "modules");
 }
 
@@ -978,6 +988,7 @@ static const net_install_staged_t s_net_install_staged[] = {
     {"appmanager", PURR_MOD_APPMANAGER, PURR_COMP_APPMANAGER},
     {"runtime",    PURR_MOD_RUNTIME,    PURR_COMP_RUNTIME},
     {"devbundle",  PURR_MOD_DEVBUNDLE,  PURR_COMP_DEVBUNDLE},
+    {"bootloader", PURR_MOD_BOOTLOADER, PURR_COMP_BOOTLOADER},      /* staged here, written to flash 0x0 by KittenOS's swap with a backup (bootloader_swap) */
 };
 
 /* The current version floor for a component, or 0 if none is set yet (purr_cfg_t.floors,
@@ -1134,6 +1145,17 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
         return 1;
     }
     purr_cli_printf(cli, "found %s %s (%u bytes)\n", component, entry->version, (unsigned)entry->size);
+
+    if (strcmp(component, "bootloader") == 0) {                /* only ever replace the running bootloader with a newer one */
+        purr_handoff_t hh;
+        uint32_t want = 0, have = purr_kernel_handoff(&hh) == 0 ? hh.bootloader_version : 0;
+        purr_version_parse(entry->version, strlen(entry->version), &want);
+        if (want <= have) {
+            purr_cli_printf(cli, "the bootloader is up to date (%u.%u.%u)\n", (unsigned)(have >> 24), (unsigned)((have >> 16) & 0xFF),
+                            (unsigned)(have & 0xFFFF));
+            return 0;
+        }
+    }
 
     char image_url[256];
     resolve_manifest_url(purr_recovery_manifest_url(), entry->file, image_url, sizeof(image_url));
@@ -1584,6 +1606,177 @@ static int read_all_cb(void *ctx, const void *data, uint32_t len)
     return 0;
 }
 
+/* ---------------------------------------------------------------- the bootloader swap (bootloader/SPEC.md section 9.2)
+ *
+ * The bootloader is the one component with no spare copy, so it gets the strictest handling. KittenOS (never the full system) does it, in this
+ * order, and stops at the first thing that is wrong:
+ *   1. the staged file (/boot/bootloader.kitt.new) is verified again: signature (the boot key only), the bootloader subtype, then the payload
+ *      itself (purr_bootimg_check: an ESP32-S3 image whose own SHA-256 matches, which the ROM insists on);
+ *   2. enough power (no battery reading, or 50 percent);
+ *   3. a BACKUP: the whole bootloader area as it is now is saved to /boot/bootloader.bak and read back, byte for byte, before anything is changed;
+ *   4. the write (only sectors that differ, last to first, read back); if the read-back is wrong the backup is written straight back;
+ *   5. the update is recorded UNCONFIRMED and the device restarts. Reaching a healthy boot confirms it (purr_mark_boot_healthy). If it never does,
+ *      the failure ladder brings KittenOS back and, after three tries, the swap rolls back to the backup.
+ * What no software can undo: power lost during step 4 (well under a second) leaves a board that needs the USB flasher. */
+#define BL_NEW "/boot/bootloader.kitt.new"
+#define BL_BAK "/boot/bootloader.bak"
+
+static int bl_read_file(const char *path, uint8_t **out, uint32_t *len)
+{
+    int is_dir;
+    uint32_t sz;
+    if (purr_fs_stat(&s_fs, path, &is_dir, &sz) != 0 || is_dir || sz == 0 || sz > 64 * 1024) {
+        return -1;
+    }
+    uint8_t *b = malloc(sz);
+    if (b == NULL) {
+        return -1;
+    }
+    read_all_ctx_t rd = {b, sz, 0};
+    if (purr_fs_read(&s_fs, path, read_all_cb, &rd) != 0 || rd.got != sz) {
+        free(b);
+        return -1;
+    }
+    *out = b;
+    *len = sz;
+    return 0;
+}
+
+static void bl_done(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg, uint8_t state, const char *msg, int restart)
+{
+    cfg->update.state = state;
+    cfg->update.attempts = 0;
+    purr_cfg_take_flag(cfg, PURR_CFGF_FORCE_RECOVERY);          /* staging asked for KittenOS once; that is this boot */
+    purr_cfg_store(fl, cfg);
+    purr_cli_printf(cli, "bootloader: %s\n", msg);
+    purr_console_flush();
+    if (restart) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
+}
+
+static void bootloader_swap(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg, purr_swap_action_t action)
+{
+    uint8_t *cur = malloc(PURR_BOOTIMG_MAX);
+    if (cur == NULL) {
+        purr_cli_puts(cli, "bootloader: out of memory\n");
+        return;
+    }
+    if (purr_bootupdate_read(cur, PURR_BOOTIMG_MAX) != 0) {
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, "could not read the current bootloader; nothing was changed", 0);
+        return;
+    }
+
+    if (action == PURR_SWAP_ROLLBACK) {
+        uint8_t *bak = NULL;
+        uint32_t n = 0;
+        if (bl_read_file(BL_BAK, &bak, &n) != 0 || n != PURR_BOOTIMG_MAX || bak[0] != 0xE9) {
+            free(bak);
+            free(cur);
+            bl_done(cli, fl, cfg, PURR_UPD_FAILED, "the new bootloader did not come up healthy, and there is no usable backup", 0);
+            return;
+        }
+        purr_cli_puts(cli, "bootloader: the new one did not come up healthy; putting the old one back\n");
+        purr_console_flush();
+        int r = purr_bootupdate_write(bak, n);
+        free(bak);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, r == 0 ? "the old bootloader is back" : "putting the old bootloader back FAILED: use the USB flasher", 1);
+        return;
+    }
+
+    /* DO_SWAP, or RESUME_MOVE after a restart in the middle of one. */
+    uint8_t *file = NULL;
+    uint32_t flen = 0;
+    if (bl_read_file(BL_NEW, &file, &flen) != 0) {
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, "the staged bootloader is missing; giving up on the update", 0);
+        return;
+    }
+    purr_cfg_t view;
+    os_cfg_view(cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {
+        .chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
+    };
+    install_mem_ctx_t rdctx = {file, flen};
+    purr_image_header_t hdr;
+    purr_verify_result_t vr = purr_image_verify(&env, install_mem_read, &rdctx, flen, &hdr);
+    const char *why = NULL;
+    if (hdr.magic != PURR_IMAGE_MAGIC || hdr.image_type != PURR_IMG_MODULE || PURR_FLAGS_SUBTYPE(hdr.flags) != PURR_MOD_BOOTLOADER) {
+        why = "the staged file is not a bootloader image";
+    } else if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
+        why = purr_verify_name(vr);
+    } else if (vr != PURR_V_OK && vr != PURR_V_NO_KEY && vr != PURR_V_ROLE_MISMATCH && vr != PURR_V_BAD_SIGNATURE) {
+        why = purr_verify_name(vr);                       /* secure mode off tolerates an unsigned image, never a damaged or wrong one */
+    } else if ((uint64_t)hdr.payload_offset + hdr.payload_size > flen) {
+        why = "the staged file is cut short";
+    } else {
+        why = purr_bootimg_check(file + hdr.payload_offset, hdr.payload_size, PURR_BOOTIMG_CHIP_ESP32S3);
+    }
+    if (why != NULL) {
+        char m[96];
+        snprintf(m, sizeof(m), "refused: %s", why);
+        free(file);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, m, 0);
+        return;
+    }
+    const uint8_t *payload = file + hdr.payload_offset;
+    size_t plen = hdr.payload_size;
+
+    if (memcmp(cur, payload, plen) == 0) {                /* already in flash: a swap that finished but was cut off before it was recorded */
+        free(file);
+        free(cur);
+        purr_fs_remove(&s_fs, BL_NEW);
+        bl_done(cli, fl, cfg, PURR_UPD_UNCONFIRMED, "the new bootloader is in place; restarting to confirm it", 1);
+        return;
+    }
+
+    char pw[96];
+    if (!purr_bootupdate_power_ok(pw, sizeof(pw))) {
+        free(file);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, pw, 0);
+        return;
+    }
+
+    /* The backup: everything below the partition table, saved and read back before anything changes. */
+    purr_fs_mkdir(&s_fs, "/boot");
+    uint8_t *check = NULL;
+    uint32_t cn = 0;
+    if (purr_fs_write(&s_fs, BL_BAK, cur, PURR_BOOTIMG_MAX) != 0 || bl_read_file(BL_BAK, &check, &cn) != 0 ||
+        cn != PURR_BOOTIMG_MAX || memcmp(check, cur, PURR_BOOTIMG_MAX) != 0) {
+        free(check);
+        free(file);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, "could not save a backup of the current bootloader; nothing was changed", 0);
+        return;
+    }
+    free(check);
+
+    cfg->update.state = PURR_UPD_MOVING;
+    purr_cfg_store(fl, cfg);                              /* recorded before the write, for crash safety */
+    purr_cli_printf(cli, "bootloader: backup saved; writing %s...\n", hdr.version);
+    purr_console_flush();
+    if (purr_bootupdate_write(payload, plen) != 0) {
+        int back = purr_bootupdate_write(cur, PURR_BOOTIMG_MAX);   /* straight back, from memory */
+        free(file);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, back == 0 ? "the write did not check out; the old bootloader was put back"
+                                                          : "the write did not check out and the old one could not be put back: use the USB flasher", 1);
+        return;
+    }
+    free(file);
+    free(cur);
+    purr_fs_remove(&s_fs, BL_NEW);
+    bl_done(cli, fl, cfg, PURR_UPD_UNCONFIRMED, "installed; restarting to confirm it", 1);
+}
+
 /* KittenOS's side of PurrOS/SPEC.md section 6.1: acts on a pending system-file update that
  * stage_file_component() (above) recorded in purrcfg. Reboots (never returns) whenever it
  * actually did something; returns normally when there's nothing to do, so KittenOS's boot
@@ -1605,6 +1798,12 @@ void purr_swap_setup(purr_cli_t *cli)
     }
     if (!purr_fs_mounted(&s_fs)) {
         purr_cli_puts(cli, "swap: no filesystem mounted, cannot act on the pending update\n");
+        return;
+    }
+
+    if (cfg.update.target == PURR_COMP_BOOTLOADER &&
+        (action == PURR_SWAP_DO_SWAP || action == PURR_SWAP_RESUME_MOVE || action == PURR_SWAP_ROLLBACK)) {
+        bootloader_swap(cli, &fl, &cfg, action);          /* flash 0x0, with a backup: not a rename of files */
         return;
     }
 

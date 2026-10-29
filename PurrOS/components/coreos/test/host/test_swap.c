@@ -41,6 +41,7 @@ static void test_quiet_states_do_nothing(void)
 static void test_filenames(void)
 {
     CHECK(purr_swap_filename(PURR_COMP_COREOS) != 0);
+    CHECK(purr_swap_filename(PURR_COMP_BOOTLOADER) != 0);          /* staged like the system files */
     CHECK_EQ(strcmp(purr_swap_filename(PURR_COMP_COREOS), "coreos.kitt"), 0);
     CHECK_EQ(strcmp(purr_swap_filename(PURR_COMP_APPMANAGER), "appmanager.kitt"), 0);
     CHECK_EQ(strcmp(purr_swap_filename(PURR_COMP_RUNTIME), "runtime.kitt"), 0);
