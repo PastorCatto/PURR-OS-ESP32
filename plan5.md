@@ -127,15 +127,33 @@ module ABI) and a project pins the kit version it builds with, so an old project
 
 ## Status
 
-| # | Item | State |
+| # | Item | State (2026-10-29, after the overnight build) |
 |---|---|---|
 | 0 | Plan written, scope and delivery decided | done |
-| 1-7 | Phases above | todo |
+| 1 | Driver framework: bus ABI 6 (UART), driver classes, named-value config, class registry | done, host-tested (C tests written earlier; their run was blocked by the macOS exec stall) |
+| 2 | Reference drivers: GPS (NMEA), LoRa (SX126x), LTE modem (AT), Wi-Fi (ESP-AT), Bluetooth (HCI H4), trackball | written; **41+ host tests pass** against a Python bus (`sdk/tests/test_drivers_host.py`); built as modules (`out/drivers/*.cat`, unsigned); **not run on a board** |
+| 3 | `purrsdk` library + `purr` CLI: inspect (pure-Python signature check), keys, new, build, sign, release, serve, publish, flash, brand, board, config, doctor | done, 72 tests |
+| 4 | PURR Studio (Metro web app, local server): drop-an-image inspector, projects, keys, boards (pin map), brand (live boot-screen preview), release, server, configure (settings, apps, trust block), flash, doctor, docs | done; looked at in headless Chrome; the drag-and-drop gesture itself was not exercised (no way to drag in a headless browser), the upload route behind it is tested |
+| 5 | Flavors: `brand.toml` -> boot package (names, wordmark, colours) and the system's visible names/first accent | boot package rebuilt with a flavor and checked in the binary; the shell, loader and KittenOS use `PURR_BRAND_*` (compile-checked in all three profiles; **not run**, default values are the stock strings) |
+| 6 | Kit builder (`sdk/build-kit.py`): bundled Python 3.12 + cryptography + esptool, trimmed xtensa toolchain, headers, purrstrap, prebuilt parts, manifest | done; kit at `~/Desktop/PURR-SDK/purr-sdk-0.1.0-macos-x86_64` (about 330 MB) works with the system Python; **the kit's own bundled Python could not be started on this Mac tonight** (new programs hang at launch, see the session log) |
+| 7 | Firmware consumers: `gps`, `radio`, `modem` shell commands; the T-Deck Plus board lists its GPS and radio | built in all three profiles; **not flashed** |
+| 8 | Emulator hook (`purr run`, PURR_EMULATOR) | hook only, as asked |
+| 9 | Phase D of plan6 (app lifecycle in the SDK) | not started |
 
 ## Session log
 
 - 2026-10-26: scope set (whole developer kit, self-contained download); surveyed what exists (above);
   plan written. Nothing built yet.
+- 2026-10-28/29 (overnight, owner away): built items 1-8 above. Commits: driver classes and bus ABI 6; GPS and LoRa drivers; `sdk/` (library, CLI, Studio, templates, docs, kit builder); branding;
+  AT modem, ESP-AT Wi-Fi and HCI drivers; trackball driver; firmware commands. Things worth knowing:
+  - **macOS stopped starting any newly built program** from about 22:48 (processes sit in the "U" state forever, even tiny C programs; old, already-seen programs such as the compiler and Chrome still start). Probably the
+    system's code-checking service. It is not something I could fix without admin rights; a restart usually clears it. Because of it, the C host tests (`test_drv_gnss.c` and the others) could not be run tonight, and I tested
+    the drivers instead by loading them as shared libraries from Python (`sdk/tests/driverhost.py`), which does work. That found and fixed real problems: a two-digit GPS year read as 2094, a LoRa probe that could not tell an absent
+    chip from a present one, modules that needed memcpy.
+  - `purrstrap`'s module build now passes `-fno-tree-loop-distribute-patterns` (new modules only; nothing already signed changed).
+  - The T-Deck Plus GPS is on GPIO 43/44, which are also UART0's default console pins. UART1 moved onto them takes over the pins; the USB serial port keeps carrying the logs (it is the console's second output).
+  - The radio's reset is left unset: LilyGO wires it to GPIO 17, the touch controller's reset line.
+  - Not decided by anyone: the kit licence (`LICENSE-TODO`), and whether the kit's bundled Python should be verified on a second Mac before it is handed out.
 
 ## Absorbs plan6 phase D (owner, 2026-10-28)
 Plan6 phase D (SDK side of the app runtime) is a phase of this kit now. It includes the lifecycle rule: unload apps that are not
