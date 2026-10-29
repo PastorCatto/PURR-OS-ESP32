@@ -1,4 +1,4 @@
-/* T-Deck keyboard backlight (I2C): a small test driver for the "map a device by hand" path (hwdev add kbd-backlight 18 8 0x55).
+/* T-Deck keyboard backlight (I2C). A board device on the T-Deck Plus, and still usable by hand (hwdev add kbd-backlight 18 8 0x55).
  *
  * The T-Deck keyboard is its own little controller at 0x55. Besides handing out key presses it takes a two-byte command to light the keys:
  * [0x01, level] sets the backlight brightness (0 = off, 255 = full). This follows LilyGO's published keyboard firmware; if a unit ignores it, the
@@ -71,11 +71,36 @@ static void kb_remove(void *handle)
     }
 }
 
+/* read() is also the control channel (a driver has no write hook): with two or more bytes in the buffer, data[0] = 0xA5 sets the level to data[1]
+ * and 0xA6 only reports it. Either answers with the level in data[0]. Anything else steps the level, as the test hook always did. */
+#define KB_SET 0xA5
+#define KB_GET 0xA6
+
 static int kb_read(void *handle, uint8_t *data, size_t len)
 {
     kb_t *d = handle;
     if (d == NULL || !d->in_use || len < 1) {
         return -1;
+    }
+    if (len >= 2 && data[0] == KB_GET) {
+        data[0] = k_levels[d->step];
+        return 1;
+    }
+    if (len >= 2 && data[0] == KB_SET) {
+        uint8_t want = data[1];
+        uint8_t best = 0;
+        for (unsigned i = 0; i < sizeof(k_levels) / sizeof(k_levels[0]); i++) {     /* the nearest of the four steps */
+            int a = (int)k_levels[i] - (int)want, b = (int)k_levels[best] - (int)want;
+            if ((a < 0 ? -a : a) < (b < 0 ? -b : b)) {
+                best = (uint8_t)i;
+            }
+        }
+        if (set_level(d->h, k_levels[best]) != 0) {
+            return -1;
+        }
+        d->step = best;
+        data[0] = k_levels[best];
+        return 1;
     }
     d->step = (uint8_t)((d->step + 1) % (sizeof(k_levels) / sizeof(k_levels[0])));
     if (set_level(d->h, k_levels[d->step]) != 0) {

@@ -5,7 +5,7 @@
                                                 [--abi-min 4] [--abi-max 0] [--key developer]
 
 Copies each file into DIR as <name>-<board>.cat and writes DIR/drivers.manifest next to them (upload both to the same release as modules.manifest, JumpingJaguar2).
-Each --driver is FILE:COMPATIBLE:BUSES:CATCALL. The name and version come from the file's own header. abi_min/abi_max are the driver bus
+Each --driver is FILE:COMPATIBLE:BUSES:CATCALL[:ABI_MIN] (ABI_MIN defaults to --abi-min). The name and version come from the file's own header. abi_min/abi_max are the driver bus
 ABIs the driver works with (purr_driver_bus.h: the kernel serves PURR_DRIVER_BUS_ABI_MIN up to its current version; abi_max 0 = no upper
 bound). A version found broken on a newer OS can be listed again with `blocked=yes` (edit the manifest by hand): it is never offered.
 """
@@ -38,9 +38,13 @@ def main():
     lines = ["release=drivers-%s" % time.strftime("%Y%m%d"), "released=%s" % time.strftime("%Y-%m-%d"), ""]
     for spec in a.driver:
         try:
-            path, compatible, buses, catcall = spec.split(":")
+            parts = spec.split(":")
+            path, compatible, buses, catcall = parts[:4]
+            abi_min = int(parts[4]) if len(parts) > 4 else a.abi_min
+            if len(parts) < 4 or len(parts) > 5:
+                raise ValueError
         except ValueError:
-            sys.exit("bad --driver %r: want FILE:COMPATIBLE:BUSES:CATCALL" % spec)
+            sys.exit("bad --driver %r: want FILE:COMPATIBLE:BUSES:CATCALL[:ABI_MIN]" % spec)
         data = open(path, "rb").read()
         if not pimg.is_purr_image(data) or len(data) < pimg.HEADER_SIZE:
             sys.exit("%s is not a PURR image" % path)
@@ -55,7 +59,7 @@ def main():
         lines += ["component=%s" % name, "type=driver", "version=%s" % f["version"], "chip=%s" % CHIPS.get(f["chip_id"], "any"),
                   "board=%s" % a.board, "file=%s" % fname, "size=%d" % len(data), "sha256=%s" % hashlib.sha256(data).hexdigest(),
                   "key=%s" % a.key, "compatible=%s" % compatible, "buses=%s" % buses, "catcall=%s" % catcall,
-                  "abi_min=%d" % a.abi_min] + (["abi_max=%d" % a.abi_max] if a.abi_max else []) + [""]
+                  "abi_min=%d" % abi_min] + (["abi_max=%d" % a.abi_max] if a.abi_max else []) + [""]
         print("added %s %s (%d bytes)" % (name, f["version"], len(data)))
     with open(os.path.join(a.out, "drivers.manifest"), "w") as fh:
         fh.write("\n".join(lines))

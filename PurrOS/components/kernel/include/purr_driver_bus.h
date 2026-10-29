@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define PURR_DRIVER_BUS_ABI_VERSION 4u
+#define PURR_DRIVER_BUS_ABI_VERSION 5u
 /* The oldest bus table layout this kernel still serves. The table only ever grows at the end (see Drivers/SPEC.md section 4.1), so a driver
  * built against any version from this one up to the current works unchanged: the driver's version is independent of the OS's. Raise this
  * only if a slot is ever moved, which the append-only rule forbids. */
@@ -92,6 +92,11 @@ typedef struct {
      * silent no-op, same as the compiled st7789 driver's own s.backlight_ready check). */
     int (*backlight_init)(int pin);
     void (*backlight_set)(uint8_t level);
+
+    /* ABI 5. The voltage on a GPIO that sits on an ADC input, in millivolts at the pin (calibrated where the chip allows), averaged over
+     * several samples. -1 if the pin is not an ADC pin or the converter could not be set up. The pin must not be one a driver already uses
+     * for something else. */
+    int (*adc_read_mv)(int pin);
 } purr_driver_bus_table_t;
 
 /* core -> module direction (Modules/SPEC.md section 6, scoped to drivers): called once per

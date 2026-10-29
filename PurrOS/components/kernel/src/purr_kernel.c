@@ -8,6 +8,9 @@
 #include "driver/i2c_master.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_efuse.h"
 #include "esp_efuse_table.h"
 #include "esp_flash_encrypt.h"
@@ -391,6 +394,55 @@ static void bus_backlight_set(uint8_t level)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_2);
 }
 
+/* One-shot ADC for drivers (the battery). Units are created on first use and kept; each channel is configured the first time its pin is read. */
+static adc_oneshot_unit_handle_t s_adc[2];
+static adc_cali_handle_t s_adc_cali[2];
+static uint32_t s_adc_chan_done[2];
+
+static int bus_adc_read_mv(int pin)
+{
+    adc_unit_t unit;
+    adc_channel_t ch;
+    if (adc_oneshot_io_to_channel(pin, &unit, &ch) != ESP_OK || unit > ADC_UNIT_2) {
+        return -1;
+    }
+    int u = (int)unit;
+    if (s_adc[u] == NULL) {
+        adc_oneshot_unit_init_cfg_t ic = {.unit_id = unit, .ulp_mode = ADC_ULP_MODE_DISABLE};
+        if (adc_oneshot_new_unit(&ic, &s_adc[u]) != ESP_OK) {
+            s_adc[u] = NULL;
+            return -1;
+        }
+        adc_cali_curve_fitting_config_t cc = {.unit_id = unit, .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
+        if (adc_cali_create_scheme_curve_fitting(&cc, &s_adc_cali[u]) != ESP_OK) {
+            s_adc_cali[u] = NULL;                       /* no calibration data on this chip: a straight-line estimate below */
+        }
+    }
+    if (!(s_adc_chan_done[u] & (1u << ch))) {
+        adc_oneshot_chan_cfg_t chc = {.atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
+        if (adc_oneshot_config_channel(s_adc[u], ch, &chc) != ESP_OK) {
+            return -1;
+        }
+        s_adc_chan_done[u] |= 1u << ch;
+    }
+    int sum = 0, n = 0;
+    for (int i = 0; i < 16; i++) {
+        int raw;
+        if (adc_oneshot_read(s_adc[u], ch, &raw) == ESP_OK) {
+            sum += raw;
+            n++;
+        }
+    }
+    if (n == 0) {
+        return -1;
+    }
+    int raw = sum / n, mv;
+    if (s_adc_cali[u] == NULL || adc_cali_raw_to_voltage(s_adc_cali[u], raw, &mv) != ESP_OK) {
+        mv = raw * 3100 / 4095;
+    }
+    return mv;
+}
+
 static const purr_driver_bus_table_t s_bus_table = {
     .abi_version = PURR_DRIVER_BUS_ABI_VERSION,
     .spi_add_device = bus_spi_add_device,
@@ -409,6 +461,7 @@ static const purr_driver_bus_table_t s_bus_table = {
     .dma_alloc = bus_dma_alloc,
     .backlight_init = bus_backlight_init,
     .backlight_set = bus_backlight_set,
+    .adc_read_mv = bus_adc_read_mv,
 };
 
 const purr_driver_bus_table_t *purr_driver_bus_table(void)

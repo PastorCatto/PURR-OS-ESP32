@@ -1,5 +1,6 @@
 /* purr_power_plat.c - the device's power manager. See purr_power_plat.h and plan10.md. */
 #include "purr_power_plat.h"
+#include "purr_kbdlight.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,7 @@ static void plat_screen(int on)
     if (d != NULL && d->set_brightness != NULL) {
         d->set_brightness((uint8_t)(on ? user_brightness() : 0));
     }
+    purr_kbdlight_screen(on);                   /* the keys follow the screen */
     ESP_LOGI(TAG, "screen %s", on ? "on" : "off");
 }
 

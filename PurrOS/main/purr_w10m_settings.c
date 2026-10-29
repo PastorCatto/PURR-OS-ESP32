@@ -40,7 +40,9 @@
 #include "login.h"
 #include "purr_appmgr.h"
 #include "purr_catrt.h"
+#include "purr_battery.h"
 #include "purr_board.h"
+#include "purr_kbdlight.h"
 #include "purr_catrt_power.h"
 #include "purr_driver.h"
 #include "purr_hwscan_plat.h"
@@ -428,6 +430,22 @@ static void page_system(void)
 static void hardware_section(void);
 static void devsrv_section(void);
 
+static lv_obj_t *s_kbl_btn;
+
+static void kbl_text(void)
+{
+    char t[48];
+    snprintf(t, sizeof(t), "Keyboard backlight: %s", purr_kbdlight_name(purr_kbdlight_get()));
+    cm_button_text(s_kbl_btn, t);
+}
+
+static void kbl_cb(lv_event_t *e)
+{
+    (void)e;
+    purr_kbdlight_set((purr_kbdlight_get() + 1) % 4);
+    kbl_text();
+}
+
 static void page_devices(void)
 {
     char buf[96];
@@ -439,6 +457,22 @@ static void page_devices(void)
     cm_title(s_body, "Input");
     cm_text(s_body, purr_lvgl_keypad() != NULL ? "Keyboard: ready" : "Keyboard: not found");
     cm_text(s_body, "Touch screen: ready");
+
+    if (purr_kbdlight_present()) {
+        s_kbl_btn = cm_button(s_body, "", kbl_cb, NULL);
+        lv_obj_set_width(s_kbl_btn, LV_PCT(100));
+        kbl_text();
+    }
+
+    cm_space(s_body, 4);
+    cm_title(s_body, "Battery");
+    int bp, bmv;
+    if (purr_battery_get(&bp, &bmv)) {
+        snprintf(buf, sizeof(buf), "%d%%  (%d.%02d V)", bp, bmv / 1000, (bmv % 1000) / 10);
+    } else {
+        snprintf(buf, sizeof(buf), "No battery reading");
+    }
+    cm_text(s_body, buf);
 
     cm_space(s_body, 4);
     cm_title(s_body, "Network adapters");
@@ -2087,6 +2121,7 @@ static void show_page(page_t page)
     s_app_list = s_app_src = NULL;
     s_hw_list = s_hw_setup_btn = s_drv_list = s_man_drv = s_man_sda = s_man_scl = s_man_addr = NULL;
     s_srv_line = s_srv_addr = s_srv_list = s_upd_install_btn = s_upd_src_btn = NULL;
+    s_kbl_btn = NULL;
     s_time_now = NULL;
     s_acct_auto_sw = s_acct_auto_pw = NULL;
     s_sec_state = s_sec_boot = s_sec_trust = s_sec_slot = s_sec_active = NULL;

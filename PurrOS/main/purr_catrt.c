@@ -7,6 +7,7 @@
  */
 #include "esp_attr.h"
 #include "purr_catrt.h"
+#include "purr_battery.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -661,7 +662,7 @@ static const purr_cc_sched_t s_cc_sched = {
 
 static uint32_t cc_free_heap(void) { return (uint32_t)esp_get_free_heap_size(); }
 static uint32_t cc_largest_block(void) { return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT); }
-static int cc_battery(void) { return -1; }
+static int cc_battery(void) { return purr_battery_percent(); }
 static int64_t cc_unix_time(void)
 {
     time_t t = time(NULL);

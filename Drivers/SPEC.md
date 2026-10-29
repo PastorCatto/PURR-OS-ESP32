@@ -117,3 +117,14 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
 - **Dependencies between drivers,** and what happens when two drivers match one device.
 - **Rolling back a bad driver,** using the same `.bak` swap as other system files.
 - **Whether a user can override the pins** in a pack on their own board.
+
+
+### 4.3 Bus ABI 5: `adc_read_mv`, and two drivers that became board devices (2026-10-28)
+- The bus table grew at the end by one function, `adc_read_mv(pin)`: the calibrated, averaged millivolts at an ADC-capable GPIO (-1 otherwise). `PURR_DRIVER_BUS_ABI_VERSION` is 5;
+  `PURR_DRIVER_BUS_ABI_MIN` stays 4, so drivers built against 4 (bme280, the display/touch/keyboard modules) load unchanged. A driver that calls `adc_read_mv` lists `abi_min=5` in
+  drivers.manifest (`make_drivers_index.py --driver FILE:COMPATIBLE:BUSES:CATCALL:ABI_MIN`).
+- `battery-adc` (Modules/drivers/battery_module.c): cfg `purr_adc_dev_cfg_t {pin, mul, div}`; `read()` returns `[percent, mV lo, mV hi, flags]` (flags bit 0 = a cell is connected). T-Deck Plus: GPIO 4,
+  divider 2:1. Percent is a single-cell Li-ion curve estimate; the OS (`purr_battery.c`) smooths it and caches it for 20 s.
+- `kbd-backlight`: now a board device on the T-Deck Plus (0x55 on the keyboard's wires). `read()` is the control channel: `[0xA5, level]` sets the nearest of the four steps, `[0xA6, x]` reports it.
+  The level is the setting `keyboard.backlight` (0 off, 1 low, 2 medium, 3 high), switched off with the screen.
+- Both are baked into the firmware like the keyboard driver (`s_temp_drivers`), so they work with no network, and are also published in drivers.manifest.

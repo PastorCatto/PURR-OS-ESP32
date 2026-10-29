@@ -96,6 +96,13 @@ typedef struct {
     uint32_t hz;
 } purr_i2c_dev_cfg_t;
 
+/* The cfg of a device that is just a voltage on an ADC pin (the battery): the pin, and the divider in front of it, so the driver sees
+ * pin_mV * mul / div as the real voltage. */
+typedef struct {
+    int pin;
+    int mul, div;
+} purr_adc_dev_cfg_t;
+
 /* One entry in a board's device list (section 3, section 5's driver-matching target).
  * `compatible` matches a purr_driver_t's own `compatible` (purr_driver.h) -- the kernel never
  * calls a driver by name. `extra_pins` are the device's own pins beyond whatever bus it's

@@ -27,6 +27,7 @@
 #include "commands.h"
 #include "login.h"
 #include "purr_appmgr.h"
+#include "purr_battery.h"
 #include "purr_catrt.h"
 #include "purr_catrt_ui.h"
 #include "purr_console.h"
@@ -132,6 +133,7 @@ static lv_obj_t *s_shade;               /* a dark veil over it so the tiles read
 static lv_obj_t *s_start;               /* the scrolling start screen */
 static lv_obj_t *s_status;              /* the status strip */
 static lv_obj_t *s_clock;
+static lv_obj_t *s_batt;                /* the battery percent in the strip, hidden when there is no reading */
 static lv_obj_t *s_status_dev;          /* "DEV" / "UNSIGNED OK" badge while developer mode is active */
 static lv_obj_t *s_status_user;         /* the signed-in user's name, at the left of the strip */
 static lv_obj_t *s_net;
@@ -381,6 +383,15 @@ static void clock_tick(lv_timer_t *timer)
         snprintf(buf, sizeof(buf), "--:--");     /* the clock has not been set */
     }
     lv_label_set_text(s_clock, buf);
+    if (s_batt != NULL) {
+        int pct;
+        if (purr_battery_get(&pct, NULL)) {
+            lv_label_set_text_fmt(s_batt, "%d%%", pct);
+            lv_obj_remove_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 }
 
 void w10m_dev_badge_update(void)
@@ -413,6 +424,12 @@ static void build_status(void)
     lv_obj_set_style_text_font(s_clock, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_clock, lv_color_white(), 0);
     lv_obj_align(s_clock, LV_ALIGN_RIGHT_MID, -6, 0);
+
+    s_batt = lv_label_create(s_status);
+    lv_obj_set_style_text_font(s_batt, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_batt, lv_color_white(), 0);
+    lv_obj_align(s_batt, LV_ALIGN_RIGHT_MID, -72, 0);
+    lv_obj_add_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
 
     const lv_image_dsc_t *net = img("wifi_icon");
     if (net != NULL) {

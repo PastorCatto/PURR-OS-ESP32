@@ -54,6 +54,10 @@ static purr_board_t s_board = {
      * being built. */
 };
 
+/* The battery sits behind a 1:2 divider on GPIO 4 (LilyGO's BOARD_BAT_ADC); the keyboard controller also takes the backlight command, at the same address on the same wires. */
+static const purr_adc_dev_cfg_t s_battery_cfg = {.pin = 4, .mul = 2, .div = 1};
+static const purr_i2c_dev_cfg_t s_kbd_light_cfg = {.port = 0, .sda = 18, .scl = 8, .addr = 0x55, .hz = 100 * 1000};
+
 /* F-02: the registry's view of this board's two devices, pointing at the same
  * purr_display_cfg_t/purr_keyboard_cfg_t s_board already carries (not a second copy).
  * extra_pins are each device's own pins beyond the shared SPI bus (display: cs, dc, rst,
@@ -76,6 +80,16 @@ static const purr_device_t s_devices[] = {
         .extra_pins = {17, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE,
                       PURR_PIN_NONE, PURR_PIN_NONE},
         .cfg = &s_board.touch,
+    },
+    {
+        .name = "battery", .compatible = "battery-adc", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {4, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_battery_cfg,
+    },
+    {
+        .name = "kbd-backlight", .compatible = "kbd-backlight", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_kbd_light_cfg,
     },
 };
 

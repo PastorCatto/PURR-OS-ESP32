@@ -36,7 +36,7 @@ idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "include"
                        REQUIRES coreos littlefs esp_partition esp_wifi esp_netif esp_event nvs_flash
                                 mbedtls esp_http_client esp-tls esp_timer bootloader_support
-                                driver esp_driver_gpio esp_driver_spi esp_driver_i2c esp_driver_ledc heap log
+                                driver esp_driver_gpio esp_driver_spi esp_driver_i2c esp_driver_ledc esp_adc heap log
                                 # Always listed: component requirements are expanded before
                                 # the project's sdkconfig exists, so this cannot depend on the
                                 # network backend. The linker drops it when the Wi-Fi one is used.
