@@ -92,6 +92,34 @@ Not in Studio tonight: the emulator (separate job; the "Run" tile is a placehold
 
 Where a pin says "to be checked", the board file carries it as data so it is a one-line change, not a code change.
 
+## Branding (added by the owner, last request of the night)
+
+People will make their own flavors, so the look and the names of the system are data, not code. A flavor has a `brand.toml`:
+
+```toml
+[brand]
+product   = "PURR OS"          # the name in the boot menu, the status text and About
+recovery  = "KittenOS"         # the name of the recovery system
+codename  = "BlackDeck+"       # the board line under the logo
+logo      = "PURR OS!"         # the wordmark on the boot screens (bold italic)
+logo_accent_from = 7           # characters from this position on use the accent colour (-1 for none)
+
+[colours]
+accent    = "#FFB400"          # boot screens: the logo's accent, the selection border, the default tag
+text      = "#FFFFFF"
+dim       = "#94969A"
+ok        = "#4CC38A"
+warn      = "#FFB400"
+
+[shell]
+accent    = "Cobalt"           # the shell's default accent colour (the Windows Phone palette names)
+```
+
+`purrstrap brand build <brand.toml>` checks it (lengths that fit the 8 x 8 font on a 320 px line, colours, names) and writes the headers the boot package, the loader, KittenOS and the shell are built with.
+The boot package (the screens the bootloader shows) takes the logo, the colours and the product names; the loader, KittenOS and the shell take the names and the default accent.
+The bootloader itself (flash 0x0) has no screen of its own: its log lines are the only text, and it reports the version, not a brand. So rebranding the "bootloader" means rebranding the boot package. Studio has a Brand tool with a
+live preview of the splash, the menu and the problem screen, so a flavor's look can be seen before anything is built.
+
 ## Order of work (tonight)
 
 1. The driver class ABI, the kernel class registry, bus ABI 6 (UART), the key/value device config, host tests.

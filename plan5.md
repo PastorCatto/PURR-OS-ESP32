@@ -184,3 +184,5 @@ bootloader redesign (menu only when needed, Fast startup, 20 s fall-through, "PU
 - The emulator is NOT part of this job (the owner works on it separately as a fork of the ESP32 emulator): leave a hook only.
 - The end goal: a 100 % supported T-Deck Plus built through the SDK, GPS and LoRa included. Inventory and status: `sdk/DESIGN.md`.
 - Design details and order of work: `sdk/DESIGN.md`. Nothing is released, flashed or put on the dev server tonight.
+
+- **Branding (owner, last request):** a flavor's names, wordmark and colours are data (`brand.toml`), applied to the boot package, loader, KittenOS and shell; Studio gets a Brand tool with a live preview. Design in `sdk/DESIGN.md`.
