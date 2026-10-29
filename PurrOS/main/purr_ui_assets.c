@@ -1,10 +1,14 @@
 #include "esp_attr.h"
 #include "purr_ui_assets.h"
 
+#include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "purr_util.h"
 
@@ -40,6 +44,38 @@ static EXT_RAM_BSS_ATTR purr_asset_t s_assets[MAX_ASSETS];
 static int s_count;
 static esp_partition_mmap_handle_t s_mmap_handle;
 static int s_mapped;
+static volatile int s_bad;                  /* the background check found the image data damaged: hand out nothing more */
+
+typedef struct {
+    const void *dir;
+    size_t dir_bytes;
+    const void *pixels;
+    size_t used;
+    uint32_t want;
+} crc_job_t;
+
+/* The CRC over several MB of flash takes seconds. Done before the shell was drawn it left a white screen for all that time, so it runs
+ * after, in small steps. The directory's bounds are checked up front (nothing can read outside the partition); the CRC only guards the
+ * pixels themselves, so a bad one just means the pictures stop being offered. */
+static void crc_task(void *arg)
+{
+    crc_job_t j = *(crc_job_t *)arg;
+    free(arg);
+    uint32_t crc = purr_crc32(0, j.dir, j.dir_bytes);
+    const uint8_t *p = j.pixels;
+    for (size_t off = 0; off < j.used; off += 16384) {
+        size_t n = j.used - off < 16384 ? j.used - off : 16384;
+        crc = purr_crc32(crc, p + off, n);
+        vTaskDelay(1);
+    }
+    if (crc != j.want) {
+        s_bad = 1;
+        ESP_LOGW(TAG, "CRC mismatch (corrupt or partial write): the pictures are switched off");
+    } else {
+        ESP_LOGI(TAG, "image data checked");
+    }
+    vTaskDelete(NULL);
+}
 
 esp_err_t purr_ui_assets_init(void)
 {
@@ -92,11 +128,27 @@ esp_err_t purr_ui_assets_init(void)
             used = (size_t)end;
         }
     }
-    uint32_t crc = purr_crc32(0, dir, dir_bytes);
-    crc = purr_crc32(crc, pixel_region, used);
-    if (crc != hdr->crc32) {
-        ESP_LOGW(TAG, "CRC mismatch (corrupt or partial write)");
-        return ESP_ERR_INVALID_CRC;
+    s_bad = 0;
+    crc_job_t *job = malloc(sizeof(*job));
+    bool check = false;
+    if (job != NULL) {
+        job->dir = dir;
+        job->dir_bytes = dir_bytes;
+        job->pixels = pixel_region;
+        job->used = used;
+        job->want = hdr->crc32;
+        check = xTaskCreate(crc_task, "assets-crc", 3072, job, 1, NULL) == pdPASS;
+        if (!check) {
+            free(job);
+        }
+    }
+    if (!check) {                                  /* no task: do it here, as before */
+        uint32_t crc = purr_crc32(0, dir, dir_bytes);
+        crc = purr_crc32(crc, pixel_region, used);
+        if (crc != hdr->crc32) {
+            ESP_LOGW(TAG, "CRC mismatch (corrupt or partial write)");
+            return ESP_ERR_INVALID_CRC;
+        }
     }
 
     for (uint32_t i = 0; i < hdr->count; i++) {
@@ -115,7 +167,7 @@ esp_err_t purr_ui_assets_init(void)
 
 const purr_asset_t *purr_ui_assets_find(const char *name)
 {
-    if (!s_mapped) {
+    if (!s_mapped || s_bad) {
         return NULL;
     }
     for (int i = 0; i < s_count; i++) {
