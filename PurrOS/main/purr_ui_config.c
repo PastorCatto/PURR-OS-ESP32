@@ -1,3 +1,4 @@
+#include "purr_brand.h"
 #include "sdkconfig.h"
 #include "purr_ui_config.h"
 
@@ -453,14 +454,14 @@ esp_err_t purr_ui_load_and_build(const char *path)
 /* ---------------------------------------------------------------- default config */
 
 static const char s_default_shell_conf[] =
-    "# Default PURR OS shell screen. Edit freely -- netinstall never overwrites a file\n"
+    "# Default " PURR_BRAND_PRODUCT " shell screen. Edit freely -- netinstall never overwrites a file\n"
     "# that's already here (purr_ui_config_setup()'s own missing-only check), and neither\n"
     "# does this planting step on a later boot.\n"
     "screen \"shell\" {\n"
     "    background = #000000\n"
     "\n"
     "    label \"title\" {\n"
-    "        text      = \"PURR OS\"\n"
+    "        text      = \"" PURR_BRAND_PRODUCT "\"\n"
     "        position  = 16, 16\n"
     "        color     = #fda000\n"
     "        scale     = 3\n"

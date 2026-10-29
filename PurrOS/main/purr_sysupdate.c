@@ -1,4 +1,5 @@
 /* purr_sysupdate.c - see purr_sysupdate.h. */
+#include "purr_brand.h"
 #include "purr_sysupdate.h"
 
 #include <stdio.h>
@@ -137,9 +138,9 @@ int purr_sysupdate_check(int use_dev, char *msg, size_t cap)
     }
     free(m);
     if (any) {
-        snprintf(msg, cap, "Newer: %s. You have PURR OS %s, KittenOS %s.", what, kv, ov);
+        snprintf(msg, cap, "Newer: %s. You have " PURR_BRAND_PRODUCT " %s, " PURR_BRAND_RECOVERY " %s.", what, kv, ov);
     } else {
-        snprintf(msg, cap, "Up to date: PURR OS %s, KittenOS %s.", kv, ov);
+        snprintf(msg, cap, "Up to date: " PURR_BRAND_PRODUCT " %s, " PURR_BRAND_RECOVERY " %s.", kv, ov);
     }
     return any;
 }

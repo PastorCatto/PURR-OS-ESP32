@@ -1,4 +1,5 @@
 /* recovery_app.c - see recovery_app.h. */
+#include "purr_brand.h"
 #include "recovery_app.h"
 
 #include <stdio.h>
@@ -287,7 +288,7 @@ static void home(void)
     }
     w10m_space(s_body, 6);
     w10m_row(s_body, "Restart", "Try starting normally again", 1, restart_cb, NULL);
-    w10m_row(s_body, "Reinstall PURR OS", "Keeps your accounts and files", 1, admin_cb, (void *)(intptr_t)SC_KEEP);
+    w10m_row(s_body, "Reinstall " PURR_BRAND_PRODUCT, "Keeps your accounts and files", 1, admin_cb, (void *)(intptr_t)SC_KEEP);
     w10m_row(s_body, "Reinstall and erase everything", "Starts over like a new device", 1, admin_cb,
              (void *)(intptr_t)SC_ERASE_INFO);
     w10m_row(s_body, "Security", "The bootloader's protection", 1, admin_strict_cb, (void *)(intptr_t)SC_SECURITY);
@@ -295,7 +296,7 @@ static void home(void)
 
 static void keep(void)
 {
-    heading("Reinstall PURR OS");
+    heading("Reinstall " PURR_BRAND_PRODUCT);
     w10m_dim(s_body, "We'll download a fresh copy of the system. Your accounts, apps and files stay right where they are.");
     w10m_dim(s_body, "It needs Wi-Fi (or a cable) and takes a few minutes. Keep it charged.");
     w10m_space(s_body, 6);
@@ -307,7 +308,7 @@ static void keep(void)
 static void erase_info(void)
 {
     heading("Erase everything");
-    w10m_dim(s_body, "This deletes every account, app and file on this device, then installs PURR OS again as if it were new. The saved Wi-Fi network is kept so it can download PURR OS by itself.");
+    w10m_dim(s_body, "This deletes every account, app and file on this device, then installs " PURR_BRAND_PRODUCT " again as if it were new. The saved Wi-Fi network is kept so it can download " PURR_BRAND_PRODUCT " by itself.");
     w10m_dim(s_body, "It can't be undone.");
     w10m_space(s_body, 6);
     lv_obj_t *b = w10m_button(s_body, "Continue", go_cb, (void *)(intptr_t)SC_ERASE_SURE);
@@ -330,7 +331,7 @@ static void gate(void)
 static void erase_sure(void)
 {
     heading("Last chance");
-    w10m_dim(s_body, "Everything on this device will be erased and PURR OS reinstalled.");
+    w10m_dim(s_body, "Everything on this device will be erased and " PURR_BRAND_PRODUCT " reinstalled.");
     w10m_space(s_body, 6);
     lv_obj_t *b = w10m_button(s_body, "Erase everything", erase_go_cb, NULL);
     lv_obj_set_style_bg_color(b, lv_color_hex(0xC42B1C), 0);

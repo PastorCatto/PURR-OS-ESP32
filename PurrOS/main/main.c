@@ -17,6 +17,7 @@
  */
 #include <stdio.h>
 
+#include "purr_brand.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -259,7 +260,7 @@ void app_main(void)
     if (resumed) {
         const esp_partition_t *kp = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
         if (kp != NULL && !purr_slot_marked_bad(kp)) {
-            purr_cli_puts(&boot_cli, "restarting into PURR OS...\n");
+            purr_cli_puts(&boot_cli, "restarting into " PURR_BRAND_PRODUCT "...\n");
             purr_console_flush();
             vTaskDelay(pdMS_TO_TICKS(1500));
             esp_restart();
@@ -306,7 +307,7 @@ void app_main(void)
         ESP_LOGW(TAG, "shell escape held; skipping LVGL for this boot");
         rs_end();
     } else {
-        BOOT_STEP(4, "Starting PURR OS");
+        BOOT_STEP(4, "Starting " PURR_BRAND_PRODUCT);
         /* A real login here, not a create-only check: chunk F (the app_grid widget,
          * memory/[[project_appruntime_fullstack_plan]]) needs to know who is logged in to
          * know whose apps to show, and nothing before this point ever sets that for an

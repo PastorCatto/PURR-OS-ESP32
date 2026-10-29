@@ -73,8 +73,9 @@ def find_tool(prefix, name, env=None):
     return None
 
 
-def compile_args(repo_root, board):
-    return ["-Os", "-std=gnu11", f'-DPKG_VERSION="{VERSION}"', "-ffreestanding", "-fno-builtin", "-mlongcalls",
+def compile_args(repo_root, board, brand=""):
+    brand_flag = [f'-DPURR_BRAND_HEADER="{brand}"'] if brand else []
+    return brand_flag + ["-Os", "-std=gnu11", f'-DPKG_VERSION="{VERSION}"', "-ffreestanding", "-fno-builtin", "-mlongcalls",
             "-ffunction-sections", "-fdata-sections", "-Wall", "-Wextra", "-Werror",
             "-I", os.path.join(repo_root, PKG_DIR, "src"),
             "-I", os.path.join(repo_root, PKG_DIR, "boards"),
@@ -105,7 +106,7 @@ def _symbols(nm_output):
     return table
 
 
-def build(ctx, board):
+def build(ctx, board, brand="", out=""):
     if board not in BOARDS:
         ctx.error(f"unknown board {board}")
         return 1
@@ -115,7 +116,11 @@ def build(ctx, board):
         ctx.error(f"{prefix} tools not found. Install ESP-IDF, or put them on PATH.")
         return 1
     root = ctx.repo_root
-    out = os.path.join(root, PKG_DIR, "build", board)
+    brand = os.path.abspath(brand).replace(os.sep, "/") if brand else ""
+    if brand and not os.path.isfile(brand):
+        ctx.error(f"{brand}: no such brand header. Make one with `purr brand build brand.toml`.")
+        return 1
+    out = os.path.abspath(out) if out else os.path.join(root, PKG_DIR, "build", board)
     os.makedirs(out, exist_ok=True)
 
     # The board header is included as "board.h".
@@ -126,7 +131,7 @@ def build(ctx, board):
     objs = []
     for src in sources(root, board):
         obj = os.path.join(out, os.path.basename(src)[:-2] + ".o")
-        code = ctx.run([gcc] + compile_args(root, board) + ["-I", out, "-c", src, "-o", obj])
+        code = ctx.run([gcc] + compile_args(root, board, brand) + ["-I", out, "-c", src, "-o", obj])
         if code != 0:
             ctx.error(f"compile failed: {os.path.basename(src)}")
             return code
@@ -182,6 +187,8 @@ SCRIPT = Script(
     actions=(
         Action("build", "Build", build, help="compile, link and pack one board's package",
                params=(Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
-                             help="the board to build for"),)),
+                             help="the board to build for"),
+                      Param("brand", "path", default="", help="a purr_brand.h from `purr brand build`: the flavor's names and colours"),
+                      Param("out", "path", default="", help="build in this folder instead of bootpkg/build/<board>"))),
     ),
 )

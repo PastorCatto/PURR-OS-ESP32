@@ -5,6 +5,7 @@
  * apps; only a small Wi-Fi diagnostic shell (wifi, net, exit), offered by a keypress at
  * startup, for checking the connection before or without doing a recovery.
  */
+#include "purr_brand.h"
 #include "recovery_loader.h"
 
 #include <stdarg.h>
@@ -396,7 +397,7 @@ static int install_kittenos(const uint8_t *image, size_t image_len)
     purr_verify_result_t vr = purr_image_verify(&env, mem_read, &rdctx, (uint32_t)image_len, &hdr);
 
     if (hdr.magic != PURR_IMAGE_MAGIC || hdr.image_type != PURR_IMG_RECOVERY) {
-        status("not a KittenOS image");
+        status("not a " PURR_BRAND_RECOVERY " image");
         return -1;
     }
     if (vr != PURR_V_OK && !unverified_ok(&view)) {
@@ -615,7 +616,7 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
     }
     char url[256];
     resolve_url(purr_recovery_manifest_url(), entry->file, url, sizeof(url));
-    status_step(purr_recovery_source_name() != NULL ? "Downloading PURR OS from your dev server" : "Downloading PURR OS");
+    status_step(purr_recovery_source_name() != NULL ? "Downloading " PURR_BRAND_PRODUCT " from your dev server" : "Downloading " PURR_BRAND_PRODUCT);
 
     uint8_t *image = NULL;
     size_t image_len = 0;
@@ -814,7 +815,7 @@ static int restore_components(int include_kernel)
                                                                  purr_board()->name);
     if (kop != NULL && !purr_slot_marked_bad(kop) && partition_matches_manifest(kop, kosentry) &&    /* F-14 */
         partition_trailer_ok(kop, PURR_IMG_RECOVERY, 0) && !installed_is_older(kop, kosentry)) {
-        status("KittenOS is already good");
+        status(PURR_BRAND_RECOVERY " is already good");
     } else {
         const purr_manifest_entry_t *entry = kosentry;
         uint8_t *image = NULL;
@@ -825,7 +826,7 @@ static int restore_components(int include_kernel)
             failures++;
         } else {
             resolve_url(purr_recovery_manifest_url(), entry->file, url, sizeof(url));
-            status_step(purr_recovery_source_name() != NULL ? "Downloading PURR OS from your dev server" : "Downloading PURR OS");
+            status_step(purr_recovery_source_name() != NULL ? "Downloading " PURR_BRAND_PRODUCT " from your dev server" : "Downloading " PURR_BRAND_PRODUCT);
             uint8_t got_hash[PURR_SHA256_LEN];
             if (purr_fetch_alloc(url, &image, &image_len, MAX_IMAGE_SIZE) != ESP_OK) {
                 status("The download didn't finish.");

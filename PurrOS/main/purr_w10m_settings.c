@@ -27,6 +27,7 @@
 #include <strings.h>
 #include <time.h>
 
+#include "purr_brand.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -2121,7 +2122,7 @@ static void about_system_section(void)
     purr_sysupdate_versions(kv, ov);
     cm_space(s_body, 4);
     cm_title(s_body, "System update");
-    snprintf(buf, sizeof(buf), "PURR OS %s, KittenOS %s", kv, ov);
+    snprintf(buf, sizeof(buf), PURR_BRAND_PRODUCT " %s, " PURR_BRAND_RECOVERY " %s", kv, ov);
     cm_text(s_body, buf);
     s_upd_src_btn = NULL;
     purr_repo_server_t sv;
@@ -2141,15 +2142,15 @@ static void about_system_section(void)
 
     cm_space(s_body, 4);
     cm_title(s_body, "Reinstall");
-    cm_dim(s_body, "Puts PURR OS back from the source above, kernel and KittenOS both, even if they look fine. Your files and accounts are kept.");
-    lv_obj_t *rb = cm_button(s_body, "Reinstall PURR OS", upd_reinstall_cb, NULL);
+    cm_dim(s_body, "Puts " PURR_BRAND_PRODUCT " back from the source above, kernel and " PURR_BRAND_RECOVERY " both, even if they look fine. Your files and accounts are kept.");
+    lv_obj_t *rb = cm_button(s_body, "Reinstall " PURR_BRAND_PRODUCT, upd_reinstall_cb, NULL);
     lv_obj_set_width(rb, LV_PCT(100));
 }
 
 static void page_about(void)
 {
     char buf[96];
-    cm_title(s_body, "PURR OS");
+    cm_title(s_body, PURR_BRAND_PRODUCT);
     cm_text(s_body, purr_system_name());
 
     purr_secure_status_t st;

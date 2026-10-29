@@ -1,0 +1,156 @@
+# LilyGO T-Deck Plus (ESP32-S3, 16 MB flash, 8 MB PSRAM): the reference board of the PURR Developer Kit.
+# A board is data. Change a pin here, run `purr board build boards/tdeck_plus.toml`, and the board file the kernel is built with
+# (and the profile a device reads at boot) are written for you.
+#
+# status says how far each part has got on a real unit: "works" (used every day), "built" (the code runs but nobody has read
+# real values yet), "written" (the driver exists, tested against a scripted fake only), "template" (no driver yet).
+# Pins marked "LilyGO" come from LilyGO's published headers and have not been checked on this unit.
+
+[board]
+id = "tdeck_plus"
+name = "LilyGO T-Deck Plus"
+chip = "esp32s3"
+flash_mb = 16
+psram_mb = 8
+power_pin = 10                 # switches the rail for the display, touch, keyboard, SD card and LoRa: high first, or none of them answer
+power_settle_ms = 50
+idle_high_pins = [9, 39]       # the other chip selects on the shared SPI bus (LoRa 9, SD 39), held high while the display is used
+
+[spi]
+host = 1                       # SPI2_HOST
+mosi = 41
+miso = 38
+sclk = 40
+
+[display]
+name = "ST7789 320x240"
+compatible = "st7789"
+cs = 12
+dc = 11
+rst = -1
+backlight = 42
+width = 320
+height = 240
+col_off = 0
+row_off = 0
+madctl = 0x70                  # MX|MY|MV: landscape
+bgr = 1                        # wired BGR: without this red and blue swap
+invert = 1                     # this panel needs inversion for correct colours
+spi_hz = 40000000
+status = "works"
+
+[keyboard]
+compatible = "kbd-i2c"
+port = 0
+sda = 18
+scl = 8
+addr = 0x55
+hz = 100000
+status = "works"
+
+[touch]
+compatible = "gt911"
+port = 0
+sda = 18
+scl = 8
+int_pin = -1                   # polling: this board's INT line is not used
+rst_pin = 17
+hz = 400000
+width = 320
+height = 240
+native_x_max = 311             # this unit's own raw range, measured
+native_y_max = 235
+status = "works"
+
+[buttons]
+boot = -1                      # no BOOT or PWR buttons: there is a keyboard
+pwr = -1
+hold_ms = 0
+
+[[device]]
+name = "battery"
+compatible = "battery-adc"
+class = "battery"
+bus = "adc"
+priority = "optional"
+pin = 4                        # LilyGO BOARD_BAT_ADC, behind a 1:2 divider
+mul = 2
+div = 1
+status = "built"
+note = "Reads the voltage on GPIO 4; not yet compared with a multimeter."
+
+[[device]]
+name = "kbd-backlight"
+compatible = "kbd-backlight"
+class = "light"
+bus = "i2c"
+priority = "optional"
+port = 0
+sda = 18
+scl = 8
+addr = 0x55
+hz = 100000
+status = "works"
+note = "The keyboard controller takes the backlight command [0x01, level]."
+
+[[device]]
+name = "gps0"
+compatible = "gnss-nmea"
+class = "gnss"
+bus = "uart"
+priority = "optional"
+port = 1
+tx = 43                        # LilyGO: the u-blox MIA-M10Q listens on 43 and talks on 44
+rx = 44
+baud = 38400
+status = "written"
+note = "NMEA sentences; the driver is host-tested against a scripted receiver."
+
+[[device]]
+name = "lora0"
+compatible = "lora-sx126x"
+class = "lora"
+bus = "spi"
+priority = "optional"
+cs = 9                         # LilyGO: shared SPI with the display and the SD card
+rst = -1                       # LilyGO wires the radio's reset to GPIO 17, the same line as the touch controller's: left unset until checked
+busy = 13
+dio1 = 45                      # a strapping pin; fine as an input once the chip has started
+tcxo = 1                       # the SX1262 on this board has a TCXO on DIO3 and an RF switch on DIO2 (to verify on the unit)
+dio2sw = 1
+status = "written"
+note = "SX1262 over the shared SPI bus; the driver is host-tested against a scripted chip only."
+
+[[device]]
+name = "trackball"
+compatible = "trackball-gpio"
+class = "pointer"
+bus = "gpio"
+priority = "optional"
+up = 3
+down = 15
+left = 1
+right = 2
+click = 0
+status = "template"
+note = "Five GPIOs (LilyGO). Click is GPIO 0, the boot strapping pin."
+
+[[device]]
+name = "sd0"
+compatible = "sd-spi"
+class = "storage"
+bus = "spi"
+priority = "optional"
+cs = 39
+status = "template"
+
+[[device]]
+name = "speaker"
+compatible = "i2s-out"
+class = "audio"
+bus = "i2s"
+priority = "optional"
+bck = 7
+ws = 5
+dout = 6
+status = "template"

@@ -1,4 +1,5 @@
 /* purr_recovery_src.c - see purr_recovery_src.h. */
+#include "purr_brand.h"
 #include "purr_recovery_src.h"
 
 #include <stdio.h>
@@ -139,7 +140,7 @@ int purr_recovery_verify(const char *base, char *msg, size_t cap)
         snprintf(msg, cap, "It's up, but it has nothing for this device yet.");
         return -1;
     }
-    snprintf(msg, cap, "Verified. It has PURR OS %s for this device.", e->version);
+    snprintf(msg, cap, "Verified. It has " PURR_BRAND_PRODUCT " %s for this device.", e->version);
     return 0;
 }
 

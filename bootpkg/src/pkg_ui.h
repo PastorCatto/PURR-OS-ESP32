@@ -15,12 +15,14 @@
 
 #include <stdint.h>
 
+#include "pkg_brand.h"
+
 #define UI_BLACK  0x0000
-#define UI_WHITE  0xFFFF
-#define UI_GREY   0x94B2
-#define UI_ORANGE 0xFDA0
+#define UI_WHITE  PKG_BRAND_COLOUR_TEXT
+#define UI_GREY   PKG_BRAND_COLOUR_DIM
+#define UI_ORANGE PKG_BRAND_COLOUR_ACCENT   /* the accent, whatever the flavor makes it */
 #define UI_DIM    0x39E7       /* the empty part of the bar */
-#define UI_GREEN  0x564F
+#define UI_GREEN  PKG_BRAND_COLOUR_OK
 
 /* Chip kinds. */
 #define UI_CHIP_OK    0        /* grey outline, green dot: fine */

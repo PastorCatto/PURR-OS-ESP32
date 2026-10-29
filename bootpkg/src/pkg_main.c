@@ -232,7 +232,7 @@ static int stage_keycheck(const purr_boot_services_t *svc, int ms)
 static const char *display_name(const char *label, int problem)
 {
     if (label[0] == 'K' && label[1] == 'e') {                   /* "Kernel" */
-        return "PURR OS";
+        return PKG_BRAND_PRODUCT;
     }
     if (problem && label[0] == 'K' && label[1] == 'i') {        /* "KittenOS" */
         return "Start recovery";
@@ -285,10 +285,10 @@ static void kbd_draw_desc(const purr_boot_services_t *svc, const purr_menu_t *m,
     } else if (m->entries[m->selected].part >= 0) {
         const char *lab = m->entries[m->selected].label;
         if (is_kittenos(lab)) {
-            l1 = "Repairs or reinstalls PURR OS.";
+            l1 = "Repairs or reinstalls " PKG_BRAND_PRODUCT ".";
             l2 = "Your files are kept.";
         } else if (lab[0] == 'K') {
-            l1 = "Starts PURR OS normally.";
+            l1 = "Starts " PKG_BRAND_PRODUCT " normally.";
         }
     }
     if (l1) ui_left(155, l1, UI_GREY);
@@ -337,9 +337,9 @@ static int kbd_menu(const purr_boot_services_t *svc, const purr_boot_part_t *par
     ui_frame_small();
     s_frame = 1;
     if (v.problem) {
-        ui_left(46, "PURR OS did not pass its check.", UI_ORANGE);
+        ui_left(46, PKG_BRAND_PRODUCT " did not pass its check.", UI_ORANGE);
     } else {
-        ui_left(46, reason == PURR_MENU_WHY_LAST_FAILED ? "PURR OS did not start last time." : "Boot menu", UI_WHITE);
+        ui_left(46, reason == PURR_MENU_WHY_LAST_FAILED ? PKG_BRAND_PRODUCT " did not start last time." : "Boot menu", UI_WHITE);
         ui_left(66, "Pick what to start.", UI_GREY);
     }
     ui_rule(147);
@@ -378,7 +378,7 @@ static int kbd_menu(const purr_boot_services_t *svc, const purr_boot_part_t *par
     }
     if (r.action == PURR_MENU_ACT_BOOT) {
         svc->log("bootpkg: booting the chosen slot");
-        stage_splash(svc, is_kittenos(mp[r.index].label) ? "Starting KittenOS" : "Starting PURR OS");
+        stage_splash(svc, is_kittenos(mp[r.index].label) ? "Starting " PKG_BRAND_RECOVERY : "Starting " PKG_BRAND_PRODUCT);
         return r.index;
     }
     svc->log("bootpkg: starting internet recovery");

@@ -1,4 +1,5 @@
 /* purr_oobe.c - see purr_oobe.h. */
+#include "purr_brand.h"
 #include "purr_oobe.h"
 
 #include <stdio.h>
@@ -267,7 +268,7 @@ static void page_wrong(void)
         purr_theme_apply(g, PURR_TH_TEXT);
         w10m_text(s_body, "This is a network install.");
         w10m_space(s_body, 6);
-        w10m_dim(s_body, "Looks like this is the first time it has been run. We'll hop on Wi-Fi and grab PURR OS for you.");
+        w10m_dim(s_body, "Looks like this is the first time it has been run. We'll hop on Wi-Fi and grab " PURR_BRAND_PRODUCT " for you.");
         set_next("OK", 1);
         return;
     }
@@ -357,7 +358,7 @@ static void wifi_list_build(void)
 static void page_wifi(void)
 {
     w10m_title(s_body, "Let's get you connected");
-    w10m_dim(s_body, "Pick your network and PURR OS will be ready for you.");
+    w10m_dim(s_body, "Pick your network and " PURR_BRAND_PRODUCT " will be ready for you.");
     s_connected = 0;
     set_next("Next", 0);
     if (s_ops->wired != NULL && s_ops->wired()) {
@@ -442,10 +443,10 @@ static void page_devserver(void)
 {
     if (s_ops->dev_recovery != NULL && s_ops->dev_recovery()) {
         w10m_title(s_body, "Use your dev server?");
-        w10m_dim(s_body, "Developer mode is on, so we can grab PURR OS from a server on your network instead of the internet.");
+        w10m_dim(s_body, "Developer mode is on, so we can grab " PURR_BRAND_PRODUCT " from a server on your network instead of the internet.");
     } else {
         w10m_title(s_body, "Use a recovery computer?");
-        w10m_dim(s_body, "A computer on this network running broken-kitten-recovery can send PURR OS to this device. Pick it only if it is yours.");
+        w10m_dim(s_body, "A computer on this network running broken-kitten-recovery can send " PURR_BRAND_PRODUCT " to this device. Pick it only if it is yours.");
     }
     s_srv_list = lv_obj_create(s_body);
     lv_obj_remove_style_all(s_srv_list);
@@ -493,7 +494,7 @@ static void page_finishing(void)
     s_stage = s_strip_lbl;
     s_progress = s_strip_bar;
     w10m_title(s_body, "Just a few more minutes");
-    w10m_dim(s_body, "Your files are safe. PURR OS starts by itself when this is done. Keep it charged or plugged in.");
+    w10m_dim(s_body, "Your files are safe. " PURR_BRAND_PRODUCT " starts by itself when this is done. Keep it charged or plugged in.");
     lv_obj_add_flag(s_next, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_back, LV_OBJ_FLAG_HIDDEN);
     s_restoring_done = 0;
@@ -636,7 +637,7 @@ static void page_done(void)
              purr_theme_dark() ? "dark" : "light");
     w10m_text(s_body, line);
     w10m_space(s_body, 4);
-    w10m_dim(s_body, "Finish restarts into PURR OS, and then you can sign in.");
+    w10m_dim(s_body, "Finish restarts into " PURR_BRAND_PRODUCT ", and then you can sign in.");
     set_next("Finish", 0);
     bg_update();
 }

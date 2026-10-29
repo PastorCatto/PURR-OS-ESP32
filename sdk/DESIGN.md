@@ -107,8 +107,8 @@ logo_accent_from = 7           # characters from this position on use the accent
 [colours]
 accent    = "#FFB400"          # boot screens: the logo's accent, the selection border, the default tag
 text      = "#FFFFFF"
-dim       = "#94969A"
-ok        = "#4CC38A"
+dim       = "#949694"
+ok        = "#52CA7B"
 warn      = "#FFB400"
 
 [shell]

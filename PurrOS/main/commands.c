@@ -7,6 +7,7 @@
 #include <sys/select.h>
 #include <unistd.h>
 
+#include "purr_brand.h"
 #include "esp_cache.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
@@ -83,13 +84,13 @@ extern const size_t purr_default_keys_count;
 #define PURR_DRIVERS_DIR "/boot/drivers"
 
 #if CONFIG_PURR_PROFILE_RECOVERY
-#define SYSTEM_NAME  "KittenOS"
+#define SYSTEM_NAME  PURR_BRAND_RECOVERY
 #define PROFILE_NAME "recovery"
 #elif CONFIG_PURR_PROFILE_MINIMAL
 #define SYSTEM_NAME  "PURR Loader"
 #define PROFILE_NAME "minimal"
 #else
-#define SYSTEM_NAME  "PURR OS"
+#define SYSTEM_NAME  PURR_BRAND_PRODUCT
 #define PROFILE_NAME "full"
 #endif
 
@@ -776,7 +777,7 @@ static int confirm_install(purr_cli_t *cli)
         int secs = purr_menu_seconds_left(&m);
         if (m.selected != last_sel || secs != last_secs) {
             purr_console_clear();
-            purr_cli_puts(cli, "Install PURR OS now?\n"
+            purr_cli_puts(cli, "Install " PURR_BRAND_PRODUCT " now?\n"
                                "(fetches kernel + modules over the saved network)\n\n");
             purr_cli_printf(cli, "%s Yes\n", m.selected == 0 ? ">" : " ");
             purr_cli_printf(cli, "%s No\n", m.selected == 1 ? ">" : " ");
@@ -2157,7 +2158,7 @@ static int cmd_secure(purr_cli_t *cli, int argc, char **argv)
             return 0;
         }
         if (strcmp(argv[2], "on") == 0) {
-            purr_cli_puts(cli, "development mode can only be turned on from the Security tab in recovery (KittenOS):\n"
+            purr_cli_puts(cli, "development mode can only be turned on from the Security tab in recovery (" PURR_BRAND_RECOVERY "):\n"
                                "it asks for an administrator and about your data first.\n");
             return 1;
         }
@@ -2639,7 +2640,7 @@ int purr_security_set_dev(int on, char *msg, size_t cap)
     msg[0] = '\0';
     purr_cli_init(&quiet, NULL, 0, sec_capture_put, &cp, "");
     if (on) {                       /* weakening the bootloader is recovery's job (recovery_app.c), where the data question is asked */
-        snprintf(msg, cap, "turn developer mode on from recovery (KittenOS > Security)");
+        snprintf(msg, cap, "turn developer mode on from recovery (" PURR_BRAND_RECOVERY " > Security)");
         return -1;
     }
     if (secure_store(&quiet, change_dev, on ? 1 : 0) != 0) {

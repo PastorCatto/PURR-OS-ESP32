@@ -10,6 +10,7 @@
  * downwards. A change of orientation re-runs the same routine, so there is one layout to keep
  * right, not two.
  */
+#include "purr_brand.h"
 #include "esp_attr.h"
 #include "purr_w10m.h"
 
@@ -1095,7 +1096,7 @@ static void build_cc(void)
     lv_obj_add_flag(s_status, LV_OBJ_FLAG_CLICKABLE);
 
     cc_layout();
-    add_note("PURR OS", "Control center ready. Pull down from the top edge, or tap the clock.");
+    add_note(PURR_BRAND_PRODUCT, "Control center ready. Pull down from the top edge, or tap the clock.");
 }
 
 /* ---------------------------------------------------------------- the app list
@@ -1514,7 +1515,7 @@ static void *signin_done_cb(void *arg)
         apps_refresh();
         char msg[64];
         snprintf(msg, sizeof(msg), "Signed in as %s.", j->name);
-        add_note("PURR OS", msg);
+        add_note(PURR_BRAND_PRODUCT, msg);
     } else if (j->result == PURR_LOGIN_WAIT) {
         char msg[64];
         snprintf(msg, sizeof(msg), "Too many tries. Wait %u s.", (unsigned)j->wait_s);
@@ -1928,7 +1929,7 @@ static void *build_cb(void *arg)
     if (purr_login_autologin_used()) {
         char msg[80];
         snprintf(msg, sizeof(msg), "Signed in automatically as %s (developer mode).", purr_login_current()->name);
-        add_note("PURR OS", msg);
+        add_note(PURR_BRAND_PRODUCT, msg);
     }
     if (s_signed_in) {
         purr_theme_load_user(purr_login_current()->name);

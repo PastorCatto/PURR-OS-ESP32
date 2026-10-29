@@ -65,18 +65,26 @@ void ui_clear_rect(int y, int h)
     hw_fill(0, y, LCD_W, h, UI_BLACK);
 }
 
-/* "PURR OS!" in bold italic, drawn from the 8x8 font: every pixel row of every glyph row is a run of filled cells, leaned to the right a little more the
- * higher it is (italic), and each run is one pixel wider than the font's (bold). The first seven characters are white, the "!" is orange. */
+#ifdef PKG_BRAND_CODENAME                  /* a flavor names the board line itself */
+#undef BOARD_CODENAME
+#define BOARD_CODENAME PKG_BRAND_CODENAME
+#endif
+
+/* The wordmark (PKG_BRAND_LOGO, "PURR OS!" by default) in bold italic, drawn from the 8x8 font: every pixel row of every glyph row is a run of filled
+ * cells, leaned to the right a little more the higher it is (italic), and each run is one pixel wider than the font's (bold). Characters before
+ * PKG_BRAND_LOGO_ACCENT_FROM are in the text colour, the rest in the accent. A long wordmark shrinks to fit the line. */
 static void logo(int y, int scale)
 {
-    static const char word[] = "PURR OS!";
-    int n = 8, cell = 8 * scale;
+    static const char word[] = PKG_BRAND_LOGO;
+    int n = (int)sizeof(word) - 1;
+    while (scale > 1 && n * 8 * scale > LCD_W - 2 * UI_MARGIN) scale--;
+    int cell = 8 * scale;
     int lean = 8 * scale - 1;
     int bold = scale >= 3 ? 2 : 1;
     int x0 = (LCD_W - n * cell) / 2;
     for (int ci = 0; ci < n; ci++) {
         const uint8_t *g = UI_GLYPH(word[ci]);
-        uint16_t col = ci == n - 1 ? UI_ORANGE : UI_WHITE;
+        uint16_t col = ci >= PKG_BRAND_LOGO_ACCENT_FROM ? UI_ORANGE : UI_WHITE;
         for (int r = 0; r < 8; r++) {
             for (int sy = 0; sy < scale; sy++) {
                 int py = r * scale + sy;

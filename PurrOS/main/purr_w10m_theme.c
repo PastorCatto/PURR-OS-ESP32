@@ -1,6 +1,7 @@
 /*
  * purr_w10m_theme.c - the theme (purr_w10m_theme.h, plan7.md).
  */
+#include "purr_brand.h"
 #include "purr_w10m_theme.h"
 
 #include <stdio.h>
@@ -30,7 +31,7 @@ static const purr_accent_t s_accents[] = {
 
 /* ---------------------------------------------------------------- the settings */
 
-static int s_accent = 5;                /* Cobalt */
+static int s_accent = PURR_BRAND_ACCENT_INDEX;     /* Cobalt unless the flavor says otherwise */
 static int s_dark = 1;
 static int s_transparency = 0;          /* solid by default: see-through sheets cost a blend per pixel */
 static int s_tile_opa = 255;
