@@ -184,7 +184,7 @@ def bundle_python():
                 t.extractall(tmp)
             root = os.path.join(tmp, top)
             for d in sorted(os.listdir(root)):
-                if os.path.isfile(os.path.join(root, d, "__init__.py")) and not d.startswith(("test", "docs", "ci", "flasher_stub")):
+                if os.path.isfile(os.path.join(root, d, "__init__.py")) and not d.startswith(("test", "docs", "ci", "flasher_stub", "espefuse")):   # espefuse burns eFuses: the kit never ships it
                     shutil.copytree(os.path.join(root, d), os.path.join(site, d), dirs_exist_ok=True, ignore=IGNORE)
         say("  added %s" % os.path.basename(w))
     return asset["name"]
