@@ -252,7 +252,7 @@ def cmd_repo(a):
             print("Keep keys/repo.key private (it is already in .gitignore).")
         elif a.action == "add":
             m = repo.add(a.folder, a.file, a.title or "", a.desc or "", a.category or "", a.source or "", (a.perms or "").split(",") if a.perms else [], a.type, a.target, a.dest or "",
-                         a.min_os or "", "", None, a.version)
+                         a.min_os or "", "", None, a.version, a.needs_sd)
             print(paint("Added ", "ok") + "%s %s (%s)" % (m["name"], m["version"], m["type"]))
         elif a.action == "build":
             pw = password(a, "Repository key password: ")
@@ -404,7 +404,7 @@ def build_parser():
     s.add_argument("file", nargs="?", help="for `add`: the package")
     s.add_argument("--name"); s.add_argument("--maintainer"); s.add_argument("--url"); s.add_argument("--description")
     s.add_argument("--title"); s.add_argument("--desc"); s.add_argument("--category"); s.add_argument("--source"); s.add_argument("--perms", help="comma separated")
-    s.add_argument("--type", choices=repo.TYPES); s.add_argument("--target", default="flash", choices=repo.TARGETS); s.add_argument("--dest"); s.add_argument("--min-os"); s.add_argument("--version")
+    s.add_argument("--type", choices=repo.TYPES); s.add_argument("--target", default="flash", choices=repo.TARGETS); s.add_argument("--dest"); s.add_argument("--min-os"); s.add_argument("--version"); s.add_argument("--needs-sd", action="store_true")
     s.add_argument("--layout", default="flat", choices=("flat", "tree")); s.add_argument("--out")
     s.add_argument("--key", help="for `endorse`: the project key a device trusts (today the boot key)"); s.add_argument("--key-id", type=int, default=1)
     s.set_defaults(fn=cmd_repo)

@@ -155,6 +155,57 @@ pages.brand = {
 };
 
 /* ------------------------------------------------------------------------------------------------ release */
+/* ------------------------------------------------------------------------------------------------ repositories */
+pages.repos = {
+  title: "repository",
+  async render(el) {
+    el.appendChild(h("p", { class: "dim", style: { maxWidth: "70ch" }, text: "A repository is a folder of apps, assets and extras on any web host (a GitHub release is perfect). People add it to their device and the Store shows what is in it. Whoever runs it signs it, with a key only you hold." }));
+    const list = (await api.get("repos")).repos;
+    const left = h("div"), right = h("div");
+    el.appendChild(h("div", { class: "cols", style: { gridTemplateColumns: "minmax(0,280px) minmax(0,1fr)" } }, left, right));
+    const box = h("div", { class: "list" });
+    list.forEach(r => { const it = h("button", { class: "item", "aria-current": "false", onclick: () => { $$(".item", box).forEach(i => i.setAttribute("aria-current", "false")); it.setAttribute("aria-current", "true"); openRepo(right, r.name); } }, h("span", { text: r.name })); box.appendChild(it); });
+    left.appendChild(box);
+    const nm = h("input", { type: "text", placeholder: "my-apps", "aria-label": "Repository name" }), mt = h("input", { type: "text", placeholder: "who runs it", "aria-label": "Maintainer" });
+    const url = h("input", { type: "text", placeholder: "https://github.com/you/my-apps", "aria-label": "Home page" }), pw = h("input", { type: "password", placeholder: "key password (6+ characters)", autocomplete: "new-password", "aria-label": "Key password" });
+    left.appendChild(h("h3", { text: "Start a repository" }));
+    left.appendChild(h("div", { class: "card" }, field("Name", nm), field("Maintainer", mt), field("Home page", url), field("Password for its key", pw, "It protects the repository's private key. If you lose it, you start a new repository."),
+      btn("make it", async () => { try { await api.post("repo/init", { name: nm.value, maintainer: mt.value, url: url.value, password: pw.value }); pw.value = ""; toast("Made it."); show("repos"); } catch (e) { say(e); } }, "primary")));
+    if (list.length) box.firstChild.click(); else right.appendChild(h("div", { class: "empty", text: "Start one on the left." }));
+  },
+};
+
+async function openRepo(root, name) {
+  clear(root);
+  const st = await api.get("repo/state", { name });
+  root.appendChild(h("h2", { text: st.meta.name || name, style: { marginTop: "0", textTransform: "none" } }));
+  root.appendChild(h("p", { class: "dim", text: "Fingerprint " + st.fingerprint + (st.endorsed ? "  ·  endorsed by the project" : "  ·  not endorsed (people will see it as a community repository)") }));
+  root.appendChild(h("h3", { text: "What it offers" }));
+  if (!st.items.length) root.appendChild(h("div", { class: "dim", text: "Nothing yet. Add a package below." }));
+  st.items.forEach(i => root.appendChild(h("div", { class: "item", style: { cursor: "default" } }, h("span", { class: "badge", text: i.item.type || "app" }), h("span", {}, h("div", { text: (i.item.title || i.file) + "  " + (i.item.version || "") }), h("div", { class: "sub", text: i.file + " · " + fmtBytes(i.size) })))));
+  const file = h("input", { type: "text", placeholder: "/path/to/package.cat or any file", "aria-label": "Package" }), title = h("input", { type: "text", placeholder: "title" }), desc = h("input", { type: "text", placeholder: "one line about it" });
+  const cat = h("input", { type: "text", placeholder: "category" }), perms = h("input", { type: "text", placeholder: "permissions it asks for, comma separated" }), src = h("input", { type: "text", placeholder: "link to its source" });
+  const type = h("select", {}, ["app", "asset", "extra"].map(t => h("option", { value: t, text: t }))), dest = h("input", { type: "text", placeholder: "for an asset or extra: where it goes, like fonts/mono.bin" });
+  const ver = h("input", { type: "text", placeholder: "version (an asset needs one)" });
+  root.appendChild(h("h3", { text: "Add a package" }));
+  root.appendChild(h("div", { class: "card" }, field("File", file), h("div", { class: "row" }, h("div", { style: { flex: "1 1 160px" } }, field("Kind", type)), h("div", { style: { flex: "2 1 220px" } }, field("Title", title))), field("About", desc),
+    h("div", { class: "row" }, h("div", { style: { flex: "1 1 160px" } }, field("Category", cat)), h("div", { style: { flex: "2 1 220px" } }, field("Permissions", perms))), field("Source", src), field("Destination (assets, extras)", dest), field("Version", ver),
+    btn("add it", async () => { try { await api.post("repo/add", { name, file: file.value, title: title.value, desc: desc.value, category: cat.value, perms: perms.value, source: src.value, type: type.value, dest: dest.value, version: ver.value }); toast("Added."); openRepo(root, name); } catch (e) { say(e); } }, "primary")));
+  const pw = h("input", { type: "password", placeholder: "key password", autocomplete: "off" }), layout = h("select", {}, [["flat", "flat: a GitHub release's files"], ["tree", "tree: a web host"]].map(([v, t]) => h("option", { value: v, text: t })));
+  const out = h("div");
+  root.appendChild(h("h3", { text: "Build it" }));
+  root.appendChild(h("div", { class: "card" }, field("Layout", layout), field("Password", pw, "Used once, never stored."), btn("build and check it", async () => {
+    clear(out);
+    try {
+      const r = await api.post("repo/build", { name, password: pw.value, layout: layout.value }); pw.value = "";
+      out.appendChild(h("div", { class: "check" }, h("div", { class: "sq " + (r.verify.ok ? "ok" : "bad"), text: r.verify.ok ? "✓" : "×" }), h("div", {}, h("div", { class: "n", text: r.verify.ok ? "Built, and it checks out." : "Built, but a check failed." }), h("div", { class: "t", text: r.build.apps + " item(s) in " + st.out }))));
+      if (r.verify.problems.length) out.appendChild(checks(r.verify.problems.map(p => ({ status: "bad", name: "check", text: p }))));
+      out.appendChild(h("p", { class: "dim", text: "Upload every file in that folder as the assets of one release (flat), or to your web host (tree). Then people add the address of the release." }));
+      out.appendChild(btn("look inside", () => inspectPath(st.out)));
+    } catch (e) { say(e); }
+  }, "primary"), out));
+}
+
 pages.release = {
   title: "release",
   async render(el) {

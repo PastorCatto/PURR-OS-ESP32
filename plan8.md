@@ -205,3 +205,13 @@ Known gaps: the sensor has no UI/shell reader yet (read() returns text; nothing 
 Find hardware, Add by hand, Drivers (update), the developer server and System update/Reinstall moved from Settings to the **Device Manager** app (`Apps/devices/`), through the `devices` catcall
 (`purr_catrt_devices.c`: one worker job at a time, `manage-devices` permission, administrators only). Phase 5 (the store backend and "main repo") is still open: it needs the owner's decisions listed in the
 session notes (where the main repo lives, who signs its index, whether the store is an app or part of the shell).
+
+### The Store and repositories, 2026-10-29 (owner decisions in `Repositories/SPEC.md`)
+Decided by the owner: a separate GitHub repository of pre-compiled apps, F-Droid style; anyone can run a repository and add others; whoever runs one signs it, and the device trusts the key
+in the repository's release file (`repo.json`); untrusted needs developer mode; the Store comes pre-installed and updates itself; a companion app handles installs, updates, assets and extras
+(flash or SD). The official repository is the release **JumpingJaguar3** (placeholder address in `purr_repo.h`; the owner will test trusted apps from it).
+Built (compile-checked in all three profiles, host-tested, **not run on a device**): `purr_repo_trust` (release file, signatures, endorsement tiers, trusted list, format-2 index with assets and
+extras; cross-checked against the Python tooling), `purr_store.c` (the engine, the `store` catcall, the `store` shell command, receipts and the loader's vouch rule, seeding), the Store app (`Apps/store`),
+its companion (`Apps/storesvc`, timers; becomes the `[service]` entry when services exist), `purr repo` and Studio's repository tool, `tools/release/make_jj3.sh`, `sdk/docs/11-repositories.md`.
+The Store and its companion are **built into the firmware** (`tools/release/gen_builtin_apps.py`, regenerate when they change) and installed for each account at first sign-in.
+Not decided / still open: the repository key and its passphrase (the owner makes it: `tools/release/make_jj3.sh`), endorsing it with the boot key, revocation, bundles, SD card driver.

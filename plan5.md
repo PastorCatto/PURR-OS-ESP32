@@ -204,3 +204,5 @@ bootloader redesign (menu only when needed, Fast startup, 20 s fall-through, "PU
 - Design details and order of work: `sdk/DESIGN.md`. Nothing is released, flashed or put on the dev server tonight.
 
 - **Branding (owner, last request):** a flavor's names, wordmark and colours are data (`brand.toml`), applied to the boot package, loader, KittenOS and shell; Studio gets a Brand tool with a live preview. Design in `sdk/DESIGN.md`.
+
+- 2026-10-29: `purr repo` (init, add, build, release, endorse, verify) and the repository tool in Studio; Repositories/SPEC.md. See plan8.

@@ -91,6 +91,23 @@ class Studio(unittest.TestCase):
         self.assertEqual(st, 400)
         self.assertIn("lowercase", r["error"])
 
+    @unittest.skipUnless(helpers.HAVE_CRYPTO, "needs the cryptography package")
+    def test_a_repository_end_to_end(self):
+        st, r = self.call("POST", "/api/repo/init", {"name": "mine", "title": "Mine", "maintainer": "me", "url": "https://example.org", "password": "secretpw"})
+        self.assertEqual(st, 200)
+        pkg = os.path.join(helpers.tmpdir(), "asset.bin")
+        open(pkg, "wb").write(b"x" * 40)
+        st, r = self.call("POST", "/api/repo/add", {"name": "mine", "file": pkg, "type": "asset", "dest": "data/a.bin", "version": "1.0", "title": "A"})
+        self.assertEqual(st, 200, r)
+        st, r = self.call("POST", "/api/repo/build", {"name": "mine", "password": "wrongpw"})
+        self.assertEqual(st, 400)
+        st, r = self.call("POST", "/api/repo/build", {"name": "mine", "password": "secretpw"})
+        self.assertEqual(st, 200, r)
+        self.assertTrue(r["verify"]["ok"], r["verify"]["problems"])
+        st, r = self.call("GET", "/api/repo/state?name=mine")
+        self.assertEqual(len(r["items"]), 1)
+        self.assertEqual(self.call("GET", "/api/repo/state?name=../x")[0], 400)
+
 
 if __name__ == "__main__":
     unittest.main()

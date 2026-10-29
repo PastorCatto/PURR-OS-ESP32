@@ -113,7 +113,7 @@ def package_info(path):
     return {}
 
 
-def add(folder, file, title="", desc="", category="", source="", perms=None, type_=None, target="flash", dest="", min_os="", changelog="", name=None, version=None):
+def add(folder, file, title="", desc="", category="", source="", perms=None, type_=None, target="flash", dest="", min_os="", changelog="", name=None, version=None, needs_sd=False):
     """Copy a package into packages/ and write its metadata. Returns the metadata dict."""
     if not os.path.isfile(file):
         raise RepoError("I cannot find %s." % file)
@@ -137,7 +137,7 @@ def add(folder, file, title="", desc="", category="", source="", perms=None, typ
     os.makedirs(os.path.join(folder, "packages"), exist_ok=True)
     shutil.copyfile(file, os.path.join(folder, "packages", fname))
     meta = {"item": {"name": nm, "version": ver, "type": kind, "target": target, "title": title or nm, "desc": desc, "category": category, "source": source,
-                     "perms": list(perms or []), "dest": dest, "min_os": min_os, "changelog": changelog, "chip": info.get("chip", "any")}}
+                     "perms": list(perms or []), "dest": dest, "min_os": min_os, "changelog": changelog, "chip": info.get("chip", "any"), "needs_sd": 1 if needs_sd else 0}}
     with open(os.path.join(folder, "packages", fname + ".toml"), "w") as fh:
         fh.write(minitoml.dumps(meta))
     return meta["item"]
@@ -201,6 +201,8 @@ def build(folder, out, password, layout="flat", now=None):
                 entry[k] = item[k]
         if item.get("perms"):
             entry["perms"] = item["perms"]
+        if item.get("needs_sd"):
+            entry["needs_sd"] = 1
         if kind != "app":
             _check_dest(entry.get("dest", ""))
         apps.append(entry)

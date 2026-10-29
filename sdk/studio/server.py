@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from purrsdk import (__version__, boards, brand, configs, devserver, doctor, flash, inspector, keybag, keys, minitoml, projects,  # noqa: E402
+from purrsdk import (__version__, boards, brand, configs, devserver, doctor, flash, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
                      release, workspace)
 
 WEB = os.path.join(HERE, "web")
@@ -188,6 +188,15 @@ def _read_text(path):
         return fh.read()
 
 
+def _repo_folder(ws, name):
+    if not name or "/" in name or name.startswith("."):
+        raise ValueError("That is not a repository name.")
+    folder = os.path.join(ws.path, "repos", name)
+    if not os.path.isfile(os.path.join(folder, "repo.toml")):
+        raise ValueError("I do not know a repository called %s." % name)
+    return folder
+
+
 def _board_report(b):
     return {"board": b, "issues": boards.check(b), "coverage": boards.coverage(b), "pinmap": boards.pin_map(b)}
 
@@ -351,6 +360,62 @@ def handle(state, method, route, q, body):
         if body.get("kind") == "apps":
             return {"text": configs.dump_apps_conf(body.get("conf", {}))}
         raise ValueError("I can write system and apps files.")
+
+    # ---- repositories (Repositories/SPEC.md)
+    if route == "repos":
+        base = os.path.join(ws.path, "repos")
+        out = []
+        if os.path.isdir(base):
+            for n in sorted(os.listdir(base)):
+                if os.path.isfile(os.path.join(base, n, "repo.toml")):
+                    out.append({"name": n, "path": os.path.join(base, n)})
+        return {"repos": out, "base": base}
+    if route == "repo/state":
+        folder = _repo_folder(ws, q.get("name"))
+        meta = minitoml.load(os.path.join(folder, "repo.toml")).get("repo", {})
+        items = []
+        pk = os.path.join(folder, "packages")
+        if os.path.isdir(pk):
+            for f in sorted(os.listdir(pk)):
+                if f.endswith(".toml") or f.startswith("."):
+                    continue
+                m = minitoml.load(os.path.join(pk, f + ".toml")).get("item", {}) if os.path.isfile(os.path.join(pk, f + ".toml")) else {}
+                items.append({"file": f, "size": os.path.getsize(os.path.join(pk, f)), "item": m})
+        pub = repo_mod._public(folder)
+        out_dir = os.path.join(folder, "out")
+        built = sorted(os.listdir(out_dir)) if os.path.isdir(out_dir) else []
+        return {"meta": meta, "id": repo_mod.fingerprint(pub), "fingerprint": repo_mod.pretty_fingerprint(repo_mod.fingerprint(pub)), "items": items, "built": built,
+                "endorsed": os.path.isfile(os.path.join(folder, "endorsement.json")), "folder": folder, "out": out_dir}
+    if route == "repo/init":
+        name = (body.get("name") or "").strip()
+        if not name or "/" in name or name.startswith("."):
+            raise ValueError("Give the repository a simple name, like my-apps.")
+        folder = os.path.join(ws.path, "repos", name)
+        try:
+            r = repo_mod.init(folder, body.get("title") or name, body.get("maintainer") or "", body.get("url") or "", body.get("password") or "", body.get("description") or "")
+        except repo_mod.RepoError as e:
+            raise ValueError(str(e))
+        return {"id": r["id"], "name": name}
+    if route == "repo/add":
+        folder = _repo_folder(ws, body.get("name"))
+        try:
+            m = repo_mod.add(folder, body.get("file", ""), body.get("title", ""), body.get("desc", ""), body.get("category", ""), body.get("source", ""),
+                             [p.strip() for p in (body.get("perms") or "").split(",") if p.strip()], body.get("type") or None, body.get("target") or "flash",
+                             body.get("dest", ""), "", "", None, body.get("version") or None, bool(body.get("needs_sd")))
+        except repo_mod.RepoError as e:
+            raise ValueError(str(e))
+        return {"added": m}
+    if route == "repo/build":
+        folder = _repo_folder(ws, body.get("name"))
+        try:
+            r = repo_mod.build(folder, os.path.join(folder, "out"), body.get("password") or "", body.get("layout") or "flat")
+        except repo_mod.RepoError as e:
+            raise ValueError(str(e))
+        v = repo_mod.verify(os.path.join(folder, "out"), [ws.keys])
+        return {"build": r, "verify": v}
+    if route == "repo/verify":
+        target = q.get("address") if method == "GET" and q.get("address") else os.path.join(_repo_folder(ws, q.get("name")), "out")
+        return repo_mod.verify(target, [ws.keys])
 
     # ---- release
     if route == "release/parts":

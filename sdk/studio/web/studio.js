@@ -178,6 +178,7 @@ pages.home = {
     T("c4", "boards", "board", "Pins, buses and devices. The T-Deck Plus is the example.", () => go("boards"));
     T("c3", "brand", "brand", "Names, colours and the boot screens of your own flavor.", () => go("brand"));
     T("dark", "keys", "key", "Make a key, see who may sign what.", () => go("keys"));
+    T("c6", "repository", "server", "Run a repository of apps, like F-Droid.", () => go("repos"));
     T("c1 wide", "release", "release", "Gather the parts of a system, signed with your key.", () => go("release"));
     T("c5", "server", "server", "Hand builds to a device on your network.", () => go("server"));
     T("c6", "configure", "settings", "system.conf, apps.conf, boot options.", () => go("configure"));
