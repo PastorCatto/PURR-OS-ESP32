@@ -44,6 +44,7 @@
 #include "purr_settings.h"
 #include "purr_power_plat.h"
 #include "purr_hwscan_plat.h"
+#include "purr_drvcmds.h"
 #include "purr_hwsetup.h"
 #include "purr_recovery_src.h"
 #include "purr_catrt_power.h"
@@ -4505,6 +4506,9 @@ static const purr_cmd_t s_cmds[] = {
     {"revoke", "revoke <app> <permission>: the app asks again (admin)", purr_perms_cmd},
 #if CONFIG_PURR_PROFILE_FULL
     {"hwscan", "hwscan [power <gpio>]: look for attached hardware (I2C), reading only", purr_hwscan_cmd},
+    {"gps", "gps [fix | watch | power on|off | rate <hz>]: the GPS receiver", purr_gps_cmd},
+    {"radio", "radio config <MHz> [...] | tx <text> | rx [seconds] | sleep: the LoRa radio", purr_radio_cmd},
+    {"modem", "modem [status | power on|off | connect <apn> | disconnect | at <cmd>]: a cellular modem", purr_modem_cmd},
     {"hwdev", "hwdev [add <driver> <sda> <scl> <addr> | read <name> | remove <name>]: devices set up by hand or by Find hardware", purr_hwsetup_cmd},
 #endif
     {"power", "power [screen on|off | timeout <seconds|never>]: sleep state, wake locks and alarms",

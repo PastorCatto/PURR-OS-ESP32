@@ -25,6 +25,22 @@ typedef struct {
 
 static lora_t s_dev[2];
 
+/* A module has no libc, but the compiler may still call memcpy and memset for struct copies and array initialisers, so the module brings its own. */
+void *memcpy(void *dst, const void *src, size_t n)
+{
+    uint8_t *d = dst;
+    const uint8_t *s = src;
+    for (size_t i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}
+
+void *memset(void *dst, int c, size_t n)
+{
+    uint8_t *d = dst;
+    for (size_t i = 0; i < n; i++) d[i] = (uint8_t)c;
+    return dst;
+}
+
 /* SX126x opcodes */
 #define OP_GET_STATUS       0xC0
 #define OP_SET_SLEEP        0x84

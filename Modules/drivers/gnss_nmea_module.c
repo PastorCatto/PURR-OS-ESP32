@@ -26,6 +26,14 @@ typedef struct {
 
 static gnss_t s_dev[2];
 
+/* A struct copy the compiler would turn into a call to memcpy, which a module does not have: copied by hand. */
+static void copy_bytes(void *dst, const void *src, size_t n)
+{
+    uint8_t *d = dst;
+    const uint8_t *s = src;
+    for (size_t i = 0; i < n; i++) d[i] = s[i];
+}
+
 /* ---------------------------------------------------------------- small parsers (fixed point, no libc) */
 
 static int hexv(char c)
@@ -258,7 +266,7 @@ static int g_get_fix(void *h, purr_gnss_fix_t *out)
     gnss_t *d = h;
     if (d == NULL || !d->in_use || out == NULL) return -1;
     g_poll(h);
-    *out = d->fix;
+    copy_bytes(out, &d->fix, sizeof(*out));
     uint64_t age = d->fix_us == 0 ? 0 : (s_bus->now_us() - d->fix_us) / 1000;
     out->age_ms = age > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)age;
     return d->fix.valid ? 1 : 0;

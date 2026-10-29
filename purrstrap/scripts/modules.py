@@ -75,6 +75,7 @@ def compile_args(repo_root):
     # never for linkage, same as coreos's own CMakeLists reaching into them the same way.
     return ["-O2", "-std=gnu11", "-ffreestanding", "-fno-builtin", "-mlongcalls",
             "-mtext-section-literals", "-ffunction-sections", "-fdata-sections",
+            "-fno-tree-loop-distribute-patterns",       # a copy or clear loop must stay a loop: a module has no memcpy/memset to be turned into calls to
             "-Wall", "-Wextra", "-Werror",
             "-I", os.path.join(repo_root, "PurrOS", "components", "coreos", "include"),
             "-I", os.path.join(repo_root, "PurrOS", "components", "kernel", "include"),

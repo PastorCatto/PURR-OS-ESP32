@@ -58,6 +58,14 @@ static purr_board_t s_board = {
 static const purr_adc_dev_cfg_t s_battery_cfg = {.pin = 4, .mul = 2, .div = 1};
 static const purr_i2c_dev_cfg_t s_kbd_light_cfg = {.port = 0, .sda = 18, .scl = 8, .addr = 0x55, .hz = 100 * 1000};
 
+/* The GPS receiver and the LoRa radio (LilyGO's wiring; unchecked on this unit, so they are plain data: a wrong pin is a one-line change here or in /etc/board.conf).
+ * The GPS (u-blox MIA-M10Q) sits on GPIO 43/44, which are also UART0's default pins: with UART1 moved onto them the console's UART output stops and the USB
+ * serial port carries the logs, as it already does. Both are optional and have no driver in the firmware: they come from signed driver modules (gnss-nmea,
+ * lora-sx126x), so with no driver loaded they simply report "no driver". The radio's reset is left unset: LilyGO wires it to GPIO 17, the touch controller's
+ * reset, and sharing that line would reset the touch chip too. */
+static const purr_kv_cfg_t s_gps_cfg = {.count = 4, .kv = {{"port", 1}, {"tx", 43}, {"rx", 44}, {"baud", 38400}}};
+static const purr_kv_cfg_t s_lora_cfg = {.count = 6, .kv = {{"cs", 9}, {"rst", -1}, {"busy", 13}, {"dio1", 45}, {"tcxo_mv", 1800}, {"dio2sw", 1}}};
+
 /* F-02: the registry's view of this board's two devices, pointing at the same
  * purr_display_cfg_t/purr_keyboard_cfg_t s_board already carries (not a second copy).
  * extra_pins are each device's own pins beyond the shared SPI bus (display: cs, dc, rst,
@@ -90,6 +98,16 @@ static const purr_device_t s_devices[] = {
         .name = "kbd-backlight", .compatible = "kbd-backlight", .priority = PURR_PRI_OPTIONAL,
         .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
         .cfg = &s_kbd_light_cfg,
+    },
+    {
+        .name = "gps0", .compatible = "gnss-nmea", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {43, 44, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_gps_cfg,
+    },
+    {
+        .name = "lora0", .compatible = "lora-sx126x", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {9, 13, 45, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_lora_cfg,
     },
 };
 

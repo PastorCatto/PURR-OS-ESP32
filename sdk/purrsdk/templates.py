@@ -33,6 +33,22 @@ HEAD = """/* {title}: {name}.
 {class_include}
 static const purr_driver_bus_table_t *s_bus;
 
+/* A module has no libc, but the compiler may still call memcpy and memset for struct copies and array initialisers, so the module brings its own. */
+void *memcpy(void *dst, const void *src, size_t n)
+{{
+    uint8_t *d = dst;
+    const uint8_t *s = src;
+    for (size_t i = 0; i < n; i++) d[i] = s[i];
+    return dst;
+}}
+
+void *memset(void *dst, int c, size_t n)
+{{
+    uint8_t *d = dst;
+    for (size_t i = 0; i < n; i++) d[i] = (uint8_t)c;
+    return dst;
+}}
+
 typedef struct {{
     int in_use;
 {fields}}} dev_t_{ident};
