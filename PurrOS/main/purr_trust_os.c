@@ -100,3 +100,17 @@ int purr_secure_set_dev(int on)
     }
     return purr_cfg_store(&fl, &cfg) == 0 ? 0 : -1;
 }
+
+int purr_secure_request_reinstall(int force)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return -1;
+    }
+    cfg.flags |= PURR_CFGF_FORCE_LOADER | PURR_CFGF_AUTO_REINSTALL;
+    if (force) {
+        cfg.flags |= PURR_CFGF_BAD_KERNEL | PURR_CFGF_BAD_KITTENOS;
+    }
+    return purr_cfg_store(&fl, &cfg) == 0 ? 0 : -1;
+}

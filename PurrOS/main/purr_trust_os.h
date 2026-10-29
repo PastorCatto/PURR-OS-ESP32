@@ -62,4 +62,9 @@ int purr_secure_dev_locked(void);
  * first. Returns 0, -1 (purrcfg unreadable or unwritable) or -2 (the signed trust block forbids it). Turning it off always works. */
 int purr_secure_set_dev(int on);
 
+/* Asks the bootloader for the recovery loader on the next start, to reinstall on its own with the saved network (the data is kept).
+ * force = 1 also marks the kernel and KittenOS slots BAD, so the loader rewrites them even if they still verify; 0 leaves them, and the
+ * loader writes only what the server has newer. 0 or -1. */
+int purr_secure_request_reinstall(int force);
+
 #endif

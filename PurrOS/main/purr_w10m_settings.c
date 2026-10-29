@@ -49,6 +49,7 @@
 #include "purr_lvgl.h"
 #include "purr_net.h"
 #include "purr_settings.h"
+#include "purr_sysupdate.h"
 #include "purr_trust_os.h"
 #include "purr_ui_service.h"
 #include "purr_w10m_priv.h"
@@ -63,7 +64,6 @@ typedef enum {
     PAGE_MAIN,
     PAGE_SYSTEM,
     PAGE_DEVICES,
-    PAGE_UPDATES,
     PAGE_NETWORK,
     PAGE_PERSONAL,
     PAGE_APPS,
@@ -86,8 +86,7 @@ typedef struct {
 
 static const section_t s_sections[] = {
     {"System",          "Display, shell, restart",       "wp_system",          PAGE_SYSTEM,   1},
-    {"Devices",         "Screen, keyboard, memory",      "wp_devices",         PAGE_DEVICES,  1},
-    {"Updates",         "Find hardware, drivers",        "wp_system",          PAGE_UPDATES,  1},
+    {"Devices",         "Screen, hardware, drivers",      "wp_devices",         PAGE_DEVICES,  1},
     {"Network",         "Wi-Fi and wired",               "wp_network",         PAGE_NETWORK,  1},
     {"Personalization", "Colours, transparency, tiles",  "wp_personalization", PAGE_PERSONAL, 1},
     {"Apps",            "Installed apps, install",       "wp_apps",            PAGE_APPS,     1},
@@ -426,6 +425,9 @@ static void page_system(void)
 
 /* ---------------------------------------------------------------- Devices */
 
+static void hardware_section(void);
+static void devsrv_section(void);
+
 static void page_devices(void)
 {
     char buf[96];
@@ -458,6 +460,9 @@ static void page_devices(void)
         snprintf(buf, sizeof(buf), "Flash: %u MB", (unsigned)(flash / (1024 * 1024)));
         cm_text(s_body, buf);
     }
+    cm_space(s_body, 8);
+    hardware_section();
+    devsrv_section();
     cm_space(s_body, 8);
 }
 
@@ -600,7 +605,7 @@ static void net_forget_cb(lv_event_t *e)
     }
 }
 
-/* ---------------------------------------------------------------- updates: find hardware, drivers */
+/* ---------------------------------------------------------------- devices: find hardware, drivers, the developer server */
 
 static purr_hwscan_report_t s_hw;
 static lv_obj_t *s_hw_list, *s_hw_setup_btn, *s_drv_list;
@@ -803,7 +808,7 @@ static void hw_add_cb(lv_event_t *e)
     job_start(j);
 }
 
-static void page_updates(void)
+static void hardware_section(void)
 {
     cm_title(s_body, "Hardware");
     cm_dim(s_body, "Looks for hardware that is attached but not set up yet. It only reads: it never drives a pin the system "
@@ -868,6 +873,131 @@ static void page_updates(void)
     if (s_hw.looked_at > 0) {
         hw_fill();                                  /* the last result, if this page was left and came back */
     }
+}
+
+/* The developer server: one for apps, drivers, system updates and reinstall (purr_sysupdate.h). Developer mode only. */
+static lv_obj_t *s_srv_line, *s_srv_addr, *s_srv_list;
+static purr_repo_server_t s_found[4];
+static int s_nfound;
+
+static void srv_show(const char *text)
+{
+    if (s_srv_line != NULL) {
+        lv_label_set_text(s_srv_line, text);
+    }
+}
+
+static void srv_show_current(void)
+{
+    purr_repo_server_t sv;
+    char buf[140];
+    if (purr_devsrv_get(&sv) == 0) {
+        snprintf(buf, sizeof(buf), "In use: %s  %s", sv.name, sv.base);
+    } else {
+        snprintf(buf, sizeof(buf), "None chosen yet.");
+    }
+    srv_show(buf);
+}
+
+static void srv_pick_cb(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (i >= 0 && i < s_nfound && purr_devsrv_set(&s_found[i]) == 0) {
+        srv_show_current();
+    } else {
+        srv_show("Could not use that server.");
+    }
+}
+
+static int srv_find_run(job_t *j)
+{
+    s_nfound = purr_repo_dev_discover(s_found, 4, 2500);
+    snprintf(j->msg, sizeof(j->msg), s_nfound ? "Tap a server to use it." : "No developer server answered on this network.");
+    return 0;
+}
+
+static void srv_find_done(job_t *j)
+{
+    if (s_srv_list == NULL) {
+        return;
+    }
+    lv_obj_clean(s_srv_list);
+    for (int i = 0; i < s_nfound; i++) {
+        cm_row(s_srv_list, s_found[i].name, s_found[i].base, 1, srv_pick_cb, (void *)(intptr_t)i);
+    }
+    srv_show(j->msg);
+}
+
+static void srv_find_cb(lv_event_t *e)
+{
+    (void)e;
+    job_t *j = job_new(srv_find_run, srv_find_done);
+    if (j == NULL) {
+        srv_show("Out of memory.");
+        return;
+    }
+    j->stack = 8192;
+    srv_show("Looking...");
+    job_start(j);
+}
+
+static int srv_set_run(job_t *j)
+{
+    char err[80] = "";
+    if (purr_devsrv_set_typed(j->b, err, sizeof(err)) != 0) {
+        snprintf(j->msg, sizeof(j->msg), "%s", err[0] ? err : "That address was not accepted.");
+        return -1;
+    }
+    return 0;
+}
+
+static void srv_set_done(job_t *j)
+{
+    if (j->rc == 0) {
+        srv_show_current();
+    } else {
+        srv_show(j->msg);
+    }
+}
+
+static void srv_set_cb(lv_event_t *e)
+{
+    (void)e;
+    job_t *j = job_new(srv_set_run, srv_set_done);
+    if (j == NULL) {
+        srv_show("Out of memory.");
+        return;
+    }
+    snprintf(j->b, sizeof(j->b), "%s", lv_textarea_get_text(s_srv_addr));
+    j->stack = 8192;
+    srv_show("Checking the address...");
+    job_start(j);
+}
+
+static void devsrv_section(void)
+{
+    s_srv_line = s_srv_addr = s_srv_list = NULL;
+    if (!purr_security_dev_active()) {
+        return;
+    }
+    cm_space(s_body, 4);
+    cm_title(s_body, "Developer server");
+    cm_dim(s_body, "One server for apps, drivers, system updates and reinstall. It must be on this network.");
+    s_srv_line = cm_text(s_body, "");
+    lv_label_set_long_mode(s_srv_line, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_srv_line, LV_PCT(100));
+    srv_show_current();
+    lv_obj_t *fb = cm_button(s_body, "Find on this network", srv_find_cb, NULL);
+    lv_obj_set_width(fb, LV_PCT(100));
+    s_srv_list = lv_obj_create(s_body);
+    lv_obj_remove_style_all(s_srv_list);
+    lv_obj_set_width(s_srv_list, LV_PCT(100));
+    lv_obj_set_height(s_srv_list, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_srv_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_srv_list, 2, 0);
+    s_srv_addr = cm_input(s_body, "Or type an address, like 192.168.1.20:47801", 0);
+    lv_obj_t *ub = cm_button(s_body, "Use this address", srv_set_cb, NULL);
+    lv_obj_set_width(ub, LV_PCT(100));
 }
 
 static void page_network(void)
@@ -1766,6 +1896,123 @@ static void page_developer(void)
 
 /* ---------------------------------------------------------------- About */
 
+/* ---------------------------------------------------------------- About: system update and reinstall */
+
+static int s_upd_dev;                              /* 1 = the developer server is the source, 0 = the official one */
+static lv_obj_t *s_upd_install_btn, *s_upd_src_btn;
+
+static void upd_src_text(void)
+{
+    purr_repo_server_t sv;
+    char buf[100];
+    if (s_upd_dev && purr_devsrv_get(&sv) == 0) {
+        snprintf(buf, sizeof(buf), "Source: %s", sv.name);
+    } else {
+        s_upd_dev = 0;
+        snprintf(buf, sizeof(buf), "Source: the official server");
+    }
+    if (s_upd_src_btn != NULL) {
+        cm_button_text(s_upd_src_btn, buf);
+    }
+}
+
+static void upd_src_cb(lv_event_t *e)
+{
+    (void)e;
+    s_upd_dev = !s_upd_dev;
+    upd_src_text();
+    if (s_upd_install_btn != NULL) {
+        lv_obj_add_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static int upd_check_run(job_t *j)
+{
+    j->flag = purr_sysupdate_check(j->a[0] == 'd', j->msg, sizeof(j->msg));
+    return j->flag >= 0 ? 0 : -1;
+}
+
+static void upd_check_done(job_t *j)
+{
+    say(j->msg, j->rc == 0);
+    if (s_upd_install_btn != NULL) {
+        if (j->flag == 1) {
+            lv_obj_remove_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void upd_check_cb(lv_event_t *e)
+{
+    (void)e;
+    job_t *j = job_new(upd_check_run, upd_check_done);
+    if (j == NULL) {
+        say("Out of memory.", 0);
+        return;
+    }
+    j->a[0] = s_upd_dev ? 'd' : 'o';
+    j->stack = 10240;
+    say("Checking...", 1);
+    job_start(j);
+}
+
+static void upd_go(lv_event_t *e, int force, const char *again, const char *what)
+{
+    if (!confirm_tap(lv_event_get_target(e), again)) {
+        return;
+    }
+    if (purr_sysupdate_request(s_upd_dev, force) != 0) {
+        say("Could not ask for that.", 0);
+        return;
+    }
+    say(what, 1);
+    vTaskDelay(pdMS_TO_TICKS(600));
+    esp_restart();
+}
+
+static void upd_install_cb(lv_event_t *e)
+{
+    upd_go(e, 0, "Tap again to restart and update", "Restarting into the updater...");
+}
+
+static void upd_reinstall_cb(lv_event_t *e)
+{
+    upd_go(e, 1, "Tap again: reinstall (files are kept)", "Restarting to reinstall...");
+}
+
+static void about_system_section(void)
+{
+    char kv[16], ov[16], buf[96];
+    purr_sysupdate_versions(kv, ov);
+    cm_space(s_body, 4);
+    cm_title(s_body, "System update");
+    snprintf(buf, sizeof(buf), "PURR OS %s, KittenOS %s", kv, ov);
+    cm_text(s_body, buf);
+    s_upd_src_btn = NULL;
+    purr_repo_server_t sv;
+    if (purr_security_dev_active() && purr_devsrv_get(&sv) == 0) {
+        s_upd_src_btn = cm_button(s_body, "", upd_src_cb, NULL);
+        lv_obj_set_width(s_upd_src_btn, LV_PCT(100));
+    } else {
+        s_upd_dev = 0;
+    }
+    upd_src_text();
+    lv_obj_t *cb = cm_button(s_body, "Check for update", upd_check_cb, NULL);
+    lv_obj_set_width(cb, LV_PCT(100));
+    s_upd_install_btn = cm_button(s_body, "Install update", upd_install_cb, NULL);
+    lv_obj_set_width(s_upd_install_btn, LV_PCT(100));
+    lv_obj_add_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+    make_status();
+
+    cm_space(s_body, 4);
+    cm_title(s_body, "Reinstall");
+    cm_dim(s_body, "Puts PURR OS back from the source above, kernel and KittenOS both, even if they look fine. Your files and accounts are kept.");
+    lv_obj_t *rb = cm_button(s_body, "Reinstall PURR OS", upd_reinstall_cb, NULL);
+    lv_obj_set_width(rb, LV_PCT(100));
+}
+
 static void page_about(void)
 {
     char buf[96];
@@ -1797,6 +2044,7 @@ static void page_about(void)
     cm_text(s_body, buf);
     snprintf(buf, sizeof(buf), "Screen: %dx%d", w10m_disp_w(), w10m_disp_h());
     cm_text(s_body, buf);
+    about_system_section();
     cm_space(s_body, 8);
 }
 
@@ -1807,7 +2055,6 @@ static const char *page_title(page_t p)
     switch (p) {
     case PAGE_SYSTEM:    return "System";
     case PAGE_DEVICES:   return "Devices";
-    case PAGE_UPDATES:   return "Updates";
     case PAGE_NETWORK:   return "Network";
     case PAGE_PERSONAL:  return "Personalization";
     case PAGE_APPS:      return "Apps";
@@ -1839,6 +2086,7 @@ static void show_page(page_t page)
     s_net_state = s_net_list = s_net_form = s_net_ssid = s_net_pass = NULL;
     s_app_list = s_app_src = NULL;
     s_hw_list = s_hw_setup_btn = s_drv_list = s_man_drv = s_man_sda = s_man_scl = s_man_addr = NULL;
+    s_srv_line = s_srv_addr = s_srv_list = s_upd_install_btn = s_upd_src_btn = NULL;
     s_time_now = NULL;
     s_acct_auto_sw = s_acct_auto_pw = NULL;
     s_sec_state = s_sec_boot = s_sec_trust = s_sec_slot = s_sec_active = NULL;
@@ -1850,7 +2098,6 @@ static void show_page(page_t page)
     switch (page) {
     case PAGE_SYSTEM:    page_system(); break;
     case PAGE_DEVICES:   page_devices(); break;
-    case PAGE_UPDATES:   page_updates(); break;
     case PAGE_NETWORK:   page_network(); break;
     case PAGE_PERSONAL:  page_personal(); break;
     case PAGE_APPS:      page_apps(); break;
