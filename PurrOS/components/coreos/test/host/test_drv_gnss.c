@@ -64,7 +64,7 @@ static void test_a_good_fix(void)
     CHECK_EQ(f.sats_view, 11);
     CHECK_EQ(f.hdop_x10, 9);
     CHECK_EQ((int)f.lat_e7, 515020575);                     /* 51 deg + 30.12345 min / 60 = 51.502057... */
-    CHECK_EQ((int)f.lon_e7, -1275906);                      /* 0 deg 7.65432 min west = -0.127572 */
+    CHECK_EQ((int)f.lon_e7, -1275720);                      /* 0 deg 7.65432 min west = -0.127572 */
     CHECK_EQ((int)f.alt_mm, 35400);
     CHECK_EQ((int)f.speed_mmps, 5144);                      /* 10 knots */
     CHECK_EQ((int)f.course_cdeg, 8440);
@@ -75,7 +75,10 @@ static void test_a_good_fix(void)
     CHECK_EQ(f.year, 2026);
     CHECK_EQ(f.month, 10);
     CHECK_EQ(f.day, 28);
-    CHECK_EQ((int)f.age_ms, 250);                           /* the clock moved 250 ms since the last sentence */
+    CHECK_EQ((int)f.age_ms, 0);                             /* parsed just now, by this very call */
+    fb_now += 250000;                                       /* 250 ms later, nothing new arrived */
+    CHECK_EQ(ops->get_fix(h, &f), 1);
+    CHECK_EQ((int)f.age_ms, 250);
     s_drv->remove(h);
 }
 
