@@ -112,6 +112,22 @@ def check(board):
     return issues
 
 
+def pin_map(board):
+    """Which part uses which GPIO: {"pins": {pin: [[part, role], ...]}, "reserved": [...], "strapping": {pin: why}}"""
+    pins = {}
+    for name, part, cls in all_parts(board):
+        for pin, role in _pins(part, name):
+            pins.setdefault(pin, []).append([name, role])
+    spi = board.get("spi", {})
+    for role in ("mosi", "miso", "sclk"):
+        if isinstance(spi.get(role), int) and spi[role] >= 0:
+            pins.setdefault(spi[role], []).append(["spi", role])
+    p = board.get("board", {}).get("power_pin")
+    if isinstance(p, int) and p >= 0:
+        pins.setdefault(p, []).append(["board", "power"])
+    return {"pins": pins, "reserved": sorted(RESERVED_S3), "strapping": STRAPPING_S3}
+
+
 def coverage(board):
     """For each part of a fully supported T-Deck Plus: whether the board has it and how far it has got."""
     have = {}

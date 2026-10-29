@@ -160,6 +160,12 @@ def flash_report(data, keys):
         rep["checks"].append(_check("bad", "Partition table", "I cannot find a partition table at 0x8000 or 0xA000."))
         return rep
     parts = _parse_partitions(data, table_at)
+    boot = _report("esp-app", "bootloader", "The second-stage bootloader: %s of ESP image before the partition table." % _size(table_at))
+    boot["partition"] = {"name": "bootloader", "offset": 0, "size": table_at, "type": 0, "subtype": 0, "blank": False}
+    boot["checks"].append(_check("info", "Signature", "The bootloader is the root of trust and carries no signature of its own: it is checked by what flashes it. Updates arrive as a signed .cat."))
+    table = _report("partition", "table", "The partition table: %d entries." % len(parts))
+    table["partition"] = {"name": "table", "offset": table_at, "size": 0x1000, "type": 1, "subtype": 0, "blank": False}
+    rep["parts"] += [boot, table]
     rep["facts"] = [["Size", _size(len(data))], ["Partition table at", "0x%X" % table_at], ["Partitions", str(len(parts))]]
     for p in parts:
         off, size, name = p["offset"], p["size"], p["name"]
@@ -185,7 +191,7 @@ def flash_report(data, keys):
         part["partition"] = {"name": name, "offset": off, "size": size, "type": p["type"], "subtype": p["subtype"], "blank": blank}
         part["title"] = part.get("title") or name
         rep["parts"].append(part)
-    filled = [p["partition"]["name"] for p in rep["parts"] if p["kind"] in ("purr-image", "esp-app")]
+    filled = [p["partition"]["name"] for p in rep["parts"] if p["kind"] in ("purr-image", "esp-app") and p["partition"]["name"] != "bootloader"]
     missing = [n for n in ("kittenos", "kernel", "loader") if n not in filled]
     if missing:
         rep["checks"].append(_check("info", "Slots", "No system in: %s. A blank slot is normal on a fresh device: "
@@ -194,6 +200,7 @@ def flash_report(data, keys):
     rep["checks"].append(_check("bad" if bad else "ok", "Signatures and hashes",
                                 ("Problems in: " + ", ".join(bad)) if bad else "Every part that is signed checks out."))
     rep["summary"] = "A full flash image with %d partitions, %d of them holding signed parts." % (len(parts), len(filled))
+    rep["parts"].sort(key=lambda p: p["partition"]["offset"])
     rep["next"] = [{"tool": "flash", "label": "Flash it", "why": "Write it to a board with esptool."},
                    {"tool": "emulator", "label": "Run it", "why": "Try it in the emulator (coming soon)."}]
     return rep

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PURR Studio</title>
+<link rel="stylesheet" href="studio.css">
+</head>
+<body>
+<div id="app">
+  <header id="top">
+    <button id="back" class="circle" aria-label="Back" hidden><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7M8.5 12H21"/></svg></button>
+    <div class="titles">
+      <div class="kicker">PURR DEVELOPER KIT</div>
+      <h1 id="title">purr studio</h1>
+    </div>
+    <div id="top-note"></div>
+  </header>
+  <main id="page" tabindex="-1"></main>
+  <footer id="foot">
+    <span id="foot-text"></span>
+    <span class="spacer"></span>
+    <span id="accents" aria-label="Accent colour"></span>
+    <button id="theme" class="link">light / dark</button>
+  </footer>
+</div>
+<div id="drop" hidden><div><div class="big">drop it here</div><div>I'll have a look and tell you what it is.</div></div></div>
+<div id="toast" role="status" hidden></div>
+<script src="studio.js"></script>
+<script src="pages-build.js"></script>
+<script src="pages-more.js"></script>
+</body>
+</html>
