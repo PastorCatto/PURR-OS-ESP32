@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from . import __version__, boards, brand, configs, doctor, formats, inspector, keys, minitoml, projects, release, runner, workspace
+from . import __version__, boards, brand, configs, doctor, flash, formats, inspector, keys, minitoml, projects, release, runner, workspace
 
 TTY = sys.stdout.isatty()
 COL = {"ok": "92", "warn": "93", "bad": "91", "info": "96", "dim": "90"}
@@ -224,6 +224,24 @@ def cmd_publish(a):
     return runner.purrstrap(["dev", "publish", "--file", a.file, "--dir", a.dir or ws.repo], on_line=print)["rc"]
 
 
+def cmd_flash(a):
+    port = a.port
+    if not port:
+        ports = flash.list_ports()
+        if len(ports) != 1:
+            print("Tell me which port: --port PORT. I can see: " + (", ".join(ports) or "no boards (is it in download mode?)"))
+            return 1
+        port = ports[0]
+    if not a.yes:
+        print("This writes %s to the board on %s at %s, replacing what is there." % (os.path.basename(a.image), port, a.offset))
+        if not sys.stdin.isatty() or input("Type yes to go on: ").strip().lower() != "yes":
+            print("Not flashing.")
+            return 1
+    r = flash.write(port, a.image, a.offset, on_line=print)
+    print(paint("Flashed.", "ok") if r["ok"] else paint("That did not work. The lines above say why.", "bad"))
+    return 0 if r["ok"] else 1
+
+
 def cmd_run(a):
     exe = os.environ.get("PURR_EMULATOR")
     if not exe:
@@ -329,6 +347,13 @@ def build_parser():
     s.add_argument("file")
     s.add_argument("--dir")
     s.set_defaults(fn=cmd_publish)
+
+    s = sub.add_parser("flash", help="write an image to a board over USB (esptool)")
+    s.add_argument("image")
+    s.add_argument("--port")
+    s.add_argument("--offset", default="0x0", help="0x0 for a full flash image")
+    s.add_argument("--yes", action="store_true", help="do not ask")
+    s.set_defaults(fn=cmd_flash)
 
     s = sub.add_parser("run", help="run an image in the emulator (when one is installed)")
     s.add_argument("image")

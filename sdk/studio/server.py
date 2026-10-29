@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from purrsdk import (__version__, boards, brand, configs, devserver, doctor, inspector, keybag, keys, minitoml, projects,  # noqa: E402
+from purrsdk import (__version__, boards, brand, configs, devserver, doctor, flash, inspector, keybag, keys, minitoml, projects,  # noqa: E402
                      release, workspace)
 
 WEB = os.path.join(HERE, "web")
@@ -371,6 +371,18 @@ def handle(state, method, route, q, body):
         jid = state.jobs.start("Gathering the release", lambda say: release.assemble(dest, chosen, board, key, kid, pw, on_line=say))
         return {"job": jid, "folder": dest}
 
+    if route == "flash/ports":
+        return {"ports": flash.list_ports(), "esptool": flash.have_esptool()}
+    if route == "flash/write":
+        if body.get("confirm") is not True:
+            raise ValueError("Flashing replaces what is on the board. Tick the box to say you mean it.")
+        port, image = body.get("port"), body.get("image")
+        if not port or port not in flash.list_ports():
+            raise ValueError("I cannot see that port. Is the board in download mode?")
+        offset = str(body.get("offset") or "0x0")
+        if not offset.lower().startswith("0x") or not all(c in "0123456789abcdefx" for c in offset.lower()):
+            raise ValueError("The offset is a hex number like 0x0.")
+        return {"job": state.jobs.start("Flashing", lambda say: flash.write(port, image, offset, on_line=say))}
     if route == "trust/build":
         ws.ensure()
         from purrsdk import runner

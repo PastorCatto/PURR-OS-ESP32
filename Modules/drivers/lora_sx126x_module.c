@@ -26,6 +26,7 @@ typedef struct {
 static lora_t s_dev[2];
 
 /* SX126x opcodes */
+#define OP_GET_STATUS       0xC0
 #define OP_SET_SLEEP        0x84
 #define OP_SET_STANDBY      0x80
 #define OP_SET_TX           0x83
@@ -107,6 +108,15 @@ static int clear_irq(const lora_t *d, uint16_t mask)
 {
     uint8_t a[2] = {(uint8_t)(mask >> 8), (uint8_t)mask};
     return cmd(d, OP_CLR_IRQ, a, 2);
+}
+
+/* The chip answers GetStatus with its mode in bits 6:4: 2 or 3 is standby. An absent chip leaves MISO floating (all ones: mode 7), so this tells a radio from nothing. */
+static int chip_alive(const lora_t *d)
+{
+    uint8_t tx[2] = {OP_GET_STATUS, 0}, rx[2] = {0, 0};
+    if (xfer(d, tx, rx, 2) != 0) return 0;
+    int mode = (rx[1] >> 4) & 7;
+    return mode == 2 || mode == 3;
 }
 
 static uint8_t bw_code(uint32_t bw)
@@ -313,6 +323,10 @@ static int l_probe(const purr_device_t *dev, const purr_board_t *board, void **o
     }
     d->in_use = 1;
     int rc = cmd1(d, OP_SET_STANDBY, 0x00);
+    if (rc != 0 || !chip_alive(d)) {                                   /* no radio answers here */
+        d->in_use = 0;
+        return -1;
+    }
     int tcxo = purr_kv(c, "tcxo_mv", 0);
     if (tcxo > 0) {
         uint8_t code = tcxo < 1700 ? 0 : tcxo < 1800 ? 1 : tcxo < 2200 ? 2 : tcxo < 2400 ? 3 : tcxo < 2700 ? 4 : tcxo < 3000 ? 5 : tcxo < 3300 ? 6 : 7;

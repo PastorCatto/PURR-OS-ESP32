@@ -183,6 +183,7 @@ pages.home = {
     T("c6", "configure", "settings", "system.conf, apps.conf, boot options.", () => go("configure"));
     T("c7", "docs", "docs", "How it all works, kindly explained.", () => go("docs"));
     T("c8", "doctor", "doctor", "Is the kit whole?", () => go("doctor"));
+    T("c3", "flash", "release", "Write an image to a board over USB.", () => go("flash"));
     T("muted", "run", "run", "Soon: the emulator, right here.", () => go("run"));
     el.appendChild(tiles);
     el.appendChild(h("p", { class: "dim", style: { marginTop: "26px", maxWidth: "62ch" }, text: "Hello there! Pick a tile to start, or drop a file anywhere. Everything here also works from the terminal with the purr command." }));
@@ -201,7 +202,7 @@ function partClass(p) {
 }
 function renderReport(root, rep, depth) {
   const wrap = h("div");
-  wrap.appendChild(h("h2", { text: rep.title }));
+  wrap.appendChild(h("h2", { text: rep.title, style: { textTransform: "none" } }));
   wrap.appendChild(h("p", { text: rep.summary, style: { fontSize: "18px", fontWeight: 300 } }));
   if (rep.checks.length) wrap.appendChild(checks(rep.checks));
   if (rep.kind === "flash-image") {
@@ -260,7 +261,7 @@ pages.inspect = {
   },
 };
 function nextSteps(rep) {
-  const route = { sign: () => go("keys"), release: () => go("release"), server: () => go("server"), flash: () => go("docs", "flashing"), emulator: () => go("run") };
+  const route = { sign: () => go("keys"), release: () => go("release"), server: () => go("server"), flash: () => go("flash", rep.file && rep.file.stored), emulator: () => go("run") };
   return h("div", {}, h("h3", { text: "What next?" }), h("div", { class: "row" }, rep.next.map(n => h("button", { class: "btn primary", title: n.why, onclick: route[n.tool] || (() => { }), text: n.label }))),
     h("div", { class: "dim", style: { marginTop: "6px" }, text: rep.next.map(n => n.label + ": " + n.why).join("  ·  ") }));
 }

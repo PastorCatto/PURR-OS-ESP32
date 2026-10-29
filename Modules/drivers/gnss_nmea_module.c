@@ -176,7 +176,7 @@ static int handle_sentence(gnss_t *d, char *s)
         if (dd > 0 && mm > 0 && yy >= 0) {
             d->fix.day = (uint8_t)dd;
             d->fix.month = (uint8_t)mm;
-            d->fix.year = (uint16_t)(2000 + yy);
+            d->fix.year = (uint16_t)(yy >= 80 ? 1900 + yy : 2000 + yy);          /* two digits: GPS began in 1980 */
             d->fix.time_valid = active || d->fix.time_valid;
         }
         if (active && coord(f[3], f[4], 2, &lat) && coord(f[5], f[6], 3, &lon)) {

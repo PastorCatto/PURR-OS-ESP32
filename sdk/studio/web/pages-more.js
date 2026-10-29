@@ -325,6 +325,29 @@ pages.doctor = {
   },
 };
 
+pages.flash = {
+  title: "flash",
+  async render(el, image) {
+    const st = await api.get("flash/ports");
+    const port = h("select", {}, h("option", { value: "", text: st.ports.length ? "choose a port" : "no board found" }), st.ports.map(p => h("option", { value: p, text: p })));
+    const img = h("input", { type: "text", value: typeof image === "string" ? image : "", placeholder: "/path/to/image.bin", "aria-label": "Image to flash" });
+    const off = h("input", { type: "text", value: "0x0", "aria-label": "Offset" });
+    const sure = h("input", { type: "checkbox" });
+    const log = h("div", { class: "log", hidden: true });
+    const go_ = btn("flash it", async () => {
+      clear(log); log.hidden = false; go_.disabled = true;
+      try { const { job } = await api.post("flash/write", { port: port.value, image: img.value, offset: off.value, confirm: sure.checked }); const r = await watchJob(job, log); toast(r.ok ? "Flashed." : "That did not work."); }
+      catch (e) { say(e); }
+      go_.disabled = false;
+    }, "primary");
+    el.appendChild(h("p", { class: "dim", style: { maxWidth: "70ch" }, text: "Hold the board's boot button, tap reset, and let go: it shows up as a USB port. A full flash image goes to 0x0. Flashing replaces what is on the board." }));
+    if (!st.esptool) el.appendChild(checks([{ status: "warn", name: "esptool", text: "esptool is not installed in this Python, so I cannot flash. The kit's own Python has it." }]));
+    el.appendChild(h("div", { style: { maxWidth: "620px" } }, field("Port", port, "Pick the board's port. Reopen this page after you plug it in."), field("Image", img), field("Offset", off, "0x0 for a whole flash image."),
+      h("label", { class: "switch", style: { margin: "0 0 14px", display: "flex" } }, sure, h("span", { text: "I mean it: replace what is on the board." })), go_));
+    el.appendChild(log);
+  },
+};
+
 pages.run = {
   title: "run",
   async render(el) {
@@ -334,7 +357,7 @@ pages.run = {
   },
 };
 
-function markdown(src) {
+function markdown(src, onDoc) {
   const root = h("div", { style: { maxWidth: "76ch" } });
   const inline = (s) => {
     const frag = document.createDocumentFragment();
@@ -345,7 +368,9 @@ function markdown(src) {
       const t = m[0];
       if (t[0] === "`") frag.appendChild(h("code", { class: "kbd", text: t.slice(1, -1) }));
       else if (t[0] === "*") frag.appendChild(h("b", { text: t.slice(2, -2) }));
-      else { const mm = /\[([^\]]+)\]\(([^)]+)\)/.exec(t); frag.appendChild(h("a", { href: mm[2], target: "_blank", rel: "noopener", text: mm[1] })); }
+      else { const mm = /\[([^\]]+)\]\(([^)]+)\)/.exec(t);
+        if (/^[0-9a-z-]+$/.test(mm[2]) && onDoc) frag.appendChild(h("a", { href: "#docs", onclick: e => { e.preventDefault(); onDoc(mm[2]); }, text: mm[1] }));
+        else frag.appendChild(h("a", { href: mm[2], target: "_blank", rel: "noopener", text: mm[1] })); }
       last = m.index + t.length;
     }
     if (last < s.length) frag.appendChild(document.createTextNode(s.slice(last)));
@@ -373,7 +398,7 @@ pages.docs = {
     const left = h("div"), right = h("div");
     el.appendChild(h("div", { class: "cols", style: { gridTemplateColumns: "minmax(0,240px) minmax(0,1fr)" } }, left, right));
     const l = h("div", { class: "list" });
-    const open = async (d) => { $$(".item", l).forEach(i => i.setAttribute("aria-current", i.dataset.name === d.name ? "true" : "false")); clear(right); right.appendChild(markdown((await api.get("docs/page", { name: d.name })).text)); };
+    const open = async (d) => { $$(".item", l).forEach(i => i.setAttribute("aria-current", i.dataset.name === d.name ? "true" : "false")); clear(right); right.appendChild(markdown((await api.get("docs/page", { name: d.name })).text, name => open(list.find(x => x.name.endsWith(name)) || d))); };
     list.forEach(d => l.appendChild(h("button", { class: "item", "data-name": d.name, "aria-current": "false", onclick: () => open(d) }, h("span", { text: d.title }))));
     left.appendChild(l);
     const start = list.find(d => d.name === which) || list[0];
