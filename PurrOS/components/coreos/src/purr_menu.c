@@ -43,6 +43,14 @@ void purr_menu_init(purr_menu_t *m, const purr_menu_part_t *parts, int nparts, i
         add_entry(m, "Internet recovery", -1);
     } else {
         m->counting = 1;
+        m->default_sel = m->selected;
+    }
+}
+
+void purr_menu_add_restart(purr_menu_t *m)
+{
+    if (m->count < PURR_MENU_MAX_ENTRIES) {
+        add_entry(m, "Restart", -2);
     }
 }
 
@@ -64,7 +72,9 @@ static purr_menu_result_t choose(const purr_menu_t *m)
 {
     purr_menu_result_t r = {PURR_MENU_ACT_NONE, -1};
     int part = m->entries[m->selected].part;
-    if (part < 0) {
+    if (part == -2) {
+        r.action = PURR_MENU_ACT_RESTART;
+    } else if (part < 0) {
         r.action = PURR_MENU_ACT_INTERNET_RECOVERY;
     } else {
         r.action = PURR_MENU_ACT_BOOT;
@@ -84,7 +94,7 @@ purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_menu_key_
     }
 
     if (key != PURR_KEY_NONE) {
-        m->counting = 0;   /* a keypress means someone is here: no auto-boot */
+        m->elapsed_ms = 0;   /* a keypress means someone is here: the idle timer starts over */
     }
     if (key == PURR_KEY_UP && m->selected > 0) {
         m->selected--;
@@ -96,6 +106,7 @@ purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_menu_key_
 
     m->elapsed_ms += dt_ms;
     if (m->counting && m->elapsed_ms >= PURR_MENU_TIMEOUT_MS) {
+        m->selected = m->default_sel;                 /* nobody answered: the default, not whatever was highlighted last */
         return choose(m);
     }
     return none;

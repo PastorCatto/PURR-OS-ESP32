@@ -563,6 +563,32 @@ KittenOS fails too, it prints a prompt on the serial console.
 **Updating the package.** It changes rarely. KittenOS writes it into its raw partition from a
 verified file.
 
+### 9.1 The quiet start (2026-10-28, boot package 0.3)
+
+The boot menu used to be the front door: every start loaded the package, verified each slot behind a progress bar, and counted down three seconds. It is now only
+shown when it is needed.
+
+A start goes like this (keyboard boards; the e-ink board keeps the old menu):
+
+1. The bootloader picks the slot as before (the failure ladder, the one-shot requests, the continue-install override). Nothing about that changed.
+2. **Fast startup** (`PURR_CFGF_FAST_START`, Settings > Devices > Startup) with nothing wrong: no package is loaded and nothing is drawn. The slot is
+   checked exactly as in every other mode and the bootloader jumps. Without Fast startup: the package draws the **splash** (logo, board and version, "Starting PURR OS",
+   the status chips; no bar), the slot is checked behind it, and the keyboard is watched for 300 ms.
+3. The **menu** appears instead when any of these holds (`purr_menu_reason`, `PURR_MENU_WHY_*`): Space was pressed (the key will become a setting; the SDK is to expose
+   the mapping, plan5.md), the last start never reached a healthy boot (`boot_fail_count` above 1), the kernel is present but fails its check (the ladder would
+   otherwise have quietly moved on), or Settings asked for it (`PURR_CFGF_SHOW_MENU`, cleared when read). Any of these turns Fast startup off for that start.
+4. The menu lists what can start (PURR OS, KittenOS), greys what cannot ("unusable"), and describes the highlighted entry. On a failed check it states why in two lines
+   and adds **Restart**. The internet reinstall is no longer a menu entry; it is reached from KittenOS. Nobody pressing a key for 20 seconds starts the DEFAULT entry
+   (the ladder's pick), not whatever was highlighted last; a key press starts the 20 seconds again. A device with nothing bootable still offers the recovery loader.
+
+Boot package versions: a package older than 0.3 is given the old menu with the progress calls as before; none at all means no screen and the ladder's slot. Boot package
+0.3 asks for services version 4 (`menu_reason`, `menu_idle_ms`, `detail1`, `detail2`, the SPLASH and KEYCHECK stages, the RESTART choice).
+
+Fast startup cannot skip the bootloader itself (the chip's ROM runs it on every power-up) and does not skip the signature check, so enforce means what it did. Time saved is the
+package load, the display start-up and the countdown.
+
+The logo is "PURR OS!" in bold italic, white with an orange "!", drawn from the 8 x 8 font (each pixel row is a run, leaned a quarter pixel per row, and one pixel wider).
+
 ## 10. Open questions
 
 - Header-first container vs. trailer, pending the IDF loader check (section 3).

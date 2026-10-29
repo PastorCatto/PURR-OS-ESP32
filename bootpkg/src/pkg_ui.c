@@ -12,17 +12,17 @@
 
 /* Two layouts: the 320x240 colour panel, and the 200x200 e-ink panel. Every y is fixed per layout. */
 #if LCD_H >= 240
-#define Y_MARK    48        /* centre of the cat's eye */
-#define Y_WORD    74
-#define Y_VER     98
+#define Y_LOGO    66        /* top of the 32 px high logo */
+#define LOGO_SCALE 4
+#define Y_VER     128
 #define Y_ROWS    124       /* the entry rows, in the middle of the screen */
 #define ROW_STEP  18
 #define Y_ABOVE   188       /* stage text, or the countdown */
 #define Y_BAR     204
 #define Y_CHIPS   216       /* the status chips sit under the bar */
 #else
-#define Y_MARK    24
-#define Y_WORD    44
+#define Y_LOGO    24
+#define LOGO_SCALE 2
 #define Y_VER     64
 #define Y_ROWS    86
 #define ROW_STEP  16
@@ -35,57 +35,99 @@
 #define BAR_W  (LCD_W - 2 * BAR_X)
 #define BAR_H  3
 
-static int slen(const char *s)
-{
-    int n = 0;
-    while (s[n]) n++;
-    return n;
-}
+#ifdef PKG_UI_SHIM
+#define UI_GLYPH(c) purr_font_glyph(c)
+#else
+#define UI_GLYPH(c) purr_font_glyph(c)
+#include "purr_font.h"
+#endif
 
-/* Half-widths of the lens, from its middle row outward; the pupil is a black slit narrowing toward the ends. */
-static const uint8_t k_lens[13] = {26, 26, 25, 24, 24, 22, 21, 19, 17, 15, 12, 8, 0};
-
-static void mark(void)
-{
-    int cx = LCD_W / 2;
-    for (int dy = -12; dy <= 12; dy++) {
-        int a = dy < 0 ? -dy : dy;
-        hw_fill(cx - k_lens[a], Y_MARK + dy, k_lens[a] * 2, 1, UI_ORANGE);
-    }
-    for (int dy = -11; dy <= 11; dy++) {
-        int a = dy < 0 ? -dy : dy;
-        int half = a < 7 ? 3 : (a < 10 ? 2 : 1);
-        hw_fill(cx - half, Y_MARK + dy, half * 2, 1, UI_BLACK);
-    }
-}
-
-/* Letter-spaced text, centred: hw_text has no spacing, so one call per character. */
-static void spaced(int y, const char *s, uint16_t fg, int scale, int gap)
-{
-    int n = slen(s), cell = 8 * scale;
-    int x = (LCD_W - (n * cell + (n - 1) * gap)) / 2;
-    for (int i = 0; i < n; i++) {
-        char c[2] = {s[i], 0};
-        hw_text(x, y, c, fg, UI_BLACK, scale);
-        x += cell + gap;
-    }
-}
-
+/* Letter-spaced text, centred: hw_text has no spacing, so one call per character. (Kept for the e-ink layout.) */
 static void centred(int y, const char *s, uint16_t fg)
 {
     hw_text((LCD_W - hw_text_width(s, 1)) / 2, y, s, fg, UI_BLACK, 1);
 }
 
+void ui_centred(int y, const char *s, uint16_t fg) { centred(y, s, fg); }
+
+void ui_left(int y, const char *s, uint16_t fg)
+{
+    hw_text(UI_MARGIN, y, s, fg, UI_BLACK, 1);
+}
+
+void ui_rule(int y)
+{
+    hw_fill(UI_MARGIN, y, LCD_W - 2 * UI_MARGIN, 1, UI_DIM);
+}
+
+void ui_clear_rect(int y, int h)
+{
+    hw_fill(0, y, LCD_W, h, UI_BLACK);
+}
+
+/* "PURR OS!" in bold italic, drawn from the 8x8 font: every pixel row of every glyph row is a run of filled cells, leaned to the right a little more the
+ * higher it is (italic), and each run is one pixel wider than the font's (bold). The first seven characters are white, the "!" is orange. */
+static void logo(int y, int scale)
+{
+    static const char word[] = "PURR OS!";
+    int n = 8, cell = 8 * scale;
+    int lean = 8 * scale - 1;
+    int bold = scale >= 3 ? 2 : 1;
+    int x0 = (LCD_W - n * cell) / 2;
+    for (int ci = 0; ci < n; ci++) {
+        const uint8_t *g = UI_GLYPH(word[ci]);
+        uint16_t col = ci == n - 1 ? UI_ORANGE : UI_WHITE;
+        for (int r = 0; r < 8; r++) {
+            for (int sy = 0; sy < scale; sy++) {
+                int py = r * scale + sy;
+                int shift = (lean - py) / 4;
+                int c = 0;
+                while (c < 8) {
+                    if (!(g[r] & (0x80 >> c))) {
+                        c++;
+                        continue;
+                    }
+                    int e = c;
+                    while (e < 8 && (g[r] & (0x80 >> e))) e++;
+                    hw_fill(x0 + ci * cell + c * scale + shift, y + py, (e - c) * scale + bold, 1, col);
+                    c = e;
+                }
+            }
+        }
+    }
+}
+
 void ui_frame(void)
 {
     hw_fill(0, 0, LCD_W, LCD_H, UI_BLACK);
-    mark();
-    spaced(Y_WORD, "PURR OS", UI_WHITE, 2, 5);
+    logo(Y_LOGO, LOGO_SCALE);
 #ifdef BOARD_CODENAME
     centred(Y_VER, BOARD_CODENAME "   " PKG_VERSION, UI_GREY);
 #else
     centred(Y_VER, PKG_VERSION, UI_GREY);
 #endif
+}
+
+void ui_frame_small(void)
+{
+    hw_fill(0, 0, LCD_W, LCD_H, UI_BLACK);
+    logo(11, 2);
+}
+
+void ui_menu_row(int y, const char *name, const char *tag, int tag_hot, int selected, int usable)
+{
+    int x0 = UI_MARGIN, w = LCD_W - 2 * UI_MARGIN;
+    hw_fill(x0, y, w, 24, UI_BLACK);
+    if (selected) {
+        hw_fill(x0, y, w, 1, UI_ORANGE);
+        hw_fill(x0, y + 23, w, 1, UI_ORANGE);
+        hw_fill(x0, y, 1, 24, UI_ORANGE);
+        hw_fill(x0 + w - 1, y, 1, 24, UI_ORANGE);
+    }
+    hw_text(x0 + 7, y + 8, name, usable ? UI_WHITE : UI_GREY, UI_BLACK, 1);
+    if (tag && tag[0]) {
+        hw_text(x0 + w - 7 - hw_text_width(tag, 1), y + 8, tag, tag_hot ? UI_ORANGE : UI_GREY, UI_BLACK, 1);
+    }
 }
 
 static int chip_w(const ui_chip_t *c)

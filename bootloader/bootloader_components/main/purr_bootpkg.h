@@ -14,6 +14,18 @@
 bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index,
                       bool (*usable)(int index));
 
+/* The normal way in (boot package 0.3 and later; an older one gets the old menu, none gets nothing). Decides whether any screen is needed at all.
+ *  fast: Fast startup is on and nothing is wrong, so no package is loaded and nothing is drawn unless trouble turns up.
+ *  why:  PURR_MENU_WHY_* if the caller already knows the menu is needed (a failed last start, Settings asking), else 0.
+ *  fail_slot: the slot that should have started but did not pass its check, or -1 (used for PURR_MENU_WHY_NO_VERIFY's text).
+ * Returns 0 to boot *boot_index (the slot that was passed in), 1 if the menu chose *boot_index, 2 for "restart", -1 when no screen could be
+ * shown (carry on without one). */
+int purr_bootpkg_start(const bootloader_state_t *bs, int preferred, bool fast, uint32_t why, int fail_slot,
+                       int *boot_index, bool (*usable)(int index));
+
+/* Two short lines saying why a slot failed its check (purr_boot.c); the pointers are to static text. */
+void purr_slot_failure_text(int index, const char **line1, const char **line2);
+
 /* Whether a slot may be launched under the current secure_mode (purr_boot.c): it looks like
  * an app image and, in enforce mode, its signature trailer verifies. The menu takes this as
  * `usable` so it never offers a slot the bootloader would refuse. */

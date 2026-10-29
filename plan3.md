@@ -215,3 +215,13 @@ Tests (VM, enforce mode, developer mode OFF, official URL set to a dead address)
 - a rogue "relay" serving images with the manifest hashes forged to match: "kernel verification failed: bad-hash", "verification failed: bad-hash"; nothing written. Pass.
 Not run: the attended wizard screens (no touch input in the headless runner), dev mode flashing a failing image, hardware.
 Found while testing: the unicast discovery probe to the VM host reaches only one program per UDP port, so the relay and `dev serve` cannot both answer in the VM.
+
+## Quieter bootloader (owner approved the design, 2026-10-28)
+Design: menu only when needed, "PURR OS!" bold italic logo (white, orange "!"), no progress bar, status chips kept, Fast startup, 20 s fall-through to the default, Space opens the menu
+(a setting later; the SDK is to expose the mapping, plan5.md). Full description: `bootloader/SPEC.md` section 9.1.
+- Built: config flags `FAST_START` (persistent) and `SHOW_MENU` (one-shot); package ABI v4 (splash, key check, menu reasons, restart); `purr_menu` idle timer with the default as the fall-through
+  (host tests pass); boot package 0.3.0 (splash, menu with descriptions, problem screen, logo drawn from the 8x8 font); bootloader flow (`purr_bootpkg_start`, `purr_slot_failure_text`);
+  Settings > Devices > Startup (Fast startup switch, Restart to the boot menu). Seen in the emulator: the splash. See below for the menu and problem screens.
+- The loader now ends every install in KittenOS's second stage (also a reset that keeps the data). Needs one flash of the new loader.
+- Not done: the crash during the old autorun countdown is not located (needs a serial log). The new flow has no countdown screen, but that is not proof the crash is gone.
+- Not on a device yet. A bootloader change is never delivered by recovery: it needs a flash of 0x0 (the blank image has it).

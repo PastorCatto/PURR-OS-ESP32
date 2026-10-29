@@ -175,6 +175,38 @@ bool purr_slot_usable(int index)
  * (cpu_start.c "OpenOCD may have already enabled clock"), and once the new image overwrites the code the core was spinning in, it
  * dies with IllegalInstruction right after "cpu_start: Multicore app". So: hold the app CPU in reset with its clock off. The app then
  * starts it the normal way. */
+/* Two short lines for the problem screen: what was wrong with the slot, in words. */
+void purr_slot_failure_text(int index, const char **line1, const char **line2)
+{
+    const char *fix = "Start recovery to put it back.";
+    switch (slot_verdict(index)->result) {
+    case PURR_V_BAD_SIGNATURE:
+        *line1 = "Signature does not match.";
+        *line2 = "It was not signed by a trusted key.";
+        return;
+    case PURR_V_NO_KEY:
+    case PURR_V_ROLE_MISMATCH:
+    case PURR_V_REVOKED:
+        *line1 = "Not signed by a trusted key.";
+        break;
+    case PURR_V_BAD_HASH:
+        *line1 = "The system files are damaged.";
+        break;
+    case PURR_V_BELOW_FLOOR:
+    case PURR_V_TOO_OLD_BOOTLOADER:
+        *line1 = "This version is older than allowed.";
+        fix = "Start recovery to update it.";
+        break;
+    case PURR_V_BAD_MAGIC:
+        *line1 = "No signature was found.";
+        break;
+    default:
+        *line1 = "It could not be checked.";
+        break;
+    }
+    *line2 = fix;
+}
+
 static void park_app_cpu(void)
 {
     SET_PERI_REG_MASK(SYSTEM_CORE_1_CONTROL_0_REG, SYSTEM_CONTROL_CORE_1_RUNSTALL);
@@ -346,9 +378,26 @@ void __attribute__((noreturn)) call_start_cpu0(void)
          * is already TEST_APP_INDEX from the ladder above. */
         ESP_LOGW(TAG, "repeated boot failure: escalating straight to the recovery loader");
     } else {
-        /* The boot package shows the menu and may pick another slot. Without one, boot normally. */
-        int chosen;
-        if (purr_bootpkg_run(&bs, boot_index, &chosen, purr_slot_usable)) {
+        /* The boot package shows a screen only when one is needed (bootloader/SPEC.md section 9): a normal start is a splash and a jump, a Fast startup
+         * start is not even that. The menu comes up when Space is held, when the last start never reached a healthy boot, when the slot that should
+         * start does not pass its check, or when Settings asked for it. Verification is never skipped. */
+        uint32_t why = 0;
+        int fail_slot = -1;
+        if (purr_bootcfg_take_flag(PURR_CFGF_SHOW_MENU)) {
+            why = PURR_MENU_WHY_REQUESTED;
+        } else if (fail_count > 1) {
+            why = PURR_MENU_WHY_LAST_FAILED;
+        } else if (tier == k_tier0 && purr_looks_bootable(slot_pos(tier[0].index)) && !purr_slot_usable(tier[0].index)) {
+            why = PURR_MENU_WHY_NO_VERIFY;                 /* the kernel is there but fails its check: the ladder quietly moved on, the person should know */
+            fail_slot = tier[0].index;
+        }
+        bool fast = (cfg.flags & PURR_CFGF_FAST_START) != 0;
+        int chosen = boot_index;
+        int r = purr_bootpkg_start(&bs, boot_index, fast, why, fail_slot, &chosen, purr_slot_usable);
+        if (r == 2) {
+            ESP_LOGI(TAG, "restart chosen in the boot menu");
+            bootloader_reset();
+        } else if (r == 1) {
             boot_index = chosen;
             menu_chose = true;
         }

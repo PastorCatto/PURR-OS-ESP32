@@ -22,6 +22,7 @@
 #include "freertos/task.h"
 
 #include "commands.h"
+#include "purr_clock.h"
 #include "purr_kbdlight.h"
 #include "login.h"
 #include "purr_catrt.h"
@@ -212,6 +213,7 @@ void app_main(void)
     purr_apps_setup(&boot_cli);
 #endif
     purr_settings_setup();              /* /etc/system.conf: time zone, clock format; before any UI reads them */
+    purr_clock_boot();                  /* the last known time back, and SNTP once there is a network */
     purr_kbdlight_boot();               /* the saved keyboard backlight level, now that the drivers and the settings are up */
     purr_power_sys_start();             /* screen timeout and wake locks; reads its settings from system.conf */
 #if !CONFIG_PURR_PROFILE_RECOVERY

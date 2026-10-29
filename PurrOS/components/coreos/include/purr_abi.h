@@ -136,6 +136,13 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
 #define PURR_CFGF_BAD_KERNEL       (1u << 11)
 #define PURR_CFGF_BAD_KITTENOS     (1u << 12)
 
+/* Persistent flag: FAST_START ("Fast startup" in Settings). On a healthy start the bootloader loads no boot package and draws nothing: it checks
+ * the system, as always, and jumps. Any trouble (a failed check, a start that never reached healthy, a recovery request) brings the screens back
+ * for that start. It removes what is shown, never a check, so every secure mode behaves exactly as before. */
+#define PURR_CFGF_FAST_START       (1u << 13)
+/* One-shot: SHOW_MENU ("Restart to the boot menu" in Settings). The next start shows the boot menu; the bootloader clears the flag when it reads it. */
+#define PURR_CFGF_SHOW_MENU        (1u << 14)
+
 /* flags: one-shot unless noted, cleared by the bootloader before handoff */
 #define PURR_CFGF_IGNORE_ONCE      (1u << 0)
 #define PURR_CFGF_UPDATE_KEY       (1u << 1)
@@ -337,7 +344,7 @@ PURR_STATIC_ASSERT(sizeof(purr_pkg_preamble_t) == 16, "package preamble layout c
 #define PURR_PKG_S3_DATA_MAX       0x8000u
 
 #define PURR_PKG_MAX_PARTS         8
-#define PURR_PKG_SERVICES_VERSION  3    /* 2: secure_state. 3: the package may be called to show progress */
+#define PURR_PKG_SERVICES_VERSION  4    /* 2: secure_state. 3: the package may be called to show progress. 4: splash, key check, menu reasons */
 
 /* A progress call (services version 3; only made to a package whose own version is 0.2 or later). The same entry
  * point is called with nparts < 0: `parts` then points at a NUL-terminated label (the slot being verified, a plain
@@ -345,6 +352,17 @@ PURR_STATIC_ASSERT(sizeof(purr_pkg_preamble_t) == 16, "package preamble layout c
  * The package draws its progress screen and returns 0. The bootloader makes these calls while it verifies the
  * slots, before the menu entry call, so the screen is already up when the menu appears. */
 #define PURR_PKG_STAGE_VERIFY      1
+/* Services version 4 (only made to a package whose own version is 0.3 or later):
+ *   SPLASH:   `parts` is the stage text ("Starting PURR OS"). Draws the start screen (logo, version, stage line, status chips). Returns 0.
+ *   KEYCHECK: `preferred` is how many milliseconds to watch the keyboard. Returns 1 if the menu key (Space) was pressed in that time, else 0. */
+#define PURR_PKG_STAGE_SPLASH      2
+#define PURR_PKG_STAGE_KEYCHECK    3
+
+/* Why the menu is up (purr_boot_services_t.menu_reason, services version 4). */
+#define PURR_MENU_WHY_KEY          1    /* the menu key was held at power-on */
+#define PURR_MENU_WHY_LAST_FAILED  2    /* the last start never reached a healthy boot */
+#define PURR_MENU_WHY_NO_VERIFY    3    /* the system did not pass its check (detail1/detail2 say how) */
+#define PURR_MENU_WHY_REQUESTED    4    /* Settings asked for the menu */
 
 /* A bootable-or-not app slot, as the bootloader found it in the partition table. */
 typedef struct {
@@ -367,10 +385,17 @@ typedef struct {
     /* version >= 2: the effective security state the bootloader is using, PURR_SECST_*
      * (mode, development mode, signed trust block), so the menu can show it. */
     uint32_t secure_state;
+    /* version >= 4, for the menu call: why it is up (PURR_MENU_WHY_*), how long it may sit with nobody pressing a key before the default starts, and
+     * for PURR_MENU_WHY_NO_VERIFY two short lines saying what failed (either may be NULL). */
+    uint32_t menu_reason;
+    uint32_t menu_idle_ms;
+    const char *detail1;
+    const char *detail2;
 } purr_boot_services_t;
 
 #define PURR_PKG_CHOICE_NORMAL             (-1)   /* leave the choice to the bootloader */
 #define PURR_PKG_CHOICE_INTERNET_RECOVERY  (-2)   /* start the recovery loader (the "test" slot) */
+#define PURR_PKG_CHOICE_RESTART            (-3)   /* restart the device (the problem screen's "Restart") */
 
 /*
  * The package's entry. Returns the index in `parts` to boot, or one of the

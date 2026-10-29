@@ -114,3 +114,32 @@ int purr_secure_request_reinstall(int force)
     }
     return purr_cfg_store(&fl, &cfg) == 0 ? 0 : -1;
 }
+
+static int cfg_flag_get(uint32_t flag)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return 0;
+    }
+    return (cfg.flags & flag) != 0;
+}
+
+static int cfg_flag_put(uint32_t flag, int on)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return -1;
+    }
+    if (on) {
+        cfg.flags |= flag;
+    } else {
+        cfg.flags &= ~flag;
+    }
+    return purr_cfg_store(&fl, &cfg) == 0 ? 0 : -1;
+}
+
+int purr_boot_fast_get(void) { return cfg_flag_get(PURR_CFGF_FAST_START); }
+int purr_boot_fast_set(int on) { return cfg_flag_put(PURR_CFGF_FAST_START, on); }
+int purr_boot_request_menu(void) { return cfg_flag_put(PURR_CFGF_SHOW_MENU, 1); }

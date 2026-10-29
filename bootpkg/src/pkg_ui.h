@@ -33,8 +33,22 @@ typedef struct {
     uint8_t kind;
 } ui_chip_t;
 
-/* Clears the screen and draws the mark, wordmark and version line. */
+/* Clears the screen and draws the logo ("PURR OS!", bold italic, the "!" in orange) and the version line. */
 void ui_frame(void);
+/* The same with a small logo at the top, for the menu and problem screens. */
+void ui_frame_small(void);
+
+/* Text on the 8x8 font at scale 1: centred, or from the left margin (x = UI_MARGIN). */
+#define UI_MARGIN 20
+void ui_centred(int y, const char *s, uint16_t fg);
+void ui_left(int y, const char *s, uint16_t fg);
+/* A thin dim rule across the text margins. */
+void ui_rule(int y);
+/* A clear band across the whole width, from y for h pixels. */
+void ui_clear_rect(int y, int h);
+/* A menu row, 24 px tall (rows at y, y+24, ...): name on the left, tag on the right. A selected row has an orange border. tag_hot draws the tag
+ * orange; grey is for "unusable" and plain tags. usable 0 draws the name grey. */
+void ui_menu_row(int y, const char *name, const char *tag, int tag_hot, int selected, int usable);
 /* Draws the chips centred, dropping the last ones if they would not fit. */
 void ui_chips(const ui_chip_t *chips, int n);
 /* The bottom band below the chips, cleared. */

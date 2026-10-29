@@ -32,13 +32,24 @@ static void test_countdown(void)
 {
     purr_menu_t m;
     purr_menu_init(&m, two, 2, 1);
-    CHECK_EQ(purr_menu_seconds_left(&m), 3);
+    CHECK_EQ(purr_menu_seconds_left(&m), 20);
     CHECK_EQ(purr_menu_step(&m, 1000, PURR_KEY_NONE).action, PURR_MENU_ACT_NONE);
-    CHECK_EQ(purr_menu_seconds_left(&m), 2);
-    CHECK_EQ(purr_menu_step(&m, 1999, PURR_KEY_NONE).action, PURR_MENU_ACT_NONE);
+    CHECK_EQ(purr_menu_seconds_left(&m), 19);
+    CHECK_EQ(purr_menu_step(&m, 18999, PURR_KEY_NONE).action, PURR_MENU_ACT_NONE);
     purr_menu_result_t r = purr_menu_step(&m, 1, PURR_KEY_NONE);
     CHECK_EQ(r.action, PURR_MENU_ACT_BOOT);
     CHECK_EQ(r.index, 1);                 /* the preferred one */
+}
+
+static void test_restart_entry(void)
+{
+    purr_menu_t m;
+    purr_menu_init(&m, two, 2, 0);
+    purr_menu_add_restart(&m);
+    CHECK_EQ(m.count, 3);
+    purr_menu_step(&m, 10, PURR_KEY_DOWN);
+    purr_menu_step(&m, 10, PURR_KEY_DOWN);
+    CHECK_EQ(purr_menu_step(&m, 10, PURR_KEY_ENTER).action, PURR_MENU_ACT_RESTART);
 }
 
 static void test_keys(void)
@@ -47,8 +58,13 @@ static void test_keys(void)
     purr_menu_init(&m, two, 2, 0);
     purr_menu_step(&m, 100, PURR_KEY_DOWN);
     CHECK_EQ(m.selected, 1);
-    CHECK_EQ(purr_menu_seconds_left(&m), -1);   /* a key stops the countdown */
-    CHECK_EQ(purr_menu_step(&m, 60000, PURR_KEY_NONE).action, PURR_MENU_ACT_NONE);
+    CHECK_EQ(purr_menu_seconds_left(&m), 20);   /* a key starts the idle timer over; it does not stop it */
+    CHECK_EQ(purr_menu_step(&m, 19899, PURR_KEY_NONE).action, PURR_MENU_ACT_NONE);   /* 100 ms already passed with the key */
+    purr_menu_result_t idle = purr_menu_step(&m, 1, PURR_KEY_NONE);
+    CHECK_EQ(idle.action, PURR_MENU_ACT_BOOT);  /* left alone: the DEFAULT starts, not the entry last highlighted */
+    CHECK_EQ(idle.index, 0);
+    purr_menu_init(&m, two, 2, 0);
+    purr_menu_step(&m, 100, PURR_KEY_DOWN);
     purr_menu_step(&m, 10, PURR_KEY_DOWN);      /* clamps at the end */
     CHECK_EQ(m.selected, 1);
     purr_menu_step(&m, 10, PURR_KEY_UP);
@@ -103,6 +119,7 @@ int main(void)
     test_entries();
     test_countdown();
     test_keys();
+    test_restart_entry();
     test_wasd();
     test_nothing_to_boot();
     TK_DONE("test_menu");

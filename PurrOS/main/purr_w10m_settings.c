@@ -41,6 +41,7 @@
 #include "purr_appmgr.h"
 #include "purr_catrt.h"
 #include "purr_battery.h"
+#include "purr_clock.h"
 #include "purr_board.h"
 #include "purr_kbdlight.h"
 #include "purr_catrt_power.h"
@@ -431,6 +432,34 @@ static void hardware_section(void);
 static void devsrv_section(void);
 
 static lv_obj_t *s_kbl_btn;
+static lv_obj_t *s_start_msg;                   /* the result line under the Startup controls (this page has several sections with their own results) */
+
+static void start_say(const char *t)
+{
+    if (s_start_msg != NULL) {
+        lv_label_set_text(s_start_msg, t);
+    }
+}
+
+static void fast_cb(lv_event_t *e)
+{
+    int on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+    start_say(purr_boot_fast_set(on) == 0 ? (on ? "Fast startup is on." : "Fast startup is off.") : "Could not save that.");
+}
+
+static void bootmenu_cb(lv_event_t *e)
+{
+    if (!confirm_tap(lv_event_get_target(e), "Tap again to restart")) {
+        return;
+    }
+    if (purr_boot_request_menu() != 0) {
+        start_say("Could not ask for the menu.");
+        return;
+    }
+    start_say("Restarting to the boot menu...");
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
+}
 
 static void kbl_text(void)
 {
@@ -463,6 +492,14 @@ static void page_devices(void)
         lv_obj_set_width(s_kbl_btn, LV_PCT(100));
         kbl_text();
     }
+
+    cm_space(s_body, 4);
+    cm_title(s_body, "Startup");
+    cm_switch(s_body, "Fast startup", purr_boot_fast_get(), fast_cb);
+    cm_dim(s_body, "Skips the logo and the boot menu on a normal start. The system is still checked every time. Anything unusual brings the screens back.");
+    lv_obj_t *bm = cm_button(s_body, "Restart to the boot menu", bootmenu_cb, NULL);
+    lv_obj_set_width(bm, LV_PCT(100));
+    s_start_msg = cm_dim(s_body, "");
 
     cm_space(s_body, 4);
     cm_title(s_body, "Battery");
@@ -1648,11 +1685,41 @@ static void clock24_cb(lv_event_t *e)
     say("Saved. The clock updates within a second.", 1);
 }
 
+static lv_obj_t *s_ntp_line;
+
+static void ntp_text(void)
+{
+    char t[80];
+    purr_clock_status(t, sizeof(t));
+    if (s_ntp_line != NULL) {
+        lv_label_set_text(s_ntp_line, t);
+    }
+}
+
+static void ntp_cb(lv_event_t *e)
+{
+    purr_clock_set_ntp_enabled(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+    ntp_text();
+}
+
+static void ntp_sync_cb(lv_event_t *e)
+{
+    (void)e;
+    purr_clock_sync_now();
+    say("Asking for the time...", 1);
+    ntp_text();
+}
+
 static void page_time(void)
 {
     cm_title(s_body, "Date and time");
     s_time_now = cm_text(s_body, "");
     time_refresh();
+    cm_switch(s_body, "Set time automatically", purr_clock_ntp_enabled(), ntp_cb);
+    s_ntp_line = cm_dim(s_body, "");
+    ntp_text();
+    lv_obj_t *sb = cm_button(s_body, "Sync now", ntp_sync_cb, NULL);
+    lv_obj_set_width(sb, LV_PCT(100));
     cm_space(s_body, 4);
     cm_text(s_body, "Time zone");
     char names[400] = "";
@@ -2122,6 +2189,8 @@ static void show_page(page_t page)
     s_hw_list = s_hw_setup_btn = s_drv_list = s_man_drv = s_man_sda = s_man_scl = s_man_addr = NULL;
     s_srv_line = s_srv_addr = s_srv_list = s_upd_install_btn = s_upd_src_btn = NULL;
     s_kbl_btn = NULL;
+    s_ntp_line = NULL;
+    s_start_msg = NULL;
     s_time_now = NULL;
     s_acct_auto_sw = s_acct_auto_pw = NULL;
     s_sec_state = s_sec_boot = s_sec_trust = s_sec_slot = s_sec_active = NULL;

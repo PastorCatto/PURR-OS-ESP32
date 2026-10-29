@@ -28,7 +28,7 @@ BOARDS = {
 # sight/log line, same reason the recovery releases this repo publishes are named
 # (JumpingJaguar1, ...).
 HW_SOURCE = {"tdeck": "pkg_hw.c", "tdeck_plus": "pkg_hw.c", "waveshare154": "pkg_hw_epd.c"}
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # Re-exported under their original names: purrstrap/tests/test_bootpkg.py reads these.
 HEADER_FORMAT = pimg.HEADER_FORMAT

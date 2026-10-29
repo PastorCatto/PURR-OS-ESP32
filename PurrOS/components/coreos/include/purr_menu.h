@@ -8,8 +8,8 @@
  * Rules:
  *  - One entry per bootable partition, in table order. The preferred one (the one
  *    otadata points at) is selected first.
- *  - With something to boot, a countdown runs. If it reaches zero the selected
- *    entry is booted. Any key stops the countdown for good.
+ *  - With something to boot, an idle timer runs. If it reaches zero with nobody pressing a key, the DEFAULT entry (the one selected first) is booted,
+ *    whatever has been highlighted since. Any key restarts the timer.
  *  - With nothing to boot, the menu waits PURR_MENU_EMPTY_DELAY_MS, then offers
  *    "Internet recovery" as its only entry. It never boots by itself in that case.
  */
@@ -24,13 +24,14 @@ extern "C" {
 
 #define PURR_MENU_MAX_ENTRIES      8
 #define PURR_MENU_LABEL_LEN        20
-#define PURR_MENU_TIMEOUT_MS       3000u
+#define PURR_MENU_TIMEOUT_MS       20000u
 #define PURR_MENU_EMPTY_DELAY_MS   2000u
 
 typedef enum {
     PURR_MENU_ACT_NONE = 0,       /* nothing chosen yet */
     PURR_MENU_ACT_BOOT,           /* boot entry `index`, a partition from the input list */
-    PURR_MENU_ACT_INTERNET_RECOVERY
+    PURR_MENU_ACT_INTERNET_RECOVERY,
+    PURR_MENU_ACT_RESTART         /* the problem screen's "Restart" */
 } purr_menu_action_t;
 
 /* Named purr_menu_key_t, not purr_key_t: purr_keybag.h already uses purr_key_t for a signing
@@ -69,7 +70,8 @@ typedef struct {
     } entries[PURR_MENU_MAX_ENTRIES];
     int count;
     int selected;
-    uint32_t elapsed_ms;
+    int default_sel;                   /* the entry selected first: what an idle menu starts */
+    uint32_t elapsed_ms;               /* idle time: a key sets it back to 0 */
     uint8_t counting;                  /* a countdown to auto-boot is running */
     uint8_t no_boot_options;           /* the input had nothing bootable */
 } purr_menu_t;
@@ -79,6 +81,9 @@ void purr_menu_init(purr_menu_t *m, const purr_menu_part_t *parts, int nparts, i
 
 /* Advance by dt_ms and apply one key. Returns the choice once there is one. */
 purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_menu_key_t key);
+
+/* Adds a "Restart" entry at the end (only if there is room). Its choice is PURR_MENU_ACT_RESTART. */
+void purr_menu_add_restart(purr_menu_t *m);
 
 /* What to draw: false until the recovery entry has appeared. */
 int purr_menu_visible(const purr_menu_t *m);

@@ -4,6 +4,9 @@
  *
  * The menu rules are PurrOS/components/coreos/src/purr_menu.c, shared with the host
  * tests. This file draws it and feeds it keys and time.
+ *
+ * Version 0.3: on the keyboard boards the menu is only up when it is needed (the bootloader decides, and says why in the services: held Space, a start
+ * that failed, a system that did not verify, or Settings asking). A normal start is the splash (SPLASH, then KEYCHECK for the menu key) and no menu at all.
  */
 #include <stdint.h>
 
@@ -14,6 +17,7 @@
 #include "purr_menu.h"
 
 #define TICK_MS 50
+#define Y_ABOVE_TEXT 188
 
 /* No snprintf here: these build the few strings the menu shows. */
 static void put_str(char *dst, int *n, const char *s)
@@ -86,6 +90,7 @@ static int build_chips(const purr_boot_services_t *svc, ui_chip_t *c)
     return n;
 }
 
+#if !BOARD_HAS_KEYBOARD          /* the e-ink board keeps the original menu; the keyboard boards use kbd_menu() below */
 typedef struct {
     const purr_menu_part_t *mp;
     int preferred;
@@ -142,6 +147,8 @@ static void draw_footer(const purr_menu_t *m)
     hw_flush();
 }
 
+#endif
+
 /* A progress call from the bootloader: "Verifying <slot>" and how far along. */
 static void draw_progress(const purr_boot_services_t *svc, const char *label, int per_mille)
 {
@@ -173,6 +180,7 @@ static void draw_progress(const purr_boot_services_t *svc, const char *label, in
 #endif
 }
 
+#if !BOARD_HAS_KEYBOARD
 /* The last screen before the bootloader takes over: the same frame, the bar full. */
 static void draw_handoff(const purr_boot_services_t *svc, const char *what)
 {
@@ -183,16 +191,223 @@ static void draw_handoff(const purr_boot_services_t *svc, const char *what)
     ui_splash(chips, build_chips(svc, chips), stage, "100%", 1000);
 }
 
+#endif
+
+#if BOARD_HAS_KEYBOARD
+
+/* The normal-start screen: logo, version, the stage line, the chips. No bar. */
+static int stage_splash(const purr_boot_services_t *svc, const char *what)
+{
+    if (!bring_up(svc)) {
+        return 0;
+    }
+    ui_chip_t chips[5];
+    ui_frame();
+    s_frame = 1;
+    ui_centred(Y_ABOVE_TEXT, what, UI_WHITE);
+    ui_chips(chips, build_chips(svc, chips));
+    hw_flush();
+    return 0;
+}
+
+/* Watches the keyboard for `ms`; 1 if Space was pressed. Anything already waiting in the controller counts (it was pressed while the system was
+ * being checked). */
+static int stage_keycheck(const purr_boot_services_t *svc, int ms)
+{
+    if (!bring_up(svc)) {
+        return 0;
+    }
+    for (int t = 0; t <= ms; t += 10) {
+        char c;
+        while ((c = hw_key()) != 0) {
+            if (c == ' ') {
+                return 1;
+            }
+        }
+        hw_delay_ms(10);
+    }
+    return 0;
+}
+
+static const char *display_name(const char *label, int problem)
+{
+    if (label[0] == 'K' && label[1] == 'e') {                   /* "Kernel" */
+        return "PURR OS";
+    }
+    if (problem && label[0] == 'K' && label[1] == 'i') {        /* "KittenOS" */
+        return "Start recovery";
+    }
+    return label;
+}
+
+static int is_kittenos(const char *label) { return label[0] == 'K' && label[1] == 'i'; }
+
+typedef struct {
+    int problem;                      /* the system did not verify: heading in orange, the reason in the description */
+    int rows_y;
+} kview_t;
+
+static void put_secs(char *dst, int *n, int s)
+{
+    char t[4];
+    int k = 0;
+    if (s <= 0) t[k++] = '0';
+    while (s > 0 && k < 3) { t[k++] = (char)('0' + s % 10); s /= 10; }
+    while (k > 0 && *n < 47) dst[(*n)++] = t[--k];
+    dst[*n] = '\0';
+}
+
+static void kbd_draw_rows(const purr_menu_t *m, const kview_t *v, const purr_menu_part_t *mp, int nparts)
+{
+    ui_clear_rect(v->rows_y, 24 * 4);
+    int row = 0;
+    for (int i = 0; i < m->count; i++, row++) {
+        const char *lab = m->entries[i].part >= 0 ? m->entries[i].label : (m->entries[i].part == -2 ? "Restart" : "Internet recovery");
+        ui_menu_row(v->rows_y + row * 24, display_name(lab, v->problem), i == m->default_sel ? "default" : "", 1, i == m->selected, 1);
+    }
+    for (int p = 0; p < nparts && row < 4; p++) {                     /* what is not bootable, listed but never selectable */
+        if (!mp[p].bootable) {
+            ui_menu_row(v->rows_y + row * 24, display_name(mp[p].label, v->problem), "unusable", 0, 0, 0);
+            row++;
+        }
+    }
+}
+
+static void kbd_draw_desc(const purr_boot_services_t *svc, const purr_menu_t *m, const kview_t *v)
+{
+    ui_clear_rect(155, 24);
+    const char *l1 = 0, *l2 = 0;
+    if (v->problem) {
+        l1 = svc->detail1;
+        l2 = svc->detail2;
+    } else if (m->entries[m->selected].part == -2) {
+        l1 = "Restarts the device.";
+    } else if (m->entries[m->selected].part >= 0) {
+        const char *lab = m->entries[m->selected].label;
+        if (is_kittenos(lab)) {
+            l1 = "Repairs or reinstalls PURR OS.";
+            l2 = "Your files are kept.";
+        } else if (lab[0] == 'K') {
+            l1 = "Starts PURR OS normally.";
+        }
+    }
+    if (l1) ui_left(155, l1, UI_GREY);
+    if (l2) ui_left(166, l2, UI_GREY);
+}
+
+static void kbd_draw_foot(const purr_boot_services_t *svc, const purr_menu_t *m, const kview_t *v)
+{
+    ui_clear_rect(189, 24);
+    ui_centred(189, "W up   S down   D select", UI_GREY);
+    int s = purr_menu_seconds_left(m);
+    if (s >= 0) {
+        char line[48];
+        int n = 0;
+        put_str(line, &n, display_name(m->entries[m->default_sel].label, v->problem));
+        put_str(line, &n, " starts in ");
+        put_secs(line, &n, s);
+        put_str(line, &n, " s");
+        ui_centred(200, line, UI_GREY);
+    }
+    (void)svc;
+}
+
+static int kbd_menu(const purr_boot_services_t *svc, const purr_boot_part_t *parts, int n, int preferred)
+{
+    purr_menu_part_t mp[PURR_PKG_MAX_PARTS];
+    for (int i = 0; i < n; i++) {
+        int j = 0;
+        for (; j < 15 && parts[i].name[j]; j++) mp[i].label[j] = parts[i].name[j];
+        mp[i].label[j] = '\0';
+        mp[i].bootable = parts[i].bootable;
+    }
+    int reason = svc->version >= 4 ? (int)svc->menu_reason : PURR_MENU_WHY_KEY;
+    kview_t v = {reason == PURR_MENU_WHY_NO_VERIFY, 0};
+    v.rows_y = v.problem ? 68 : 90;
+
+    purr_menu_t m;
+    purr_menu_init(&m, mp, n, preferred);
+    if (v.problem) {
+        purr_menu_add_restart(&m);
+    }
+    ui_chip_t chips[5];
+    ui_frame_small();
+    s_frame = 1;
+    if (v.problem) {
+        ui_left(46, "PURR OS did not pass its check.", UI_ORANGE);
+    } else {
+        ui_left(46, reason == PURR_MENU_WHY_LAST_FAILED ? "PURR OS did not start last time." : "Boot menu", UI_WHITE);
+        ui_left(66, "Pick what to start.", UI_GREY);
+    }
+    ui_rule(147);
+    ui_chips(chips, build_chips(svc, chips));
+    hw_key();
+    kbd_draw_rows(&m, &v, mp, n);
+    kbd_draw_desc(svc, &m, &v);
+    kbd_draw_foot(svc, &m, &v);
+    hw_flush();
+
+    int last_sel = m.selected, last_secs = purr_menu_seconds_left(&m), last_kbd = hw_kbd_ok();
+    purr_menu_result_t r = {PURR_MENU_ACT_NONE, -1};
+    while (r.action == PURR_MENU_ACT_NONE) {
+        hw_delay_ms(TICK_MS);
+        hw_tick(TICK_MS);
+        r = purr_menu_step(&m, TICK_MS, purr_key_from_char(hw_key()));
+        if (hw_kbd_ok() != last_kbd) {
+            last_kbd = hw_kbd_ok();
+            ui_chips(chips, build_chips(svc, chips));
+        }
+        if (m.selected != last_sel) {
+            kbd_draw_rows(&m, &v, mp, n);
+            kbd_draw_desc(svc, &m, &v);
+        }
+        int secs = purr_menu_seconds_left(&m);
+        if (secs != last_secs || m.selected != last_sel) {
+            kbd_draw_foot(svc, &m, &v);
+        }
+        last_sel = m.selected;
+        last_secs = secs;
+    }
+
+    if (r.action == PURR_MENU_ACT_RESTART) {
+        svc->log("bootpkg: restart chosen");
+        return PURR_PKG_CHOICE_RESTART;
+    }
+    if (r.action == PURR_MENU_ACT_BOOT) {
+        svc->log("bootpkg: booting the chosen slot");
+        stage_splash(svc, is_kittenos(mp[r.index].label) ? "Starting KittenOS" : "Starting PURR OS");
+        return r.index;
+    }
+    svc->log("bootpkg: starting internet recovery");
+    stage_splash(svc, "Starting recovery loader");
+    return PURR_PKG_CHOICE_INTERNET_RECOVERY;
+}
+
+#endif /* BOARD_HAS_KEYBOARD */
+
 int purr_pkg_entry(const purr_boot_services_t *svc, const purr_boot_part_t *parts,
                    int nparts, int preferred)
 {
-    if (nparts < 0) {                       /* a progress call (purr_abi.h); `parts` is the label */
-        draw_progress(svc, (const char *)parts, preferred);
+    if (nparts < 0) {                       /* a stage call (purr_abi.h); `parts` is the label or the stage text */
+#if BOARD_HAS_KEYBOARD
+        if (-nparts == PURR_PKG_STAGE_SPLASH) {
+            return stage_splash(svc, (const char *)parts);
+        }
+        if (-nparts == PURR_PKG_STAGE_KEYCHECK) {
+            return stage_keycheck(svc, preferred);
+        }
+#endif
+        if (-nparts == PURR_PKG_STAGE_VERIFY) {
+            draw_progress(svc, (const char *)parts, preferred);
+        }
         return 0;
     }
     if (!bring_up(svc)) {
         return -1;
     }
+#if BOARD_HAS_KEYBOARD
+    return kbd_menu(svc, parts, nparts > PURR_PKG_MAX_PARTS ? PURR_PKG_MAX_PARTS : nparts, preferred);
+#else
 
     for (;;) {
         purr_menu_part_t mp[PURR_PKG_MAX_PARTS];
@@ -258,4 +473,5 @@ int purr_pkg_entry(const purr_boot_services_t *svc, const purr_boot_part_t *part
         draw_handoff(svc, "Starting recovery loader");
         return PURR_PKG_CHOICE_INTERNET_RECOVERY;
     }
+#endif /* BOARD_HAS_KEYBOARD */
 }
