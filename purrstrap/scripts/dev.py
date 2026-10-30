@@ -46,6 +46,7 @@ VERSION_RE = re.compile(r"^[0-9][A-Za-z0-9.+-]{0,14}$")
 CHIPS = {pimg.CHIP_ANY: "any", pimg.CHIP_ESP32: "esp32", pimg.CHIP_ESP32S3: "esp32s3"}
 MAX_PACKAGE = 512 * 1024
 RECOVERY_DIR = "recovery"
+RECOVERY_VM_DIR = "recovery-vm"                  # the same files built for the emulator (the VM flavor's recovery URL points here)
 RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader")      # the files the loader and KittenOS fetch by name
 RECOVERY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")    # a plain file name: no slash, so no way out of the folder
 
@@ -294,11 +295,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if path == "/purr/v1/index.json":
             body = json.dumps(build_index(self.repo, self.name, self.repo_id)).encode()
             return self._send(200, body, "application/json")
-        if path.startswith("/" + RECOVERY_DIR + "/"):
-            name = path[len(RECOVERY_DIR) + 2:]
+        for sub in (RECOVERY_DIR, RECOVERY_VM_DIR):
+            if not path.startswith("/" + sub + "/"):
+                continue
+            name = path[len(sub) + 2:]
             if _safe_recovery_name(name):
                 try:
-                    with open(os.path.join(_recovery_dir(self.repo), name), "rb") as fh:
+                    with open(os.path.join(self.repo, sub, name), "rb") as fh:
                         ctype = "text/plain" if name.endswith((".manifest", ".txt")) else "application/octet-stream"
                         return self._send(200, fh.read(), ctype)
                 except OSError:

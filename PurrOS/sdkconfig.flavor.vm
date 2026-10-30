@@ -13,8 +13,9 @@ CONFIG_PURR_NET_ETH_W5500=y
 # The VM boots into the Windows 10 Mobile style shell (plan7.md) until it replaces the card stack.
 CONFIG_PURR_UI_DEFAULT_MODE="w10m"
 
+# The VM has its own folder (recovery-vm) on the dev server: it needs the VM kernel, KittenOS and loader (virtual Ethernet, no Wi-Fi), not the real device's.
 # In the VM, recovery pulls from the host's dev server (`purrstrap dev serve`, reached at 10.0.2.2) with no development mode
 # needed: the images are still verified against the boot key. The official release URLs are for real devices.
-CONFIG_PURR_RECOVERY_MANIFEST_URL="http://10.0.2.2:47801/recovery/recovery.manifest"
-CONFIG_PURR_MODULE_INDEX_URL="http://10.0.2.2:47801/recovery/modules.manifest"
+CONFIG_PURR_RECOVERY_MANIFEST_URL="http://10.0.2.2:47801/recovery-vm/recovery.manifest"
+CONFIG_PURR_MODULE_INDEX_URL="http://10.0.2.2:47801/recovery-vm/modules.manifest"
 
