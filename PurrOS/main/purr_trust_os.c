@@ -69,6 +69,41 @@ void purr_secure_status(purr_secure_status_t *out)
     }
 }
 
+const char *purr_role_label(uint8_t role)
+{
+    switch (role) {
+    case PURR_ROLE_BOOT:      return "PURR OS boot key";
+    case PURR_ROLE_SYSTEM:    return "System key";
+    case PURR_ROLE_OWNER:     return "Owner key";
+    case PURR_ROLE_DEVELOPER: return "Developer key";
+    case PURR_ROLE_VENDOR:    return "Vendor key";
+    default:                  return "Unknown key";
+    }
+}
+
+void purr_secure_signer(uint8_t key_id, purr_signer_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->key_id = key_id;
+    if (key_id == 0xFF) {
+        return;
+    }
+    purr_flash_t fl;
+    purr_cfg_t cfg, view;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    os_cfg_view(&cfg, &view);                                     /* signed overrides count, unsigned ones do not */
+    static purr_keybag_t bag;                                     /* ~600 bytes: not on the caller's stack */
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    const purr_key_t *k = purr_keybag_find(&bag, key_id);
+    if (k != NULL) {
+        out->known = 1;
+        out->role = k->role;
+        out->revoked = purr_keybag_is_revoked(&bag, key_id);
+    }
+}
+
 int purr_secure_dev_locked(void)
 {
     purr_flash_t fl;

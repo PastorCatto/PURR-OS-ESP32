@@ -1662,11 +1662,41 @@ static void page_about(void)
     snprintf(buf, sizeof(buf), "State: %s", purr_secure_level_name(st.level));
     cm_text(s_body, buf);
     if (st.slot_verified) {
-        snprintf(buf, sizeof(buf), "System signed by key %u", (unsigned)st.key_id);
+        purr_signer_t who;
+        purr_secure_signer(st.key_id, &who);
+        cm_text(s_body, "System: verified");
+        if (who.known) {
+            snprintf(buf, sizeof(buf), "Signed by: %s (key %u)%s", purr_role_label(who.role), (unsigned)who.key_id,
+                     who.revoked ? ", REVOKED" : "");
+        } else {
+            snprintf(buf, sizeof(buf), "Signed by: key %u (not in this device's key list)", (unsigned)st.key_id);
+        }
+        lv_obj_t *l = cm_text(s_body, buf);
+        if (who.revoked || !who.known) {
+            lv_obj_set_style_text_color(l, lv_color_hex(0xFFB900), 0);
+        }
     } else {
-        snprintf(buf, sizeof(buf), "System signature: not verified");
+        lv_obj_t *l = cm_text(s_body, st.have_handoff ? "System: NOT verified (the signature did not check out)"
+                                                      : "System: NOT verified (no boot record: not started by the PURR bootloader)");
+        lv_obj_set_style_text_color(l, lv_color_hex(0xFFB900), 0);
     }
-    cm_text(s_body, buf);
+    snprintf(buf, sizeof(buf), "Boot policy: %s", !st.have_handoff ? "unknown"
+             : st.mode_at_boot == PURR_SECURE_ENFORCE ? "enforce (unsigned images are refused)" : "warn (unsigned images boot with a warning)");
+    cm_dim(s_body, buf);
+    if (st.dev_at_boot || st.dev_now) {
+        cm_dim(s_body, "Developer mode is on.");
+    }
+    switch (esp_reset_reason()) {
+    case ESP_RST_PANIC:     snprintf(buf, sizeof(buf), "Last start: after a crash"); break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:       snprintf(buf, sizeof(buf), "Last start: after a freeze (watchdog)"); break;
+    case ESP_RST_BROWNOUT:  snprintf(buf, sizeof(buf), "Last start: power dipped (brownout)"); break;
+    case ESP_RST_SW:        snprintf(buf, sizeof(buf), "Last start: restarted by the system"); break;
+    case ESP_RST_POWERON:   snprintf(buf, sizeof(buf), "Last start: power on"); break;
+    default:                snprintf(buf, sizeof(buf), "Last start: other (%d)", (int)esp_reset_reason()); break;
+    }
+    cm_dim(s_body, buf);
 
     cm_space(s_body, 4);
     cm_title(s_body, "Device");

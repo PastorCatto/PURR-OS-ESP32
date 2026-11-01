@@ -54,6 +54,16 @@ typedef struct {
 void purr_secure_status(purr_secure_status_t *out);
 const char *purr_secure_level_name(purr_secure_level_t l);
 
+/* Who signed the running system: what the effective key bag (built-in keys plus the signed overrides) says about key_id. */
+typedef struct {
+    int     known;                         /* the bag has a key with this id */
+    uint8_t key_id, role;                  /* role: PURR_ROLE_* */
+    int     revoked;
+} purr_signer_t;
+void purr_secure_signer(uint8_t key_id, purr_signer_t *out);
+/* "PURR OS boot key", "Developer key", ... a short name for a key role. */
+const char *purr_role_label(uint8_t role);
+
 /* 1 if this device's SIGNED trust block locks development mode out (a production device). */
 int purr_secure_dev_locked(void);
 

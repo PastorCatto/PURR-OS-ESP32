@@ -113,7 +113,7 @@ Follows `Permissions/SPEC.md` as already decided: asked **at first use**, grants
   Settings > Display > "Screen off after".
 - Phase 4 done in code: `power` catcall, `PURR_APPEV_WAKE` / `PURR_APPEV_PERM`, `Apps/beacon/`.
 - Firmware (`vmdbg`) builds, 14 % of the kernel slot free; beacon and notes build as modules. NOT run in the VM.
-- Not rechecked: the minimal and recovery profile builds (the new power files are in every profile).
+- Rechecked 2026-10-31: stdmin, stdrec and stdfull all build. Free space in the slot: min 6 %, **recovery 2 % (0x8480 bytes)**, full builds (the usual too-small warning for the kittenos and loader slots). Recovery is nearly full.
 - Panel sleep is not used: only the backlight goes dark (putting the ST7789 to sleep has to be sequenced with the UI
   task's flushes). Revisit with the hardware phase.
 - Lost in a macOS hard lock and to rebuild: the scratchpad (vmdbg build dir was rebuilt; signed apps, dev repo and
