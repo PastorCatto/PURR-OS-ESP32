@@ -206,3 +206,21 @@ bootloader redesign (menu only when needed, Fast startup, 20 s fall-through, "PU
 - **Branding (owner, last request):** a flavor's names, wordmark and colours are data (`brand.toml`), applied to the boot package, loader, KittenOS and shell; Studio gets a Brand tool with a live preview. Design in `sdk/DESIGN.md`.
 
 - 2026-10-29: `purr repo` (init, add, build, release, endorse, verify) and the repository tool in Studio; Repositories/SPEC.md. See plan8.
+
+
+## App lifecycle: frozen apps, eviction, service slots (2026-10-31, built; host-tested, compile-checked, NOT run on a device)
+The rule from "App lifecycle, decided" above, in code:
+- **Frozen.** An app that leaves the screen and may not run in the background (not background-ok, or over the service cap) goes SUSPENDED and its task is frozen. The runtime
+  never suspends a task from outside (it could be inside littlefs or waiting on the UI task, holding their locks). `host_freeze` queues a "freeze" message behind whatever the app is
+  doing; the task parks itself on a semaphore when it reaches it. `deliver()` thaws first, so RESUME, DESTROY and events always reach a running task; teardown thaws too.
+  Freezing drops its screen and CPU wake locks and cancels its alarms (`on_frozen` in `purr_catrt_power.c`).
+- **Caps.** `cfg.max_frozen` / `cfg.max_services`, set at boot from the PSRAM size by `purr_rt_caps_for_psram` (8 MB class 3 + 2, 4 MB 2 + 1, smaller 1 + 1). `/etc/apps.conf`
+  `general:max_frozen` and `general:max_services` can lower them, never raise them. Over `max_frozen`, the app unused longest is closed (persistent and pinned apps are skipped, the app just
+  brought to the front never is) after an `evicted>>id,name` event; it saved its state when it left the screen. A new daemon over `max_services` is refused (`PURR_RT_E_SERVICES`,
+  `refused>>name,service-slots`); a background-ok app that cannot get a slot is frozen instead.
+- **Notice.** The runtime's event sink keeps a one-line notice ("Closed Notes to free memory", "X cannot run in the background: no free slot"); the shell's clock timer takes it and
+  shows it on the status strip (`purr_catrt_take_notice`). The runtime task never waits on the UI.
+- Tests: `test_runtime.c` (273 checks): freeze before no delivery, thaw before RESUME and DESTROY, eviction order, protected apps, service cap and fallback, PSRAM table, config clamp.
+- Not done: the companion-service half (a `[service]` entry in the package: a UI app's service carries on when its UI is closed) and the `PURR_APPEV_SAVE` autosave nudge before eviction. The
+  "unload instead of freeze" case (an app with nothing to keep) is not distinguished: every non-service app is frozen, then evicted when the cap is hit. The device checks still to make: park
+  and thaw a real app (Notes, Files) several times, with a timer running and with a permission prompt up.

@@ -343,6 +343,15 @@ static void on_stopped(int slot, const char *name)
 
 static void on_paused(int slot) { purr_power_sys_release(slot, PURR_WAKE_SCREEN); }
 
+/* The app's task is stopped: nothing it holds may keep the device awake, and a stopped app cannot answer an alarm. */
+static void on_frozen(int slot)
+{
+    purr_power_sys_release(slot, PURR_WAKE_SCREEN);
+    purr_power_sys_release(slot, PURR_WAKE_CPU);
+    purr_power_sys_alarm_cancel(slot, 0);
+    purr_power_sys_alarm_cancel(slot, 1);
+}
+
 void purr_catrt_power_init(void)
 {
     if (s_mu == NULL) {
@@ -350,6 +359,7 @@ void purr_catrt_power_init(void)
     }
     purr_power_sys_set_hooks(on_wake, on_notify);
     purr_catrt_set_power(&s_cc_power, on_stopped, on_paused);
+    purr_catrt_set_power_frozen(on_frozen);
 }
 
 /* ------------------------------------------------------------------ the shell commands */

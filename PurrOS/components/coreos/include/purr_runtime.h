@@ -104,6 +104,9 @@ typedef struct {
     /* Returns the state length, 0 if none saved, < 0 on error. */
     int  (*load_state)(void *ctx, const char *name, void *buf, uint32_t cap);
     void (*log)(void *ctx, const char *line);
+    /* Optional. Stop (frozen = 1) or restart (0) the app's task. Called with the app idle: after its PAUSE returned, and
+     * before any event is delivered to it again. NULL = nothing to freeze (host tests, a build without tasks). */
+    void (*freeze)(void *ctx, uint32_t handle, int frozen);
 } purr_rt_host_t;
 
 typedef struct {
@@ -114,6 +117,8 @@ typedef struct {
     uint32_t margin;                   /* recover above low/critical by this much (hysteresis) */
     uint32_t min_kill_ms;              /* least time between two out-of-memory kills */
     uint32_t unresponsive_ms;          /* foreground silent for this long = unresponsive */
+    uint32_t max_frozen;               /* user apps kept frozen (SUSPENDED) at once; the oldest is closed over this. 0 = no cap */
+    uint32_t max_services;             /* apps that may run in the BACKGROUND (services) at once. 0 = no cap */
 } purr_rt_cfg_t;
 
 typedef struct {
@@ -124,6 +129,7 @@ typedef struct {
     uint8_t  flags;                    /* effective: header flags with rules applied */
     uint8_t  unresponsive;             /* already reported */
     uint8_t  pinned;
+    uint8_t  frozen;                   /* the host has stopped its task (state SUSPENDED); thawed before any event */
     uint32_t memory;                   /* bytes held (rule override or header) */
     uint32_t started_ms, last_used_ms, last_beat_ms;
     char     subs[PURR_RT_MAX_SUBS][PURR_RT_PREFIX_LEN];
@@ -178,6 +184,10 @@ void purr_rt_init(purr_rt_t *rt, const purr_rt_host_t *host);
 /* Makes the current options the defaults a config reload starts from. Call after setting them
  * (purr_rt_init sets them to the built-in values). */
 void purr_rt_set_defaults(purr_rt_t *rt);
+/* The resident-app caps for a machine with this much PSRAM (plan5, "Decided 2026-10-28"): 8 MB class 3 frozen user apps and
+ * 2 services, 4 MB class 2 and 1, anything smaller 1 and 1. The row is chosen by "at least", with slack for the part of an
+ * 8 MB chip the heap does not report. */
+void purr_rt_caps_for_psram(uint32_t psram_bytes, uint32_t *max_frozen, uint32_t *max_services);
 const char *purr_rt_state_name(purr_rt_state_t s);
 const char *purr_rt_reason_name(int reason);
 const char *purr_rt_kind_name(int kind);
@@ -197,6 +207,7 @@ int purr_rt_invoke(const purr_rt_app_t *app, const purr_rt_event_t *ev);
 #define PURR_RT_E_STATE     (-6)   /* not allowed in the app's state */
 #define PURR_RT_E_ARG       (-7)
 #define PURR_RT_E_UNTRUSTED (-8)   /* refused: not signed by a trusted key (see host.load) */
+#define PURR_RT_E_SERVICES  (-9)   /* every service slot is taken (cfg.max_services) */
 int purr_rt_open(purr_rt_t *rt, const char *name);
 
 /* Stops an instance. `reason` is PURR_APP_DESTROY_*. */

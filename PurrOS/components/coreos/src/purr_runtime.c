@@ -180,6 +180,8 @@ void purr_rt_init(purr_rt_t *rt, const purr_rt_host_t *host)
     rt->cfg.margin = 0;
     rt->cfg.min_kill_ms = 0;
     rt->cfg.unresponsive_ms = 0;          /* 0 = never report */
+    rt->cfg.max_frozen = 0;               /* 0 = no cap; the device sets them from the PSRAM size */
+    rt->cfg.max_services = 0;
     rt->next_id = 0;
     rt->cfg_defaults = rt->cfg;
 }
@@ -187,6 +189,24 @@ void purr_rt_init(purr_rt_t *rt, const purr_rt_host_t *host)
 void purr_rt_set_defaults(purr_rt_t *rt)
 {
     rt->cfg_defaults = rt->cfg;
+}
+
+void purr_rt_caps_for_psram(uint32_t psram_bytes, uint32_t *max_frozen, uint32_t *max_services)
+{
+    uint32_t f = 1, s = 1;
+    if (psram_bytes >= 6u * 1024 * 1024) {
+        f = 3;
+        s = 2;
+    } else if (psram_bytes >= 3u * 1024 * 1024) {
+        f = 2;
+        s = 1;
+    }
+    if (max_frozen) {
+        *max_frozen = f;
+    }
+    if (max_services) {
+        *max_services = s;
+    }
 }
 
 int purr_rt_invoke(const purr_rt_app_t *app, const purr_rt_event_t *ev)
@@ -232,8 +252,20 @@ int purr_rt_invoke(const purr_rt_app_t *app, const purr_rt_event_t *ev)
     return 0;
 }
 
+static void set_frozen(purr_rt_t *rt, purr_rt_inst_t *in, int frozen)
+{
+    if (in->frozen == (uint8_t)frozen) {
+        return;
+    }
+    in->frozen = (uint8_t)frozen;
+    if (rt->host.freeze) {
+        rt->host.freeze(rt->host.ctx, in->app.handle, frozen);
+    }
+}
+
 static int deliver(purr_rt_t *rt, purr_rt_inst_t *in, const purr_rt_event_t *ev)
 {
+    set_frozen(rt, in, 0);                /* a frozen app cannot answer: wake it for whatever it is about to be told */
     if (rt->host.deliver) {
         return rt->host.deliver(rt->host.ctx, in->id, &in->app, ev);
     }
@@ -405,6 +437,40 @@ static void set_state(purr_rt_t *rt, purr_rt_inst_t *in, purr_rt_state_t ns)
     }
     emitf(rt, "state", "%d,%s,%s,%s", in->id, in->name, purr_rt_state_name(old),
           purr_rt_state_name(ns));
+    if (ns == PURR_RT_SUSPENDED) {
+        set_frozen(rt, in, 1);            /* idle (its PAUSE has returned): stop its task until something needs it */
+    }
+}
+
+static int count_state(const purr_rt_t *rt, purr_rt_state_t st)
+{
+    int n = 0;
+    for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
+        n += rt->inst[i].id != 0 && rt->inst[i].state == st;
+    }
+    return n;
+}
+
+/* Over the cap of frozen user apps, the one unused longest is closed (it saved its state when it left the screen). */
+static void enforce_frozen_cap(purr_rt_t *rt)
+{
+    while (rt->cfg.max_frozen && count_state(rt, PURR_RT_SUSPENDED) > (int)rt->cfg.max_frozen) {
+        purr_rt_inst_t *v = NULL;
+        for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
+            purr_rt_inst_t *in = &rt->inst[i];
+            if (in->id == 0 || in->state != PURR_RT_SUSPENDED || (in->flags & PURR_APP_F_PERSISTENT) || in->pinned) {
+                continue;
+            }
+            if (v == NULL || in->last_used_ms < v->last_used_ms) {
+                v = in;
+            }
+        }
+        if (v == NULL) {
+            break;                        /* everything left is protected */
+        }
+        emitf(rt, "evicted", "%d,%s", v->id, v->name);
+        purr_rt_stop(rt, v->id, PURR_APP_DESTROY_MEMORY);
+    }
 }
 
 static void save_state_of(purr_rt_t *rt, purr_rt_inst_t *in)
@@ -430,6 +496,10 @@ static void leave_foreground(purr_rt_t *rt, purr_rt_inst_t *in, int force_suspen
     deliver(rt, in, &ev);
     int bg = (in->flags & PURR_APP_F_BACKGROUND_OK) && !(in->flags & PURR_APP_F_SUSPEND) &&
              !force_suspend;
+    if (bg && rt->cfg.max_services && count_state(rt, PURR_RT_BACKGROUND) >= (int)rt->cfg.max_services) {
+        bg = 0;                           /* every service slot is taken: this one is frozen instead */
+        emitf(rt, "refused", "%s,service-slots", in->name);
+    }
     set_state(rt, in, bg ? PURR_RT_BACKGROUND : PURR_RT_SUSPENDED);
 }
 
@@ -446,6 +516,7 @@ static void bring_to_front(purr_rt_t *rt, purr_rt_inst_t *in)
     deliver(rt, in, &ev);
     set_state(rt, in, PURR_RT_FOREGROUND);
     emitf(rt, "focus", "%d,%s", in->id, in->name);
+    enforce_frozen_cap(rt);               /* after the switch, so the app just brought forward is never the one closed */
 }
 
 /* ------------------------------------------------------------------- rules */
@@ -611,6 +682,16 @@ int purr_rt_open(purr_rt_t *rt, const char *name)
     tmp.memory = app.memory_needed;
     apply_rules(rt, &tmp);
 
+    int take_fg = !(tmp.flags & PURR_APP_F_NOFOCUS) &&
+                  (tmp.app.kind != PURR_APP_KIND_DAEMON || (tmp.flags & PURR_APP_F_FOCUS));
+    if (!take_fg && rt->cfg.max_services && count_state(rt, PURR_RT_BACKGROUND) >= (int)rt->cfg.max_services) {
+        if (rt->host.unload) {
+            rt->host.unload(rt->host.ctx, app.handle);
+        }
+        emitf(rt, "refused", "%s,service-slots", name);
+        return PURR_RT_E_SERVICES;
+    }
+
     /* A free slot, and room under the configured cap. */
     uint32_t cap = rt->cfg.max_apps ? rt->cfg.max_apps : PURR_RT_MAX_APPS;
     while ((uint32_t)purr_rt_count(rt) >= cap) {
@@ -680,8 +761,6 @@ int purr_rt_open(purr_rt_t *rt, const char *name)
     }
     emitf(rt, "openapp", "%d,%s", id, in->name);
 
-    int take_fg = !(in->flags & PURR_APP_F_NOFOCUS) &&
-                  (in->app.kind != PURR_APP_KIND_DAEMON || (in->flags & PURR_APP_F_FOCUS));
     if (take_fg) {
         bring_to_front(rt, in);
     } else {
@@ -713,6 +792,7 @@ int purr_rt_background(purr_rt_t *rt, int id)
         return PURR_RT_E_STATE;
     }
     leave_foreground(rt, in, 0);
+    enforce_frozen_cap(rt);
     return 0;
 }
 
@@ -724,10 +804,12 @@ int purr_rt_suspend(purr_rt_t *rt, int id)
     }
     if (in->state == PURR_RT_FOREGROUND) {
         leave_foreground(rt, in, 1);
+        enforce_frozen_cap(rt);
         return 0;
     }
     if (in->state == PURR_RT_BACKGROUND) {
         set_state(rt, in, PURR_RT_SUSPENDED);
+        enforce_frozen_cap(rt);
         return 0;
     }
     return PURR_RT_E_STATE;
@@ -1196,6 +1278,12 @@ int purr_rt_key(purr_rt_t *rt, unsigned mods, const char *key)
 
 /* --------------------------------------------------------------------- config */
 
+/* A config file may lower a resident-app cap the machine allows, never raise it (0 asks for "no cap", which only a machine without one has). */
+static uint32_t clamp_cap(uint32_t asked, uint32_t allowed)
+{
+    return allowed != 0 && (asked == 0 || asked > allowed) ? allowed : asked;
+}
+
 static int parse_uint(const char *s, uint32_t *out)
 {
     if (*s == '\0') {
@@ -1320,6 +1408,10 @@ int purr_rt_config_load(purr_rt_t *rt, const char *text, char *err, size_t errca
                 rt->cfg.min_kill_ms = v;
             } else if (strcmp(opt, "unresponsive_ms") == 0) {
                 rt->cfg.unresponsive_ms = v;
+            } else if (strcmp(opt, "max_frozen") == 0) {
+                rt->cfg.max_frozen = clamp_cap(v, rt->cfg_defaults.max_frozen);
+            } else if (strcmp(opt, "max_services") == 0) {
+                rt->cfg.max_services = clamp_cap(v, rt->cfg_defaults.max_services);
             } else {
                 config_error(err, errcap, &used, lineno, "unknown general option");
                 bad++;

@@ -46,11 +46,13 @@ typedef struct {
     purr_app_event_t aev;
     char name[32];
     char data[48];
-    uint8_t has_aev, has_name, has_data, wait, stop;
+    uint8_t has_aev, has_name, has_data, wait, stop, freeze;
 } app_msg_t;
 
 typedef struct {
     uint8_t in_use;
+    volatile uint8_t frozen;      /* the runtime asked it to park (see app_task): idle, owns no lock, thawed before it is told anything */
+    SemaphoreHandle_t thaw;       /* what a parked task waits on */
     volatile uint8_t closing;     /* teardown has begun: the app's catcalls refuse, so it cannot call into a window that is being deleted */
     int id;                       /* the manager's instance id, set at CREATE */
     TaskHandle_t task;
@@ -67,6 +69,26 @@ typedef struct {
 } rtdev_t;
 
 static rtdev_t s_dev[PURR_RT_MAX_APPS];
+
+/* Guards the lifetime of each slot's queue. The UI task, timers and the power/permission glue post to an app's queue from other
+ * tasks; teardown deletes it. Without this a second Back tap (or a late permission answer) could send into a queue being freed. */
+static StaticSemaphore_t s_qmu_buf;
+static SemaphoreHandle_t s_qmu;
+
+/* Queue one message for the app without ever blocking. 0 if queued; -1 if the app is closing, gone, or its queue is full. */
+static int q_post(rtdev_t *d, const app_msg_t *m)
+{
+    int rc = -1;
+    if (s_qmu == NULL) {
+        return -1;
+    }
+    xSemaphoreTake(s_qmu, portMAX_DELAY);
+    if (d->in_use && !d->closing && d->q != NULL) {
+        rc = xQueueSend(d->q, m, 0) == pdTRUE ? 0 : -1;
+    }
+    xSemaphoreGive(s_qmu);
+    return rc;
+}
 static EXT_RAM_BSS_ATTR purr_rt_t s_rt;
 static const void *s_files_table;
 static const void *s_devices_table;
@@ -77,16 +99,57 @@ static void (*s_storage_release)(int slot);
 static const void *s_power_table;
 static void (*s_power_stopped)(int slot, const char *name);
 static void (*s_power_paused)(int slot);
+static void (*s_power_frozen)(int slot);
+static portMUX_TYPE s_notice_mux = portMUX_INITIALIZER_UNLOCKED;
+static char s_notice[64];
 static const purr_catrt_platform_t *s_plat;
 
 /* The event ring: one writer (the manager task), any number of polling readers. */
 static char s_ring[EVENT_RING][PURR_RT_LINE_LEN * 2];
 static volatile uint32_t s_seq;
 
+static void notice_set(const char *fmt, const char *name)
+{
+    char tmp[sizeof(s_notice)];
+    snprintf(tmp, sizeof(tmp), fmt, name);
+    portENTER_CRITICAL(&s_notice_mux);
+    memcpy(s_notice, tmp, sizeof(s_notice));
+    portEXIT_CRITICAL(&s_notice_mux);
+}
+
+int purr_catrt_take_notice(char *buf, size_t cap)
+{
+    int got = 0;
+    portENTER_CRITICAL(&s_notice_mux);
+    if (s_notice[0] != '\0' && cap > 0) {
+        snprintf(buf, cap, "%s", s_notice);
+        s_notice[0] = '\0';
+        got = 1;
+    }
+    portEXIT_CRITICAL(&s_notice_mux);
+    return got;
+}
+
 static void sink_cb(void *ctx, const char *line)
 {
     (void)ctx;
     ESP_LOGI(TAG, "%s", line);
+    if (strncmp(line, "evicted>>", 9) == 0) {            /* "evicted>>3,notes" */
+        const char *name = strchr(line + 9, ',');
+        if (name != NULL) {
+            char n[24];
+            snprintf(n, sizeof(n), "%s", name + 1);
+            notice_set("Closed %.24s to free memory", n);
+        }
+    } else if (strncmp(line, "refused>>", 9) == 0 && strstr(line, ",service-slots") != NULL) {
+        char n[24];
+        snprintf(n, sizeof(n), "%s", line + 9);
+        char *comma = strchr(n, ',');
+        if (comma != NULL) {
+            *comma = '\0';
+        }
+        notice_set("%.24s cannot run in the background: no free slot", n);
+    }
     snprintf(s_ring[s_seq % EVENT_RING], sizeof(s_ring[0]), "%s", line);
     s_seq++;
 }
@@ -359,6 +422,10 @@ static int host_load(void *ctx, const char *name, purr_rt_app_t *out)
 static void teardown(rtdev_t *d)
 {
     d->closing = 1;
+    if (d->frozen && d->thaw) {                 /* a parked task cannot read its stop message */
+        d->frozen = 0;
+        xSemaphoreGive(d->thaw);
+    }
     if (s_power_stopped != NULL) {
         s_power_stopped((int)(d - s_dev), d->name);       /* its locks, alarms and "just once" grants go with it */
     }
@@ -376,9 +443,9 @@ static void teardown(rtdev_t *d)
         app_msg_t m;
         memset(&m, 0, sizeof(m));
         m.stop = 1;
-        xQueueSend(d->q, &m, pdMS_TO_TICKS(100));
-        for (int i = 0; i < 50 && d->task; i++) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+        xQueueSend(d->q, &m, pdMS_TO_TICKS(100));       /* d->closing is set: nobody else posts, so this is the last message */
+        for (int i = 0; i < 200 && d->task; i++) {      /* it was told to destroy and answered, so this is normally instant; a forced delete */
+            vTaskDelay(pdMS_TO_TICKS(10));              /* can leave a file system or UI lock held, so give a straggler 2 s */
         }
         if (d->task) {                          /* stuck in a callback: force it (SPEC section 9) */
             vTaskDelete(d->task);
@@ -388,16 +455,55 @@ static void teardown(rtdev_t *d)
     if (s_ui_lifecycle != NULL && d->t2.kind == PURR_APP_KIND_UI) {      /* only now that the app can no longer call into it */
         s_ui_lifecycle((int)(d - s_dev), d->name, PURR_RT_EV_DESTROY);   /* its window and widgets go with it */
     }
-    if (d->q) {
-        vQueueDelete(d->q);
+    QueueHandle_t q = d->q;
+    xSemaphoreTake(s_qmu, portMAX_DELAY);               /* a poster that got past the closing check is finished before this returns */
+    d->q = NULL;
+    xSemaphoreGive(s_qmu);
+    if (q) {
+        vQueueDelete(q);
     }
     if (d->done) {
         vSemaphoreDelete(d->done);
+    }
+    if (d->thaw) {
+        vSemaphoreDelete(d->thaw);
     }
     if (s_plat->unload) {
         s_plat->unload(d->handle);
     }
     memset(d, 0, sizeof(*d));
+}
+
+/* The runtime freezes an app that left the screen and thaws it before it is told anything again. The task is never suspended from the
+ * outside (it could be inside littlefs or waiting on the UI task, holding their locks): a "freeze" message goes into its queue, behind
+ * whatever it is still doing, and the task parks itself when it reaches it. Its power locks and alarms go when it freezes: a frozen app
+ * keeps nothing awake. */
+static void host_freeze(void *ctx, uint32_t handle, int frozen)
+{
+    (void)ctx;
+    if (handle == 0 || handle > PURR_RT_MAX_APPS) {
+        return;
+    }
+    rtdev_t *d = &s_dev[handle - 1];
+    if (!d->in_use || d->task == NULL || d->closing) {
+        return;
+    }
+    if (frozen && !d->frozen) {
+        app_msg_t m;
+        memset(&m, 0, sizeof(m));
+        m.freeze = 1;
+        d->frozen = 1;
+        if (xQueueSend(d->q, &m, pdMS_TO_TICKS(100)) != pdTRUE) {
+            d->frozen = 0;                                  /* the queue is full: leave it running rather than lose track */
+            return;
+        }
+        if (s_power_frozen != NULL) {
+            s_power_frozen((int)(d - s_dev));
+        }
+    } else if (!frozen && d->frozen) {
+        d->frozen = 0;
+        xSemaphoreGive(d->thaw);
+    }
 }
 
 static void host_unload(void *ctx, uint32_t handle)
@@ -424,6 +530,16 @@ static void app_task(void *arg)
         if (m.stop) {
             break;
         }
+        if (m.freeze) {
+            /* Parked between two messages, so it holds no lock and has no call in flight. host_freeze() asked for this; if the app was
+             * thawed before this message came up there is nothing to wait for (and a give that raced ahead is cleared). */
+            if (d->frozen) {
+                xSemaphoreTake(d->thaw, portMAX_DELAY);
+            } else {
+                xSemaphoreTake(d->thaw, 0);
+            }
+            continue;
+        }
         if (m.has_aev) {
             m.aev.name = m.has_name ? m.name : NULL;
             m.aev.data = m.has_data ? m.data : NULL;
@@ -448,9 +564,10 @@ static int host_deliver(void *ctx, int id, const purr_rt_app_t *app, const purr_
         d->app = *app;
         d->q = xQueueCreate(APP_QUEUE_DEPTH, sizeof(app_msg_t));
         d->done = xSemaphoreCreateBinary();
+        d->thaw = xSemaphoreCreateBinary();
         char tname[configMAX_TASK_NAME_LEN];
         snprintf(tname, sizeof(tname), "app:%.11s", d->name);
-        if (d->q == NULL || d->done == NULL ||
+        if (d->q == NULL || d->done == NULL || d->thaw == NULL ||
             xTaskCreate(app_task, tname, APP_STACK_BYTES, d, 4, &d->task) != pdPASS) {
             ESP_LOGE(TAG, "%s: could not start its task", d->name);
             return -1;
@@ -621,9 +738,7 @@ static void timer_cb(TimerHandle_t t)
     m.aev.type = PURR_APPEV_TIMER;
     m.aev.arg = (int32_t)(code & 0xff) + 1;
     m.ev.type = PURR_RT_EV_APP;
-    if (d->in_use && d->q) {
-        xQueueSend(d->q, &m, 0);                /* a full queue drops the tick, as it should */
-    }
+    q_post(d, &m);                              /* a full queue drops the tick, as it should */
 }
 
 static int cc_timer_start(uint32_t ms, int repeat)
@@ -751,6 +866,11 @@ int purr_catrt_caller(char *name, size_t cap)
     return (int)(d - s_dev);
 }
 
+void purr_catrt_set_power_frozen(void (*frozen)(int slot))
+{
+    s_power_frozen = frozen;
+}
+
 void purr_catrt_set_power(const void *table, void (*stopped)(int slot, const char *name), void (*paused)(int slot))
 {
     s_power_table = table;
@@ -770,6 +890,11 @@ int purr_catrt_slot_info(int slot, purr_catrt_slot_info_t *out)
     for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
         if (d->id != 0 && s_rt.inst[i].id == d->id) {
             flags = s_rt.inst[i].flags;
+            /* An app still in on_create is about to take the screen: what it asks for there (Device Manager asks for
+             * manage-devices at once) may prompt. Counting it as a background app refused it with no prompt ever shown. */
+            if (s_rt.inst[i].state == PURR_RT_STARTING && d->t2.kind == PURR_APP_KIND_UI && !(flags & PURR_APP_F_NOFOCUS)) {
+                out->foreground = 1;
+            }
         }
     }
     out->privileged = (flags & PURR_APP_F_PRIVILEGED) != 0;
@@ -790,7 +915,7 @@ int purr_catrt_slot_of(const char *name)
 
 int purr_catrt_post_event(int slot, int type, int arg, const char *name)
 {
-    if (slot < 0 || slot >= PURR_RT_MAX_APPS || !s_dev[slot].in_use || s_dev[slot].q == NULL) {
+    if (slot < 0 || slot >= PURR_RT_MAX_APPS) {
         return -1;
     }
     app_msg_t m;
@@ -803,7 +928,7 @@ int purr_catrt_post_event(int slot, int type, int arg, const char *name)
         snprintf(m.name, sizeof(m.name), "%s", name);
     }
     m.ev.type = PURR_RT_EV_APP;
-    return xQueueSend(s_dev[slot].q, &m, 0) == pdTRUE ? 0 : -1;
+    return q_post(&s_dev[slot], &m);
 }
 
 int purr_catrt_post_ui(int slot, int handle, const char *what)
@@ -812,9 +937,6 @@ int purr_catrt_post_ui(int slot, int handle, const char *what)
         return -1;
     }
     rtdev_t *d = &s_dev[slot];
-    if (!d->in_use || d->q == NULL) {
-        return -1;
-    }
     app_msg_t m;
     memset(&m, 0, sizeof(m));
     m.has_aev = 1;
@@ -823,7 +945,7 @@ int purr_catrt_post_ui(int slot, int handle, const char *what)
     m.aev.arg = handle;
     snprintf(m.name, sizeof(m.name), "%s", what);
     m.ev.type = PURR_RT_EV_APP;
-    return xQueueSend(d->q, &m, 0) == pdTRUE ? 0 : -1;       /* a full queue drops it, never blocks */
+    return q_post(d, &m);                                    /* a full queue drops it, never blocks */
 }
 
 void purr_catrt_close_slot(int slot)
@@ -965,7 +1087,7 @@ esp_err_t purr_catrt_start(const purr_catrt_platform_t *platform)
     purr_rt_host_t host = {
         .ctx = NULL, .load = host_load, .unload = host_unload, .deliver = host_deliver,
         .now_ms = host_now, .free_bytes = host_free, .save_state = host_save_state,
-        .load_state = host_load_state, .log = host_log,
+        .load_state = host_load_state, .log = host_log, .freeze = host_freeze,
     };
     purr_rt_init(&s_rt, &host);
     s_rt.cfg.reserve = 64 * 1024;
@@ -973,9 +1095,11 @@ esp_err_t purr_catrt_start(const purr_catrt_platform_t *platform)
     s_rt.cfg.critical = 256 * 1024;
     s_rt.cfg.margin = 128 * 1024;
     s_rt.cfg.min_kill_ms = 5000;
+    purr_rt_caps_for_psram((uint32_t)heap_caps_get_total_size(MALLOC_CAP_SPIRAM), &s_rt.cfg.max_frozen, &s_rt.cfg.max_services);
     purr_rt_set_defaults(&s_rt);
     purr_rt_add_sink(&s_rt, sink_cb, NULL);
 
+    s_qmu = xSemaphoreCreateMutexStatic(&s_qmu_buf);
     s_reqq = xQueueCreate(16, sizeof(req_t *));
     if (s_reqq == NULL ||
         xTaskCreate(manager_task, "rt-mgr", 7168, NULL, 6, NULL) != pdPASS) {

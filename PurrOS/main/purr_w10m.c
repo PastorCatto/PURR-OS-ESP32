@@ -676,6 +676,10 @@ static void status_layout(void)
 static void clock_tick(lv_timer_t *timer)
 {
     (void)timer;
+    char notice[64];
+    if (purr_catrt_take_notice(notice, sizeof(notice))) {      /* the runtime closed an app for room, or refused a service */
+        w10m_banner(notice, 0);
+    }
     time_t now = time(NULL);
     char buf[12];
     if (now > 1000000000) {

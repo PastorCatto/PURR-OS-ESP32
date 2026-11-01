@@ -100,6 +100,12 @@ void purr_catrt_set_files(const void *table);
 void purr_catrt_set_devices(const void *table);
 void purr_catrt_set_store(const void *table);
 void purr_catrt_set_power(const void *table, void (*stopped)(int slot, const char *name), void (*paused)(int slot));
+/* Called when the runtime freezes an app's task (it left the screen and may not run in the background): drop its locks and alarms. */
+void purr_catrt_set_power_frozen(void (*frozen)(int slot));
+
+/* A short line for the user when the runtime closed an app to make room ("Closed Notes to free memory") or refused a service. The shell
+ * polls this from its UI timer, so the runtime's own task never waits on the UI. 1 = a line was copied out. */
+int purr_catrt_take_notice(char *buf, size_t cap);
 
 #ifdef __cplusplus
 }

@@ -30,6 +30,7 @@ static fake_app_t s_apps[] = {
     {"cfg1",   PURR_APP_KIND_UI,           0, 100, 0},
     {"cfg2",   PURR_APP_KIND_UI,           0, 100, 0},
     {"cfg3",   PURR_APP_KIND_UI,           0, 100, 0},
+    {"sync2",  PURR_APP_KIND_DAEMON,       0, 500, 0},
 };
 #define NAPPS ((int)(sizeof(s_apps) / sizeof(s_apps[0])))
 
@@ -114,11 +115,17 @@ static int fake_load(void *ctx, const char *name, purr_rt_app_t *out)
     return -1;
 }
 
+static uint8_t s_frozen[16];              /* by app handle: the host has stopped its task */
+static int s_freeze_calls, s_delivered_frozen;
+
 /* Instances start their blocks at CREATE and release them at unload, like the device layer. */
 static int fake_deliver(void *ctx, int id, const purr_rt_app_t *app, const purr_rt_event_t *ev)
 {
     (void)ctx;
     (void)id;
+    if (s_frozen[app->handle]) {
+        s_delivered_frozen++;                 /* the manager told a stopped task something: the device would hang */
+    }
     if (ev->type == PURR_RT_EV_CREATE) {
         int idx = (int)app->handle - 1;
         if (s_apps[idx].create_result < 0) {
@@ -130,6 +137,12 @@ static int fake_deliver(void *ctx, int id, const purr_rt_app_t *app, const purr_
 }
 
 static uint32_t s_unloaded_mem;
+static void fake_freeze(void *ctx, uint32_t handle, int frozen)
+{
+    (void)ctx;
+    s_frozen[handle] = (uint8_t)frozen;
+    s_freeze_calls++;
+}
 static void fake_unload(void *ctx, uint32_t handle)
 {
     (void)ctx;
@@ -193,10 +206,12 @@ static void reset(uint32_t total)
     s_created_state_len = 0;
     s_event_calls = 0;
     s_unloaded_mem = 0;
+    memset(s_frozen, 0, sizeof(s_frozen));
+    s_freeze_calls = s_delivered_frozen = 0;
     purr_rt_host_t host = {
         .load = fake_load, .unload = fake_unload, .deliver = fake_deliver, .now_ms = fake_now,
         .free_bytes = fake_free, .save_state = fake_save, .load_state = fake_load_state,
-        .log = fake_log,
+        .log = fake_log, .freeze = fake_freeze,
     };
     purr_rt_init(&rt, &host);
     purr_rt_add_sink(&rt, sink, NULL);
@@ -908,6 +923,141 @@ static void test_the_event_stream_tells_the_whole_story(void)
     CHECK(event_index("focus>>1,clock") != event_index("focus>>1,clock") + 1);
 }
 
+/* ------------------------------------------------------------ resident apps: frozen, evicted, services */
+
+static void test_leaving_the_screen_freezes_and_coming_back_thaws(void)
+{
+    reset(100000);
+    int n = purr_rt_open(&rt, "notes");
+    purr_rt_open(&rt, "shell");               /* notes leaves the screen: not background-ok, so suspended */
+    CHECK_EQ(purr_rt_get(&rt, n)->state, PURR_RT_SUSPENDED);
+    CHECK_EQ(s_frozen[1], 1);                 /* notes is handle 1 */
+    CHECK_EQ(s_delivered_frozen, 0);
+    purr_rt_focus(&rt, n);                    /* RESUME must reach a running task */
+    CHECK_EQ(s_frozen[1], 0);
+    CHECK_EQ(s_delivered_frozen, 0);
+    purr_rt_focus(&rt, 2);                    /* notes frozen again */
+    CHECK_EQ(s_frozen[1], 1);
+    purr_rt_stop(&rt, n, PURR_APP_DESTROY_USER);   /* its DESTROY must reach a running task too */
+    CHECK_EQ(s_delivered_frozen, 0);
+}
+
+static void test_a_background_ok_app_is_not_frozen(void)
+{
+    reset(100000);
+    purr_rt_open(&rt, "clock");
+    purr_rt_open(&rt, "shell");
+    CHECK_EQ(purr_rt_get(&rt, 1)->state, PURR_RT_BACKGROUND);
+    CHECK_EQ(s_frozen[2], 0);                 /* clock is handle 2 */
+}
+
+static void test_over_the_frozen_cap_the_oldest_is_closed(void)
+{
+    reset(100000);
+    rt.cfg.max_frozen = 2;
+    int a = purr_rt_open(&rt, "notes");
+    s_now += 10;
+    int b = purr_rt_open(&rt, "shell");
+    s_now += 10;
+    int c = purr_rt_open(&rt, "cfg1");
+    s_now += 10;
+    CHECK(purr_rt_get(&rt, a) != NULL && purr_rt_get(&rt, b) != NULL);   /* two frozen: at the cap */
+    int d = purr_rt_open(&rt, "cfg2");        /* a third would be frozen: notes, the longest unused, goes */
+    CHECK(d > 0);
+    CHECK(purr_rt_get(&rt, a) == NULL);
+    CHECK(purr_rt_get(&rt, b) != NULL && purr_rt_get(&rt, c) != NULL);
+    CHECK(saw_event("evicted>>1,notes"));
+    CHECK_EQ(s_destroy_reason, PURR_APP_DESTROY_MEMORY);
+    CHECK_EQ(s_delivered_frozen, 0);
+    CHECK_EQ(rt.fg_id, d);                    /* the app in front is never the one closed */
+}
+
+static void test_the_app_just_brought_forward_is_never_evicted(void)
+{
+    reset(100000);
+    rt.cfg.max_frozen = 1;
+    int a = purr_rt_open(&rt, "notes");
+    s_now += 10;
+    int b = purr_rt_open(&rt, "shell");       /* notes frozen: at the cap */
+    s_now += 10;
+    int c = purr_rt_open(&rt, "cfg1");        /* shell frozen too: notes (older) is closed */
+    CHECK(purr_rt_get(&rt, a) == NULL);
+    s_now += 10;
+    CHECK_EQ(purr_rt_focus(&rt, b), 0);       /* shell back in front, cfg1 frozen: one frozen, fine */
+    CHECK(purr_rt_get(&rt, b) != NULL && purr_rt_get(&rt, c) != NULL);
+    CHECK_EQ(rt.fg_id, b);
+}
+
+static void test_persistent_frozen_apps_are_not_evicted(void)
+{
+    reset(100000);
+    char err[64];
+    purr_rt_config_load(&rt, "rule = persistent, name:notes\n", err, sizeof(err));
+    rt.cfg.max_frozen = 1;                    /* after the load: a load starts from the defaults */
+    int a = purr_rt_open(&rt, "notes");
+    s_now += 10;
+    int b = purr_rt_open(&rt, "shell");
+    s_now += 10;
+    purr_rt_open(&rt, "cfg1");                /* two frozen over a cap of one: shell goes, notes is protected */
+    CHECK(purr_rt_get(&rt, a) != NULL);
+    CHECK(purr_rt_get(&rt, b) == NULL);
+}
+
+static void test_a_full_set_of_services_refuses_another(void)
+{
+    reset(100000);
+    rt.cfg.max_services = 1;
+    purr_rt_open(&rt, "notes");
+    int s1 = purr_rt_open(&rt, "sync");
+    CHECK_EQ(purr_rt_get(&rt, s1)->state, PURR_RT_BACKGROUND);
+    CHECK_EQ(purr_rt_open(&rt, "sync2"), PURR_RT_E_SERVICES);
+    CHECK(saw_event("refused>>sync2,service-slots"));
+    CHECK_EQ(purr_rt_count(&rt), 2);
+}
+
+static void test_a_background_app_over_the_service_cap_is_frozen_instead(void)
+{
+    reset(100000);
+    rt.cfg.max_services = 1;
+    purr_rt_open(&rt, "sync");                /* takes the one service slot */
+    int c = purr_rt_open(&rt, "clock");       /* background-ok, in front */
+    purr_rt_open(&rt, "shell");               /* clock leaves: no slot left, so suspended and frozen */
+    CHECK_EQ(purr_rt_get(&rt, c)->state, PURR_RT_SUSPENDED);
+    CHECK_EQ(s_frozen[2], 1);
+}
+
+static void test_the_psram_table(void)
+{
+    uint32_t f, s;
+    purr_rt_caps_for_psram(8u * 1024 * 1024 - 100000, &f, &s);
+    CHECK_EQ(f, 3);
+    CHECK_EQ(s, 2);
+    purr_rt_caps_for_psram(4u * 1024 * 1024 - 100000, &f, &s);
+    CHECK_EQ(f, 2);
+    CHECK_EQ(s, 1);
+    purr_rt_caps_for_psram(2u * 1024 * 1024, &f, &s);
+    CHECK_EQ(f, 1);
+    CHECK_EQ(s, 1);
+    purr_rt_caps_for_psram(0, &f, &s);
+    CHECK_EQ(f, 1);
+    CHECK_EQ(s, 1);
+}
+
+static void test_a_config_file_can_lower_the_caps_but_not_raise_them(void)
+{
+    reset(100000);
+    rt.cfg.max_frozen = 3;
+    rt.cfg.max_services = 2;
+    purr_rt_set_defaults(&rt);
+    char err[64];
+    purr_rt_config_load(&rt, "general:max_frozen = 1\ngeneral:max_services = 9\n", err, sizeof(err));
+    CHECK_EQ(rt.cfg.max_frozen, 1);
+    CHECK_EQ(rt.cfg.max_services, 2);         /* 9 is more than the machine allows */
+    purr_rt_config_load(&rt, "general:max_frozen = 0\n", err, sizeof(err));
+    CHECK_EQ(rt.cfg.max_frozen, 3);           /* 0 means "no cap": not on a machine that has one */
+}
+
+
 int main(void)
 {
     test_open_and_lifecycle();
@@ -951,5 +1101,14 @@ int main(void)
     test_boot_apps_start_at_boot_and_the_rest_wait_for_a_login();
     test_an_exec_boot_app_that_cannot_open_is_logged_and_skipped();
     test_the_event_stream_tells_the_whole_story();
+    test_leaving_the_screen_freezes_and_coming_back_thaws();
+    test_a_background_ok_app_is_not_frozen();
+    test_over_the_frozen_cap_the_oldest_is_closed();
+    test_the_app_just_brought_forward_is_never_evicted();
+    test_persistent_frozen_apps_are_not_evicted();
+    test_a_full_set_of_services_refuses_another();
+    test_a_background_app_over_the_service_cap_is_frozen_instead();
+    test_the_psram_table();
+    test_a_config_file_can_lower_the_caps_but_not_raise_them();
     TK_DONE("test_runtime");
 }
