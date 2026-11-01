@@ -97,3 +97,21 @@ destroyed after the app task has stopped. (2) Settings > Apps > Permissions had 
 (littlefs runs on the app's stack for a listing). Files 1.1.0: status messages and errors under the failing button. **Needs the owner to try it on the device**; if it still locks, `Back` at the top level (close) is the
 first thing to look at.
 - New catcall `devices` and the Device Manager app (`Apps/devices/`, 1.0.0), published to the dev server (unsigned).
+
+### Files "going back" lock, round 2 (2026-10-31, owner: it still happens)
+Still not reproduced (no device attached, VM left alone). Found by reading, fixed in `main/purr_catrt.c`: `purr_catrt_post_ui`, `purr_catrt_post_event` and the timer callback sent into an app's queue
+without checking that the app was closing, while `teardown` deleted that queue. A second Back tap (or a late permission answer) during the close lands in that window: a send into a queue being freed
+can wedge the UI task. Now every post goes through `q_post` (a mutex guards the queue's lifetime, refuses once `closing` is set), `teardown` clears `d->q` under it before deleting, and the wait for a
+straggling app task before the forced delete went from 0.5 s to 2 s (a forced delete can leave a littlefs or UI lock held). Builds clean in stdmin, stdrec, stdfull. **Needs the owner to try it on the device**;
+if it still locks, attach OpenOCD at the freeze (`thread apply all bt`) rather than reading further.
+
+### The real cause of the Files and Device Manager crashes: jump tables (2026-11-01, found and fixed, verified in the VM)
+Reproduced in the VM (tap through a headless run, serial log, `addr2line` on the panic). **Not** the queue race above (that was a real but separate defect). Cause: a `switch` compiles to a jump table whose
+words hold addresses in the MIDDLE of a function. The module build (`purrstrap/scripts/modules.py`) relocated only words equal to a function's first byte against the executable alias; a jump-table word
+went to the writable (data) alias, so the first `jx` jumped into data memory and the app died: Device Manager on its first tap (`on_click` switches on the page), Files on Back (`go_back` switches on the page),
+the Store, and the `modem-at` driver. Fix: every address inside a FUNC symbol's range now counts as code (`_CodeAddresses`; test `purrstrap/tests/test_modules_relocs.py`). Rebuilt and republished: Device Manager,
+Files (dev repo), the built-in Store (`purr_builtin_apps.c` regenerated, all kernels rebuilt). **Still to republish: the `modem-at` driver** (one jump table). VM result: all six Device Manager pages open, Back
+closes it; Files goes folder -> item -> places -> closed; the built-in Store opens and asks for its permission. Any app or driver already signed and shipped with a `switch` of five or more dense cases needs a rebuild.
+Also fixed: an app asking for a permission inside `on_create` was refused as "background" (no prompt ever appeared): `purr_catrt_slot_info` counts a starting UI app as foreground (Device Manager showed "for administrators").
+Open, found in the VM: tapping a sleeping screen to wake it panicked once in the I2C interrupt handler (bus error reading the I2C FIFO register, `i2c_isr_receive_handler`); not seen on an awake screen. Probably the
+emulated I2C, not the firmware: not investigated.

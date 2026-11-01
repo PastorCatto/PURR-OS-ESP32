@@ -10,6 +10,7 @@ unsigned PURR_IMG_MODULE container (or PURR_IMG_APP for --kind app); sign it wit
 sign` same as any other image.
 """
 
+import bisect
 import glob
 import os
 import shutil
@@ -117,22 +118,42 @@ def _symbols(nm_output):
     return table
 
 
+class _CodeAddresses:
+    """Every address that lies inside a function (ELF symbol type FUNC, from `readelf -s`): its first byte and every byte after.
+
+    Not just function starts. A `switch` compiles to a jump table whose words hold addresses in the MIDDLE of a function; they are
+    jumped to, so they must be relocated against the executable alias like a function pointer is. Classed as plain data they point at
+    the writable alias, the first `jx` lands in data memory, and the app dies on its first switch (Device Manager on its first tap,
+    Files on Back)."""
+
+    def __init__(self, ranges):
+        self._ranges = sorted(ranges)
+        self._starts = [r[0] for r in self._ranges]
+
+    def __contains__(self, addr):
+        i = bisect.bisect_right(self._starts, addr) - 1
+        return i >= 0 and self._ranges[i][0] <= addr < self._ranges[i][1]
+
+    def __len__(self):
+        return len(self._ranges)
+
+
 def _function_addresses(readelf_output):
-    """The set of addresses that are genuinely functions (ELF symbol type FUNC), from
-    `readelf -s`. Deliberately not nm's section-letter classification: with everything
-    merged into one section (linker_script(), for the "one segment" design), nm's T/t just
-    means "lives in .module" and includes read-only DATA (a const struct, a string) placed
-    there by -mtext-section-literals -- not "this is callable". readelf's type column is the
-    compiler's real, section-independent answer to "is this a function or an object"."""
-    addrs = set()
+    """The code addresses of the module (see _CodeAddresses), from `readelf -s`. Deliberately not nm's section-letter classification:
+    with everything merged into one section (linker_script(), for the "one segment" design), nm's T/t just means "lives in .module"
+    and includes read-only DATA (a const struct, a string) placed there by -mtext-section-literals -- not "this is callable".
+    readelf's type column is the compiler's real, section-independent answer to "is this a function or an object"."""
+    ranges = []
     for line in readelf_output.splitlines():
         parts = line.split()
         if len(parts) >= 4 and parts[3] == "FUNC":
             try:
-                addrs.add(int(parts[1], 16))
+                start = int(parts[1], 16)
+                size = int(parts[2], 0)
             except ValueError:
-                pass
-    return addrs
+                continue
+            ranges.append((start, start + max(size, 1)))
+    return _CodeAddresses(ranges)
 
 
 def build_one(ctx, gcc, objcopy, nm, readelf, sources, out_dir, tag, base, entry):
