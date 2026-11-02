@@ -94,6 +94,20 @@ status = "works"
 note = "The keyboard controller takes the backlight command [0x01, level]."
 
 [[device]]
+name = "kbdraw"
+compatible = "kbd-raw"
+class = "input"
+bus = "i2c"
+priority = "optional"
+port = 0
+sda = 18
+scl = 8
+addr = 0x55
+hz = 100000
+status = "written"
+note = "Raw key state for games (command 0x03 raw, 0x04 back to characters). The 0x04 command is from LilyGO's firmware and not confirmed on a unit."
+
+[[device]]
 name = "gps0"
 compatible = "gnss-nmea"
 class = "gnss"
@@ -156,3 +170,31 @@ bck = 7
 ws = 5
 dout = 6
 status = "template"
+
+# How the game cores see this board (purrstrap games target): the one thing the rest of the file does not say is which hardware
+# input is which game button. Everything else (display, SD card, audio pins, battery, power pin) is read from the sections above.
+[game]
+target_name = "T-DECK-PLUS"
+input = "i2c-keyboard-raw"       # "i2c-keyboard-raw" (a key matrix read over I2C) | "i2c-expander" (e.g. MCP23017) | "gpio"
+kbd_addr = 0x55
+kbd_raw_cmd = 0x03              # puts the keyboard controller into raw key-number mode
+screen_madctl = 0xC8            # the cores rotate the picture themselves: this is the panel's native orientation
+audio = "i2s-dac"               # the speaker section: bck / ws / dout
+battery_min_mv = 3500
+battery_max_mv = 4200
+menu_gpio = 0                   # the boot button doubles as the menu button (active low, pulled up)
+
+[game.keys]                     # button = the key number the controller reports in raw mode
+up = 18
+right = 17
+down = 20
+left = 19
+select = 7
+start = 30
+option = 31
+a = 1
+b = 3
+x = 0
+y = 21
+l = 24
+r = 14

@@ -26,7 +26,7 @@ NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # time only; nothing downstream enforces them yet (that spec's own note on what reaches the
 # signed .cat today).
 VALID_CLASSES = ("unprivileged", "privileged")
-VALID_KINDS = ("daemon", "command-line", "ui")
+VALID_KINDS = ("daemon", "command-line", "ui", "game")
 
 
 def _load_modules_script():
