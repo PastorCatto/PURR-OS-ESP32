@@ -176,3 +176,31 @@ shade swipe from the top; everything else is faster than earlier UIs. Do not sta
 - **An error also sits under the button that failed**: Settings moves its result line under the last pressed button (`w10m_last_button`); the Files and Device Manager apps put a message line under each action button.
 - **Settings > Devices and About lost Find hardware, Add by hand, Drivers, the developer server, System update and Reinstall.** They are the **Device Manager** app now (`Apps/devices/`, catcall `devices`, permission `manage-devices`, administrators only). Settings points to it.
 - Compile-checked in the full and minimal profiles; **not run on a device or in the VM**.
+
+### UI art rule (owner, 2026-11-01)
+The icons the system uses today stay as they are (the 16 px status icons, the 32 px Settings page icons, the settings gear). **No new Windows-style icons or Windows/Microsoft branding get added**; anything new is original. The look and feel is a recreation, not a copy.
+Audit of the packed `ui_assets` (57 images, 4.4 MB of the 5 MB partition): 25 are referenced by name in the code (status icons, Settings icons, `wifi_icon`, `img0`, `img1`, `img3`); the rest are not referenced by name. Unreferenced entries with Microsoft branding or Microsoft-app art
+(`windows_logo`, `wp_logo`, `microsoft_ic`, `outlook_ic`, `edge_ic`, `groove_ic`, `tips_ic`, the `news_*` images, `weather_ic`, `stars_ic`) and the wallpapers `img0` to `img9` (3.5 MB) are not decided yet. Names loaded by a number pattern may hide references.
+
+## The lock screen becomes the sign-in screen (owner decisions, 2026-11-01; designed, nothing built)
+Why: today's lock screen (`purr_w10m.c` ~1430-1590) is only a cover with "swipe up"; it asks for no credential and everything stays alive behind it, and there is no auto-lock (the only way to lock is the control center's Lock button).
+- **Locked = the sign-in screen.** Delete the cover overlay, its drag handler and timer, and the lock wallpaper; the sign-in screen (avatar, name, password, PBKDF2 check) gets a locked mode.
+- **What it shows:** once a user has signed in on this device, the screen shows that user's profile (avatar and name) and one password field, plus a "Sign in as another user" button that reveals the full name-and-password form. The last user is remembered device-wide. Before any user has ever signed in, the full form shows as today.
+- **When it locks:** the Lock button, and automatically after the screen has been off for as long as the display timeout is set to (reading to confirm: with a 1 minute timeout the screen goes off at 1 minute and the device locks at 2). "Never" means never auto-lock.
+- **Apps that are open stay frozen and hidden** (the lifecycle code); their windows are kept, so nothing unsaved is lost.
+- **The shell's own UI is offloaded while locked** (start screen, app list, control center, notification panel, Settings): deleted on lock, rebuilt on unlock. Expected to free some tens of KB of internal RAM while locked (a guess, to measure).
+- **Notifications while locked:** a message icon and a count, never the text.
+- **Consequence to settle:** signing in as another user from the locked screen ends the first user's session (their apps are closed after saving state, with a warning), because the frozen apps belong to that user.
+- **To think about:** failed-password back-off now that a password guards the lock; and that unlock rebuilds the UI (about a second, to measure). Protects the UI layer only: files at rest are not encrypted (per-user encryption keyed from the password is a separate project).
+
+## Multitasking: the task view (owner, 2026-11-01; built in 1.0.14, run in the VM, not on a device)
+There is no way to switch between running apps. Swiping up from the bottom edge opens the task view:
+- A card for every running app (the foreground one and the frozen ones), about three across: a square with the app's icon or initial and its name, and a close button (X) in the corner. Tapping a card brings that app forward; the X closes it (its state is saved first); tapping outside, or a swipe down, goes back. The foreground app's card is marked.
+- **Background services** (apps with no screen, such as the Store's companion) are not cards: a small indicator along the bottom lists them ("running in the background: ...").
+- The swipe is detected in the touch read callback (press in the bottom ~16 px, then up by about 40 px) and then cancels the touch, so taps near the bottom edge of an app still work.
+- Needs: a list of the running apps with their state from the runtime (id, name, kind, foreground, frozen, service), an asynchronous focus (like the existing asynchronous close) so the UI task never waits on an app, and a keyboard way to open it for devices without touch. Closed while the lock screen is up.
+- Works with the app lifecycle already built: the frozen apps are the ones the cards show.
+
+**Built (1.0.14).** `purr_w10m_tasks.c`; the swipe is detected in the touch read (`purr_lvgl.c`, with LVGL's own rotation transform), cancels the press and opens the view on the next tick. Cards for every running app that has a screen (initial, name, close button; the app in front has an accent outline), a **Home** button that sends the app in front back to the start screen without closing it (it is frozen, or keeps running if it may), the background services in one line along the bottom, a tap on empty space or a second swipe goes back, a tap on a card brings that app forward. Run in the VM with Beacon and Notes: both cards, Home, close, switch all work.
+Not done: a keyboard way to open it (a bind on the runtime's `cycle` does the switching today); Settings and the Developer Portal are sheets of the shell, not runtime apps, so they have no card; rotating the screen closes the view.
+**Also in 1.0.14: the trackball.** The board lists it (so Device Manager > Drivers > Get missing drivers fetches `trackball-gpio`), and the keypad reads it every 10 ms: a roll is an arrow key, a click is Enter, and a vertical roll scrolls the app window on screen unless a text field has focus. Not run on a unit: the pin directions are still unverified.
