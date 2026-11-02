@@ -531,6 +531,17 @@ static void *layout_cb(void *arg)
     return NULL;
 }
 
+int purr_catrt_ui_scroll(int dy)
+{
+    for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
+        if (s_win[i].used && s_win[i].open && s_win[i].body != NULL) {
+            lv_obj_scroll_by(s_win[i].body, 0, -dy, LV_ANIM_OFF);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void purr_catrt_ui_layout(void)
 {
     layout_cb(NULL);                                    /* called on the UI task by the shell */

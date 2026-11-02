@@ -1244,11 +1244,30 @@ static void *process_request(const purr_ui_request_t *req)
 
 /* ---------------------------------------------------------------- the task */
 
+static volatile int s_paused;
+
+static void *pause_cb(void *arg)
+{
+    int on = (int)(intptr_t)arg;
+    if (!on && s_paused) {
+        lv_obj_invalidate(lv_screen_active());          /* the panel was used by something else: repaint every layer */
+        lv_obj_invalidate(lv_layer_top());
+        lv_obj_invalidate(lv_layer_sys());
+    }
+    s_paused = on;
+    return NULL;
+}
+
+void purr_ui_service_pause(int on)
+{
+    purr_ui_service_run(pause_cb, (void *)(intptr_t)on, NULL);
+}
+
 static void service_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        uint32_t next_ms = lv_timer_handler();
+        uint32_t next_ms = s_paused ? LVGL_TICK_PERIOD_MS : lv_timer_handler();
         if (next_ms == LV_NO_TIMER_READY || next_ms > LVGL_TICK_PERIOD_MS) {
             next_ms = LVGL_TICK_PERIOD_MS;
         }

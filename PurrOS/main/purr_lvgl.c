@@ -8,6 +8,7 @@
 #include "lvgl.h"
 
 #include "purr_display.h"
+#include "purr_driver.h"
 #include "purr_kernel.h"
 #include "purr_power_plat.h"
 #include "purr_ui_service.h"
@@ -100,9 +101,70 @@ int purr_lvgl_get_rotation(void)
  * own. LVGL polls this on its own internal timer once registered -- nothing else to drive. */
 static int s_touch_swallow;
 
+/* ---------------------------------------------------------------- the bottom-edge swipe
+ * Detected in the touch read, on the point as the user sees it (LVGL's own rotation transform, applied here to the raw point, which is what
+ * indev_pointer_proc does next). When the swipe is recognised the press is cancelled (lv_indev_reset: the widget under the finger gets PRESS_LOST, not a
+ * click), the finger is ignored until it lifts, and the view opens on the next tick, not from inside the input handler. */
+#define EDGE_PX  18
+#define SWIPE_PX 36
+static void (*s_edge_cb)(void);
+static int s_edge_down, s_edge_armed, s_edge_y0, s_edge_fired;
+
+void purr_lvgl_set_edge_swipe(void (*cb)(void))
+{
+    s_edge_cb = cb;
+}
+
+static void edge_async(void *arg)
+{
+    (void)arg;
+    if (s_edge_cb != NULL) {
+        s_edge_cb();
+    }
+}
+
+/* The raw panel point as the user sees it (the same transform LVGL applies after the read callback). */
+static void screen_point(int raw_x, int raw_y, int *x, int *y)
+{
+    int ow = (int)lv_display_get_physical_horizontal_resolution(s_lv_display);
+    int oh = (int)lv_display_get_physical_vertical_resolution(s_lv_display);
+    lv_display_rotation_t rot = lv_display_get_rotation(s_lv_display);
+    int px = raw_x, py = raw_y;
+    if (rot == LV_DISPLAY_ROTATION_180 || rot == LV_DISPLAY_ROTATION_270) {
+        px = ow - px - 1;
+        py = oh - py - 1;
+    }
+    if (rot == LV_DISPLAY_ROTATION_90 || rot == LV_DISPLAY_ROTATION_270) {
+        int tmp = py;
+        py = px;
+        px = oh - tmp - 1;
+    }
+    *x = px;
+    *y = py;
+}
+
+/* Returns 1 while a bottom-edge swipe has taken over this touch (report it as released). */
+static int edge_swipe(lv_indev_t *indev, int raw_x, int raw_y)
+{
+    int x, y;
+    screen_point(raw_x, raw_y, &x, &y);
+    if (!s_edge_down) {
+        s_edge_down = 1;
+        s_edge_armed = s_edge_cb != NULL && y >= (int)lv_display_get_vertical_resolution(s_lv_display) - EDGE_PX;
+        s_edge_y0 = y;
+        s_edge_fired = 0;
+    }
+    if (s_edge_armed && !s_edge_fired && s_edge_y0 - y >= SWIPE_PX) {
+        s_edge_fired = 1;
+        lv_indev_reset(indev, NULL);
+        lv_indev_wait_release(indev);
+        lv_async_call(edge_async, NULL);
+    }
+    return s_edge_fired;
+}
+
 static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    (void)indev;
     uint16_t x, y;
     if (purr_kernel_touch_read(&x, &y)) {
         if (purr_power_sys_activity()) {
@@ -112,11 +174,18 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
             data->state = LV_INDEV_STATE_RELEASED;
             return;
         }
+        if (edge_swipe(indev, x, y)) {
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
         data->point.x = x;
         data->point.y = y;
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         s_touch_swallow = 0;
+        s_edge_down = 0;
+        s_edge_armed = 0;
+        s_edge_fired = 0;
         data->state = LV_INDEV_STATE_RELEASED;
     }
 }
@@ -127,9 +196,75 @@ static lv_indev_t *s_lv_kbd;
 static uint32_t s_kbd_key;
 static int s_kbd_down;
 
+/* ---------------------------------------------------------------- the trackball
+ * Sampled here, in the keypad's read (every 10 ms, see purr_lvgl_init), because the ball's sensors toggle a line per step and a step is a change of level
+ * between two reads: a slower rate would drop steps. Each step becomes one arrow key; a click is Enter. Until the device is bound (the driver has to be
+ * downloaded first) it is looked at once a second. */
+static int (*s_scroll_cb)(int dy);
+static int s_tb_bound, s_tb_dx, s_tb_dy, s_tb_click, s_tb_click_prev;
+static uint32_t s_tb_check;
+
+void purr_lvgl_set_scroll_handler(int (*cb)(int dy))
+{
+    s_scroll_cb = cb;
+}
+
+static void trackball_poll(void)
+{
+    if (!s_tb_bound) {
+        if (s_tb_check != 0 && lv_tick_elaps(s_tb_check) < 1000) {
+            return;
+        }
+        s_tb_check = lv_tick_get() | 1;
+        s_tb_bound = purr_device_state("trackball") == PURR_DEV_BOUND;
+        if (!s_tb_bound) {
+            return;
+        }
+    }
+    uint8_t b[4] = {0};
+    if (purr_device_read("trackball", b, sizeof(b)) < 3) {
+        return;
+    }
+    s_tb_dx += (int8_t)b[0];
+    s_tb_dy += (int8_t)b[1];
+    s_tb_dx = s_tb_dx > 8 ? 8 : (s_tb_dx < -8 ? -8 : s_tb_dx);          /* a long roll leaves no tail of keys */
+    s_tb_dy = s_tb_dy > 8 ? 8 : (s_tb_dy < -8 ? -8 : s_tb_dy);
+    if (b[2] && !s_tb_click_prev) {
+        s_tb_click = 1;
+    }
+    s_tb_click_prev = b[2];
+}
+
+/* One pending trackball step as an LVGL key, or 0. A vertical roll scrolls the app window on screen unless a text field has focus. */
+static uint32_t trackball_key(lv_indev_t *kbd)
+{
+    trackball_poll();
+    if (s_tb_click) {
+        s_tb_click = 0;
+        return LV_KEY_ENTER;
+    }
+    if (s_tb_dy != 0) {
+        int dy = s_tb_dy > 0 ? 1 : -1;
+        s_tb_dy -= dy;
+        lv_group_t *g = kbd != NULL ? lv_indev_get_group(kbd) : NULL;
+        lv_obj_t *f = g != NULL ? lv_group_get_focused(g) : NULL;
+        if (f == NULL || !lv_obj_check_type(f, &lv_textarea_class)) {
+            if (s_scroll_cb != NULL && s_scroll_cb(dy * 24)) {
+                return 0;
+            }
+        }
+        return dy > 0 ? LV_KEY_DOWN : LV_KEY_UP;
+    }
+    if (s_tb_dx != 0) {
+        int dx = s_tb_dx > 0 ? 1 : -1;
+        s_tb_dx -= dx;
+        return dx > 0 ? LV_KEY_RIGHT : LV_KEY_LEFT;
+    }
+    return 0;
+}
+
 static void kbd_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
-    (void)indev;
     if (s_kbd_down) {
         s_kbd_down = 0;
         data->state = LV_INDEV_STATE_RELEASED;
@@ -137,7 +272,8 @@ static void kbd_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         return;
     }
     char c = purr_kernel_key();
-    if (c == 0) {
+    uint32_t tk = c == 0 ? trackball_key(indev) : 0;
+    if (c == 0 && tk == 0) {
         data->state = LV_INDEV_STATE_RELEASED;
         data->key = s_kbd_key;
         return;
@@ -147,8 +283,8 @@ static void kbd_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->key = s_kbd_key;
         return;
     }
-    uint32_t k = (uint8_t)c;
-    switch (c) {
+    uint32_t k = tk != 0 ? tk : (uint8_t)c;
+    switch (tk != 0 ? 0 : c) {
     case '\r':
     case '\n': k = LV_KEY_ENTER; break;
     case 8:
@@ -209,6 +345,7 @@ esp_err_t purr_lvgl_init(void)
     s_lv_kbd = lv_indev_create();
     lv_indev_set_type(s_lv_kbd, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(s_lv_kbd, kbd_read_cb);
+    lv_timer_set_period(lv_indev_get_read_timer(s_lv_kbd), 10);       /* the trackball needs a read at least every 10 ms */
 
     ESP_LOGI(TAG, "up: %ux%u, %u byte draw buffer (PSRAM), LVGL %d.%d.%d",
              (unsigned)info.width, (unsigned)info.height, (unsigned)bytes, LVGL_VERSION_MAJOR,

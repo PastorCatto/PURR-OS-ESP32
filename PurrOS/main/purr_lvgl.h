@@ -63,6 +63,14 @@ struct _lv_indev_t;
 struct _lv_indev_t *purr_lvgl_keypad(void);
 int purr_lvgl_get_rotation(void);
 
+/* A swipe up from the bottom edge of the screen (a press in the bottom 18 px that moves up 36 px) calls this on the UI task and cancels the touch, so
+ * what is underneath is not tapped. NULL turns it off. */
+void purr_lvgl_set_edge_swipe(void (*cb)(void));
+
+/* The trackball (the "trackball" device, see Modules/drivers/trackball_gpio_module.c) acts as arrow keys and Enter on the keypad. Rolling up or
+ * down first offers the move to this handler (dy > 0 = further down; return 1 if it scrolled something) unless a text field has focus. */
+void purr_lvgl_set_scroll_handler(int (*cb)(int dy));
+
 #ifdef __cplusplus
 }
 #endif

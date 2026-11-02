@@ -30,6 +30,7 @@
 #include "purr_appmgr.h"
 #include "purr_battery.h"
 #include "purr_catrt.h"
+#include "purr_catrt_game.h"
 #include "purr_catrt_ui.h"
 #include "purr_console.h"
 #include "purr_kernel.h"
@@ -39,6 +40,7 @@
 #include "purr_ui_assets.h"
 #include "purr_ui_service.h"
 #include "purr_w10m_priv.h"
+#include "purr_wallpaper.h"
 #include "purr_w10m_theme.h"
 
 static const char *TAG = "w10m";
@@ -54,7 +56,6 @@ static const char *TAG = "w10m";
 #define MAX_TILES    40
 
 /* The palette and the look live in purr_w10m_theme.c. */
-static const char *s_wallpaper = "img0";
 
 /* ---------------------------------------------------------------- assets as LVGL images */
 
@@ -1532,7 +1533,7 @@ static void build_lock(void)
     lv_obj_clear_flag(s_lock, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_lock, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
-    s_lock_wall = wp_image(s_lock, "img1");
+    s_lock_wall = wp_image(s_lock, purr_wallpaper_asset(PURR_WP_LOCK));
     lv_obj_t *veil = lv_obj_create(s_lock);
     lv_obj_remove_style_all(veil);
     lv_obj_set_size(veil, LV_PCT(100), LV_PCT(100));
@@ -1577,6 +1578,7 @@ static void lock_layout(void)
 
 static void lock_show(void)
 {
+    w10m_tasks_close();
     s_lock_on = 1;
     lock_clock_refresh();
     lv_obj_remove_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
@@ -1777,7 +1779,7 @@ static void build_bfu(void)
     lv_obj_clear_flag(s_bfu, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_bfu, LV_OBJ_FLAG_CLICKABLE);      /* nothing beneath it can be touched */
 
-    s_bfu_wall = wp_image(s_bfu, "img3");
+    s_bfu_wall = wp_image(s_bfu, purr_wallpaper_asset(PURR_WP_SIGNIN));
     lv_obj_t *veil = lv_obj_create(s_bfu);
     lv_obj_remove_style_all(veil);
     lv_obj_set_size(veil, LV_PCT(100), LV_PCT(100));
@@ -2002,7 +2004,7 @@ static void *build_cb(void *arg)
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     s_wall = lv_image_create(scr);
-    const lv_image_dsc_t *wp = img(s_wallpaper);
+    const lv_image_dsc_t *wp = img(purr_wallpaper_asset(PURR_WP_START));
     if (wp != NULL) {
         lv_image_set_src(s_wall, wp);
         lv_image_set_inner_align(s_wall, LV_IMAGE_ALIGN_CENTER);   /* cropped to the screen, not scaled */
@@ -2160,9 +2162,43 @@ void w10m_place_sheet(lv_obj_t *sheet)
     lv_obj_move_foreground(sheet);
 }
 
+/* The wallpaper choice is device-wide (purr_wallpaper.h), so this shell only draws it: on a change, each surface that exists swaps its picture. */
+static void wall_set_src(lv_obj_t *obj, purr_wp_surface_t surface)
+{
+    const lv_image_dsc_t *d = obj != NULL ? img(purr_wallpaper_asset(surface)) : NULL;
+    if (d != NULL) {
+        lv_image_set_src(obj, d);
+        lv_image_set_inner_align(obj, LV_IMAGE_ALIGN_CENTER);
+    }
+}
+
+static void *wallpaper_apply_cb(void *arg)
+{
+    (void)arg;
+    wall_set_src(s_wall, PURR_WP_START);
+    wall_set_src(s_lock_wall, PURR_WP_LOCK);
+    wall_set_src(s_bfu_wall, PURR_WP_SIGNIN);
+    return NULL;
+}
+
+/* Called from whichever task changed the choice: the Settings app (the UI task itself) or the `settings` command (another task). */
+static void wallpaper_changed(void)
+{
+    if (strcmp(pcTaskGetName(NULL), "ui_service") == 0) {
+        wallpaper_apply_cb(NULL);
+    } else {
+        purr_ui_service_run(wallpaper_apply_cb, NULL, NULL);
+    }
+}
+
 esp_err_t purr_w10m_start(void)
 {
+    purr_lvgl_set_edge_swipe(w10m_tasks_open);                      /* swipe up from the bottom: the task view */
+    purr_lvgl_set_scroll_handler(purr_catrt_ui_scroll);              /* the trackball scrolls the app window on screen */
+    purr_wallpaper_set_listener(wallpaper_changed);
+    purr_wallpaper_register();
     purr_catrt_ui_init();
+    purr_catrt_game_init();
     w10m_perm_init();
     purr_console_set_muted(1);                      /* the text console must not paint over the shell */
     for (size_t i = 0; i < sizeof(s_w10m_keys) / sizeof(s_w10m_keys[0]); i++) {
@@ -2179,6 +2215,7 @@ esp_err_t purr_w10m_start(void)
 
 void w10m_apply_orientation(int degrees)
 {
+    w10m_tasks_close();
     if (purr_lvgl_set_rotation(degrees) == 0) {
         relayout();
         ESP_LOGI(TAG, "orientation %d: %dx%d", degrees, disp_w(), disp_h());
@@ -2258,6 +2295,11 @@ static void *lock_cb(void *arg)
         lock_show();
     }
     return NULL;
+}
+
+int w10m_is_locked(void)
+{
+    return s_lock_on || !s_signed_in;
 }
 
 esp_err_t purr_w10m_lock(void)

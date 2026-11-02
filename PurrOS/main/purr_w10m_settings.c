@@ -55,6 +55,7 @@
 #include "purr_settings.h"
 #include "purr_sysupdate.h"
 #include "purr_trust_os.h"
+#include "purr_wallpaper.h"
 #include "purr_ui_service.h"
 #include "purr_w10m_priv.h"
 #include "purr_w10m_theme.h"
@@ -781,6 +782,11 @@ static void tile_opa_cb(lv_event_t *e)
     purr_theme_set_tile_opacity(lv_slider_get_value(lv_event_get_target(e)));
 }
 
+static void wallpaper_cb(lv_event_t *e)
+{
+    purr_wallpaper_set((int)lv_dropdown_get_selected(lv_event_get_target(e)));      /* saved, and the shell redraws */
+}
+
 static void page_personal(void)
 {
     cm_title(s_body, "Colours");
@@ -819,6 +825,18 @@ static void page_personal(void)
     cm_space(s_body, 4);
     cm_text(s_body, "Background");
     cm_dropdown(s_body, "Dark\nLight", purr_theme_dark() ? 0 : 1, 120, base_cb);
+
+    cm_space(s_body, 4);
+    cm_title(s_body, "Wallpaper");
+    {
+        char names[256] = "";
+        for (int i = 0; i <= PURR_WALLPAPER_BUILTIN; i++) {
+            size_t n = strlen(names);
+            snprintf(names + n, sizeof(names) - n, "%s%s", i ? "\n" : "", purr_wallpaper_name(i));
+        }
+        cm_dropdown(s_body, names, purr_wallpaper_get(), 150, wallpaper_cb);
+    }
+    cm_dim(s_body, "On the start, lock and sign-in screens. It stays when you switch the shell.");
 
     cm_space(s_body, 4);
     cm_title(s_body, "Effects");

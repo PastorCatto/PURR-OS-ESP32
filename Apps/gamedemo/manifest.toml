@@ -1,0 +1,26 @@
+name = "gamedemo"
+version = "1.0.0"
+description = "Game demo: a bouncing square, button lights and a frame-time bar. Tests the game catcall."
+class = "unprivileged"
+kind = "game"
+sdk_version = "0.1.0"
+entry = "gamedemo_entry"
+
+[catcalls]
+console = "1.0"
+sched = "1.0"
+game = "1.0"
+
+[permissions]
+requests = []
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 24576
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "Game demo"
+icon = ""

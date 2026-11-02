@@ -16,12 +16,12 @@ if(CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS)
                           "purr_card_shell.c"
                           # the setup wizard (recovery loader and KittenOS first boot) and what it is made of: the theme and
                           # the Settings widgets, in every profile
-                          "purr_w10m_theme.c" "purr_w10m_widgets.c" "purr_oobe.c")
+                          "purr_w10m_theme.c" "purr_w10m_widgets.c" "purr_oobe.c" "purr_wallpaper.c")
     # The Windows 10 Mobile style shell (and the larger fonts it uses) is left out of the recovery
     # profile: KittenOS's slot is 1.5 MB and the recovery build had no room for it.
     if(NOT CONFIG_PURR_PROFILE_RECOVERY)
         list(APPEND main_srcs "purr_w10m.c" "purr_w10m_settings.c" "purr_repo_dev.c"
-                              "purr_w10m_devportal.c" "purr_catrt_ui.c" "purr_w10m_perm.c")
+                              "purr_w10m_devportal.c" "purr_catrt_ui.c" "purr_w10m_perm.c" "purr_w10m_tasks.c" "purr_catrt_game.c")
     endif()
     list(APPEND main_reqs lvgl)
 endif()
