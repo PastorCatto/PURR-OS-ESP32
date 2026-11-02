@@ -10,6 +10,7 @@
 /* ---------------------------------------------------------------- the fake world */
 
 #define MAX_FAKE 8
+#define INTERNAL_PER_APP 10000u   /* internal RAM one started app takes in the fake machine */
 #define LOG_LINES 64
 #define LOG_LEN 96
 
@@ -107,6 +108,7 @@ static int fake_load(void *ctx, const char *name, purr_rt_app_t *out)
             out->env = &s_env;
             out->handle = (uint32_t)(i + 1);
             out->memory_needed = s_apps[i].memory;
+            out->internal_needed = INTERNAL_PER_APP;
             out->kind = s_apps[i].kind;
             out->flags = s_apps[i].flags;
             return 0;
@@ -115,6 +117,14 @@ static int fake_load(void *ctx, const char *name, purr_rt_app_t *out)
     return -1;
 }
 
+static uint32_t s_int_free;               /* the fake machine's internal RAM, in bytes; each started app takes INTERNAL_PER_APP of it */
+static uint8_t s_int_held[16];            /* by handle: this instance holds its share */
+static uint32_t fake_internal_free(void *ctx, uint32_t *largest)
+{
+    (void)ctx;
+    *largest = s_int_free;
+    return s_int_free;
+}
 static uint8_t s_frozen[16];              /* by app handle: the host has stopped its task */
 static int s_freeze_calls, s_delivered_frozen;
 
@@ -132,6 +142,8 @@ static int fake_deliver(void *ctx, int id, const purr_rt_app_t *app, const purr_
             return -1;
         }
         s_used += app->memory_needed;
+        s_int_free -= app->internal_needed;
+        s_int_held[app->handle] = 1;
     }
     return purr_rt_invoke(app, ev);
 }
@@ -147,6 +159,10 @@ static void fake_unload(void *ctx, uint32_t handle)
 {
     (void)ctx;
     int idx = (int)handle - 1;
+    if (s_int_held[handle]) {
+        s_int_held[handle] = 0;
+        s_int_free += INTERNAL_PER_APP;
+    }
     /* Only instances that were created hold memory; the fake tracks it by app. */
     if (s_used >= s_apps[idx].memory) {
         s_used -= s_apps[idx].memory;
@@ -207,11 +223,13 @@ static void reset(uint32_t total)
     s_event_calls = 0;
     s_unloaded_mem = 0;
     memset(s_frozen, 0, sizeof(s_frozen));
+    memset(s_int_held, 0, sizeof(s_int_held));
+    s_int_free = 0x40000000u;                 /* plenty, so tests that do not care about it are unaffected */
     s_freeze_calls = s_delivered_frozen = 0;
     purr_rt_host_t host = {
         .load = fake_load, .unload = fake_unload, .deliver = fake_deliver, .now_ms = fake_now,
         .free_bytes = fake_free, .save_state = fake_save, .load_state = fake_load_state,
-        .log = fake_log, .freeze = fake_freeze,
+        .log = fake_log, .freeze = fake_freeze, .internal_free = fake_internal_free,
     };
     purr_rt_init(&rt, &host);
     purr_rt_add_sink(&rt, sink, NULL);
@@ -1058,6 +1076,75 @@ static void test_a_config_file_can_lower_the_caps_but_not_raise_them(void)
 }
 
 
+/* ------------------------------------------------------------ internal RAM admission */
+
+static void test_internal_ram_is_what_limits_apps_not_the_total(void)
+{
+    reset(10000000);                          /* the total (PSRAM included) is huge */
+    rt.cfg.internal_reserve = 24000;
+    s_int_free = 70000;
+    const char *names[] = {"notes", "shell", "cfg1", "cfg2", "cfg3"};
+    int ids[5];
+    for (int i = 0; i < 5; i++) {
+        s_now += 10;
+        ids[i] = purr_rt_open(&rt, names[i]);
+        CHECK(ids[i] > 0);
+    }
+    /* 70000 -> four apps fit with 24000 left (30000); the fifth needs 34000, so the oldest frozen app is closed to make room */
+    CHECK(purr_rt_get(&rt, ids[0]) == NULL);
+    CHECK(saw_event("evicted>>1,notes"));
+    CHECK(s_int_free >= 24000);               /* the system's reserve is never eaten */
+    CHECK_EQ(rt.fg_id, ids[4]);
+}
+
+static void test_no_victim_means_a_clear_refusal(void)
+{
+    reset(10000000);
+    rt.cfg.internal_reserve = 24000;
+    s_int_free = 30000;                       /* not enough for even one app plus the reserve */
+    CHECK_EQ(purr_rt_open(&rt, "notes"), PURR_RT_E_INTERNAL);
+    CHECK_EQ(purr_rt_count(&rt), 0);
+    CHECK(saw_event("refused>>notes,memory"));
+    s_int_free = 100000;                      /* room again: the same app opens */
+    CHECK(purr_rt_open(&rt, "notes") > 0);
+}
+
+static void test_the_foreground_app_is_never_the_price_of_internal_ram(void)
+{
+    reset(10000000);
+    rt.cfg.internal_reserve = 24000;
+    s_int_free = 40000;
+    int a = purr_rt_open(&rt, "notes");       /* 30000 left after it: not enough for another plus the reserve */
+    CHECK(a > 0);
+    CHECK_EQ(purr_rt_open(&rt, "shell"), PURR_RT_E_INTERNAL);   /* the only candidate is in front: refused, not closed */
+    CHECK(purr_rt_get(&rt, a) != NULL);
+}
+
+static void test_internal_ram_emergency_closes_one_app_per_tick(void)
+{
+    reset(10000000);
+    rt.cfg.internal_reserve = 24000;
+    rt.cfg.min_kill_ms = 0;
+    s_int_free = 200000;
+    int a = purr_rt_open(&rt, "notes");
+    s_now += 10;
+    int b = purr_rt_open(&rt, "shell");       /* notes is frozen */
+    s_int_free = 8000;                        /* something else (a job task) took almost everything: below half the reserve */
+    purr_rt_tick(&rt);
+    CHECK(purr_rt_get(&rt, a) == NULL);
+    CHECK(purr_rt_get(&rt, b) != NULL);       /* the one in front stays */
+    CHECK(saw_event("evicted>>1,notes"));
+}
+
+static void test_the_internal_reserve_is_a_config_option(void)
+{
+    reset(100000);
+    char err[64];
+    purr_rt_config_load(&rt, "general:internal_reserve_kb = 16\n", err, sizeof(err));
+    CHECK_EQ(rt.cfg.internal_reserve, 16 * 1024);
+}
+
+
 int main(void)
 {
     test_open_and_lifecycle();
@@ -1110,5 +1197,10 @@ int main(void)
     test_a_background_app_over_the_service_cap_is_frozen_instead();
     test_the_psram_table();
     test_a_config_file_can_lower_the_caps_but_not_raise_them();
+    test_internal_ram_is_what_limits_apps_not_the_total();
+    test_no_victim_means_a_clear_refusal();
+    test_the_foreground_app_is_never_the_price_of_internal_ram();
+    test_internal_ram_emergency_closes_one_app_per_tick();
+    test_the_internal_reserve_is_a_config_option();
     TK_DONE("test_runtime");
 }

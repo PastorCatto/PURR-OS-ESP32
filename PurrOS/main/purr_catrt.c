@@ -33,6 +33,8 @@ static const char *TAG = "rt";
 #define APP_QUEUE_DEPTH   8
 #define APP_STACK_BYTES   8192             /* a file listing or a copy runs littlefs on the app's own stack: 6144 was tight */
 #define CALL_TIMEOUT_MS   3000
+#define APP_INTERNAL_EXTRA 2048            /* its queue, task record and semaphores, on top of the stack */
+#define INTERNAL_RESERVE  (24 * 1024)      /* internal RAM kept for the system's own tasks and the 12-14 KB job tasks (Device Manager, Store) */
 #define MAX_TIMERS        4
 #define EVENT_RING        16
 #define REPLY_LEN         1536
@@ -100,6 +102,8 @@ static const void *s_power_table;
 static void (*s_power_stopped)(int slot, const char *name);
 static void (*s_power_paused)(int slot);
 static void (*s_power_frozen)(int slot);
+static const void *s_game_table;
+static void (*s_game_lifecycle)(int slot, int ev);
 static portMUX_TYPE s_notice_mux = portMUX_INITIALIZER_UNLOCKED;
 static char s_notice[64];
 static const purr_catrt_platform_t *s_plat;
@@ -344,6 +348,15 @@ static uint32_t host_free(void *ctx)
     return (uint32_t)esp_get_free_heap_size();
 }
 
+/* An app's task stack comes from INTERNAL RAM (it cannot live in PSRAM: apps write flash), which is a small part of what host_free()
+ * counts. This is the number admission and the memory-emergency check use. */
+static uint32_t host_internal_free(void *ctx, uint32_t *largest)
+{
+    (void)ctx;
+    *largest = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
 static void host_log(void *ctx, const char *line)
 {
     (void)ctx;
@@ -414,6 +427,7 @@ static int host_load(void *ctx, const char *name, purr_rt_app_t *out)
     out->env = &s_env;
     out->handle = (uint32_t)(d - s_dev) + 1;
     out->memory_needed = (d->t2.memory_needed ? d->t2.memory_needed : 16384) + APP_STACK_BYTES;
+    out->internal_needed = APP_STACK_BYTES + APP_INTERNAL_EXTRA;
     out->kind = d->t2.kind;
     out->flags = d->t2.flags;
     return 0;
@@ -451,6 +465,9 @@ static void teardown(rtdev_t *d)
             vTaskDelete(d->task);
             d->task = NULL;
         }
+    }
+    if (s_game_lifecycle != NULL && d->t2.kind == PURR_APP_KIND_GAME) {
+        s_game_lifecycle((int)(d - s_dev), PURR_RT_EV_DESTROY);             /* the screen goes back to the shell */
     }
     if (s_ui_lifecycle != NULL && d->t2.kind == PURR_APP_KIND_UI) {      /* only now that the app can no longer call into it */
         s_ui_lifecycle((int)(d - s_dev), d->name, PURR_RT_EV_DESTROY);   /* its window and widgets go with it */
@@ -607,6 +624,10 @@ static int host_deliver(void *ctx, int id, const purr_rt_app_t *app, const purr_
     if (s_ui_lifecycle != NULL && d->t2.kind == PURR_APP_KIND_UI &&
         (ev->type == PURR_RT_EV_RESUME || ev->type == PURR_RT_EV_PAUSE)) {
         s_ui_lifecycle((int)(d - s_dev), d->name, ev->type);              /* show or hide its window */
+    }
+    if (s_game_lifecycle != NULL && d->t2.kind == PURR_APP_KIND_GAME &&
+        (ev->type == PURR_RT_EV_RESUME || ev->type == PURR_RT_EV_PAUSE)) {
+        s_game_lifecycle((int)(d - s_dev), ev->type);                      /* the screen and the buttons change hands */
     }
     if (ev->type == PURR_RT_EV_PAUSE && s_power_paused != NULL) {
         s_power_paused((int)(d - s_dev));                                  /* a screen lock ends with its time in front */
@@ -866,6 +887,12 @@ int purr_catrt_caller(char *name, size_t cap)
     return (int)(d - s_dev);
 }
 
+void purr_catrt_set_game(const void *table, void (*lifecycle)(int slot, int ev))
+{
+    s_game_table = table;
+    s_game_lifecycle = lifecycle;
+}
+
 void purr_catrt_set_power_frozen(void (*frozen)(int slot))
 {
     s_power_frozen = frozen;
@@ -901,6 +928,48 @@ int purr_catrt_slot_info(int slot, purr_catrt_slot_info_t *out)
     out->background_ok = d->t2.kind == PURR_APP_KIND_DAEMON || (flags & PURR_APP_F_BACKGROUND_OK) != 0;
     out->kind = d->t2.kind;
     return 0;
+}
+
+int purr_catrt_tasks(purr_catrt_task_t *out, int max)
+{
+    int n = 0;
+    for (int slot = 0; slot < PURR_RT_MAX_APPS && n < max; slot++) {
+        rtdev_t *d = &s_dev[slot];
+        if (!d->in_use || d->closing || d->id == 0) {
+            continue;
+        }
+        const purr_rt_inst_t *in = NULL;
+        for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
+            if (s_rt.inst[i].id == d->id) {
+                in = &s_rt.inst[i];
+            }
+        }
+        if (in == NULL || in->state == PURR_RT_STARTING || in->state == PURR_RT_STOPPING || in->state == PURR_RT_STOPPED) {
+            continue;
+        }
+        purr_catrt_task_t *t = &out[n++];
+        memset(t, 0, sizeof(*t));
+        t->slot = slot;
+        t->id = d->id;
+        snprintf(t->name, sizeof(t->name), "%s", d->name);
+        t->kind = d->t2.kind;
+        t->foreground = in->state == PURR_RT_FOREGROUND;
+        t->frozen = d->frozen != 0;
+        t->service = d->t2.kind == PURR_APP_KIND_DAEMON;
+    }
+    return n;
+}
+
+void purr_catrt_home(void)
+{
+    post_async(R_DISPATCH, "background active", NULL, 0);
+}
+
+void purr_catrt_focus_slot(int slot)
+{
+    if (slot >= 0 && slot < PURR_RT_MAX_APPS && s_dev[slot].in_use && !s_dev[slot].closing) {
+        post_async(R_FOCUS, NULL, NULL, s_dev[slot].id);
+    }
 }
 
 int purr_catrt_slot_of(const char *name)
@@ -972,6 +1041,10 @@ static const void *catcall_get(const char *name, uint32_t min_version)
     if (strcmp(name, "ui") == 0 && s_ui_table != NULL && min_version <= ((const uint32_t *)s_ui_table)[0]) {
         rtdev_t *d = cur_dev();
         return d != NULL && d->t2.kind == PURR_APP_KIND_UI ? s_ui_table : NULL;
+    }
+    if (strcmp(name, "game") == 0 && s_game_table != NULL && min_version <= ((const uint32_t *)s_game_table)[0]) {
+        rtdev_t *d = cur_dev();
+        return d != NULL && d->t2.kind == PURR_APP_KIND_GAME ? s_game_table : NULL;
     }
     if (strcmp(name, "power") == 0 && s_power_table != NULL && min_version <= ((const uint32_t *)s_power_table)[0]) {
         return s_power_table;
@@ -1087,7 +1160,7 @@ esp_err_t purr_catrt_start(const purr_catrt_platform_t *platform)
     purr_rt_host_t host = {
         .ctx = NULL, .load = host_load, .unload = host_unload, .deliver = host_deliver,
         .now_ms = host_now, .free_bytes = host_free, .save_state = host_save_state,
-        .load_state = host_load_state, .log = host_log, .freeze = host_freeze,
+        .load_state = host_load_state, .log = host_log, .freeze = host_freeze, .internal_free = host_internal_free,
     };
     purr_rt_init(&s_rt, &host);
     s_rt.cfg.reserve = 64 * 1024;
@@ -1095,6 +1168,7 @@ esp_err_t purr_catrt_start(const purr_catrt_platform_t *platform)
     s_rt.cfg.critical = 256 * 1024;
     s_rt.cfg.margin = 128 * 1024;
     s_rt.cfg.min_kill_ms = 5000;
+    s_rt.cfg.internal_reserve = INTERNAL_RESERVE;
     purr_rt_caps_for_psram((uint32_t)heap_caps_get_total_size(MALLOC_CAP_SPIRAM), &s_rt.cfg.max_frozen, &s_rt.cfg.max_services);
     purr_rt_set_defaults(&s_rt);
     purr_rt_add_sink(&s_rt, sink_cb, NULL);

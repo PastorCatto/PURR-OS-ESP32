@@ -30,6 +30,17 @@ static uint32_t free_bytes(purr_rt_t *rt)
     return rt->host.free_bytes ? rt->host.free_bytes(rt->host.ctx) : 0xFFFFFFFFu;
 }
 
+/* Is there internal RAM for one more app task, and still the reserve for the system's own tasks afterwards? */
+static int internal_ok(purr_rt_t *rt, uint32_t need)
+{
+    if (rt->host.internal_free == NULL) {
+        return 1;
+    }
+    uint32_t largest = 0;
+    uint32_t free = rt->host.internal_free(rt->host.ctx, &largest);
+    return free >= need + rt->cfg.internal_reserve && largest >= need;
+}
+
 static void log_line(purr_rt_t *rt, const char *fmt, ...)
 {
     if (!rt->host.log) {
@@ -163,6 +174,7 @@ const char *purr_rt_kind_name(int kind)
     case PURR_APP_KIND_COMMAND_LINE: return "command-line";
     case PURR_APP_KIND_DAEMON:       return "daemon";
     case PURR_APP_KIND_UI:           return "ui";
+    case PURR_APP_KIND_GAME:         return "game";
     }
     return "?";
 }
@@ -180,6 +192,7 @@ void purr_rt_init(purr_rt_t *rt, const purr_rt_host_t *host)
     rt->cfg.margin = 0;
     rt->cfg.min_kill_ms = 0;
     rt->cfg.unresponsive_ms = 0;          /* 0 = never report */
+    rt->cfg.internal_reserve = 0;         /* 0 = none; the device sets it */
     rt->cfg.max_frozen = 0;               /* 0 = no cap; the device sets them from the PSRAM size */
     rt->cfg.max_services = 0;
     rt->next_id = 0;
@@ -720,6 +733,21 @@ int purr_rt_open(purr_rt_t *rt, const char *name)
         purr_rt_stop(rt, v->id, PURR_APP_DESTROY_MEMORY);
     }
 
+    /* Internal RAM: the app's task stack cannot live in PSRAM, so the total above says nothing about it. Close what may be closed (frozen and
+     * background apps, oldest first) until one more task fits and the system keeps its reserve; if nothing can go, say so. */
+    while (!internal_ok(rt, tmp.app.internal_needed)) {
+        purr_rt_inst_t *v = pick_victim(rt);
+        if (v == NULL) {
+            if (rt->host.unload) {
+                rt->host.unload(rt->host.ctx, app.handle);
+            }
+            emitf(rt, "refused", "%s,memory", name);
+            return PURR_RT_E_INTERNAL;
+        }
+        emitf(rt, "evicted", "%d,%s", v->id, v->name);
+        purr_rt_stop(rt, v->id, PURR_APP_DESTROY_MEMORY);
+    }
+
     purr_rt_inst_t *in = NULL;
     for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
         if (rt->inst[i].id == 0) {
@@ -925,6 +953,22 @@ int purr_rt_tick(purr_rt_t *rt)
             stopped++;
             if (rt->cfg.min_kill_ms > 0) {
                 break;
+            }
+        }
+    }
+
+    /* Internal RAM running out is a memory emergency the totals above cannot see: the system's own tasks need it. One victim per tick. */
+    if (rt->host.internal_free != NULL && rt->cfg.internal_reserve != 0) {
+        uint32_t largest = 0;
+        if (rt->host.internal_free(rt->host.ctx, &largest) < rt->cfg.internal_reserve / 2 &&
+            (rt->kills == 0 || now - rt->last_kill_ms >= rt->cfg.min_kill_ms)) {
+            purr_rt_inst_t *v = pick_victim(rt);
+            if (v != NULL) {
+                rt->kills++;
+                rt->last_kill_ms = now;
+                emitf(rt, "evicted", "%d,%s", v->id, v->name);
+                purr_rt_stop(rt, v->id, PURR_APP_DESTROY_MEMORY);
+                stopped++;
             }
         }
     }
@@ -1149,6 +1193,8 @@ static const char *error_text(int e)
     case PURR_RT_E_LOAD:   return "could not load that app";
     case PURR_RT_E_FULL:   return "no room for another app";
     case PURR_RT_E_MEMORY: return "not enough memory";
+    case PURR_RT_E_INTERNAL: return "not enough memory to start another app: close one first";
+    case PURR_RT_E_SERVICES: return "every background slot is taken";
     case PURR_RT_E_CREATE: return "the app failed to start";
     case PURR_RT_E_NOAPP:  return "no such app";
     case PURR_RT_E_STATE:  return "not allowed in the app's state";
@@ -1408,6 +1454,8 @@ int purr_rt_config_load(purr_rt_t *rt, const char *text, char *err, size_t errca
                 rt->cfg.min_kill_ms = v;
             } else if (strcmp(opt, "unresponsive_ms") == 0) {
                 rt->cfg.unresponsive_ms = v;
+            } else if (strcmp(opt, "internal_reserve_kb") == 0) {
+                rt->cfg.internal_reserve = v * 1024u;
             } else if (strcmp(opt, "max_frozen") == 0) {
                 rt->cfg.max_frozen = clamp_cap(v, rt->cfg_defaults.max_frozen);
             } else if (strcmp(opt, "max_services") == 0) {

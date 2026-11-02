@@ -337,6 +337,36 @@ typedef struct {
     int  (*setting)(const char *key, int fallback);
 } purr_cc_store_t;
 
+/* ------------------------------------------------------------------ game
+ * For an app of kind `game` only (PURR_APP_KIND_GAME; plan6.md, "The game surface"). While the game is in front the shell stops drawing and the game owns the
+ * screen and the buttons; the OS takes both back when the game leaves the front or stops, and holding the menu key for a second sends the game back to the
+ * start screen whatever it is doing. Nothing here works while the game is not in front: lcd_write() refuses and buttons() reads 0.
+ * The game paces itself (a sched timer is the simplest way: one frame per PURR_APPEV_TIMER event, each finished well inside a callback's 3 seconds). */
+#define PURR_GBTN_UP     (1u << 0)
+#define PURR_GBTN_DOWN   (1u << 1)
+#define PURR_GBTN_LEFT   (1u << 2)
+#define PURR_GBTN_RIGHT  (1u << 3)
+#define PURR_GBTN_A      (1u << 4)
+#define PURR_GBTN_B      (1u << 5)
+#define PURR_GBTN_X      (1u << 6)
+#define PURR_GBTN_Y      (1u << 7)
+#define PURR_GBTN_L      (1u << 8)
+#define PURR_GBTN_R      (1u << 9)
+#define PURR_GBTN_START  (1u << 10)
+#define PURR_GBTN_SELECT (1u << 11)
+#define PURR_GBTN_OPTION (1u << 12)
+#define PURR_GBTN_MENU   (1u << 13)   /* held: the OS takes the game back to the start screen after a second */
+
+typedef struct {
+    uint32_t version;                                   /* 1 */
+    uint16_t width, height;                             /* the panel, in the screen's current orientation */
+    /* Copies a w by h rectangle of host-endian RGB565 to the panel (clipped); returns when the data is sent. 0, or < 0 if the game is not in front. */
+    int      (*lcd_write)(int x, int y, int w, int h, const uint16_t *pixels);
+    uint32_t (*buttons)(void);                          /* the PURR_GBTN_* bits held right now; 0 when the controls are not available */
+    uint64_t (*ticks_us)(void);                         /* microseconds since boot */
+    void     (*quit)(void);                             /* close this game */
+} purr_cc_game_t;
+
 #ifdef __cplusplus
 }
 #endif

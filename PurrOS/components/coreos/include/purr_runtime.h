@@ -45,6 +45,7 @@ extern "C" {
 #define PURR_APP_KIND_COMMAND_LINE 0
 #define PURR_APP_KIND_DAEMON       1
 #define PURR_APP_KIND_UI           2
+#define PURR_APP_KIND_GAME         3   /* owns the screen and the buttons while it is in front (the `game` catcall) */
 
 typedef enum {
     PURR_RT_STARTING = 0,
@@ -81,6 +82,7 @@ typedef struct {
     const purr_app_env_t *env;
     uint32_t handle;                   /* opaque, passed back to unload */
     uint32_t memory_needed;            /* bytes: its block, for admission */
+    uint32_t internal_needed;          /* bytes of INTERNAL RAM one instance takes (its task's stack and queue): not available from PSRAM */
     uint8_t kind;
     uint8_t flags;
 } purr_rt_app_t;
@@ -107,6 +109,9 @@ typedef struct {
     /* Optional. Stop (frozen = 1) or restart (0) the app's task. Called with the app idle: after its PAUSE returned, and
      * before any event is delivered to it again. NULL = nothing to freeze (host tests, a build without tasks). */
     void (*freeze)(void *ctx, uint32_t handle, int frozen);
+    /* Optional. Free internal RAM in bytes, and the largest free block in *largest. An app's task stack must come from internal RAM, which is
+     * far smaller than the heap total free_bytes() reports (that counts PSRAM). NULL = no limit (host tests). */
+    uint32_t (*internal_free)(void *ctx, uint32_t *largest);
 } purr_rt_host_t;
 
 typedef struct {
@@ -117,6 +122,7 @@ typedef struct {
     uint32_t margin;                   /* recover above low/critical by this much (hysteresis) */
     uint32_t min_kill_ms;              /* least time between two out-of-memory kills */
     uint32_t unresponsive_ms;          /* foreground silent for this long = unresponsive */
+    uint32_t internal_reserve;         /* internal RAM left for the system's own tasks and job tasks when admitting an app; 0 = none */
     uint32_t max_frozen;               /* user apps kept frozen (SUSPENDED) at once; the oldest is closed over this. 0 = no cap */
     uint32_t max_services;             /* apps that may run in the BACKGROUND (services) at once. 0 = no cap */
 } purr_rt_cfg_t;
@@ -208,6 +214,7 @@ int purr_rt_invoke(const purr_rt_app_t *app, const purr_rt_event_t *ev);
 #define PURR_RT_E_ARG       (-7)
 #define PURR_RT_E_UNTRUSTED (-8)   /* refused: not signed by a trusted key (see host.load) */
 #define PURR_RT_E_SERVICES  (-9)   /* every service slot is taken (cfg.max_services) */
+#define PURR_RT_E_INTERNAL  (-10)  /* not enough internal RAM for another app, and none that may be closed to make room */
 int purr_rt_open(purr_rt_t *rt, const char *name);
 
 /* Stops an instance. `reason` is PURR_APP_DESTROY_*. */

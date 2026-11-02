@@ -93,6 +93,20 @@ typedef struct {
 } purr_catrt_slot_info_t;
 int purr_catrt_slot_info(int slot, purr_catrt_slot_info_t *out);
 int purr_catrt_slot_of(const char *name);                      /* -1 if it is not running */
+
+/* What is running, for the task view: every resident app that is not closing. A service (a daemon with no screen) is listed with service = 1. */
+typedef struct {
+    int slot;
+    int id;
+    char name[32];
+    uint8_t kind;               /* PURR_APP_KIND_* */
+    uint8_t foreground;
+    uint8_t frozen;             /* its task is stopped (it left the screen) */
+    uint8_t service;            /* no screen: it stays in the background */
+} purr_catrt_task_t;
+int purr_catrt_tasks(purr_catrt_task_t *out, int max);          /* how many were written */
+void purr_catrt_home(void);                                     /* the app in front steps back to the start screen without closing; returns at once */
+void purr_catrt_focus_slot(int slot);                           /* brings it to the front; returns at once (the switch happens on the manager's task) */
 /* Queues an event to an app's own task, never blocking. type is PURR_APPEV_*. */
 int purr_catrt_post_event(int slot, int type, int arg, const char *name);
 /* The power code registers to hear when an app stops and when it leaves the front. */
@@ -102,6 +116,8 @@ void purr_catrt_set_store(const void *table);
 void purr_catrt_set_power(const void *table, void (*stopped)(int slot, const char *name), void (*paused)(int slot));
 /* Called when the runtime freezes an app's task (it left the screen and may not run in the background): drop its locks and alarms. */
 void purr_catrt_set_power_frozen(void (*frozen)(int slot));
+/* The `game` catcall (purr_catrt_game.c): its table, and a hook called with PURR_RT_EV_RESUME / PAUSE / DESTROY for an app of kind game. */
+void purr_catrt_set_game(const void *table, void (*lifecycle)(int slot, int ev));
 
 /* A short line for the user when the runtime closed an app to make room ("Closed Notes to free memory") or refused a service. The shell
  * polls this from its UI timer, so the runtime's own task never waits on the UI. 1 = a line was copied out. */
