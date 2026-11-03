@@ -34,6 +34,7 @@ static const char *TAG = "rt";
 #define APP_STACK_BYTES   8192             /* a file listing or a copy runs littlefs on the app's own stack: 6144 was tight */
 #define CALL_TIMEOUT_MS   3000
 #define APP_INTERNAL_EXTRA 2048            /* its queue, task record and semaphores, on top of the stack */
+#define GAME_INTERNAL_RESERVE (8 * 1024)  /* a game in front pauses the shell: only the system's own tasks need internal RAM then */
 #define INTERNAL_RESERVE  (24 * 1024)      /* internal RAM kept for the system's own tasks and the 12-14 KB job tasks (Device Manager, Store) */
 #define MAX_TIMERS        4
 #define EVENT_RING        16
@@ -956,6 +957,7 @@ int purr_catrt_tasks(purr_catrt_task_t *out, int max)
         t->foreground = in->state == PURR_RT_FOREGROUND;
         t->frozen = d->frozen != 0;
         t->service = d->t2.kind == PURR_APP_KIND_DAEMON;
+        t->memory = in->memory;
     }
     return n;
 }
@@ -1169,6 +1171,7 @@ esp_err_t purr_catrt_start(const purr_catrt_platform_t *platform)
     s_rt.cfg.margin = 128 * 1024;
     s_rt.cfg.min_kill_ms = 5000;
     s_rt.cfg.internal_reserve = INTERNAL_RESERVE;
+    s_rt.cfg.game_internal_reserve = GAME_INTERNAL_RESERVE;
     purr_rt_caps_for_psram((uint32_t)heap_caps_get_total_size(MALLOC_CAP_SPIRAM), &s_rt.cfg.max_frozen, &s_rt.cfg.max_services);
     purr_rt_set_defaults(&s_rt);
     purr_rt_add_sink(&s_rt, sink_cb, NULL);

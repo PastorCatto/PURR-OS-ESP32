@@ -123,6 +123,7 @@ typedef struct {
     uint32_t min_kill_ms;              /* least time between two out-of-memory kills */
     uint32_t unresponsive_ms;          /* foreground silent for this long = unresponsive */
     uint32_t internal_reserve;         /* internal RAM left for the system's own tasks and job tasks when admitting an app; 0 = none */
+    uint32_t game_internal_reserve;    /* the same for a game: it owns the screen and the shell is paused, so no job task starts while it runs */
     uint32_t max_frozen;               /* user apps kept frozen (SUSPENDED) at once; the oldest is closed over this. 0 = no cap */
     uint32_t max_services;             /* apps that may run in the BACKGROUND (services) at once. 0 = no cap */
 } purr_rt_cfg_t;

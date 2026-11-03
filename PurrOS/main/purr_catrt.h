@@ -94,7 +94,7 @@ typedef struct {
 int purr_catrt_slot_info(int slot, purr_catrt_slot_info_t *out);
 int purr_catrt_slot_of(const char *name);                      /* -1 if it is not running */
 
-/* What is running, for the task view: every resident app that is not closing. A service (a daemon with no screen) is listed with service = 1. */
+/* What is running, for the task manager: every resident app that is not closing. A service (a daemon with no screen) is listed with service = 1. */
 typedef struct {
     int slot;
     int id;
@@ -103,6 +103,7 @@ typedef struct {
     uint8_t foreground;
     uint8_t frozen;             /* its task is stopped (it left the screen) */
     uint8_t service;            /* no screen: it stays in the background */
+    uint32_t memory;            /* bytes of main memory (PSRAM) its code and data hold; its task stack is internal RAM on top */
 } purr_catrt_task_t;
 int purr_catrt_tasks(purr_catrt_task_t *out, int max);          /* how many were written */
 void purr_catrt_home(void);                                     /* the app in front steps back to the start screen without closing; returns at once */

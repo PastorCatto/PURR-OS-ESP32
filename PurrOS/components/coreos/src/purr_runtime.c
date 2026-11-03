@@ -31,14 +31,14 @@ static uint32_t free_bytes(purr_rt_t *rt)
 }
 
 /* Is there internal RAM for one more app task, and still the reserve for the system's own tasks afterwards? */
-static int internal_ok(purr_rt_t *rt, uint32_t need)
+static int internal_ok(purr_rt_t *rt, uint32_t need, uint32_t reserve)
 {
     if (rt->host.internal_free == NULL) {
         return 1;
     }
     uint32_t largest = 0;
     uint32_t free = rt->host.internal_free(rt->host.ctx, &largest);
-    return free >= need + rt->cfg.internal_reserve && largest >= need;
+    return free >= need + reserve && largest >= need;
 }
 
 static void log_line(purr_rt_t *rt, const char *fmt, ...)
@@ -193,6 +193,7 @@ void purr_rt_init(purr_rt_t *rt, const purr_rt_host_t *host)
     rt->cfg.min_kill_ms = 0;
     rt->cfg.unresponsive_ms = 0;          /* 0 = never report */
     rt->cfg.internal_reserve = 0;         /* 0 = none; the device sets it */
+    rt->cfg.game_internal_reserve = 0;
     rt->cfg.max_frozen = 0;               /* 0 = no cap; the device sets them from the PSRAM size */
     rt->cfg.max_services = 0;
     rt->next_id = 0;
@@ -735,7 +736,8 @@ int purr_rt_open(purr_rt_t *rt, const char *name)
 
     /* Internal RAM: the app's task stack cannot live in PSRAM, so the total above says nothing about it. Close what may be closed (frozen and
      * background apps, oldest first) until one more task fits and the system keeps its reserve; if nothing can go, say so. */
-    while (!internal_ok(rt, tmp.app.internal_needed)) {
+    uint32_t int_reserve = tmp.app.kind == PURR_APP_KIND_GAME ? rt->cfg.game_internal_reserve : rt->cfg.internal_reserve;
+    while (!internal_ok(rt, tmp.app.internal_needed, int_reserve)) {
         purr_rt_inst_t *v = pick_victim(rt);
         if (v == NULL) {
             if (rt->host.unload) {
@@ -1456,6 +1458,8 @@ int purr_rt_config_load(purr_rt_t *rt, const char *text, char *err, size_t errca
                 rt->cfg.unresponsive_ms = v;
             } else if (strcmp(opt, "internal_reserve_kb") == 0) {
                 rt->cfg.internal_reserve = v * 1024u;
+            } else if (strcmp(opt, "game_internal_reserve_kb") == 0) {
+                rt->cfg.game_internal_reserve = v * 1024u;
             } else if (strcmp(opt, "max_frozen") == 0) {
                 rt->cfg.max_frozen = clamp_cap(v, rt->cfg_defaults.max_frozen);
             } else if (strcmp(opt, "max_services") == 0) {

@@ -32,6 +32,7 @@ static fake_app_t s_apps[] = {
     {"cfg2",   PURR_APP_KIND_UI,           0, 100, 0},
     {"cfg3",   PURR_APP_KIND_UI,           0, 100, 0},
     {"sync2",  PURR_APP_KIND_DAEMON,       0, 500, 0},
+    {"arcade", PURR_APP_KIND_GAME,         0, 500, 0},
 };
 #define NAPPS ((int)(sizeof(s_apps) / sizeof(s_apps[0])))
 
@@ -1109,6 +1110,20 @@ static void test_no_victim_means_a_clear_refusal(void)
     CHECK(purr_rt_open(&rt, "notes") > 0);
 }
 
+static void test_a_game_needs_a_smaller_internal_reserve_than_other_apps(void)
+{
+    reset(10000000);
+    rt.cfg.internal_reserve = 24000;
+    rt.cfg.game_internal_reserve = 8000;
+    s_int_free = 24000;                       /* the owner's device: 24 KB free */
+    CHECK_EQ(purr_rt_open(&rt, "notes"), PURR_RT_E_INTERNAL);   /* 10000 + 24000 does not fit */
+    CHECK(purr_rt_open(&rt, "arcade") > 0);                     /* 10000 + 8000 does */
+    CHECK(s_int_free >= 8000);
+    purr_rt_stop(&rt, rt.fg_id, 0);
+    s_int_free = 17000;                       /* and not even a game when the system would be left with less than its small reserve */
+    CHECK_EQ(purr_rt_open(&rt, "arcade"), PURR_RT_E_INTERNAL);
+}
+
 static void test_the_foreground_app_is_never_the_price_of_internal_ram(void)
 {
     reset(10000000);
@@ -1199,6 +1214,7 @@ int main(void)
     test_a_config_file_can_lower_the_caps_but_not_raise_them();
     test_internal_ram_is_what_limits_apps_not_the_total();
     test_no_victim_means_a_clear_refusal();
+    test_a_game_needs_a_smaller_internal_reserve_than_other_apps();
     test_the_foreground_app_is_never_the_price_of_internal_ram();
     test_internal_ram_emergency_closes_one_app_per_tick();
     test_the_internal_reserve_is_a_config_option();
