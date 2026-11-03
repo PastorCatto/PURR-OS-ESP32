@@ -114,8 +114,18 @@ Follows `Permissions/SPEC.md` as already decided: asked **at first use**, grants
 - Phase 4 done in code: `power` catcall, `PURR_APPEV_WAKE` / `PURR_APPEV_PERM`, `Apps/beacon/`.
 - Firmware (`vmdbg`) builds, 14 % of the kernel slot free; beacon and notes build as modules. NOT run in the VM.
 - Rechecked 2026-10-31: stdmin, stdrec and stdfull all build. Free space in the slot: min 6 %, **recovery 2 % (0x8480 bytes)**, full builds (the usual too-small warning for the kittenos and loader slots). Recovery is nearly full.
-- Panel sleep is not used: only the backlight goes dark (putting the ST7789 to sleep has to be sequenced with the UI
-  task's flushes). Revisit with the hardware phase.
+- Panel sleep (2026-11-03, owner: the backlight alone leaves the glass being driven with a static picture, and a low-battery brownout left artifacts):
+  screen off now also puts the ST7789 to sleep (display off, then sleep in), and wake does sleep out, 120 ms, display on, then a full repaint, and only
+  then the backlight. In code, not built or run yet. How it is made safe:
+  - `Modules/drivers/st7789_module.c`: `set_power()` (feature bit 1). Blit and fill hold the bus's SPI lock for the whole call, so a sleep command can
+    never land between a window and its pixels; while the panel is not on (asleep or waking) drawing is dropped and reported as done.
+  - `purr_power_plat.c`: the manager asks for the screen while holding its lock, and waking waits on the UI task, which may be blocked on that lock in its
+    input callback. So the request is only written down; the power task carries it out after the lock is dropped (it wakes on a task notification instead
+    of a plain delay, no extra task). Order: off = backlight 0, panel sleep; on = panel wake, repaint, backlight.
+  - `purr_ui_service_repaint()` invalidates every layer and draws now (`lv_refr_now`); the shell registers it with `purr_power_sys_set_repaint`.
+  - Delivery: the `st7789` driver is not a separate download: its signed module (developer key, id 2) is baked into the kernel as `s_st7789_driver_module` in `commands.c` and planted on `/boot` at start (replacing a differing file). So it ships with the kernel and recovery builds; 1.0.16 embeds st7789 0.2.0. Regenerate the array whenever `Modules/drivers/st7789_module.c` changes (build, sign with the developer key, id 2, rewrite the array); a stale blob is how the 2026-10-25 white screen happened. A driver without the power bit just keeps the backlight-only behaviour.
+  - To check on a unit: the screen goes fully black (no glow, no ghost) when idle; wake shows the right picture with no flash of the old one; a game that
+    is drawing when the screen times out does not hang; the first key press after a wake is not delivered (already so).
 - Lost in a macOS hard lock and to rebuild: the scratchpad (vmdbg build dir was rebuilt; signed apps, dev repo and
   mkimage scripts still need rebuilding).
 
