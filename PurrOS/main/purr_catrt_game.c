@@ -20,6 +20,8 @@
 #include "purr_display.h"
 #include "purr_driver.h"
 #include "purr_kernel.h"
+#include "purr_power.h"
+#include "purr_power_plat.h"
 #include "purr_runtime.h"
 #include "purr_ui_service.h"
 
@@ -83,6 +85,9 @@ static void take(int slot)
     }
     purr_ui_service_pause(1);
     s_owner = slot;
+    /* A game's keys never pass through the shell's input path, so the idle timeout would turn the screen off under it (and with the shell paused nothing
+     * could wake it: it looks like a hard lock). While a game has the screen, the screen stays on; the lock is dropped in release(). */
+    purr_power_sys_hold(slot, PURR_WAKE_SCREEN, 0);
     s_raw = raw_mode(1) == 0;
     if (!s_raw) {
         ESP_LOGW(TAG, "no raw keyboard (the kbd-raw driver is not loaded): this game has no buttons");
@@ -114,6 +119,7 @@ static void release(void)
     }
     int was = s_owner;
     s_owner = -1;
+    purr_power_sys_release(was, PURR_WAKE_SCREEN);
     purr_ui_service_pause(0);
     ESP_LOGI(TAG, "slot %d gave the screen back", was);
 }

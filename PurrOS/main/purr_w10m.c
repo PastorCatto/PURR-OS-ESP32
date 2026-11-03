@@ -38,6 +38,7 @@
 #include "purr_ui_config.h"
 #include "purr_lvgl.h"
 #include "purr_ui_assets.h"
+#include "purr_power_plat.h"
 #include "purr_ui_service.h"
 #include "purr_w10m_priv.h"
 #include "purr_wallpaper.h"
@@ -796,12 +797,14 @@ typedef struct {
 static void act_brightness(int on);
 static void act_rotate(int on);
 static void act_settings(int on);
+static void act_tasks(int on);
 static void cc_move(int open);
 
 static quick_t s_quick[] = {
     {"Network",    "wifi_ic",       1, 1, 1, NULL,           NULL, NULL},
     {"Brightness", "brightness_ic", 1, 0, 0, act_brightness, NULL, NULL},
     {"Rotate",     NULL,            1, 0, 0, act_rotate,     NULL, NULL},
+    {"Tasks",      NULL,            1, 0, 0, act_tasks,      NULL, NULL},
     {"Settings",   "settings_ic",   1, 0, 0, act_settings,   NULL, NULL},
     {"Airplane",   "airplane_ic",   0, 1, 0, NULL,           NULL, NULL},
     {"Cellular",   "cellular_ic",   0, 1, 0, NULL,           NULL, NULL},
@@ -854,6 +857,13 @@ static void act_settings(int on)
     (void)on;
     cc_move(0);
     w10m_settings_open();
+}
+
+static void act_tasks(int on)
+{
+    (void)on;
+    cc_move(0);
+    w10m_tasks_open();                                              /* the task manager: every running app, its memory, an End button */
 }
 
 static void quick_refresh(quick_t *q)
@@ -1182,7 +1192,7 @@ static void build_cc(void)
             lv_obj_remove_flag(im, LV_OBJ_FLAG_CLICKABLE);
         } else {
             lv_obj_t *l = lv_label_create(q->obj);
-            lv_label_set_text(l, LV_SYMBOL_REFRESH);
+            lv_label_set_text(l, strcmp(q->name, "Tasks") == 0 ? LV_SYMBOL_LIST : LV_SYMBOL_REFRESH);
             lv_obj_set_style_text_color(l, lv_color_white(), 0);
             lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 5);
         }
@@ -2193,12 +2203,14 @@ static void wallpaper_changed(void)
 
 esp_err_t purr_w10m_start(void)
 {
-    purr_lvgl_set_edge_swipe(w10m_tasks_open);                      /* swipe up from the bottom: the task view */
+    /* No swipe up from the bottom edge: it fought the notification tray (owner, 2026-11-03). The task manager opens from the Tasks tile in the control center
+     * (act_tasks); purr_lvgl_set_edge_swipe() still works if a gesture is wanted again. */
     purr_lvgl_set_scroll_handler(purr_catrt_ui_scroll);              /* the trackball scrolls the app window on screen */
     purr_wallpaper_set_listener(wallpaper_changed);
     purr_wallpaper_register();
     purr_catrt_ui_init();
     purr_catrt_game_init();
+    purr_power_sys_set_repaint(purr_ui_service_repaint);              /* the panel sleeps with the screen; wake draws the current picture first */
     w10m_perm_init();
     purr_console_set_muted(1);                      /* the text console must not paint over the shell */
     for (size_t i = 0; i < sizeof(s_w10m_keys) / sizeof(s_w10m_keys[0]); i++) {

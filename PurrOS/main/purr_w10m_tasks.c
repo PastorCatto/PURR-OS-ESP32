@@ -1,13 +1,15 @@
 /*
- * purr_w10m_tasks.c - the task view: swipe up from the bottom edge of the screen and every running app is a card (plan7.md, "Multitasking").
+ * purr_w10m_tasks.c - the task manager: every running app in a list, with what it holds and an End button (plan7.md, "Multitasking").
  *
- * A card is a square with the app's initial and name and a close button in its corner. Tapping a card brings that app to the front; the close button
- * closes it (the runtime saves its state first). The app in front has an accent outline. Apps with no screen (services, such as the Store's companion)
- * are not cards: they are listed in one line along the bottom. Tapping the background, or swiping up again, goes back. UI task only.
+ * Opened by the Tasks tile in the control center. A row shows the app's name, whether it is in front, paused or a background service, and the main
+ * memory it holds; End closes it (the runtime saves its state first). Tapping a row brings that app to the front. The top shows how much fast (internal)
+ * RAM and main memory are free: the internal RAM is what limits how many apps can run (plan6.md), so it is the number to watch. Home steps the app in
+ * front back to the start screen without closing it. The list redraws when the set of apps changes and the numbers refresh every two seconds. UI task only.
  */
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "lvgl.h"
 
 #include "purr_catrt.h"
@@ -15,10 +17,13 @@
 #include "purr_w10m_priv.h"
 #include "purr_w10m_theme.h"
 
-#define GAP 8
-#define MAX_TASKS 8
+#define ROW_H 40
+#define ROW_GAP 5
+#define MAX_TASKS 12
 
-static lv_obj_t *s_view, *s_row, *s_empty, *s_services, *s_title, *s_home;
+static lv_obj_t *s_view, *s_list, *s_empty, *s_title, *s_home, *s_summary;
+static lv_timer_t *s_tick;
+static uint32_t s_sig;                                              /* what the list was last built from */
 
 static void rebuild(void);
 
@@ -27,19 +32,22 @@ static void y_cb(void *obj, int32_t v)
     lv_obj_set_y((lv_obj_t *)obj, v);
 }
 
-void w10m_tasks_close(void)
-{
-    if (s_view != NULL) {
-        lv_obj_add_flag(s_view, LV_OBJ_FLAG_HIDDEN);
-    }
-}
-
 int w10m_tasks_is_open(void)
 {
     return s_view != NULL && !lv_obj_has_flag(s_view, LV_OBJ_FLAG_HIDDEN);
 }
 
-static void card_clicked(lv_event_t *e)
+void w10m_tasks_close(void)
+{
+    if (s_view != NULL) {
+        lv_obj_add_flag(s_view, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_tick != NULL) {
+        lv_timer_pause(s_tick);
+    }
+}
+
+static void row_clicked(lv_event_t *e)
 {
     purr_catrt_focus_slot((int)(intptr_t)lv_event_get_user_data(e));
     w10m_tasks_close();
@@ -53,10 +61,10 @@ static void refresh_cb(lv_timer_t *t)
     }
 }
 
-static void close_clicked(lv_event_t *e)
+static void end_clicked(lv_event_t *e)
 {
     purr_catrt_close_slot((int)(intptr_t)lv_event_get_user_data(e));
-    lv_timer_t *t = lv_timer_create(refresh_cb, 500, NULL);         /* the app is gone a moment later: draw the cards again */
+    lv_timer_t *t = lv_timer_create(refresh_cb, 500, NULL);         /* the app is gone a moment later: draw the list again */
     lv_timer_set_repeat_count(t, 1);
 }
 
@@ -74,103 +82,130 @@ static void background_clicked(lv_event_t *e)
     }
 }
 
-static void make_card(const purr_catrt_task_t *t, int side)
+static void fmt_bytes(char *out, size_t cap, uint32_t bytes)
 {
-    lv_obj_t *card = lv_obj_create(s_row);
-    lv_obj_remove_style_all(card);
-    lv_obj_set_size(card, side, side);
-    purr_theme_apply(card, PURR_TH_SURFACE);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-    if (t->foreground) {
-        lv_obj_set_style_outline_width(card, 2, 0);
-        lv_obj_set_style_outline_color(card, purr_theme_accent_color(), 0);
+    if (bytes >= 1024u * 1024u) {
+        snprintf(out, cap, "%u.%u MB", (unsigned)(bytes >> 20), (unsigned)(((bytes & 0xFFFFFu) * 10u) >> 20));
+    } else {
+        snprintf(out, cap, "%u KB", (unsigned)((bytes + 512u) >> 10));
     }
-    lv_obj_add_event_cb(card, card_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)t->slot);
+}
 
-    char initial[2] = {t->name[0] >= 'a' && t->name[0] <= 'z' ? (char)(t->name[0] - 32) : t->name[0], '\0'};
-    lv_obj_t *letter = lv_label_create(card);
-    lv_label_set_text(letter, initial);
-    lv_obj_set_style_text_font(letter, &lv_font_montserrat_40, 0);
-    purr_theme_apply(letter, PURR_TH_ACCENT_TEXT);
-    lv_obj_align(letter, LV_ALIGN_CENTER, 0, -8);
+static void make_row(const purr_catrt_task_t *t, int w)
+{
+    lv_obj_t *row = lv_obj_create(s_list);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, w, ROW_H);
+    purr_theme_apply(row, PURR_TH_SURFACE);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    if (!t->service) {                                              /* a service has no screen to bring forward */
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(row, row_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)t->slot);
+    }
+    if (t->foreground) {
+        lv_obj_set_style_outline_width(row, 2, 0);
+        lv_obj_set_style_outline_color(row, purr_theme_accent_color(), 0);
+    }
 
     char name[32];
     snprintf(name, sizeof(name), "%s", t->name);
     if (name[0] >= 'a' && name[0] <= 'z') {
         name[0] = (char)(name[0] - 32);
     }
-    lv_obj_t *label = lv_label_create(card);
+    lv_obj_t *label = lv_label_create(row);
     lv_label_set_text(label, name);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(label, side - 8);
+    lv_obj_set_width(label, w - 84);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     purr_theme_apply(label, PURR_TH_TEXT);
-    lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -6);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 8, 3);
 
-    lv_obj_t *x = lv_obj_create(card);                              /* the close button: a larger tap area than its glyph */
-    lv_obj_remove_style_all(x);
-    lv_obj_set_size(x, 32, 32);
-    lv_obj_align(x, LV_ALIGN_TOP_RIGHT, 0, 0);
-    lv_obj_add_flag(x, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(x, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(x, close_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)t->slot);
-    lv_obj_t *glyph = lv_label_create(x);
-    lv_label_set_text(glyph, LV_SYMBOL_CLOSE);
-    purr_theme_apply(glyph, PURR_TH_TEXT);
-    lv_obj_center(glyph);
+    char mem[16], detail[64];
+    fmt_bytes(mem, sizeof(mem), t->memory);
+    const char *state = t->foreground ? "In front" : t->service ? "Service" : t->frozen ? "Paused" : "In the background";
+    snprintf(detail, sizeof(detail), "%s  -  %s", state, mem);
+    lv_obj_t *sub = lv_label_create(row);
+    lv_label_set_text(sub, detail);
+    lv_label_set_long_mode(sub, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(sub, w - 84);
+    lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
+    purr_theme_apply(sub, PURR_TH_DIM);
+    lv_obj_align(sub, LV_ALIGN_BOTTOM_LEFT, 8, -4);
+
+    lv_obj_t *end = lv_obj_create(row);                             /* End: a wide tap area, the whole right edge of the row */
+    lv_obj_remove_style_all(end);
+    lv_obj_set_size(end, 64, ROW_H - 10);
+    purr_theme_apply(end, PURR_TH_ACCENT_BG);
+    lv_obj_clear_flag(end, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(end, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(end, LV_ALIGN_RIGHT_MID, -5, 0);
+    lv_obj_add_event_cb(end, end_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)t->slot);
+    lv_obj_t *end_label = lv_label_create(end);
+    lv_label_set_text(end_label, "End");
+    lv_obj_set_style_text_font(end_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(end_label, lv_color_white(), 0);
+    lv_obj_center(end_label);
 }
 
 static void layout(void)
 {
     int w = w10m_disp_w(), h = w10m_disp_h();
-    lv_obj_set_size(s_view, w, h - W10M_STATUS_H);
+    int vh = h - W10M_STATUS_H;
+    lv_obj_set_size(s_view, w, vh);
     lv_obj_set_pos(s_view, 0, W10M_STATUS_H);
-    lv_obj_set_width(s_row, w);
-    lv_obj_align(s_row, LV_ALIGN_LEFT_MID, 0, -4);
     lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, 10, 6);
     lv_obj_align(s_home, LV_ALIGN_TOP_RIGHT, -10, 4);
-    lv_obj_align(s_empty, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_width(s_services, w - 20);
-    lv_obj_align(s_services, LV_ALIGN_BOTTOM_LEFT, 10, -8);
+    lv_obj_set_width(s_summary, w - 20);
+    lv_obj_align(s_summary, LV_ALIGN_TOP_LEFT, 10, 34);
+    lv_obj_set_size(s_list, w - 20, vh - 56 - 6);
+    lv_obj_align(s_list, LV_ALIGN_TOP_LEFT, 10, 56);
+    lv_obj_align(s_empty, LV_ALIGN_CENTER, 0, 10);
+}
+
+static void update_summary(int apps)
+{
+    char fast[16], main_mem[16], line[96];
+    fmt_bytes(fast, sizeof(fast), (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    fmt_bytes(main_mem, sizeof(main_mem), (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    snprintf(line, sizeof(line), "%d running  -  %s fast RAM free  -  %s memory free", apps, fast, main_mem);
+    lv_label_set_text(s_summary, line);
 }
 
 static void rebuild(void)
 {
-    purr_catrt_task_t t[PURR_RT_MAX_APPS];
-    int n = purr_catrt_tasks(t, PURR_RT_MAX_APPS);
-    int w = w10m_disp_w(), h = w10m_disp_h();
-    int across = 3;
-    int side = (w - 2 * 10 - (across - 1) * GAP) / across;
-    int room = h - W10M_STATUS_H - 70;                              /* the title above, the services line below */
-    if (side > room) {
-        side = room;
-    }
-    lv_obj_clean(s_row);
-    char services[120] = "";
-    int cards = 0;
-    for (int i = 0; i < n && cards < MAX_TASKS; i++) {
-        if (t[i].service) {
-            size_t len = strlen(services);
-            snprintf(services + len, sizeof(services) - len, "%s%s", len ? ", " : "", t[i].name);
-            continue;
+    purr_catrt_task_t all[PURR_RT_MAX_APPS], t[PURR_RT_MAX_APPS];
+    int n = purr_catrt_tasks(all, PURR_RT_MAX_APPS);
+    int k = 0;                                                      /* in front first, then the rest, services last */
+    for (int pass = 0; pass < 3; pass++) {
+        for (int i = 0; i < n && k < MAX_TASKS; i++) {
+            int rank = all[i].foreground ? 0 : all[i].service ? 2 : 1;
+            if (rank == pass) {
+                t[k++] = all[i];
+            }
         }
-        make_card(&t[i], side);
-        cards++;
     }
-    if (cards == 0) {
+    update_summary(k);
+
+    uint32_t sig = 2166136261u;                                     /* the list only redraws when it would look different, so a scroll is not reset */
+    for (int i = 0; i < k; i++) {
+        sig = (sig ^ (uint32_t)t[i].id) * 16777619u;
+        sig = (sig ^ (uint32_t)(t[i].foreground | (t[i].frozen << 1) | (t[i].service << 2))) * 16777619u;
+        sig = (sig ^ (t[i].memory >> 10)) * 16777619u;
+    }
+    if (sig == s_sig && lv_obj_get_child_count(s_list) == (uint32_t)k) {
+        layout();
+        return;
+    }
+    s_sig = sig;
+    lv_obj_clean(s_list);
+    int w = w10m_disp_w() - 20;
+    for (int i = 0; i < k; i++) {
+        make_row(&t[i], w);
+    }
+    if (k == 0) {
         lv_obj_remove_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (services[0] != '\0') {
-        char line[160];
-        snprintf(line, sizeof(line), "Running in the background: %s", services);
-        lv_label_set_text(s_services, line);
-        lv_obj_remove_flag(s_services, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(s_services, LV_OBJ_FLAG_HIDDEN);
     }
     layout();
 }
@@ -187,7 +222,7 @@ static void build(void)
     lv_obj_move_to_index(s_view, 0);                                /* above the app windows, beneath the status strip, the control center and the lock screen */
 
     s_title = lv_label_create(s_view);
-    lv_label_set_text(s_title, "Apps");
+    lv_label_set_text(s_title, "Task Manager");
     lv_obj_set_style_text_font(s_title, &lv_font_montserrat_16, 0);
     purr_theme_apply(s_title, PURR_TH_ACCENT_TEXT);
 
@@ -204,26 +239,26 @@ static void build(void)
     lv_obj_set_style_text_color(home_label, lv_color_white(), 0);
     lv_obj_center(home_label);
 
-    s_row = lv_obj_create(s_view);
-    lv_obj_remove_style_all(s_row);
-    lv_obj_set_height(s_row, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(s_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(s_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(s_row, GAP, 0);
-    lv_obj_set_style_pad_hor(s_row, 10, 0);
-    lv_obj_set_scroll_dir(s_row, LV_DIR_HOR);
-    lv_obj_remove_flag(s_row, LV_OBJ_FLAG_CLICKABLE);               /* a tap on empty space reaches the view behind it and goes back; cards still scroll the row */
-    lv_obj_set_scrollbar_mode(s_row, LV_SCROLLBAR_MODE_OFF);
+    s_summary = lv_label_create(s_view);
+    lv_label_set_long_mode(s_summary, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(s_summary, &lv_font_montserrat_12, 0);
+    purr_theme_apply(s_summary, PURR_TH_DIM);
+
+    s_list = lv_obj_create(s_view);
+    lv_obj_remove_style_all(s_list);
+    lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_list, ROW_GAP, 0);
+    lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_list, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(s_list, LV_OBJ_FLAG_CLICKABLE);              /* a tap on empty space reaches the view behind it and goes back; rows still scroll the list */
 
     s_empty = lv_label_create(s_view);
-    lv_label_set_text(s_empty, "No apps open");
+    lv_label_set_text(s_empty, "No apps running");
     lv_obj_set_style_text_font(s_empty, &lv_font_montserrat_16, 0);
     purr_theme_apply(s_empty, PURR_TH_DIM);
 
-    s_services = lv_label_create(s_view);
-    lv_label_set_long_mode(s_services, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(s_services, &lv_font_montserrat_12, 0);
-    purr_theme_apply(s_services, PURR_TH_DIM);
+    s_tick = lv_timer_create(refresh_cb, 2000, NULL);               /* the free-memory numbers move; the list only redraws when it changes */
+    lv_timer_pause(s_tick);
 }
 
 void w10m_tasks_open(void)
@@ -235,11 +270,13 @@ void w10m_tasks_open(void)
         build();
     }
     if (w10m_tasks_is_open()) {
-        w10m_tasks_close();                                         /* a second swipe goes back */
+        w10m_tasks_close();                                         /* opening it again goes back */
         return;
     }
+    s_sig = 0;
     rebuild();
     lv_obj_remove_flag(s_view, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_resume(s_tick);
     lv_anim_t a;                                                    /* slides up from the bottom */
     lv_anim_init(&a);
     lv_anim_set_var(&a, s_view);

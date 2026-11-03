@@ -55,7 +55,7 @@ void w10m_devportal_layout(void);
 void w10m_devportal_open(void);
 int w10m_devportal_is_open(void);
 
-/* The task view (purr_w10m_tasks.c): a card for every running app, opened by swiping up from the bottom edge. UI task only. */
+/* The task manager (purr_w10m_tasks.c): a list of every running app with its memory and an End button, opened from the control center's Tasks tile. UI task only. */
 void w10m_tasks_open(void);                         /* a second call goes back */
 void w10m_tasks_close(void);
 int w10m_tasks_is_open(void);
