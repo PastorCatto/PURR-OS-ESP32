@@ -39,16 +39,56 @@ static int user_brightness(void)
     return b < 1 ? 255 : (b > 255 ? 255 : b);
 }
 
-/* Only the backlight goes dark. Putting the panel itself to sleep has to be sequenced with the UI task's
- * flushes, so it is left for the hardware phase. */
-static void plat_screen(int on)
+static void (*s_repaint)(void);
+
+void purr_power_sys_set_repaint(void (*repaint)(void))
+{
+    s_repaint = repaint;
+}
+
+/* Off: the backlight goes dark first (so nothing is seen while the panel is told to stop), then the panel sleeps: it stops driving the glass, which is what
+ * a long idle needs. On: the panel wakes (its driver waits the 120 ms the controller needs), the shell draws the current picture (anything drawn while the
+ * panel slept was dropped), and only then the backlight comes up, so a stale frame is never shown. A display with no power control (the e-paper) only has
+ * the backlight step. */
+static void apply_screen(int on)
 {
     const purr_display_v2_t *d = purr_kernel_display();
-    if (d != NULL && d->set_brightness != NULL) {
-        d->set_brightness((uint8_t)(on ? user_brightness() : 0));
+    int panel = d != NULL && d->set_power != NULL && (d->features & PURR_DISPLAY_F_POWER) != 0;
+    if (!on && d != NULL && d->set_brightness != NULL) {
+        d->set_brightness(0);
+    }
+    if (panel) {
+        esp_err_t e = d->set_power(on != 0);
+        if (e != ESP_OK) {
+            ESP_LOGW(TAG, "panel %s failed (%d)", on ? "wake" : "sleep", (int)e);
+        }
+    }
+    if (on) {
+        if (panel && s_repaint != NULL) {
+            s_repaint();
+        }
+        if (d != NULL && d->set_brightness != NULL) {
+            d->set_brightness((uint8_t)user_brightness());
+        }
     }
     purr_kbdlight_screen(on);                   /* the keys follow the screen */
-    ESP_LOGI(TAG, "screen %s", on ? "on" : "off");
+    ESP_LOGI(TAG, "screen %s%s", on ? "on" : "off", panel ? " (panel)" : "");
+}
+
+/* The power manager asks for the screen while it holds its lock, and waking it waits on the UI task (which may be blocked on that same lock in its input
+ * callback). So the request is only written down here and the power task carries it out after the lock is dropped, as soon as it is nudged. */
+static volatile int s_screen_want = -1;
+static TaskHandle_t s_tick_task;
+
+static void plat_screen(int on)
+{
+    __atomic_store_n(&s_screen_want, on ? 1 : 0, __ATOMIC_RELEASE);
+    if (s_tick_task != NULL) {
+        xTaskNotifyGive(s_tick_task);
+    } else {
+        apply_screen(on);                        /* before the task exists (early boot): nothing to deadlock with */
+        __atomic_store_n(&s_screen_want, -1, __ATOMIC_RELEASE);
+    }
 }
 
 static void plat_cpu(int ok)
@@ -105,7 +145,11 @@ static void tick_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(TICK_MS));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(TICK_MS));          /* a tick every TICK_MS, or sooner when the screen is to change */
+        int want = __atomic_exchange_n(&s_screen_want, -1, __ATOMIC_ACQ_REL);
+        if (want >= 0) {
+            apply_screen(want);
+        }
         fired_t out[8];
         int n;
         lock();
@@ -196,7 +240,7 @@ void purr_power_sys_start(void)
         purr_settings_register(&s_keys[i]);
     }
     s_started = 1;
-    xTaskCreate(tick_task, "power", 3072, NULL, 4, NULL);
+    xTaskCreate(tick_task, "power", 4096, NULL, 4, &s_tick_task);
     ESP_LOGI(TAG, "up: screen timeout %s s, light sleep %s", t <= 0 ? "never" : "set", s_lightsleep ? "on" : "off");
 }
 

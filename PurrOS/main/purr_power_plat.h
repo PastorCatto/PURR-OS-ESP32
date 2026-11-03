@@ -19,6 +19,10 @@ extern "C" {
 /* Starts the tick task and registers power.screen_timeout / power.lightsleep. After the settings store is up. */
 void purr_power_sys_start(void);
 
+/* The shell registers how to draw the whole screen again; the power manager calls it after the panel wakes, before the backlight comes up. It may be
+ * called from any task (it must handle that). */
+void purr_power_sys_set_repaint(void (*repaint)(void));
+
 /* A key or touch. Returns 1 if the screen was off and this press only woke it: the input path then drops it. */
 int  purr_power_sys_activity(void);
 

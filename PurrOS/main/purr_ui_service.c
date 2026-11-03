@@ -1258,6 +1258,25 @@ static void *pause_cb(void *arg)
     return NULL;
 }
 
+static void *repaint_cb(void *arg)
+{
+    (void)arg;
+    lv_obj_invalidate(lv_screen_active());
+    lv_obj_invalidate(lv_layer_top());
+    lv_obj_invalidate(lv_layer_sys());
+    lv_refr_now(NULL);                                  /* draw it now, not on the next timer pass: the caller lights the backlight next */
+    return NULL;
+}
+
+void purr_ui_service_repaint(void)
+{
+    if (strcmp(pcTaskGetName(NULL), "ui_service") == 0) {
+        repaint_cb(NULL);                               /* already the UI task: running through its own queue would wait for itself */
+    } else {
+        purr_ui_service_run(repaint_cb, NULL, NULL);
+    }
+}
+
 void purr_ui_service_pause(int on)
 {
     purr_ui_service_run(pause_cb, (void *)(intptr_t)on, NULL);

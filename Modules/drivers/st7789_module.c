@@ -35,6 +35,7 @@
 #define D_MAJOR 2
 #define D_MINOR 0
 #define D_F_BRIGHTNESS (1u << 0)
+#define D_F_POWER      (1u << 1)
 
 typedef struct {
     uint16_t width, height, max_chunk_pixels;
@@ -57,9 +58,11 @@ static const purr_driver_bus_table_t *s_bus;
 
 #define CHUNK_LINES 16
 
+#define CMD_SLPIN  0x10
 #define CMD_SLPOUT 0x11
 #define CMD_NORON  0x13
 #define CMD_INVON  0x21
+#define CMD_DISPOFF 0x28
 #define CMD_DISPON 0x29
 #define CMD_CASET  0x2A
 #define CMD_RASET  0x2B
@@ -173,7 +176,7 @@ static int d_get_info(display_info_t *out)
     return 0;
 }
 
-static int d_blit(int x, int y, int w, int h, const uint16_t *px)
+static int blit_now(int x, int y, int w, int h, const uint16_t *px)
 {
     int full_w = w, sx = 0, sy = 0;
     if (!clip(&x, &y, &w, &h, &sx, &sy)) {
@@ -197,7 +200,7 @@ static int d_blit(int x, int y, int w, int h, const uint16_t *px)
     return e;
 }
 
-static int d_fill(int x, int y, int w, int h, uint16_t color)
+static int fill_now(int x, int y, int w, int h, uint16_t color)
 {
     int sx, sy;
     if (!clip(&x, &y, &w, &h, &sx, &sy)) {
@@ -218,6 +221,60 @@ static int d_fill(int x, int y, int w, int h, uint16_t color)
     return e;
 }
 
+/* Panel power. 0 = on, 1 = asleep, 2 = waking. While it is not 0, drawing is dropped (reported as done): the panel is not listening, and whoever draws
+ * repaints when it wakes (the shell does). The SPI lock is held for a whole blit or fill, so a sleep command can never land between a window and its
+ * pixels, whichever task asks. Note the lock nests, so the per-transfer locks inside are harmless. */
+static volatile int s_power;
+
+static int d_blit(int x, int y, int w, int h, const uint16_t *px)
+{
+    s_bus->spi_lock();
+    int e = s_power != 0 ? 0 : blit_now(x, y, w, h, px);
+    s_bus->spi_unlock();
+    return e;
+}
+
+static int d_fill(int x, int y, int w, int h, uint16_t color)
+{
+    s_bus->spi_lock();
+    int e = s_power != 0 ? 0 : fill_now(x, y, w, h, color);
+    s_bus->spi_unlock();
+    return e;
+}
+
+/* Off: display off, then sleep in (the panel stops driving the glass; its memory keeps the last picture). On: sleep out, the 120 ms the controller needs
+ * before it takes commands again, display on. The caller turns the backlight on after the picture is current. */
+static int d_set_power(int on)
+{
+    int e = 0;
+    if (!on) {
+        s_bus->spi_lock();
+        if (s_power == 0) {
+            e = cmd(CMD_DISPOFF);
+            if (e == 0) e = cmd(CMD_SLPIN);
+            if (e == 0) s_power = 1;
+        }
+        s_bus->spi_unlock();
+        s_bus->delay_ms(5);
+        return e;
+    }
+    s_bus->spi_lock();
+    int was_off = s_power == 1;
+    if (was_off) {
+        e = cmd(CMD_SLPOUT);
+        if (e == 0) s_power = 2;
+    }
+    s_bus->spi_unlock();
+    if (was_off && e == 0) {
+        s_bus->delay_ms(120);
+        s_bus->spi_lock();
+        e = cmd(CMD_DISPON);
+        s_power = 0;
+        s_bus->spi_unlock();
+    }
+    return e;
+}
+
 static int d_set_brightness(uint8_t level)
 {
     s_bus->backlight_set(level);
@@ -228,12 +285,12 @@ static display_v2_t s_ops = {
     .struct_size = sizeof(display_v2_t),
     .major = D_MAJOR,
     .minor = D_MINOR,
-    .features = 0,
+    .features = D_F_POWER,
     .get_info = d_get_info,
     .blit = d_blit,
     .fill = d_fill,
     .set_brightness = NULL,
-    .set_power = NULL,
+    .set_power = d_set_power,
 };
 
 static int st7789_probe(const purr_device_t *dev, const purr_board_t *board, void **out_handle)

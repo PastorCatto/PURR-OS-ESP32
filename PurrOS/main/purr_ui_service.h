@@ -84,6 +84,9 @@ esp_err_t purr_ui_service_request(const purr_ui_request_t *req, void **out_obj);
  * just call fn directly. */
 esp_err_t purr_ui_service_run(void *(*fn)(void *), void *arg, void **result);
 
+/* Redraws every layer at once (after the panel slept, anything drawn meanwhile was dropped). Callable from any task, the UI task included. */
+void purr_ui_service_repaint(void);
+
 /* Stops (1) or resumes (0) LVGL drawing: a game owns the panel while it is paused. Resuming repaints everything. Callable from any task except the UI task. */
 void purr_ui_service_pause(int on);
 
