@@ -7,6 +7,7 @@
 
 int purr_gps_cmd(purr_cli_t *cli, int argc, char **argv);
 int purr_radio_cmd(purr_cli_t *cli, int argc, char **argv);
+int purr_battery_cmd(purr_cli_t *cli, int argc, char **argv);       /* the gauge's raw reading and what the OS makes of it */
 int purr_modem_cmd(purr_cli_t *cli, int argc, char **argv);
 int purr_sd_cmd(purr_cli_t *cli, int argc, char **argv);
 

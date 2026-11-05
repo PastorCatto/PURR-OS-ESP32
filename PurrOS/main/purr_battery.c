@@ -5,11 +5,13 @@
 
 #include "esp_timer.h"
 
+#include "purr_battmodel.h"
 #include "purr_driver.h"
 
 #define REFRESH_US (20LL * 1000000)
 
-static int s_have, s_pct, s_mv;
+static purr_battmodel_t s_model;
+static int s_init;
 static int64_t s_last_us;
 
 static void refresh(void)
@@ -19,35 +21,30 @@ static void refresh(void)
         return;
     }
     s_last_us = now;
+    if (!s_init) {
+        purr_battmodel_init(&s_model);
+        s_init = 1;
+    }
     uint8_t b[4];
-    if (purr_device_read("battery", b, sizeof(b)) != 4 || !(b[3] & 1)) {
-        s_have = 0;
+    int ok = purr_device_read("battery", b, sizeof(b)) == 4;
+    if (!ok || !(b[3] & 1)) {
+        purr_battmodel_feed(&s_model, 0, 0, 0, 0);
         return;
     }
-    int pct = b[0], mv = b[1] | (b[2] << 8);
-    if (!s_have) {
-        s_pct = pct;
-        s_mv = mv;
-    } else {
-        s_pct = (s_pct * 3 + pct + 2) / 4;                 /* a slow follower: the load on the cell moves single readings by several percent */
-        s_mv = (s_mv * 3 + mv + 2) / 4;
-    }
-    s_have = 1;
+    /* bit 1: the line is held above a resting cell's (USB or the charger); the rules for that are in purr_battmodel.c */
+    purr_battmodel_feed(&s_model, 1, (b[3] & 2) != 0, b[0], b[1] | (b[2] << 8));
 }
 
 int purr_battery_get(int *percent, int *millivolts)
 {
     refresh();
-    if (!s_have) {
-        return 0;
-    }
-    if (percent != NULL) {
-        *percent = s_pct;
-    }
-    if (millivolts != NULL) {
-        *millivolts = s_mv;
-    }
-    return 1;
+    return purr_battmodel_get(&s_model, percent, millivolts);
+}
+
+int purr_battery_charging(void)
+{
+    refresh();
+    return purr_battmodel_charging(&s_model);
 }
 
 int purr_battery_percent(void)

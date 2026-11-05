@@ -7,6 +7,8 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "purr_battery.h"
+#include "purr_radio_bars.h"
 #include "purr_driver.h"
 #include "purr_driver_class.h"
 #include "purr_sd.h"
@@ -155,7 +157,27 @@ int purr_radio_cmd(purr_cli_t *cli, int argc, char **argv)
         purr_cli_printf(cli, ops->sleep(e.handle) == 0 ? "radio asleep\n" : "radio: could not put it to sleep\n");
         return 0;
     }
-    purr_cli_printf(cli, "usage: radio config <MHz> [<kHz bandwidth> <sf> <cr> <dBm>] | tx <text> | rx [seconds] | sleep\n"
+    if (strcmp(sub, "status") == 0) {                   /* what the status bar's service icon is built from */
+        purr_cli_printf(cli, "radio     driver table version %u\n", (unsigned)ops->version);
+        if (ops->version < 2 || ops->status == NULL) {
+            purr_cli_printf(cli, "          this driver predates the status call: update the lora-sx126x driver (the service icon stays hidden until then)\n");
+            return 0;
+        }
+        purr_lora_status_t st;
+        if (ops->status(e.handle, &st) != 0) {
+            purr_cli_printf(cli, "radio: the status call failed\n");
+            return 1;
+        }
+        if (!st.heard) {
+            purr_cli_printf(cli, "heard     nothing yet (the radio only listens during `radio rx` or when an app listens)\n");
+        } else {
+            purr_cli_printf(cli, "heard     %u packet(s); the last %u s ago at %d dBm, SNR %d dB\n", (unsigned)st.rx_count, (unsigned)(st.last_age_ms / 1000),
+                            st.last_rssi_dbm, st.last_snr_db);
+        }
+        purr_cli_printf(cli, "bars      %d of 4\n", purr_radio_bars());
+        return 0;
+    }
+    purr_cli_printf(cli, "usage: radio config <MHz> [<kHz bandwidth> <sf> <cr> <dBm>] | tx <text> | rx [seconds] | sleep | status\n"
                          "  Only use frequencies you are allowed to (868 MHz in Europe, 915 MHz in the Americas).\n");
     return 1;
 }
@@ -321,4 +343,27 @@ int purr_sd_cmd(purr_cli_t *cli, int argc, char **argv)
     }
     purr_cli_printf(cli, "usage: sd [status | mount | unmount | ls [path] | test]\n");
     return 1;
+}
+
+/* `battery`: the gauge's raw four bytes and what the OS makes of them. Run it plugged in and unplugged to see what the cell line does on USB power
+ * (the first gauge treated anything over 4.4 V as "no battery"). */
+int purr_battery_cmd(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    uint8_t b[4] = {0};
+    int n = purr_device_read("battery", b, sizeof(b));
+    if (n != 4) {
+        purr_cli_printf(cli, "battery: no reading from the driver (%d); is the battery-adc driver loaded?\n", n);
+        return 1;
+    }
+    purr_cli_printf(cli, "raw       %u%% at %u mV, flags 0x%02x (cell %s, %s)\n", b[0], (unsigned)(b[1] | (b[2] << 8)), b[3], (b[3] & 1) ? "present" : "not seen",
+                    (b[3] & 2) ? "line held high: charging or USB power" : "line at rest level");
+    int pct = 0, mv = 0;
+    if (purr_battery_get(&pct, &mv)) {
+        purr_cli_printf(cli, "the OS     %d%% at %d mV%s\n", pct, mv, purr_battery_charging() ? ", charging" : "");
+    } else {
+        purr_cli_printf(cli, "the OS     no battery reading\n");
+    }
+    return 0;
 }
