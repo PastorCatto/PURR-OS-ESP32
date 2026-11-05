@@ -21,6 +21,8 @@ typedef struct {
     int busy_pin, dio1_pin, rst_pin, pwr_pin;
     purr_lora_cfg_t cfg;
     int configured;
+    purr_lora_status_t heard;               /* the last packet received (rssi, snr, count) */
+    uint64_t heard_us;                      /* when, by the bus clock */
 } lora_t;
 
 static lora_t s_dev[2];
@@ -273,6 +275,11 @@ static int l_receive(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms, pur
             size_t plen = st[2], start = st[3];
             uint8_t ps_tx[5] = {OP_GET_PKT_STATUS, 0, 0, 0, 0}, ps[5];
             if (xfer(d, ps_tx, ps, 5) != 0) return -1;
+            d->heard.heard = 1;
+            d->heard.last_rssi_dbm = (int16_t)(-(int)ps[2] / 2);
+            d->heard.last_snr_db = (int8_t)((int8_t)ps[3] / 4);
+            d->heard.rx_count++;
+            d->heard_us = s_bus->now_us();
             if (info != NULL) {
                 info->rssi_dbm = (int16_t)(-(int)ps[2] / 2);
                 info->snr_db = (int8_t)((int8_t)ps[3] / 4);
@@ -302,7 +309,19 @@ static int l_sleep(void *h)
     return cmd1(d, OP_SET_SLEEP, 0x04);                               /* warm start: keep the configuration */
 }
 
-static const purr_lora_ops_t s_ops = {.version = 1, .configure = l_configure, .send = l_send, .receive = l_receive, .sleep = l_sleep};
+static int l_status(void *h, purr_lora_status_t *out)
+{
+    lora_t *d = h;
+    if (d == NULL || !d->in_use || out == NULL) return -1;
+    *out = d->heard;
+    if (d->heard.heard) {
+        uint64_t age = (s_bus->now_us() - d->heard_us) / 1000;
+        out->last_age_ms = age > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)age;
+    }
+    return 0;
+}
+
+static const purr_lora_ops_t s_ops = {.version = 2, .configure = l_configure, .send = l_send, .receive = l_receive, .sleep = l_sleep, .status = l_status};
 
 static int l_probe(const purr_device_t *dev, const purr_board_t *board, void **out_handle)
 {
@@ -338,6 +357,12 @@ static int l_probe(const purr_device_t *dev, const purr_board_t *board, void **o
         s_bus->delay_ms(10);
     }
     d->in_use = 1;
+    d->heard.heard = 0;                                                /* nothing heard yet by this binding */
+    d->heard.last_rssi_dbm = 0;
+    d->heard.last_snr_db = 0;
+    d->heard.last_age_ms = 0;
+    d->heard.rx_count = 0;
+    d->heard_us = 0;
     int rc = cmd1(d, OP_SET_STANDBY, 0x00);
     if (rc != 0 || !chip_alive(d)) {                                   /* no radio answers here */
         d->in_use = 0;

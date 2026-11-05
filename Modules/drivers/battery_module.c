@@ -3,8 +3,11 @@
  * The device cfg is a purr_adc_dev_cfg_t {pin, mul, div}: the real voltage is pin millivolts * mul / div. read() hands back four bytes:
  *   [0] charge in percent (0..100), from a typical single Li-ion discharge curve
  *   [1] [2] the cell voltage in millivolts, little-endian
- *   [3] flags: bit 0 set when the reading looks like a connected cell (2.8 V to 4.4 V); clear means no battery, or one far too flat
- * Percent from voltage is an estimate: it moves with load and temperature, and it cannot tell charging from resting. The OS smooths it.
+ *   [3] flags: bit 0 set when the reading looks like a connected cell (2.8 V and up; clear means no battery, or one far too flat)
+ *               bit 1 set when the line is held above what a cell rests at (over 4.3 V): the charger or USB power is lifting it
+ * The charger lifts this line above 4.4 V, which the first version of this driver read as "no battery" (the icon vanished while plugged in). The
+ * upper limit is now the ADC's own (twice the pin's 3.3 V). Percent from voltage is an estimate: it moves with load and temperature, and while
+ * charging it reads 100. The OS smooths it.
  */
 #include "purr_driver.h"
 #include "purr_driver_bus.h"
@@ -88,7 +91,7 @@ static int bat_read(void *handle, uint8_t *data, size_t len)
     data[0] = (uint8_t)percent_of(mv);
     data[1] = (uint8_t)(mv & 0xFF);
     data[2] = (uint8_t)(mv >> 8);
-    data[3] = (uint8_t)((mv >= 2800 && mv <= 4400) ? 1 : 0);
+    data[3] = (uint8_t)((mv >= 2800 ? 1 : 0) | (mv > 4300 ? 2 : 0));
     return 4;
 }
 
