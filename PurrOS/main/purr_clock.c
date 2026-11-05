@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 
 #include "commands.h"
+#include "purr_net.h"
 #include "purr_fs.h"
 #include "purr_settings.h"
 
@@ -147,11 +148,41 @@ static void ip_cb(void *arg, esp_event_base_t base, int32_t id, void *data)
     start_sntp();
 }
 
+/* The "got an address" events are only a shortcut. purr_clock_boot() runs before the network starts, and the default event loop does not exist until
+ * then, so registering for them there fails (the clock then waited for the network for ever, with the network up). What counts is the network's own
+ * state, asked for every few seconds; the events are registered as soon as the loop is there, and make it quicker. */
+static int s_events;
+
+static void watch_cb(void *arg)
+{
+    (void)arg;
+    if (!s_events && esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, ip_cb, NULL) == ESP_OK) {
+        esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, ip_cb, NULL);
+        s_events = 1;
+    }
+    purr_net_status_t st;
+    purr_net_status(&st);
+    int up = st.connected && strcmp(st.ip, "0.0.0.0") != 0;
+    if (up && !s_online) {
+        s_online = 1;
+        start_sntp();
+    } else if (!up) {
+        s_online = 0;                            /* the next address starts the client again, which asks at once */
+    }
+}
+
 void purr_clock_boot(void)
 {
     restore_time();
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, ip_cb, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, ip_cb, NULL);
+    if (esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, ip_cb, NULL) == ESP_OK) {
+        esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, ip_cb, NULL);
+        s_events = 1;
+    }
+    static esp_timer_handle_t watch;
+    const esp_timer_create_args_t args = {.callback = watch_cb, .name = "clock-watch"};
+    if (esp_timer_create(&args, &watch) == ESP_OK) {
+        esp_timer_start_periodic(watch, 3 * 1000000LL);
+    }
 }
 
 void purr_clock_status(char *out, size_t cap)

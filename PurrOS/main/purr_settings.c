@@ -189,6 +189,7 @@ static const zone_t s_zones[] = {
     {"US-Mountain", "MST7MDT,M3.2.0,M11.1.0"},
     {"US-Arizona",  "MST7"},
     {"US-Pacific",  "PST8PDT,M3.2.0,M11.1.0"},
+    {"BC-Pacific",  "PCT7"},            /* British Columbia since its move to year-round Pacific time: UTC-7 all year, no daylight saving (owner, 2026-11-05) */
     {"US-Alaska",   "AKST9AKDT,M3.2.0,M11.1.0"},
     {"US-Hawaii",   "HST10"},
     {"UK",          "GMT0BST,M3.5.0/1,M10.5.0"},
