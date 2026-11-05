@@ -23,6 +23,10 @@ void purr_power_sys_start(void);
  * called from any task (it must handle that). */
 void purr_power_sys_set_repaint(void (*repaint)(void));
 
+/* The shell hears the screen go off (on the power task, before the backlight goes dark), so it can lock itself: whatever is on the screen when it
+ * wakes again is the lock screen. Called with on = 0 only. */
+void purr_power_sys_set_screen_hook(void (*hook)(int on));
+
 /* A key or touch. Returns 1 if the screen was off and this press only woke it: the input path then drops it. */
 int  purr_power_sys_activity(void);
 

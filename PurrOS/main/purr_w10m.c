@@ -44,6 +44,8 @@
 #include "purr_wallpaper.h"
 #include "purr_w10m_theme.h"
 
+static void lock_on_sleep(int on);
+
 static const char *TAG = "w10m";
 
 /* ---------------------------------------------------------------- geometry */
@@ -2211,6 +2213,7 @@ esp_err_t purr_w10m_start(void)
     purr_catrt_ui_init();
     purr_catrt_game_init();
     purr_power_sys_set_repaint(purr_ui_service_repaint);              /* the panel sleeps with the screen; wake draws the current picture first */
+    purr_power_sys_set_screen_hook(lock_on_sleep);                    /* and it locks when the screen goes off (security.lock_on_sleep, on unless set to 0) */
     w10m_perm_init();
     purr_console_set_muted(1);                      /* the text console must not paint over the shell */
     for (size_t i = 0; i < sizeof(s_w10m_keys) / sizeof(s_w10m_keys[0]); i++) {
@@ -2317,4 +2320,11 @@ int w10m_is_locked(void)
 esp_err_t purr_w10m_lock(void)
 {
     return purr_ui_service_run(lock_cb, NULL, NULL);
+}
+
+static void lock_on_sleep(int on)
+{
+    if (!on && purr_settings_kv_int("security.lock_on_sleep", 1)) {
+        purr_w10m_lock();
+    }
 }

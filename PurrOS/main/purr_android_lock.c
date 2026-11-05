@@ -2,12 +2,12 @@
  * purr_android_lock.c - the lock screen and the sign-in screen of the Android style shell (purr_android.c, plan7.md).
  *
  * The lock screen is Froyo's, in its landscape form: the time and date at the left with two status lines under them (the LoRa radio's last-heard
- * bars, in place of a carrier, and the battery), a vertical slider at the right edge that is dragged up, and "Press Menu to unlock" for the
- * keyboard. It is only a lock, not a sign-in. The first unlock of a boot is the sign-in screen: the accounts as a list, then the password for
+ * bars, in place of a carrier, and the battery), a vertical slider at the right edge that is dragged up, and "Slide to unlock" under it.
+ * It is only a lock, not a sign-in. The first unlock of a boot is the sign-in screen: the accounts as a list, then the password for
  * the one picked. Nothing else is reachable until it succeeds, and nothing is started for a user before then (the runtime's exec-once apps wait
  * for it too). The password check is a long PBKDF2 hash, so it runs on its own task and the screen stays live.
  *
- * Both sit on the top layer beneath the status strip and (for the lock) the key strip, so Menu still works on a locked screen. A portrait
+ * Both sit on the top layer beneath the status strip; the lock screen hides the key strip (and_keys_visible), so it has the whole screen and the slider is how it unlocks. A portrait
  * screen gets a centred clock and a horizontal slider.
  */
 #include "purr_android.h"
@@ -38,7 +38,6 @@ static const char *TAG = "android-lock";
 
 #define CARD_TITLE_H 20
 #define ROW_H        34
-#define UNLOCK_AT    88                         /* percent of the slider's travel */
 #define ORANGE       0xFFA21F
 
 static void backdrop(lv_obj_t *o)
@@ -67,7 +66,8 @@ static void clock_strings(char *tb, size_t tcap, char *db, size_t dcap)
         struct tm tm;
         localtime_r(&now, &tm);
         fmt_hm(&tm, tb, tcap);
-        strftime(db, dcap, "%A, %B %d", &tm);
+        size_t n = strftime(db, dcap, "%A, %B ", &tm);
+        snprintf(db + n, dcap - n, "%d", tm.tm_mday);
     } else {
         snprintf(tb, tcap, "--:--");
         snprintf(db, dcap, "Clock not set");
@@ -76,7 +76,8 @@ static void clock_strings(char *tb, size_t tcap, char *db, size_t dcap)
 
 /* ---------------------------------------------------------------- the lock screen */
 
-static lv_obj_t *s_lock, *s_lock_time, *s_lock_date, *s_lock_s1, *s_lock_s2, *s_lock_slider, *s_lock_hint, *s_lock_up;
+static lv_obj_t *s_lock, *s_lock_time, *s_lock_date, *s_lock_s1, *s_lock_s2, *s_lock_hint;
+static lv_obj_t *s_lk_track, *s_lk_end, *s_lk_end_glyph, *s_lk_knob, *s_lk_chev[3];
 static int s_lock_on;
 
 /* The two status lines: the LoRa radio's last-heard bars (nothing at all without a radio), and the battery as Froyo wrote it. */
@@ -140,15 +141,173 @@ void and_lock_unlock(void)
     }
     s_lock_on = 0;
     lv_obj_add_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
+    and_keys_visible(1);                                  /* the key strip comes back with the home screen */
 }
 
-static void slider_released(lv_event_t *e)
+/* ---- the unlock slider of the draft: a pill, an open padlock at the far end, three chevrons, and a padlock knob dragged to the end. It goes green while it
+ * is held, the open padlock lights up near the end, and letting go past 85 percent of the travel unlocks. Vertical when the screen is wide. */
+
+static int s_lk_horiz, s_lk_p0, s_lk_max, s_lk_pos;
+
+/* A padlock drawn from two plain shapes: the body, and a half-circle shackle that is cut short when it is open. */
+static lv_obj_t *lock_glyph(lv_obj_t *parent, int open, uint32_t color)
 {
-    lv_obj_t *sl = lv_event_get_target(e);
-    if (lv_slider_get_value(sl) >= UNLOCK_AT) {
-        and_lock_unlock();
+    lv_obj_t *g = lv_obj_create(parent);
+    lv_obj_remove_style_all(g);
+    lv_obj_set_size(g, 20, 20);
+    lv_obj_remove_flag(g, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *body = lv_obj_create(g);
+    lv_obj_remove_style_all(body);
+    lv_obj_set_size(body, 13, 9);
+    lv_obj_set_style_radius(body, 2, 0);
+    lv_obj_set_style_border_width(body, 2, 0);
+    lv_obj_set_style_border_color(body, lv_color_hex(color), 0);
+    lv_obj_remove_flag(body, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_align(body, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_t *sh = lv_arc_create(g);
+    lv_obj_remove_style(sh, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(sh, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(sh, 9, 9);
+    lv_arc_set_bg_angles(sh, 180, open ? 320 : 360);
+    lv_obj_set_style_arc_width(sh, 2, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(sh, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(sh, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_align(sh, LV_ALIGN_TOP_MID, open ? 2 : 0, open ? 1 : 3);
+    return g;
+}
+
+static void lk_set_pos(int pos)
+{
+    if (pos < 0) {
+        pos = 0;
+    } else if (pos > s_lk_max) {
+        pos = s_lk_max;
     }
-    lv_slider_set_value(sl, 0, LV_ANIM_ON);              /* the handle goes back */
+    s_lk_pos = pos;
+    if (s_lk_horiz) {
+        lv_obj_set_style_translate_x(s_lk_knob, pos, 0);
+    } else {
+        lv_obj_set_style_translate_y(s_lk_knob, -pos, 0);
+    }
+    int armed = s_lk_max > 0 && pos * 100 > s_lk_max * 85;
+    lv_obj_set_style_bg_color(s_lk_end, armed ? lv_color_hex(0x5FAE2E) : lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_lk_end, armed ? LV_OPA_COVER : LV_OPA_30, 0);
+    lv_obj_set_style_border_color(s_lk_end, armed ? lv_color_hex(0xBDF08A) : lv_color_white(), 0);
+    lv_obj_set_style_border_opa(s_lk_end, armed ? LV_OPA_COVER : LV_OPA_30, 0);
+    lv_obj_set_style_shadow_width(s_lk_end, armed ? 10 : 0, 0);
+}
+
+static void lk_point(lv_point_t *p)
+{
+    lv_indev_t *in = lv_indev_active();
+    p->x = p->y = 0;
+    if (in != NULL) {
+        lv_indev_get_point(in, p);
+    }
+}
+
+static void lk_knob_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_point_t p;
+    if (code == LV_EVENT_PRESSED) {
+        lk_point(&p);
+        s_lk_p0 = s_lk_horiz ? p.x : p.y;
+    } else if (code == LV_EVENT_PRESSING) {
+        lk_point(&p);
+        lk_set_pos(s_lk_horiz ? p.x - s_lk_p0 : s_lk_p0 - p.y);
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        int done = s_lk_max > 0 && s_lk_pos * 100 > s_lk_max * 85;
+        lk_set_pos(0);                                   /* the knob goes back either way */
+        if (done) {
+            and_lock_unlock();
+        }
+    }
+}
+
+static void lk_reset(void)
+{
+    if (s_lk_knob != NULL) {
+        lk_set_pos(0);
+    }
+}
+
+static void lk_build(void)
+{
+    s_lk_track = lv_obj_create(s_lock);
+    lv_obj_remove_style_all(s_lk_track);
+    lv_obj_set_style_radius(s_lk_track, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_lk_track, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_lk_track, LV_OPA_50, 0);
+    lv_obj_set_style_border_width(s_lk_track, 1, 0);
+    lv_obj_set_style_border_color(s_lk_track, lv_color_white(), 0);
+    lv_obj_set_style_border_opa(s_lk_track, LV_OPA_20, 0);
+    lv_obj_remove_flag(s_lk_track, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+
+    s_lk_end = lv_obj_create(s_lk_track);                /* where it unlocks: an open padlock, lit when the knob is near */
+    lv_obj_remove_style_all(s_lk_end);
+    lv_obj_set_size(s_lk_end, 32, 32);
+    lv_obj_set_style_radius(s_lk_end, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_lk_end, 1, 0);
+    lv_obj_set_style_shadow_color(s_lk_end, lv_color_hex(0x82DC3C), 0);
+    lv_obj_set_style_shadow_spread(s_lk_end, 1, 0);
+    lv_obj_remove_flag(s_lk_end, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    s_lk_end_glyph = lock_glyph(s_lk_end, 1, 0x8FBF6A);
+    lv_obj_center(s_lk_end_glyph);
+
+    for (int i = 0; i < 3; i++) {
+        s_lk_chev[i] = lv_label_create(s_lk_track);
+        lv_label_set_text(s_lk_chev[i], LV_SYMBOL_UP);
+        lv_obj_set_style_text_font(s_lk_chev[i], &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(s_lk_chev[i], lv_color_white(), 0);
+        lv_obj_set_style_text_opa(s_lk_chev[i], LV_OPA_40, 0);
+    }
+
+    s_lk_knob = lv_obj_create(s_lk_track);               /* the grey padlock knob, green while it is held */
+    lv_obj_remove_style_all(s_lk_knob);
+    lv_obj_set_size(s_lk_knob, 34, 34);
+    lv_obj_set_style_radius(s_lk_knob, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_lk_knob, lv_color_hex(0x7B7B7B), 0);
+    lv_obj_set_style_bg_grad_color(s_lk_knob, lv_color_hex(0x2C2C2C), 0);
+    lv_obj_set_style_bg_grad_dir(s_lk_knob, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_opa(s_lk_knob, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_lk_knob, 1, 0);
+    lv_obj_set_style_border_color(s_lk_knob, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(s_lk_knob, lv_color_hex(0x8BD24F), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_grad_color(s_lk_knob, lv_color_hex(0x3F8A1A), LV_STATE_PRESSED);
+    lv_obj_remove_flag(s_lk_knob, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_lk_knob, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *g = lock_glyph(s_lk_knob, 0, 0xFFFFFF);
+    lv_obj_center(g);
+    lv_obj_add_event_cb(s_lk_knob, lk_knob_cb, LV_EVENT_ALL, NULL);
+}
+
+/* Where the pieces go: along the right edge when the screen is wide (the knob starts at the bottom and goes up), along the bottom when it is tall. */
+static void lk_layout(int w, int h, int top, int landscape)
+{
+    s_lk_horiz = !landscape;
+    int track_w = landscape ? 42 : w * 2 / 3, track_h = landscape ? h - top - 12 : 42;
+    lv_obj_set_size(s_lk_track, track_w, track_h);
+    if (landscape) {
+        lv_obj_align(s_lk_track, LV_ALIGN_TOP_RIGHT, -12, top);
+        lv_obj_align(s_lk_end, LV_ALIGN_TOP_MID, 0, 4);
+        lv_obj_align(s_lk_knob, LV_ALIGN_BOTTOM_MID, 0, -3);
+        s_lk_max = track_h - 34 - 8;
+    } else {
+        lv_obj_align(s_lk_track, LV_ALIGN_BOTTOM_MID, 0, -40);
+        lv_obj_align(s_lk_end, LV_ALIGN_RIGHT_MID, -4, 0);
+        lv_obj_align(s_lk_knob, LV_ALIGN_LEFT_MID, 3, 0);
+        s_lk_max = track_w - 34 - 8;
+    }
+    for (int i = 0; i < 3; i++) {                        /* the three arrows between the knob and the open padlock */
+        lv_label_set_text(s_lk_chev[i], landscape ? LV_SYMBOL_UP : LV_SYMBOL_RIGHT);
+        if (landscape) {
+            lv_obj_align(s_lk_chev[i], LV_ALIGN_CENTER, 0, (i - 1) * 16);
+        } else {
+            lv_obj_align(s_lk_chev[i], LV_ALIGN_CENTER, (i - 1) * 16, 0);
+        }
+    }
+    lk_set_pos(0);
 }
 
 void and_lock_show(void)
@@ -160,8 +319,9 @@ void and_lock_show(void)
     w10m_tasks_close();
     and_home_reset();
     s_lock_on = 1;
+    and_keys_visible(0);                                  /* the lock screen has no key strip: the whole screen is the picture, and the slider unlocks */
     lock_clock_refresh();
-    lv_slider_set_value(s_lock_slider, 0, LV_ANIM_OFF);
+    lk_reset();
     lv_obj_remove_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -187,30 +347,9 @@ void and_lock_build(void)
     s_lock_s1 = lock_label(&lv_font_montserrat_12, 0xD4E4E6);
     s_lock_s2 = lock_label(&lv_font_montserrat_12, 0xD4E4E6);
     s_lock_hint = lock_label(&lv_font_montserrat_12, 0xE3F0F2);
-    lv_label_set_text(s_lock_hint, LV_SYMBOL_LIST "  Press Menu to unlock");
-    s_lock_up = lock_label(&lv_font_montserrat_12, 0x9FB4B8);
-    lv_label_set_text(s_lock_up, LV_SYMBOL_UP);
+    lv_label_set_text(s_lock_hint, LV_SYMBOL_LIST "  Slide to unlock");
 
-    /* The slider: a dark rounded track with a grey round handle that turns green while it is held. It is vertical when the screen is wide. */
-    s_lock_slider = lv_slider_create(s_lock);
-    lv_slider_set_range(s_lock_slider, 0, 100);
-    lv_obj_set_style_bg_color(s_lock_slider, lv_color_black(), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_lock_slider, LV_OPA_50, LV_PART_MAIN);
-    lv_obj_set_style_border_width(s_lock_slider, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(s_lock_slider, lv_color_white(), LV_PART_MAIN);
-    lv_obj_set_style_border_opa(s_lock_slider, LV_OPA_20, LV_PART_MAIN);
-    lv_obj_set_style_radius(s_lock_slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(s_lock_slider, LV_OPA_TRANSP, LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(s_lock_slider, lv_color_hex(0x7B7B7B), LV_PART_KNOB);
-    lv_obj_set_style_bg_grad_color(s_lock_slider, lv_color_hex(0x2C2C2C), LV_PART_KNOB);
-    lv_obj_set_style_bg_grad_dir(s_lock_slider, LV_GRAD_DIR_VER, LV_PART_KNOB);
-    lv_obj_set_style_bg_opa(s_lock_slider, LV_OPA_COVER, LV_PART_KNOB);
-    lv_obj_set_style_border_width(s_lock_slider, 1, LV_PART_KNOB);
-    lv_obj_set_style_border_color(s_lock_slider, lv_color_black(), LV_PART_KNOB);
-    lv_obj_set_style_pad_all(s_lock_slider, 3, LV_PART_KNOB);
-    lv_obj_set_style_bg_color(s_lock_slider, lv_color_hex(0x5FAE2E), LV_PART_KNOB | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_grad_color(s_lock_slider, lv_color_hex(0x3F8A1A), LV_PART_KNOB | LV_STATE_PRESSED);
-    lv_obj_add_event_cb(s_lock_slider, slider_released, LV_EVENT_RELEASED, NULL);
+    lk_build();
 
     lv_timer_create(lock_tick, 1000, NULL);
     and_lock_layout();
@@ -222,7 +361,7 @@ void and_lock_layout(void)
         return;
     }
     int w = w10m_disp_w(), h = w10m_disp_h();
-    int top = AND_STATUS_H + 6, bottom = AND_KEYS_H;
+    int top = AND_STATUS_H + 6, bottom = 0;             /* no key strip beneath the lock screen (and_keys_visible) */
     lv_obj_set_size(s_lock, w, h);
     lv_obj_set_pos(s_lock, 0, 0);
     if (w >= h) {                                        /* landscape: the clock at the left, the slider up the right edge */
@@ -230,20 +369,14 @@ void and_lock_layout(void)
         lv_obj_align_to(s_lock_date, s_lock_time, LV_ALIGN_OUT_BOTTOM_LEFT, 2, 0);
         lv_obj_align_to(s_lock_s1, s_lock_date, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 8);
         lv_obj_align_to(s_lock_s2, s_lock_s1, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2);
-        lv_obj_set_size(s_lock_slider, 36, h - top - bottom - 10);
-        lv_obj_align(s_lock_slider, LV_ALIGN_TOP_RIGHT, -12, top);
-        lv_obj_align_to(s_lock_up, s_lock_slider, LV_ALIGN_CENTER, 0, -10);
-        lv_label_set_text(s_lock_up, LV_SYMBOL_UP);
+        lk_layout(w, h, top, 1);
         lv_obj_align(s_lock_hint, LV_ALIGN_BOTTOM_LEFT, 14, -(bottom + 8));
     } else {                                             /* portrait: centred, with the slider along the bottom */
         lv_obj_align(s_lock_time, LV_ALIGN_TOP_MID, 0, h / 7);
         lv_obj_align_to(s_lock_date, s_lock_time, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
         lv_obj_align_to(s_lock_s1, s_lock_date, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
         lv_obj_align_to(s_lock_s2, s_lock_s1, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
-        lv_obj_set_size(s_lock_slider, w * 2 / 3, 36);
-        lv_obj_align(s_lock_slider, LV_ALIGN_BOTTOM_MID, 0, -(bottom + 34));
-        lv_obj_align_to(s_lock_up, s_lock_slider, LV_ALIGN_CENTER, 10, 0);
-        lv_label_set_text(s_lock_up, LV_SYMBOL_RIGHT);
+        lk_layout(w, h, top, 0);
         lv_obj_align(s_lock_hint, LV_ALIGN_BOTTOM_MID, 0, -(bottom + 8));
     }
     if (!s_lock_on) {

@@ -40,6 +40,12 @@ static int user_brightness(void)
 }
 
 static void (*s_repaint)(void);
+static void (*s_screen_hook)(int on);
+
+void purr_power_sys_set_screen_hook(void (*hook)(int on))
+{
+    s_screen_hook = hook;
+}
 
 void purr_power_sys_set_repaint(void (*repaint)(void))
 {
@@ -54,6 +60,9 @@ static void apply_screen(int on)
 {
     const purr_display_v2_t *d = purr_kernel_display();
     int panel = d != NULL && d->set_power != NULL && (d->features & PURR_DISPLAY_F_POWER) != 0;
+    if (!on && s_screen_hook != NULL) {
+        s_screen_hook(0);                        /* the shell locks while the picture is still being shown, so wake finds the lock screen */
+    }
     if (!on && d != NULL && d->set_brightness != NULL) {
         d->set_brightness(0);
     }

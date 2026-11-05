@@ -50,6 +50,8 @@
 #include "purr_w10m_theme.h"
 #include "purr_wallpaper.h"
 
+static void lock_on_sleep(int on);
+
 static const char *TAG = "android";
 
 #define HOLD_HOME_MS 600                /* a trackball hold that means Home */
@@ -541,6 +543,18 @@ void and_back(void)
     }
 }
 
+void and_keys_visible(int on)
+{
+    if (s_keys == NULL) {
+        return;
+    }
+    if (on) {
+        lv_obj_remove_flag(s_keys, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_keys, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 void and_menu_key(void)
 {
     if (and_lock_is_on()) {
@@ -839,6 +853,7 @@ esp_err_t purr_android_start(void)
     purr_catrt_ui_init();
     purr_catrt_game_init();
     purr_power_sys_set_repaint(purr_ui_service_repaint);              /* the panel sleeps with the screen; wake draws the current picture first */
+    purr_power_sys_set_screen_hook(lock_on_sleep);                    /* and it locks when the screen goes off (security.lock_on_sleep, on unless set to 0) */
     w10m_perm_init();
     purr_console_set_muted(1);                                        /* the text console must not paint over the shell */
     for (size_t i = 0; i < sizeof(s_keys_table) / sizeof(s_keys_table[0]); i++) {
@@ -891,4 +906,11 @@ static void *lock_cb(void *arg)
 esp_err_t purr_android_lock(void)
 {
     return purr_ui_service_run(lock_cb, NULL, NULL);
+}
+
+static void lock_on_sleep(int on)
+{
+    if (!on && purr_settings_kv_int("security.lock_on_sleep", 1)) {
+        purr_android_lock();
+    }
 }

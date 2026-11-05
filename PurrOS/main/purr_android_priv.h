@@ -23,6 +23,7 @@ lv_obj_t *and_strip(void);                          /* the status strip, for the
 void and_status_notes(int count);                   /* how many notifications the strip shows an icon for */
 void and_go_home(void);                             /* the Home key: everything open steps back to the home screen */
 void and_back(void);                                /* the Back key */
+void and_keys_visible(int on);                      /* the key strip (Menu, Home, Back) on or off: the lock screen takes the whole screen */
 void and_menu_key(void);                            /* the Menu key */
 int and_signed_in(void);
 void and_signed_in_set(void);
