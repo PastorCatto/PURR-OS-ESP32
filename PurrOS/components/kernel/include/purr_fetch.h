@@ -25,6 +25,9 @@ esp_err_t purr_fetch_alloc(const char *url, uint8_t **out, size_t *out_len, size
 typedef void (*purr_fetch_progress_fn)(size_t got, size_t total);
 void purr_fetch_set_progress(purr_fetch_progress_fn fn);
 
+/* "<file>: <why>" for the last fetch that failed (ESP error name), or "" if the last one worked: so a failure can say what it was. */
+const char *purr_fetch_last_error(void);
+
 /* GETs into a caller-supplied buffer. Fails if the response is larger than cap. */
 esp_err_t purr_fetch_into(const char *url, uint8_t *buf, size_t cap, size_t *out_len);
 

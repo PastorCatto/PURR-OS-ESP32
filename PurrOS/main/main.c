@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 
 #include "commands.h"
+#include "purr_io.h"
 #include "purr_trust_os.h"
 #include "purr_store.h"
 #include "purr_clock.h"
@@ -183,6 +184,7 @@ void app_main(void)
     static purr_cli_t boot_cli;
     purr_cli_init(&boot_cli, NULL, 0, purr_console_put, NULL, "");
     purr_cli_printf(&boot_cli, "%s starting\n", purr_system_name());
+    purr_io_start();                 /* the flash task, for tasks whose stack is in PSRAM (the apps') */
     purr_fs_setup(&boot_cli);
 #if CONFIG_PURR_PROFILE_RECOVERY
     /* KittenOS performs the swap for any pending system-file update (PurrOS/SPEC.md section

@@ -26,16 +26,27 @@
 #include "sdkconfig.h"
 
 #include "purr_catcalls.h"
+#include "purr_settings.h"
 #include "purr_runtime.h"
 
 static const char *TAG = "rt";
+
+/* Apps get their task stack, queue and semaphores in PSRAM unless `apps.psram_stacks` is 0 (a way back if an app misbehaves): the file system's raw flash access
+ * is handed to the flash task (purr_io.h), so nothing of an app calls flash on its own stack. */
+static int use_ext_stacks(void)
+{
+    return purr_settings_kv_int("apps.psram_stacks", 1) != 0;
+}
 
 #define APP_QUEUE_DEPTH   8
 #define APP_STACK_BYTES   8192             /* a file listing or a copy runs littlefs on the app's own stack: 6144 was tight */
 #define CALL_TIMEOUT_MS   3000
 #define APP_INTERNAL_EXTRA 2048            /* its queue, task record and semaphores, on top of the stack */
 #define GAME_INTERNAL_RESERVE (8 * 1024)  /* a game in front pauses the shell: only the system's own tasks need internal RAM then */
-#define INTERNAL_RESERVE  (24 * 1024)      /* internal RAM kept for the system's own tasks and the 12-14 KB job tasks (Device Manager, Store) */
+#define INTERNAL_RESERVE  (16 * 1024)      /* internal RAM kept for the system's own tasks and the 12-14 KB job tasks (Device Manager, Store); 24 KB until 2026-11-05, when
+                                            * the apps' stacks moved to PSRAM (an app at 29 KB free could not open: it needed 8 + 2 + 24) */
+#define APP_STACK_EXT_BYTES 12288          /* an app's task stack in PSRAM: room for the file system on its own stack, and nothing of it is fast RAM */
+#define APP_INTERNAL_EXT    1024           /* what such an app still holds in fast RAM: its task record, and slack */
 #define MAX_TIMERS        4
 #define EVENT_RING        16
 #define REPLY_LEN         1536
@@ -54,6 +65,8 @@ typedef struct {
 
 typedef struct {
     uint8_t in_use;
+    uint8_t ext_stack;            /* its task, queue and semaphores were made in PSRAM (setting apps.psram_stacks): they are deleted the same way */
+    uint8_t task_in_fast;         /* ext_stack, but the task itself could not get a PSRAM stack and was made the old way */
     volatile uint8_t frozen;      /* the runtime asked it to park (see app_task): idle, owns no lock, thawed before it is told anything */
     SemaphoreHandle_t thaw;       /* what a parked task waits on */
     volatile uint8_t closing;     /* teardown has begun: the app's catcalls refuse, so it cannot call into a window that is being deleted */
@@ -427,8 +440,9 @@ static int host_load(void *ctx, const char *name, purr_rt_app_t *out)
     out->table = &d->t2;
     out->env = &s_env;
     out->handle = (uint32_t)(d - s_dev) + 1;
-    out->memory_needed = (d->t2.memory_needed ? d->t2.memory_needed : 16384) + APP_STACK_BYTES;
-    out->internal_needed = APP_STACK_BYTES + APP_INTERNAL_EXTRA;
+    int ext = use_ext_stacks();
+    out->memory_needed = (d->t2.memory_needed ? d->t2.memory_needed : 16384) + (ext ? APP_STACK_EXT_BYTES : APP_STACK_BYTES);
+    out->internal_needed = ext ? APP_INTERNAL_EXT : APP_STACK_BYTES + APP_INTERNAL_EXTRA;
     out->kind = d->t2.kind;
     out->flags = d->t2.flags;
     return 0;
@@ -463,7 +477,11 @@ static void teardown(rtdev_t *d)
             vTaskDelay(pdMS_TO_TICKS(10));              /* can leave a file system or UI lock held, so give a straggler 2 s */
         }
         if (d->task) {                          /* stuck in a callback: force it (SPEC section 9) */
-            vTaskDelete(d->task);
+            if (d->ext_stack && !d->task_in_fast) {
+                vTaskDeleteWithCaps(d->task);
+            } else {
+                vTaskDelete(d->task);
+            }
             d->task = NULL;
         }
     }
@@ -478,13 +496,25 @@ static void teardown(rtdev_t *d)
     d->q = NULL;
     xSemaphoreGive(s_qmu);
     if (q) {
-        vQueueDelete(q);
+        if (d->ext_stack) {
+            vQueueDeleteWithCaps(q);
+        } else {
+            vQueueDelete(q);
+        }
     }
     if (d->done) {
-        vSemaphoreDelete(d->done);
+        if (d->ext_stack) {
+            vSemaphoreDeleteWithCaps(d->done);
+        } else {
+            vSemaphoreDelete(d->done);
+        }
     }
     if (d->thaw) {
-        vSemaphoreDelete(d->thaw);
+        if (d->ext_stack) {
+            vSemaphoreDeleteWithCaps(d->thaw);
+        } else {
+            vSemaphoreDelete(d->thaw);
+        }
     }
     if (s_plat->unload) {
         s_plat->unload(d->handle);
@@ -570,7 +600,11 @@ static void app_task(void *arg)
         }
     }
     d->task = NULL;
-    vTaskDelete(NULL);
+    if (d->ext_stack && !d->task_in_fast) {
+        vTaskDeleteWithCaps(NULL);                      /* made with a PSRAM stack: IDF frees that stack, and the task record */
+    } else {
+        vTaskDelete(NULL);
+    }
 }
 
 static int host_deliver(void *ctx, int id, const purr_rt_app_t *app, const purr_rt_event_t *ev)
@@ -580,13 +614,33 @@ static int host_deliver(void *ctx, int id, const purr_rt_app_t *app, const purr_
     if (ev->type == PURR_RT_EV_CREATE) {
         d->id = id;
         d->app = *app;
-        d->q = xQueueCreate(APP_QUEUE_DEPTH, sizeof(app_msg_t));
-        d->done = xSemaphoreCreateBinary();
-        d->thaw = xSemaphoreCreateBinary();
+        d->ext_stack = (uint8_t)use_ext_stacks();
+        d->task_in_fast = 0;
+        if (d->ext_stack) {
+            d->q = xQueueCreateWithCaps(APP_QUEUE_DEPTH, sizeof(app_msg_t), MALLOC_CAP_SPIRAM);
+            d->done = xSemaphoreCreateBinaryWithCaps(MALLOC_CAP_SPIRAM);
+            d->thaw = xSemaphoreCreateBinaryWithCaps(MALLOC_CAP_SPIRAM);
+        } else {
+            d->q = xQueueCreate(APP_QUEUE_DEPTH, sizeof(app_msg_t));
+            d->done = xSemaphoreCreateBinary();
+            d->thaw = xSemaphoreCreateBinary();
+        }
         char tname[configMAX_TASK_NAME_LEN];
         snprintf(tname, sizeof(tname), "app:%.11s", d->name);
-        if (d->q == NULL || d->done == NULL || d->thaw == NULL ||
-            xTaskCreate(app_task, tname, APP_STACK_BYTES, d, 4, &d->task) != pdPASS) {
+        BaseType_t made = pdFAIL;
+        if (d->q != NULL && d->done != NULL && d->thaw != NULL) {
+            if (d->ext_stack) {
+                made = xTaskCreateWithCaps(app_task, tname, APP_STACK_EXT_BYTES, d, 4, &d->task, MALLOC_CAP_SPIRAM);
+            }
+            if (made != pdPASS) {                       /* no PSRAM stack (or switched off): the old way, 8 KB of fast RAM; the queue and semaphores are deleted as they were made */
+                made = xTaskCreate(app_task, tname, APP_STACK_BYTES, d, 4, &d->task);
+                if (made == pdPASS && d->ext_stack) {
+                    ESP_LOGW(TAG, "%s: no PSRAM for its stack, running on a fast RAM one", d->name);
+                    d->task_in_fast = 1;
+                }
+            }
+        }
+        if (made != pdPASS) {
             ESP_LOGE(TAG, "%s: could not start its task", d->name);
             return -1;
         }

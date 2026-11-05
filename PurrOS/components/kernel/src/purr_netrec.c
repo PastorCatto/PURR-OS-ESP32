@@ -7,6 +7,8 @@
 #include "esp_log.h"
 #include "esp_partition.h"
 
+#include "purr_io.h"
+
 #include "purr_util.h"
 
 static const char *TAG = "netrec";
@@ -42,7 +44,7 @@ typedef struct {
 
 static int read_net(const esp_partition_t *p, record_t *rec)
 {
-    if (esp_partition_read(p, 0, rec, sizeof(*rec)) != ESP_OK) {
+    if (purr_io_partition_read(p, 0, rec, sizeof(*rec)) != ESP_OK) {
         return -1;
     }
     return rec->magic == MAGIC && rec->crc32 == purr_crc32(0, rec, offsetof(record_t, crc32)) ? 0 : -1;
@@ -50,7 +52,7 @@ static int read_net(const esp_partition_t *p, record_t *rec)
 
 static int read_src(const esp_partition_t *p, src_record_t *src)
 {
-    if (esp_partition_read(p, SRC_OFFSET, src, sizeof(*src)) != ESP_OK) {
+    if (purr_io_partition_read(p, SRC_OFFSET, src, sizeof(*src)) != ESP_OK) {
         return -1;
     }
     return src->magic == SRC_MAGIC && src->crc32 == purr_crc32(0, src, offsetof(src_record_t, crc32)) ? 0 : -1;
@@ -59,9 +61,9 @@ static int read_src(const esp_partition_t *p, src_record_t *src)
 /* have_net / have_src: write that record (the other is left out, so it reads as empty). */
 static void write_both(const esp_partition_t *p, const record_t *net, const src_record_t *src)
 {
-    if (esp_partition_erase_range(p, 0, p->erase_size) != ESP_OK ||
-        (net != NULL && esp_partition_write(p, 0, net, sizeof(*net)) != ESP_OK) ||
-        (src != NULL && esp_partition_write(p, SRC_OFFSET, src, sizeof(*src)) != ESP_OK)) {
+    if (purr_io_partition_erase_range(p, 0, p->erase_size) != ESP_OK ||
+        (net != NULL && purr_io_partition_write(p, 0, net, sizeof(*net)) != ESP_OK) ||
+        (src != NULL && purr_io_partition_write(p, SRC_OFFSET, src, sizeof(*src)) != ESP_OK)) {
         ESP_LOGW(TAG, "could not save the recovery record");
     }
 }
