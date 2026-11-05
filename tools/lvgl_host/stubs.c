@@ -64,3 +64,6 @@ static int zone_get(char *o, size_t c) { return purr_settings_kv_get("time.zone"
 static int zone_set(const char *v, char *e, size_t c) { (void)e; (void)c; return purr_settings_kv_set("time.zone", v); }
 static const purr_setting_t k_zone = {"time.zone", "time zone", "", 0, zone_get, zone_set};
 void host_register_settings(void) { purr_settings_register(&k_zone); }
+
+int purr_clock_ntp_enabled(void) { return 1; }
+void purr_clock_set_ntp_enabled(int on) { (void)on; }

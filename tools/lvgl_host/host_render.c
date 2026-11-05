@@ -67,6 +67,7 @@ static const char *fake_legal(void)
     return g_legal;
 }
 static int g_devrec;
+static int g_legal_fail;
 static int fake_devrec(void) { return g_devrec; }
 static int fake_servers(purr_oobe_server_t *out, int max)
 {
@@ -84,6 +85,7 @@ static int fake_job_poll(purr_oobe_job_t k, char *msg, size_t cap, int *per)
 {
     g_polls++;
     if (k == PURR_OOBE_JOB_DEVVERIFY) { if (g_polls > 3) snprintf(msg, cap, "Verified. It has PURR OS 1.0.0 for this device."); return g_polls > 3 ? 0 : -1; }
+    if (k == PURR_OOBE_JOB_LEGAL && g_legal_fail) { if (g_polls > 3) { snprintf(msg, cap, "The server did not answer (legal.txt: ESP_ERR_HTTP_CONNECT)."); return 1; } return -1; }
     if (k == PURR_OOBE_JOB_RESTORE) { snprintf(msg, cap, "Downloading PURR OS"); *per = 620; return -1; }
     return g_polls > 3 ? 0 : -1;
 }
@@ -96,6 +98,7 @@ static int fake_scan(purr_oobe_ap_t *out, int max)
 }
 static int fake_bg(char *msg, size_t cap) { if (g_bg >= 1000) snprintf(msg, cap, "System installed"); else if (g_bg >= 0) snprintf(msg, cap, "Installing the system..."); return g_bg; }
 static void fake_finish(void) {}
+static int fake_need(void) { return 1; }
 static const purr_oobe_ops_t k_ops = {fake_reasons, fake_legal, fake_devrec, fake_servers, fake_use_server, fake_wired, fake_remembered, fake_job_start, fake_job_poll, fake_scan, fake_bg, fake_finish, NULL};
 
 static lv_obj_t *find_ta(lv_obj_t *o, int *nth)
@@ -233,5 +236,45 @@ int main(int argc, char **argv)
     run(700);
     { lv_obj_t *b = find_button(lv_screen_active(), "Finish"); printf("finish button disabled=%d\n", b ? lv_obj_has_state(b, LV_STATE_DISABLED) : -1); }
     snap("first-3");
+
+#ifdef CONFIG_PURR_SHELL_ANDROID
+    /* the Froyo skin's first run: six pages (the owner's draft), each opened directly, the install at three points of its progress */
+    static const int bg_at[7] = {240, 240, 240, 240, 240, 620, 1000};
+    for (int i = 0; i < 7; i++) {
+        char name[16];
+        fresh();
+        g_bg = bg_at[i];
+        purr_oobe_start(PURR_OOBE_PART_FIRSTBOOT, &k_ops, i);
+        run(500);
+        if (i == 2) { settext(0, "catto"); settext(1, "mypassword"); settext(2, "mypassword"); run(200); }
+        snprintf(name, sizeof(name), "froyo-%d", i);
+        snap(name);
+    }
+    fresh();
+    g_bg = 300;
+    purr_oobe_start(PURR_OOBE_PART_FIRSTBOOT, &k_ops, 5);
+    run(300);
+    snap("froyo-5-early");
+
+    /* the legal page as the connection test: the text could not be loaded */
+    g_legal_fail = 1;
+    fresh();
+    g_bg = 240;
+    purr_oobe_start(PURR_OOBE_PART_FIRSTBOOT, &k_ops, 4);
+    run(600);
+    snap("froyo-legal-fail");
+    g_legal_fail = 0;
+
+    /* the install could not get online: the Wi-Fi page already in the list is the one that comes, not a second one (this was seven pages) */
+    purr_oobe_ops_t k_need = k_ops;
+    k_need.need_wifi = fake_need;
+    fresh();
+    g_bg = 240;
+    purr_oobe_start(PURR_OOBE_PART_FIRSTBOOT, &k_need, 0);
+    run(300);
+    press("Next");
+    run(400);
+    snap("froyo-needwifi");
+#endif
     return 0;
 }

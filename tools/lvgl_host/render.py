@@ -17,8 +17,14 @@ OBJ = os.path.join(OUT, "obj")
 os.makedirs(OBJ, exist_ok=True)
 
 INC = ["-I", HERE, "-I", os.path.join(HERE, "stubs"), "-I", LVGL, "-I", os.path.join(LVGL, "src"), "-I", MAIN,
-       "-I", os.path.join(ROOT, "PurrOS", "components", "coreos", "include")]
+       "-I", os.path.join(ROOT, "PurrOS", "components", "coreos", "include"),
+       "-I", os.path.join(ROOT, "PurrOS", "components", "kernel", "include")]
 DEFS = ["-DLV_CONF_INCLUDE_SIMPLE", "-DLEGAL_PATH=\"%s\"" % os.path.join(ROOT, "OTA", "legal.txt")]
+DEFS += os.environ.get("HOST_DEFS", "").split()          # e.g. HOST_DEFS=-DCONFIG_PURR_SHELL_ANDROID=1 renders the Froyo skin
+if os.environ.get("HOST_OUT"):
+    OUT = os.environ["HOST_OUT"]                              # keep a second look (the Froyo one) next to the first
+    OBJ = os.path.join(OUT, "obj")
+    os.makedirs(OBJ, exist_ok=True)
 
 lv_src = [f for f in glob.glob(os.path.join(LVGL, "src", "**", "*.c"), recursive=True)
           if "/src/drivers/" not in f and "/src/libs/" not in f and "/src/osal/" not in f]
@@ -89,3 +95,8 @@ for n, (cap, sc, _, _) in enumerate(shots):
                     mont[oy - cap_h + 8 + r][ox + i * 8 + c] = (230, 230, 230)
 pv.png(os.path.join(OUT, "oobe-real.png"), mont, mw, mh)
 print("wrote", os.path.join(OUT, "oobe-real.png"))
+for f in sorted(glob.glob(os.path.join(OUT, "froyo-*.ppm"))):        # the Froyo skin's first run (HOST_DEFS=-DCONFIG_PURR_SHELL_ANDROID=1), one picture each
+    w, h, px = ppm(f)
+    scaled = [[p for p in row for _ in range(SC)] for row in px for _ in range(SC)]
+    pv.png(f[:-4] + ".png", scaled, w * SC, h * SC)
+

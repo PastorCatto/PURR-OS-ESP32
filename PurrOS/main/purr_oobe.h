@@ -65,6 +65,14 @@ typedef struct {
     int (*background)(char *msg, size_t cap);
     void (*finish)(void);                                       /* restart into the next stage */
     void (*use_keypad)(void *lv_group);                         /* give this LVGL group the hardware keyboard (NULL on the host) */
+    /* 1 once the background install (part 2, or the finishing part) could not get online: the wizard puts the Wi-Fi page in front of the next
+     * page, once. A CONNECT job that succeeds is the cue for the install to try again. NULL = never. */
+    int (*need_wifi)(void);
+    /* The background install failed and the person asked to try again (the Retry button on the Installing page): start it again if it is not running. NULL = none. */
+    void (*retry)(void);
+    /* The Installing page was reached: start the install now if it was held back (the Froyo first run installs after the connection test on the legal page). Returns 1 if an
+     * install is running. NULL = it already started on its own. */
+    int (*start_install)(void);
 } purr_oobe_ops_t;
 
 #define PURR_OOBE_PART_LOADER 1

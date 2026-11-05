@@ -7,6 +7,7 @@
 
 #include "lvgl.h"
 
+#include "purr_clock.h"
 #include "purr_reason.h"
 #include "purr_settings.h"
 #include "purr_w10m_theme.h"
@@ -23,7 +24,7 @@ static int head_px(void) { return droid() ? DROID_HEAD_H : HEAD_H; }
 static int bar_px(void) { return droid() ? DROID_BAR_H : BAR_H; }
 static const lv_font_t *head_font(void) { return droid() ? &lv_font_montserrat_14 : &lv_font_montserrat_20; }
 
-typedef enum { PG_WRONG, PG_DEVSERVER, PG_LEGAL, PG_WIFI, PG_RESTORING, PG_COLOUR, PG_ACCOUNT, PG_TIME, PG_DONE, PG_FINISHING } page_t;
+typedef enum { PG_WRONG, PG_DEVSERVER, PG_LEGAL, PG_WIFI, PG_RESTORING, PG_COLOUR, PG_ACCOUNT, PG_TIME, PG_DONE, PG_FINISHING, PG_WELCOME, PG_INSTALL } page_t;
 
 /* The last page is only reached from a failed restore ("Use a recovery computer"); the normal flow ends on the restore. */
 static const page_t k_loader[] = {PG_WRONG, PG_WIFI, PG_RESTORING, PG_DEVSERVER};
@@ -33,13 +34,19 @@ static const page_t k_loader_setup[] = {PG_WRONG, PG_WIFI};
 static const page_t k_loader_setup_dev[] = {PG_WRONG, PG_WIFI, PG_DEVSERVER};
 static const page_t k_finishing[] = {PG_FINISHING};
 static const page_t k_first[] = {PG_COLOUR, PG_LEGAL, PG_ACCOUNT, PG_TIME, PG_DONE};
+/* The Froyo skin's first run follows the owner's draft (plan7.md), with the legal page back in (owner): seven pages, the legal page doubling as the connection test,
+ * then the install on a page of its own with a checklist. The colour is the skin's. */
+static const page_t k_first_droid[] = {PG_WELCOME, PG_WIFI, PG_ACCOUNT, PG_TIME, PG_LEGAL, PG_INSTALL, PG_DONE};
 
 static const purr_oobe_ops_t *s_ops;
 static const page_t *s_pages;
 static int s_npages, s_idx, s_part;
+static page_t s_dyn[12];                                        /* the page list with the Wi-Fi page put in, see detour_insert() */
+static int s_detour;
 
 static lv_obj_t *s_sheet, *s_head, *s_body, *s_bar, *s_back, *s_next, *s_next_label;
 static lv_obj_t *s_title_lbl, *s_cnt_lbl;               /* the Froyo skin's title bar: the page name, and "2 of 5" (hidden while the install line uses that room) */
+static lv_obj_t *s_legal_btns;                            /* the legal page's "Try again" and "Check Wi-Fi", shown when the connection test failed */
 static lv_obj_t *s_bg_label, *s_bg_bar;                  /* the background install, above the bottom bar */
 static lv_obj_t *s_strip_lbl, *s_strip_bar;              /* the loader's and the finishing page's strip: a status line and a thin bar up top */
 static lv_obj_t *s_status;                               /* the page's one-line result */
@@ -127,6 +134,8 @@ static const char *page_name(page_t p)
     switch (p) {
     case PG_WRONG:
         return s_ops != NULL && s_ops->reasons != NULL && purr_reason_is_first_run(s_ops->reasons()) ? "Welcome" : "Recovery";
+    case PG_WELCOME:   return "Welcome";
+    case PG_INSTALL:   return "Installing";
     case PG_DEVSERVER: return "Developer server";
     case PG_LEGAL:     return "Legal and credits";
     case PG_WIFI:      return "Wi-Fi";
@@ -180,11 +189,74 @@ static void strip_set(int on)
     cnt_refresh();
 }
 
-static void bg_update(void)
+/* The background install could not get online (ops->need_wifi): the Wi-Fi page goes in at `at`, once, and the pages from there on move up. */
+/* A Wi-Fi page already on this page or still to come is where the person gets to it: no second one. */
+static int wifi_page_ahead(void)
 {
+    for (int i = s_idx; i < s_npages; i++) {
+        if (s_pages[i] == PG_WIFI) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int detour_wanted(void)
+{
+    return !s_detour && !wifi_page_ahead() && s_ops->need_wifi != NULL && s_ops->need_wifi() &&
+           (s_part == PURR_OOBE_PART_FIRSTBOOT || s_part == PURR_OOBE_PART_FINISHING) && s_npages < (int)(sizeof(s_dyn) / sizeof(s_dyn[0])) - 1;
+}
+
+static void detour_insert(int at)
+{
+    for (int i = 0; i < at; i++) {
+        s_dyn[i] = s_pages[i];
+    }
+    s_dyn[at] = PG_WIFI;
+    for (int i = at; i < s_npages; i++) {
+        s_dyn[i + 1] = s_pages[i];
+    }
+    s_pages = s_dyn;
+    s_npages++;
+    s_detour = 1;
+}
+
+/* The page after this one; the Wi-Fi page first when the install is waiting for a network. */
+static void go_next(void)
+{
+    if (detour_wanted()) {
+        detour_insert(s_idx + 1);
+    }
+    show_page(s_idx + 1);
+}
+
+static void install_refresh(int p, const char *msg);
+
+static void bg_update_part(void)
+{
+    if (droid() && s_part == PURR_OOBE_PART_FIRSTBOOT) {         /* the draft: the install has its own page, not a line in the title bar */
+        char m[48] = "";
+        int q = s_ops->background != NULL ? s_ops->background(m, sizeof(m)) : -1;
+        if (s_pages[s_idx] == PG_INSTALL && s_progress != NULL) {
+            if (q == -2 && detour_wanted()) {                    /* no network for it: ask for one, then it carries on */
+                detour_insert(s_idx);
+                show_page(s_idx);
+                return;
+            }
+            install_refresh(q, m);
+        } else if (s_pages[s_idx] == PG_DONE) {
+            set_next("Finish", q == -1 || q == -2 || q >= 1000);
+        }
+        return;
+    }
     char msg[48] = "";
     int p = s_ops->background != NULL ? s_ops->background(msg, sizeof(msg)) : -1;
     if (s_pages[s_idx] == PG_FINISHING && s_progress != NULL) {
+        if (p == -2 && detour_wanted()) {                       /* no network for it: ask for one, then it carries on */
+            detour_insert(0);
+            show_page(0);
+            return;
+        }
         if (p == -2) {                                          /* it failed: say so and stop; power cycling tries again */
             lv_label_set_text(s_stage, msg[0] ? msg : "The install did not finish. Power it off and on to try again.");
             lv_obj_set_style_text_color(s_stage, lv_color_hex(0xFFB900), 0);
@@ -225,6 +297,14 @@ static void bg_update(void)
     lv_label_set_text_fmt(s_bg_label, "%s", msg[0] ? msg : (p >= 1000 ? "System installed" : "Still installing the system..."));
     lv_obj_align(s_bg_label, LV_ALIGN_RIGHT_MID, -10, 0);
     lv_bar_set_value(s_bg_bar, p, LV_ANIM_OFF);
+}
+
+/* The "2 of 5" in the Froyo title bar gives way to the install line whenever that shows, and comes back when it hides: so it is settled after every update,
+ * not only when the page changes. */
+static void bg_update(void)
+{
+    bg_update_part();
+    cnt_refresh();
 }
 
 static void tick_cb(lv_timer_t *t)
@@ -279,7 +359,7 @@ static void tick_cb(lv_timer_t *t)
     case PURR_OOBE_JOB_ACCOUNT:
         if (r == 0) {
             s_account_ok = 1;
-            show_page(s_idx + 1);
+            go_next();
         } else {
             set_status(msg[0] ? msg : "We couldn't create the account.", 0);
             set_next("Next", 1);
@@ -292,8 +372,18 @@ static void tick_cb(lv_timer_t *t)
                 const char *nl = strchr(text, '\n');
                 text = nl != NULL ? nl + 1 : text + strlen(text);
             }
-            lv_label_set_text(s_legal_label, text != NULL && text[0]
-                              ? text : "We couldn't load the legal text. You can read it in Settings once you are set up.");
+            if (text != NULL && text[0]) {
+                lv_label_set_text(s_legal_label, text);
+            } else if (droid()) {                               /* the legal page is the connection test: say what it means before the install starts on it */
+                lv_label_set_text_fmt(s_legal_label, "We couldn't load this, so we might not be able to connect.%s%s\nCheck your Wi-Fi, or carry on: the install will try again.",
+                                      msg[0] ? "\n" : "", msg);
+                lv_obj_set_style_text_color(s_legal_label, lv_color_hex(0xFFB900), 0);
+                if (s_legal_btns != NULL) {
+                    lv_obj_remove_flag(s_legal_btns, LV_OBJ_FLAG_HIDDEN);
+                }
+            } else {
+                lv_label_set_text(s_legal_label, "We couldn't load the legal text. You can read it in Settings once you are set up.");
+            }
         }
         break;
     case PURR_OOBE_JOB_RESTORE:
@@ -353,15 +443,49 @@ static void page_wrong(void)
     set_next("OK", 1);
 }
 
+static void legal_retry_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_legal_label != NULL) {
+        lv_label_set_text(s_legal_label, "Just a sec...");
+        lv_obj_remove_local_style_prop(s_legal_label, LV_STYLE_TEXT_COLOR, 0);
+        purr_theme_apply(s_legal_label, PURR_TH_DIM);
+    }
+    if (s_legal_btns != NULL) {
+        lv_obj_add_flag(s_legal_btns, LV_OBJ_FLAG_HIDDEN);
+    }
+    job_start(PURR_OOBE_JOB_LEGAL, NULL, NULL);
+}
+
+static void goto_page(page_t pg);
+
+static void legal_wifi_cb(lv_event_t *e)
+{
+    (void)e;
+    goto_page(PG_WIFI);
+}
+
 static void page_legal(void)
 {
-    w10m_title(s_body, "The legal stuff & cool people");
+    if (!droid()) {
+        w10m_title(s_body, "The legal stuff & cool people");
+    }
     s_legal_label = lv_label_create(s_body);
     lv_label_set_text(s_legal_label, "Just a sec...");
     lv_label_set_long_mode(s_legal_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(s_legal_label, LV_PCT(100));
     lv_obj_set_style_text_font(s_legal_label, &lv_font_montserrat_12, 0);
     purr_theme_apply(s_legal_label, PURR_TH_DIM);
+    s_legal_btns = lv_obj_create(s_body);                       /* hidden until the text fails to load: what to do about it */
+    lv_obj_remove_style_all(s_legal_btns);
+    lv_obj_set_size(s_legal_btns, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(s_legal_btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_gap(s_legal_btns, 6, 0);
+    lv_obj_t *b1 = w10m_button(s_legal_btns, "Try again", legal_retry_cb, NULL);
+    lv_obj_set_width(b1, LV_PCT(48));
+    lv_obj_t *b2 = w10m_button(s_legal_btns, "Check Wi-Fi", legal_wifi_cb, NULL);
+    lv_obj_set_width(b2, LV_PCT(48));
+    lv_obj_add_flag(s_legal_btns, LV_OBJ_FLAG_HIDDEN);
     set_next("Continue", 1);
     job_start(PURR_OOBE_JOB_LEGAL, NULL, NULL);
 }
@@ -417,8 +541,20 @@ static void wifi_list_build(void)
 
 static void page_wifi(void)
 {
-    w10m_title(s_body, "Let's get you connected");
-    w10m_dim(s_body, "Pick your network and " PURR_BRAND_PRODUCT " will be ready for you.");
+    if (droid() && s_part == PURR_OOBE_PART_FIRSTBOOT && s_ops->background != NULL) {
+        int q = s_ops->background(NULL, 0);
+        if (q >= 0 && q < 1000) {                               /* the install is downloading: a scan for networks would interrupt it */
+            w10m_dim(s_body, "You're online. The install is using the connection, so choosing another network waits until it has finished. You can change it in Settings.");
+            set_next("Next", 1);
+            return;
+        }
+    }
+    if (!droid()) {                                             /* the Froyo title bar already says Wi-Fi: the networks start right under it */
+        w10m_title(s_body, "Let's get you connected");
+    }
+    int offline = s_detour || (s_ops->need_wifi != NULL && s_ops->need_wifi());
+    w10m_dim(s_body, offline ? "The rest of the system couldn't be downloaded. Pick your network and it will carry on."
+                             : "Pick your network and " PURR_BRAND_PRODUCT " will be ready for you.");
     s_connected = 0;
     set_next("Next", 0);
     if (s_ops->wired != NULL && s_ops->wired()) {
@@ -560,6 +696,77 @@ static void page_finishing(void)
     s_restoring_done = 0;
 }
 
+/* ---- part 2: the Froyo skin's Welcome and Installing pages */
+
+static void page_welcome(void)
+{
+    w10m_title(s_body, "Welcome to " PURR_BRAND_PRODUCT);
+    w10m_dim(s_body, "A few quick steps and this device is ready. You can change all of it later in Settings.");
+    w10m_space(s_body, 4);
+    w10m_row(s_body, "Language", "English (United States)", 1, NULL, NULL);
+    w10m_row(s_body, "Keyboard", "QWERTY, this handset", 1, NULL, NULL);
+}
+
+#define INSTALL_STEPS 5
+static int s_install_failed;                            /* the Back button is Retry while the install is stopped */
+static lv_obj_t *s_chk[INSTALL_STEPS];
+static const char *const k_install_steps[INSTALL_STEPS] = {
+    "Installing the kernel", "Installing the modules", "Installing the pictures", "Checking the bootloader", "System installed",
+};
+
+/* p as ops->background gives it: -1 nothing running (it is finished), 0..999 working, 1000 done, -2 it failed. The step is told from the progress the install
+ * job reports: the kernel up to 500, the modules to 800, the pictures to 960, the bootloader check to 1000. */
+static void install_refresh(int p, const char *msg)
+{
+    int done = p == -1 || p >= 1000;
+    int step = p < 0 ? INSTALL_STEPS - 1 : p < 500 ? 0 : p < 800 ? 1 : p < 960 ? 2 : p < 1000 ? 3 : INSTALL_STEPS - 1;
+    if (s_progress != NULL) {
+        lv_bar_set_value(s_progress, done ? 1000 : (p < 0 ? 0 : p), LV_ANIM_OFF);
+    }
+    for (int i = 0; i < INSTALL_STEPS; i++) {
+        if (s_chk[i] == NULL) {
+            continue;
+        }
+        char line[48];
+        int ok = done || (p != -2 && i < step);
+        snprintf(line, sizeof(line), "%s %s%s", ok ? LV_SYMBOL_OK : (i == step && p != -2 ? LV_SYMBOL_RIGHT : "  "), k_install_steps[i],
+                 !ok && i == step && p != -2 ? "..." : "");
+        lv_label_set_text(s_chk[i], line);
+        purr_theme_apply(s_chk[i], ok ? PURR_TH_DIM : (i == step && p != -2 ? PURR_TH_TEXT : PURR_TH_DIM));
+    }
+    if (p == -2) {                                              /* it failed: say what, and offer to try again, or to carry on without */
+        set_status(msg != NULL && msg[0] ? msg : "The install did not finish. You can add the rest later from Settings.", 0);
+        if (s_ops->retry != NULL) {
+            w10m_button_text(s_back, "Retry");
+            lv_obj_remove_state(s_back, LV_STATE_DISABLED);
+            s_install_failed = 1;
+        }
+        set_next("Skip", 1);
+        return;
+    }
+    set_next("Next", done);
+}
+
+static void page_install(void)
+{
+    w10m_dim(s_body, "This can take a few minutes. Keep the handset charged.");
+    s_progress = lv_bar_create(s_body);
+    lv_bar_set_range(s_progress, 0, 1000);
+    lv_obj_set_size(s_progress, LV_PCT(100), 12);
+    style_bar(s_progress);
+    w10m_space(s_body, 4);
+    for (int i = 0; i < INSTALL_STEPS; i++) {
+        s_chk[i] = w10m_text(s_body, "");
+    }
+    make_status();
+    if (s_ops->start_install != NULL) {
+        s_ops->start_install();                                 /* held back until now: the connection was tested on the legal page */
+    }
+    lv_obj_add_state(s_back, LV_STATE_DISABLED);                /* nothing to go back to while it installs */
+    set_next("Next", 0);
+    install_refresh(s_ops->background != NULL ? s_ops->background(NULL, 0) : -1, NULL);
+}
+
 /* ---- part 2 */
 
 static int name_ok(const char *n)
@@ -619,6 +826,11 @@ static void zone_cb(lv_event_t *e)
     }
 }
 
+static void ntp_cb(lv_event_t *e)
+{
+    purr_clock_set_ntp_enabled(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0);
+}
+
 static void clock_cb(lv_event_t *e)
 {
     purr_settings_kv_set("time.clock24", lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? "1" : "0");
@@ -637,7 +849,13 @@ static void mode_cb(lv_event_t *e)
 
 static void page_time(void)
 {
-    w10m_title(s_body, "Date and time");
+    if (!droid()) {                                             /* the Froyo title bar already says it */
+        w10m_title(s_body, "Date and time");
+    }
+    if (droid()) {
+        w10m_switch(s_body, "Set the time from the network", purr_clock_ntp_enabled(), ntp_cb);
+        w10m_space(s_body, 4);
+    }
     w10m_text(s_body, "Time zone");
     char names[400] = "";
     for (int i = 0; i < purr_settings_zone_count(); i++) {
@@ -655,7 +873,9 @@ static void page_time(void)
     w10m_dropdown(s_body, names, sel, 200, zone_cb);
     w10m_space(s_body, 4);
     w10m_switch(s_body, "24-hour clock", purr_settings_kv_int("time.clock24", 1), clock_cb);
-    w10m_dim(s_body, "No stress, you can change these in Settings any time.");
+    if (!droid()) {
+        w10m_dim(s_body, "No stress, you can change these in Settings any time.");
+    }
 }
 
 static void page_colour(void)
@@ -686,6 +906,14 @@ static void page_colour(void)
 static void page_done(void)
 {
     w10m_title(s_body, "Your " PURR_BRAND_PRODUCT " device is ready");
+    if (droid() && s_part == PURR_OOBE_PART_FIRSTBOOT) {
+        w10m_dim(s_body, "Sign in with the account you just made. Wi-Fi, apps and the rest are in Settings.");
+        w10m_space(s_body, 4);
+        w10m_row(s_body, "Apps from the Store", "Open the Store to add more", 1, NULL, NULL);
+        set_next("Finish", 0);
+        bg_update();
+        return;
+    }
     char line[64];
     snprintf(line, sizeof(line), "Account:  %s", s_account[0] ? s_account : "-");
     w10m_text(s_body, line);
@@ -715,12 +943,15 @@ static void show_page(int idx)
     s_idx = idx;
     s_job_active = -1;
     s_status = NULL;
-    s_progress = s_stage = s_legal_label = s_srv_list = s_relay_btn = NULL;
+    s_progress = s_stage = s_legal_label = s_srv_list = s_relay_btn = s_legal_btns = NULL;
     strip_set(0);                                               /* a page that wants the strip turns it back on */
     lv_obj_clean(s_body);
     lv_group_remove_all_objs(s_group);
     lv_obj_remove_flag(s_next, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_back, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_state(s_back, LV_STATE_DISABLED);
+    w10m_button_text(s_back, "Back");
+    s_install_failed = 0;
     if (idx == 0) {
         lv_obj_add_flag(s_back, LV_OBJ_FLAG_HIDDEN);            /* the only button on the first page: centred */
     }
@@ -742,6 +973,8 @@ static void show_page(int idx)
     case PG_COLOUR:    page_colour(); break;
     case PG_DONE:      page_done(); break;
     case PG_FINISHING: page_finishing(); break;
+    case PG_WELCOME:   page_welcome(); break;
+    case PG_INSTALL:   page_install(); break;
     }
 }
 
@@ -756,6 +989,11 @@ static void next_clicked(lv_event_t *e)
         return;
     }
     if (s_pages[s_idx] == PG_DONE) {
+        if (detour_wanted()) {                                   /* the install never got online: the network first, then Finish */
+            detour_insert(s_idx);
+            show_page(s_idx);
+            return;
+        }
         s_ops->finish();
         return;
     }
@@ -766,12 +1004,23 @@ static void next_clicked(lv_event_t *e)
         goto_page(PG_RESTORING);
         return;
     }
-    show_page(s_idx + 1);
+    go_next();
 }
 
 static void back_clicked(lv_event_t *e)
 {
     (void)e;
+    if (s_pages[s_idx] == PG_INSTALL) {                          /* the Installing page has no Back: its button is Retry once the install has stopped */
+        if (s_install_failed && s_ops->retry != NULL) {
+            s_install_failed = 0;
+            s_ops->retry();
+            w10m_button_text(s_back, "Back");
+            lv_obj_add_state(s_back, LV_STATE_DISABLED);
+            set_status("", 1);
+            set_next("Next", 0);
+        }
+        return;
+    }
     show_page(s_idx - 1);
 }
 
@@ -779,6 +1028,7 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
 {
     s_ops = ops;
     s_part = part;
+    s_detour = 0;
     int dev = (part == PURR_OOBE_PART_LOADER || part == PURR_OOBE_PART_LOADER_SETUP) && ops->dev_recovery != NULL && ops->dev_recovery();
     if (part == PURR_OOBE_PART_FINISHING) {
         s_pages = k_finishing;
@@ -787,10 +1037,10 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
         s_pages = dev ? k_loader_setup_dev : k_loader_setup;
         s_npages = dev ? 3 : 2;
     } else {
-    s_pages = part == PURR_OOBE_PART_LOADER ? (dev ? k_loader_dev : k_loader) : k_first;
+    s_pages = part == PURR_OOBE_PART_LOADER ? (dev ? k_loader_dev : k_loader) : (droid() ? k_first_droid : k_first);
     s_npages = part == PURR_OOBE_PART_LOADER ? (dev ? (int)(sizeof(k_loader_dev) / sizeof(k_loader_dev[0]))
                                                     : (int)(sizeof(k_loader) / sizeof(k_loader[0])))
-                                             : (int)(sizeof(k_first) / sizeof(k_first[0]));
+                                             : (droid() ? (int)(sizeof(k_first_droid) / sizeof(k_first_droid[0])) : (int)(sizeof(k_first) / sizeof(k_first[0])));
     }
     int w = lv_display_get_horizontal_resolution(NULL), h = lv_display_get_vertical_resolution(NULL);
 
