@@ -27,6 +27,7 @@ import re
 import struct
 import zlib
 
+from lib import image as pimg
 from lib.model import Action, Param, Script
 
 MAGIC = 0x54534150        # 'PAST', little-endian: "Purr ASset Table"
@@ -130,6 +131,17 @@ def to_rgb565(width, height, channels, pixels):
         out[i * 2] = v & 0xFF
         out[i * 2 + 1] = (v >> 8) & 0xFF
     return bytes(out)
+
+
+def to_rgb565a8(width, height, channels, pixels):
+    """An RGB565 plane followed by an 8-bit alpha plane (LVGL's RGB565A8). A picture without
+    alpha (3 channels) gets a fully opaque plane, so every image in a pack can be the same format."""
+    plane = to_rgb565(width, height, channels, pixels)
+    if channels == 4:
+        alpha = bytes(pixels[i * 4 + 3] for i in range(width * height))
+    else:
+        alpha = b"\xff" * (width * height)
+    return plane + alpha
 
 
 # -- packing -------------------------------------------------------------------------
@@ -254,7 +266,7 @@ def find_partition(ctx, repo_root, board, name):
     return None
 
 
-def build(ctx, board, assets_dir, out):
+def build(ctx, board, assets_dir, out, alpha=False):
     if board not in BOARDS:
         ctx.error(f"unknown board {board!r} (LVGL only builds for {', '.join(BOARDS)})")
         return 1
@@ -281,8 +293,12 @@ def build(ctx, board, assets_dir, out):
         except ValueError as e:
             ctx.error(str(e))
             return 1
-        images.append((name, w, h, to_rgb565(w, h, channels, pixels)))
-        ctx.info(f"{fname}: {w}x{h}, {channels} channel(s) -> {w * h * 2} bytes RGB565")
+        if alpha:
+            images.append((name, w, h, to_rgb565a8(w, h, channels, pixels), CF_RGB565A8))
+            ctx.info(f"{fname}: {w}x{h}, {channels} channel(s) -> {w * h * 3} bytes RGB565A8")
+        else:
+            images.append((name, w, h, to_rgb565(w, h, channels, pixels)))
+            ctx.info(f"{fname}: {w}x{h}, {channels} channel(s) -> {w * h * 2} bytes RGB565")
 
     image = pack(images)
     if len(image) > size:
@@ -301,6 +317,53 @@ def build(ctx, board, assets_dir, out):
     ctx.info(f"  python -m esptool --chip esp32s3 -b 460800 write_flash {offset:#x} {dest}")
     ctx.info("(add -p <PORT> for the device's serial port; this only overwrites the "
               "ui_assets partition, nothing else on the device.)")
+    return 0
+
+
+def used_length(data):
+    """How many bytes of a packed pack are real: the header, the directory and the furthest pixel range, rounded up to ALIGN.
+    A built .bin is padded with erased-flash 0xFF to the whole partition; only this much is signed and sent."""
+    if len(data) < struct.calcsize(HEADER_FMT):
+        raise ValueError("too short to be an asset pack")
+    magic, count, _crc = struct.unpack_from(HEADER_FMT, data, 0)
+    if magic != MAGIC:
+        raise ValueError("not an asset pack (bad magic)")
+    head = struct.calcsize(HEADER_FMT) + count * ENTRY_SIZE
+    if len(data) < head:
+        raise ValueError("the directory runs past the end of the file")
+    end = 0
+    for i in range(count):
+        _name, off, length, _w, _h, _cf = struct.unpack_from(ENTRY_FMT, data, struct.calcsize(HEADER_FMT) + i * ENTRY_SIZE)
+        end = max(end, off + length)
+    total = head + end
+    if total > len(data):
+        raise ValueError("an entry's pixels run past the end of the file")
+    return (total + ALIGN - 1) // ALIGN * ALIGN
+
+
+def package(ctx, board, file, version, out):
+    """Wraps a built pack into the unsigned PURR_IMG_MODULE container (subtype PURR_MOD_UIASSETS) that stage 2 and
+    `netinstall uiassets` install; sign it with `keys sign` (the boot key, or the release's system key) before publishing."""
+    if board not in BOARDS:
+        ctx.error(f"unknown board {board!r} (LVGL only builds for {', '.join(BOARDS)})")
+        return 1
+    if not os.path.isfile(file):
+        ctx.error(f"{file}: no such file")
+        return 1
+    with open(file, "rb") as fh:
+        data = fh.read()
+    try:
+        n = used_length(data)
+    except ValueError as e:
+        ctx.error(f"{file}: {e}")
+        return 1
+    image = pimg.make_image("uiassets", version, pimg.IMG_MODULE, pimg.MOD_UIASSETS, data[:n], pimg.CHIP_ESP32S3)
+    dest = out or f"uiassets-{board}.cat"
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(image)
+    ctx.ok(f"{dest}: {len(image)} bytes (uiassets {version}, {n} of {len(data)} bytes of the pack, unsigned)")
+    ctx.info(f"sign it: purrstrap keys sign --key boot.key --image {dest} --key-id <id>")
     return 0
 
 
@@ -332,6 +395,21 @@ SCRIPT = Script(
                               "becomes the asset name"),
                    Param("out", "path", default="",
                          help="output file (default: rel/ui_assets/<board>.ui_assets.bin)"),
+                   Param("alpha", "bool", default=False,
+                         help="keep each PNG's alpha channel (RGB565A8, 3 bytes a pixel) instead "
+                              "of flattening to opaque RGB565; the Android shell's icons need it"),
+               )),
+        Action("package", "Package for the recovery server", package,
+               help="wrap a built pack in a PURR image (subtype uiassets) that stage 2 installs; sign it afterwards",
+               params=(
+                   Param("board", "choice", default="tdeck_plus", choices=BOARDS,
+                         help="the board the pack is for"),
+                   Param("file", "path", required=True,
+                         help="the pack built by `uiassets build` (the padding to the partition's size is left out)"),
+                   Param("version", "str", required=True,
+                         help="the pack's version, for example 1.0.17"),
+                   Param("out", "path", default="",
+                         help="output file (default: uiassets-<board>.cat)"),
                )),
     ),
 )

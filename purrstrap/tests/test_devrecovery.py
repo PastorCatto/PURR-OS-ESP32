@@ -58,6 +58,21 @@ class RecoveryHosting(unittest.TestCase):
         self.assertNotIn("component=kernel", mods)             # components and modules stay in their own manifests
         self.assertTrue(os.path.exists(os.path.join(rdir, "legal.txt")))
 
+    def test_a_ui_pack_is_a_component_signed_for_the_system_key(self):
+        pack = os.path.join(self.tmp, "uiassets.cat")
+        with open(pack, "wb") as fh:
+            fh.write(img("uiassets", "1.0.17", b"pack bytes" * 30, flags=pimg.MOD_UIASSETS))
+        rc, _ = self.run_recovery(uiassets=pack)
+        self.assertEqual(rc, 0)
+        rdir = os.path.join(self.repo, "recovery")
+        self.assertTrue(os.path.exists(os.path.join(rdir, "uiassets-tdeck_plus.cat")))
+        text = open(os.path.join(rdir, "recovery.manifest")).read()
+        stanza = next(s for s in text.split("\n\n") if "component=uiassets" in s)
+        for want in ("version=1.0.17", "file=uiassets-tdeck_plus.cat", "key=system", "payload_size=300"):
+            self.assertIn(want, stanza)
+        self.assertNotIn("component=uiassets", open(os.path.join(rdir, "modules.manifest")).read())
+        self.assertEqual(len([s for s in text.split("\n\n") if "component=" in s]), 5)
+
     def test_refuses_what_is_not_an_image_or_a_bad_module_name(self):
         junk = os.path.join(self.tmp, "junk.cat")
         with open(junk, "wb") as fh:

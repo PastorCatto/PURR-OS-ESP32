@@ -47,7 +47,7 @@ CHIPS = {pimg.CHIP_ANY: "any", pimg.CHIP_ESP32: "esp32", pimg.CHIP_ESP32S3: "esp
 MAX_PACKAGE = 512 * 1024
 RECOVERY_DIR = "recovery"
 RECOVERY_VM_DIR = "recovery-vm"                  # the same files built for the emulator (the VM flavor's recovery URL points here)
-RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader")      # the files the loader and KittenOS fetch by name
+RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader", "uiassets")      # the files the loader and KittenOS fetch by name
 RECOVERY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")    # a plain file name: no slash, so no way out of the folder
 
 
@@ -219,7 +219,7 @@ def build_recovery_manifests(repo):
     for e in comps:
         lines += ["component=%s" % e["component"], "version=%s" % e["version"], "chip=%s" % e["chip"],
                   "board=%s" % e["board"], "file=%s" % e["file"], "size=%d" % e["size"], "sha256=%s" % e["sha256"],
-                  "key=boot", "payload_size=%d" % e["payload_size"], "payload_sha256=%s" % e["payload_sha256"], ""]
+                  "key=%s" % ("system" if e["component"] == "uiassets" else "boot"), "payload_size=%d" % e["payload_size"], "payload_sha256=%s" % e["payload_sha256"], ""]
     with open(os.path.join(rdir, "recovery.manifest"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     lines = ["release=dev-%s" % time.strftime("%Y%m%d%H%M%S"), "released=%s" % stamp, ""]
@@ -232,11 +232,11 @@ def build_recovery_manifests(repo):
     return comps, mods
 
 
-def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader=""):
+def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader="", uiassets=""):
     rdir = _recovery_dir(dir)
     os.makedirs(rdir, exist_ok=True)
     given = {"kernel": (kernel, ".cat"), "kittenos": (kittenos, ".kitt"), "loader": (loader, ".cat"),
-             "bootpkg": (bootpkg, ".cat"), "bootloader": (bootloader, ".cat")}
+             "bootpkg": (bootpkg, ".cat"), "bootloader": (bootloader, ".cat"), "uiassets": (uiassets, ".cat")}
     for comp, (src, ext) in given.items():
         if not src:
             continue
@@ -476,6 +476,7 @@ SCRIPT = Script(
                        Param("loader", "path", default="", help="the recovery loader image (.cat)"),
                        Param("bootpkg", "path", default="", help="the boot package image (.cat)"),
                        Param("bootloader", "path", default="", help="the signed bootloader image (.cat), installed by KittenOS with a backup"),
+                       Param("uiassets", "path", default="", help="the signed UI icon pack (.cat from `uiassets package`), installed by stage 2"),
                        Param("legal", "path", default="", help="the legal and credits text file"),
                        Param("modules", "str", default="", help="module images to host, comma separated"))),
         Action("publish", "Publish an app", publish,

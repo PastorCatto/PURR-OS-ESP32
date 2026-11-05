@@ -56,6 +56,8 @@ def allowed_roles(image_type, subtype):
     if image_type == img.IMG_MODULE:
         if subtype in (img.MOD_KERNEL, img.MOD_COREOS, img.MOD_BOOTPKG, img.MOD_LOADER, img.MOD_BOOTLOADER):
             return ["boot"]
+        if getattr(img, "MOD_UIASSETS", None) == subtype:
+            return ["boot", "system"]
         if subtype == img.MOD_DRIVER:
             return ["system", "developer", "vendor"]
         return ["system"]

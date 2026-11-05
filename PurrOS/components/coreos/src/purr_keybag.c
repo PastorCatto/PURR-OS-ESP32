@@ -83,6 +83,8 @@ int purr_role_may_sign(uint8_t role, uint8_t image_type, uint8_t subtype)
         case PURR_MOD_LOADER:
         case PURR_MOD_BOOTLOADER:
             return role == PURR_ROLE_BOOT;
+        case PURR_MOD_UIASSETS:
+            return role == PURR_ROLE_BOOT || role == PURR_ROLE_SYSTEM;       /* pictures, not code: the release's system key signs them, and so does the boot key a dev server uses */
         case PURR_MOD_APPMANAGER:
         case PURR_MOD_RUNTIME:
         case PURR_MOD_DEVBUNDLE:

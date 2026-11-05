@@ -42,6 +42,19 @@ def array_text(name, w, h, cf, data):
     return ARRAY.format(name=name, w=w, h=h, cf=cf, data=body)
 
 
+class AlphaTests(unittest.TestCase):
+    def test_rgba_pixels_become_a_colour_plane_then_an_alpha_plane(self):
+        px = bytes([255, 0, 0, 255,   0, 255, 0, 128,   0, 0, 255, 0,   255, 255, 255, 64])
+        data = ua.to_rgb565a8(2, 2, 4, px)
+        self.assertEqual(len(data), 2 * 2 * 3)
+        self.assertEqual(data[:2], bytes([0x00, 0xF8]))          # red, little-endian RGB565
+        self.assertEqual(data[8:], bytes([255, 128, 0, 64]))     # the alpha plane, in pixel order
+
+    def test_rgb_pixels_get_an_opaque_alpha_plane(self):
+        data = ua.to_rgb565a8(1, 2, 3, bytes([0, 0, 0, 255, 255, 255]))
+        self.assertEqual(data[4:], bytes([255, 255]))
+
+
 class PackTests(unittest.TestCase):
     def entries(self, blob):
         magic, count, _crc = struct.unpack(ua.HEADER_FMT, blob[:12])
@@ -110,6 +123,60 @@ class ImportTests(unittest.TestCase):
         (row,) = PackTests().entries(blob)
         start = 12 + ua.ENTRY_SIZE + row[1]
         self.assertEqual(blob[start:start + row[2]], data)
+
+
+class PackageTests(unittest.TestCase):
+    """`uiassets package`: the used part of a pack, wrapped as a PURR_MOD_UIASSETS image for stage 2."""
+
+    def built(self, padded_to=4096):
+        blob = ua.pack([("a", 2, 2, b"\x01" * 8), ("b", 2, 2, b"\x02" * 12, ua.CF_RGB565A8)])
+        return blob, blob + b"\xff" * (padded_to - len(blob))
+
+    def test_used_length_leaves_out_the_padding_to_the_partition(self):
+        blob, padded = self.built()
+        n = ua.used_length(padded)
+        self.assertEqual(padded[:n].rstrip(b"\xff")[:12], blob[:12])
+        self.assertLess(n, len(padded))
+        self.assertEqual(n % ua.ALIGN, 0)
+        self.assertGreaterEqual(n, len(blob) - ua.ALIGN)
+
+    def test_a_pack_whose_pixels_run_past_the_file_is_refused(self):
+        blob, _ = self.built()
+        with self.assertRaises(ValueError):
+            ua.used_length(blob[:-8])
+        with self.assertRaises(ValueError):
+            ua.used_length(b"\x00" * 64)                         # bad magic
+        with self.assertRaises(ValueError):
+            ua.used_length(b"\x01")
+
+    def test_the_package_is_a_module_image_with_the_uiassets_subtype_and_the_trimmed_payload(self):
+        from lib import image as pimg
+        from helpers import make_ctx
+        blob, padded = self.built(8192)
+        tmp = tempfile.mkdtemp()
+        src, dest = os.path.join(tmp, "p.bin"), os.path.join(tmp, "u.cat")
+        with open(src, "wb") as fh:
+            fh.write(padded)
+        ctx, _ = make_ctx(tmp)
+        self.assertEqual(ua.package(ctx, "tdeck_plus", src, "1.0.17", dest), 0)
+        data = open(dest, "rb").read()
+        self.assertTrue(pimg.is_purr_image(data))
+        f = pimg.header_fields(pimg.parse_header(data))
+        self.assertEqual(f["image_type"], pimg.IMG_MODULE)
+        self.assertEqual(f["flags"] & 0xFF, pimg.MOD_UIASSETS)
+        self.assertEqual(f["name"], "uiassets")
+        self.assertEqual(f["version"], "1.0.17")
+        payload = data[pimg.HEADER_SIZE:]
+        self.assertEqual(f["payload_size"], len(payload))
+        self.assertEqual(len(payload), ua.used_length(padded))
+        self.assertEqual(payload, padded[:len(payload)])
+
+    def test_a_missing_file_or_an_unknown_board_is_refused(self):
+        from helpers import make_ctx
+        tmp = tempfile.mkdtemp()
+        ctx, _ = make_ctx(tmp)
+        self.assertEqual(ua.package(ctx, "tdeck_plus", os.path.join(tmp, "nope.bin"), "1.0.0", ""), 1)
+        self.assertEqual(ua.package(ctx, "no_such_board", os.path.join(tmp, "nope.bin"), "1.0.0", ""), 1)
 
 
 if __name__ == "__main__":

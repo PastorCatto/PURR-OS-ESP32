@@ -57,6 +57,28 @@ package itself, regardless of which system happened to run the install.
   the installer either way -- only `purr_image_verify`'s header checks and, later, the
   bootloader when it actually tries to boot the partition -- so this works for a stock
   ESP-IDF app image (`kernel`) exactly as it would for any other opaque blob.
+- **How a package step wraps a payload into its file** (the same for `package-component`, `bootpkg build`,
+  `uiassets package`; `purrstrap/lib/image.py`, `make_image`, and `purr_image_header_t` in `purr_abi.h`). The file is
+  one header followed by the payload bytes, unchanged:
+
+  | field | notes |
+  |---|---|
+  | `magic` `'PURR'`, `header_version`, `header_size` | the layout is declared once, in `lib/image.py` |
+  | `chip_id`, `image_type` (`PURR_IMG_MODULE`) | the chip is checked against the device |
+  | `key_id`, `signature[64]` | zero in the packaged file; `keys sign` fills them (P-256 over every byte before the signature) |
+  | `flags` low byte | the subtype: `PURR_MOD_KERNEL`, `LOADER`, `BOOTLOADER`, `BOOTPKG`, `UIASSETS` ... |
+  | `name[32]`, `version[12]`, `min_boot_version[12]` | `name` is the component; the manifest names the file `<component>-<board>.cat` |
+  | `payload_offset`, `payload_size`, `payload_sha256` | the payload is the bytes that reach the partition (kernel, loader, ui_assets) or the whole file is kept (bootpkg) |
+
+  Package, sign, then `dev recovery` copies the file in and writes its size and sha256 (and the payload's) into
+  `recovery.manifest`; the device checks the file hash, the signature and the subtype's allowed key, writes, and reads
+  back the payload hash. A new component therefore needs one subtype, one row of `purr_role_may_sign`, one install
+  branch in `commands.c`, and one name in `RECOVERY_COMPONENTS` (`purrstrap/scripts/dev.py`).
+- **`uiassets`** (`PURR_MOD_UIASSETS`, 10): the picture pack for the `ui_assets` data partition, one pack per shell
+  (the Windows-style and the Android-style packs differ). Signed by the boot key (a dev server) or the system key (a
+  release). Only the used part of the pack is sent, not the padding to the partition's size. Stage 2 (and
+  `netinstall uiassets`) writes only that part, skips the write when the partition already holds the same payload, and
+  needs no reboot beyond the next UI start. Packaged by `purrstrap uiassets package`, hosted by `dev recovery --uiassets`.
 - `kernel` also becomes the boot target immediately (no reboot needed to select it); `loader` and
   `bootpkg` are read directly by the bootloader's own fallback chain
   (`../bootloader/SPEC.md`), so the write above is the whole install.

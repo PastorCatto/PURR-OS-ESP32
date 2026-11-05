@@ -108,6 +108,35 @@ static void test_payload_fields(void)
     CHECK_EQ(bootpkg->have_payload_sha256, 0);
 }
 
+static void test_ui_pack_entry(void)
+{
+    /* The UI picture pack (OTA/SPEC.md, uiassets): a recovery component like the kernel, signed for the system key, with its payload hash so
+     * stage 2 can see what is already in the ui_assets partition. It is found by name and board; a release without one simply has no entry. */
+    const char *text =
+        "component=uiassets\n"
+        "version=1.0.17\n"
+        "chip=esp32s3\n"
+        "board=tdeck_plus\n"
+        "file=uiassets-tdeck_plus.cat\n"
+        "size=149000\n"
+        "sha256=" HASH64 "\n"
+        "key=system\n"
+        "payload_size=148831\n"
+        "payload_sha256=" HASH64_B "\n";
+
+    purr_manifest_t m;
+    CHECK_EQ(purr_manifest_parse(&m, text, strlen(text)), 1);
+    const purr_manifest_entry_t *e = purr_manifest_find(&m, "uiassets", "esp32s3", "tdeck_plus");
+    CHECK(e != NULL);
+    CHECK_EQ(e->size, 149000u);
+    CHECK_EQ(e->payload_size, 148831u);
+    CHECK_EQ(e->have_payload_sha256, 1);
+    CHECK(strcmp(e->file, "uiassets-tdeck_plus.cat") == 0);
+    CHECK(strcmp(e->key_role, "system") == 0);
+    CHECK(purr_manifest_find(&m, "uiassets", "esp32s3", "waveshare154") == NULL);            /* another board has no pack here */
+    CHECK(purr_manifest_find(&m, "kernel", "esp32s3", "tdeck_plus") == NULL);
+}
+
 static void test_module_index_entry(void)
 {
     const char *text =
@@ -289,6 +318,7 @@ int main(void)
 {
     test_basic_parse();
     test_payload_fields();
+    test_ui_pack_entry();
     test_module_index_entry();
     test_find_misses();
     test_comments_and_blank_runs();
