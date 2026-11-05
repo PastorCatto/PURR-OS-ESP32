@@ -1,6 +1,6 @@
 set(main_srcs "main.c" "commands.c" "recovery_loader.c" "recovery_screen.c" "login.c" "purr_slot_trailer.c" "purr_trust_os.c"
-              "purr_catrt.c" "purr_catrt_storage.c" "purr_settings.c" "purr_power_plat.c" "purr_catrt_power.c" "purr_catrt_files.c" "purr_battery.c" "purr_clock.c" "purr_bootupdate.c" "purr_kbdlight.c"
-              "oobe_job.c" "oobe_ui.c" "recovery_app.c" "purr_hwscan_plat.c" "purr_hwsetup.c" "purr_sysupdate.c" "oobe_firstboot.c" "purr_lan_discover.c" "purr_recovery_src.c" "purr_drvcmds.c" "purr_catrt_devices.c" "purr_store.c" "purr_builtin_apps.c" "purr_sd.c")
+              "purr_catrt.c" "purr_catrt_storage.c" "purr_settings.c" "purr_power_plat.c" "purr_catrt_power.c" "purr_catrt_files.c" "purr_battery.c" "purr_radio_bars.c" "purr_clock.c" "purr_bootupdate.c" "purr_kbdlight.c"
+              "oobe_job.c" "oobe_ui.c" "recovery_app.c" "purr_hwscan_plat.c" "purr_hwsetup.c" "purr_netsettle.c" "purr_sysupdate.c" "oobe_firstboot.c" "purr_lan_discover.c" "purr_recovery_src.c" "purr_drvcmds.c" "purr_catrt_devices.c" "purr_store.c" "purr_builtin_apps.c" "purr_sd.c")
 set(main_reqs kernel coreos littlefs esp_partition esp_system esp_timer esp_wifi
              mbedtls esp_http_client app_update heap esp_mm
              esp_driver_usb_serial_jtag vfs fatfs)
@@ -20,8 +20,15 @@ if(CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS)
     # The Windows 10 Mobile style shell (and the larger fonts it uses) is left out of the recovery
     # profile: KittenOS's slot is 1.5 MB and the recovery build had no room for it.
     if(NOT CONFIG_PURR_PROFILE_RECOVERY)
-        list(APPEND main_srcs "purr_w10m.c" "purr_w10m_settings.c" "purr_repo_dev.c"
+        # shared by every official shell: Settings, Developer Portal, task manager, permission prompt, the ui catcall windows
+        list(APPEND main_srcs "purr_shell.c" "purr_w10m_settings.c" "purr_repo_dev.c"
                               "purr_w10m_devportal.c" "purr_catrt_ui.c" "purr_w10m_perm.c" "purr_w10m_tasks.c" "purr_catrt_game.c")
+        # exactly one official shell per image (Kconfig choice PURR_OFFICIAL_SHELL)
+        if(CONFIG_PURR_SHELL_ANDROID)
+            list(APPEND main_srcs "purr_android.c" "purr_android_home.c" "purr_android_shade.c" "purr_android_lock.c")
+        else()
+            list(APPEND main_srcs "purr_w10m.c")
+        endif()
     endif()
     list(APPEND main_reqs lvgl)
 endif()

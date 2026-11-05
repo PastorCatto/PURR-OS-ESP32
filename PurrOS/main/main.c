@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 
 #include "commands.h"
+#include "purr_trust_os.h"
 #include "purr_store.h"
 #include "purr_clock.h"
 #include "purr_kbdlight.h"
@@ -42,7 +43,7 @@
 #include "purr_card_shell.h"
 #include "recovery_app.h"
 #if !CONFIG_PURR_PROFILE_RECOVERY
-#include "purr_w10m.h"
+#include "purr_shell.h"
 #endif
 #include "purr_lvgl.h"
 #include "purr_ui_assets.h"
@@ -189,6 +190,7 @@ void app_main(void)
     purr_swap_setup(&boot_cli);
 #endif
     purr_modules_setup(&boot_cli);   /* loads/registers display (+ keyboard/touch) from here */
+    purr_boot_fast_clear();          /* Fast startup is not allowed for now: a device that still has it on loses it here, so the next start shows the boot screens */
 
     /* Display is the one driver that still has to exist before anything can be shown on the
      * physical screen -- same fail-stop this function always had, just moved to after the
@@ -366,7 +368,7 @@ void app_main(void)
 #if CONFIG_PURR_PROFILE_RECOVERY
                 purr_card_shell_start();
 #else
-                purr_w10m_start();
+                purr_shell_start();
 #endif
             } else {
                 purr_card_shell_start();

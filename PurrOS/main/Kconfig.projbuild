@@ -117,6 +117,27 @@ menu "PURR OS user interface"
             card_shell, nav or w10m (the Windows 10 Mobile style shell). Only used when
             /ui/mode.conf does not exist yet; edit that file to switch afterwards.
 
+    choice PURR_OFFICIAL_SHELL
+        prompt "Official shell compiled into the image"
+        default PURR_SHELL_W10M
+        help
+            The graphical shell that ships in the system image, signed and verified with it. Apps
+            never see the shell: they use the ui, tile, system and permission catcalls and the OS
+            draws the result, so an app runs the same under any of them. Only one is compiled per
+            image. Used when /ui/mode.conf says w10m, android or shell (plan7.md).
+
+        config PURR_SHELL_W10M
+            bool "Windows 10 Mobile style"
+            help
+                Tiles, app list, control center and lock screen (purr_w10m.c).
+
+        config PURR_SHELL_ANDROID
+            bool "Android 2.2 style, with a QWERTY keyboard"
+            help
+                Home pages and dock, app drawer, notification shade, key strip with Menu, Home and
+                Back, Froyo skin on every widget (purr_android.c). Plan7.md, "Android shell build-out".
+    endchoice
+
     config PURR_W10M_ROTATE_DEMO
         bool "Turn the Windows 10 Mobile style shell through every orientation (test only)"
         default n
