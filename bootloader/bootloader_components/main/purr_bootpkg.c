@@ -17,6 +17,7 @@
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
 #include "hal/gpio_ll.h"
+#include "hal/wdt_hal.h"
 #include "soc/gpio_sig_map.h"
 
 #include "purr_abi.h"
@@ -55,9 +56,34 @@ static void svc_log(const char *line)
     flush_log();
 }
 
+/* The bootloader arms the RTC watchdog when it starts (CONFIG_BOOTLOADER_WDT_TIME_MS, 9 s) and nothing fed it, so the boot menu waiting for a key was reset
+ * by the watchdog about 5 s after it appeared (the verification and the splash had already used the first few seconds): the device restarted instead of
+ * falling through to its default after the menu's own 20 s idle time, and did that in a loop. The package waits through delay_us, so that is where the
+ * watchdog is fed, every half second at most. It is fed only for a bounded total (90 s of waiting, far more than a menu and its 20 s fall-through need):
+ * a package that hangs in its wait loop is still reset, as the watchdog is there to do. */
+#define WAIT_CHUNK_US   500000u
+#define WAIT_FEED_MAX_US (90ull * 1000000ull)
+static uint64_t s_waited_us;
+
+static void wdt_feed(void)
+{
+    wdt_hal_context_t rwdt = RWDT_HAL_CONTEXT_DEFAULT();
+    wdt_hal_write_protect_disable(&rwdt);
+    wdt_hal_feed(&rwdt);
+    wdt_hal_write_protect_enable(&rwdt);
+}
+
 static void svc_delay_us(uint32_t us)
 {
-    esp_rom_delay_us(us);
+    while (us > 0) {
+        uint32_t chunk = us > WAIT_CHUNK_US ? WAIT_CHUNK_US : us;
+        if (s_waited_us < WAIT_FEED_MAX_US) {
+            wdt_feed();
+        }
+        esp_rom_delay_us(chunk);
+        s_waited_us += chunk;
+        us -= chunk;
+    }
 }
 
 static void svc_gpio_setup(int pin, int mode)
