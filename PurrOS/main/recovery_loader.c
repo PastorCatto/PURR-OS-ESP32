@@ -1199,6 +1199,7 @@ void purr_recovery_loader_main(void)
     if (d->set_brightness) {
         d->set_brightness(255);
     }
+    purr_boot_fast_clear();                 /* Fast startup is not allowed for now: if it is still on, turn it off so the next start shows the boot screens */
     purr_console_init(d);
     int wizard = oobe_ui_available();
     if (wizard) {

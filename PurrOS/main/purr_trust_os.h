@@ -75,7 +75,8 @@ int purr_secure_set_dev(int on);
 /* Fast startup (bootloader/SPEC.md section 9): on a healthy start the bootloader loads no boot package and draws nothing. The checks are not skipped.
  * get: 1 if it is on. set: 0 or -1 (the boot configuration could not be written). */
 int purr_boot_fast_get(void);
-int purr_boot_fast_set(int on);
+int purr_boot_fast_set(int on);         /* turning it on is refused (-1) for now: Fast startup is not allowed; turning it off always works */
+void purr_boot_fast_clear(void);        /* if a device still has it on, turn it off; called on every start by the kernel, KittenOS and the loader */
 /* The next start shows the boot menu once (the bootloader clears the request when it reads it). 0 or -1. */
 int purr_boot_request_menu(void);
 

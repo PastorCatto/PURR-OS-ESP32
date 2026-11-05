@@ -176,5 +176,16 @@ static int cfg_flag_put(uint32_t flag, int on)
 }
 
 int purr_boot_fast_get(void) { return cfg_flag_get(PURR_CFGF_FAST_START); }
-int purr_boot_fast_set(int on) { return cfg_flag_put(PURR_CFGF_FAST_START, on); }
+
+/* Fast startup is not allowed for now (owner, 2026-11-04): it hid the boot screens and went with start-up trouble. Turning it off always works; turning it on is refused. */
+int purr_boot_fast_set(int on) { return on ? -1 : cfg_flag_put(PURR_CFGF_FAST_START, 0); }
+
+/* Clears the flag if a device still has it set (it was turned on before this was disallowed, and a restore keeps it). Called early on every start, so the next
+ * start shows the boot screens again. Writes only when the flag is set. */
+void purr_boot_fast_clear(void)
+{
+    if (purr_boot_fast_get() == 1) {
+        purr_boot_fast_set(0);
+    }
+}
 int purr_boot_request_menu(void) { return cfg_flag_put(PURR_CFGF_SHOW_MENU, 1); }
