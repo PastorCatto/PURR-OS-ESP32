@@ -34,3 +34,23 @@ shipped**. The packaging is built so the replacement is a drop-in: a new `ui_ass
 ## LVGL
 
 LVGL (MIT) is used as a managed component, version 9.2.x, <https://lvgl.io>.
+
+## Android Open Source Project (Android 2.2 "Froyo" icons)
+
+The Android style shell (`PurrOS/main/purr_android.c`, plan7.md, "Android shell build-out") draws its
+launcher, dock and status-bar icons from the **Android Open Source Project**, copyright (c) The
+Android Open Source Project, licensed under the **Apache License, Version 2.0**
+(<https://www.apache.org/licenses/LICENSE-2.0>); the licence text and notice are in
+`UI/android-assets/NOTICE`. They come from the Froyo (Android 2.2) release: the launcher and dock art
+from the Launcher2, Phone, Contacts, Browser, Settings, Camera, Messaging, DeskClock and Music
+repositories, and the battery, signal and Wi-Fi status icons from `frameworks/base`
+(`core/res/res/drawable-mdpi`, branch `froyo-release`).
+
+**Changes made:** each icon was resampled once, offline, to the size the shell draws it at
+(`tools/ui/froyo_pack.py`) and renamed for its asset. Nothing is scaled on the device. The
+resampled PNGs are in `UI/android-assets/`; `purrstrap uiassets build --alpha` packs them.
+
+Not used, on purpose: Google application artwork (Gmail, Maps, Market and the like) and any phone
+maker's skin or icons, which are not under that licence. The shell's wallpapers and layout are
+original.
+
