@@ -14,12 +14,14 @@
 
 #include "purr_catrt.h"
 #include "purr_runtime.h"
+#include "purr_systasks.h"
 #include "purr_w10m_priv.h"
 #include "purr_w10m_theme.h"
 
 #define ROW_H 40
 #define ROW_GAP 5
 #define MAX_TASKS 12
+#define MAX_SYS 14
 
 static lv_obj_t *s_view, *s_list, *s_empty, *s_title, *s_home, *s_summary;
 static lv_timer_t *s_tick;
@@ -147,6 +149,47 @@ static void make_row(const purr_catrt_task_t *t, int w)
     lv_obj_center(end_label);
 }
 
+static void make_header(const char *text, int w)
+{
+    lv_obj_t *l = lv_label_create(s_list);
+    lv_label_set_text(l, text);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(l, w);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+    purr_theme_apply(l, PURR_TH_ACCENT_TEXT);
+}
+
+/* A system task: nothing to bring forward and no End (stopping the Wi-Fi or the display from here would only break the device); it is here to be seen. */
+static void make_sys_row(const purr_systask_t *t, int w)
+{
+    lv_obj_t *row = lv_obj_create(s_list);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, w, ROW_H);
+    purr_theme_apply(row, PURR_TH_SURFACE);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, t->name);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(label, w - 16);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    purr_theme_apply(label, PURR_TH_TEXT);
+    lv_obj_align(label, LV_ALIGN_TOP_LEFT, 8, 3);
+
+    char stack[16], spare[16], detail[72];
+    fmt_bytes(stack, sizeof(stack), t->stack);
+    fmt_bytes(spare, sizeof(spare), t->spare);
+    snprintf(detail, sizeof(detail), "%s%s  -  %s spare  -  %s", t->stack ? stack : "static stack", t->stack && t->internal ? " fast" : "", spare,
+             t->blocked ? "waiting" : "running");
+    lv_obj_t *sub = lv_label_create(row);
+    lv_label_set_text(sub, detail);
+    lv_label_set_long_mode(sub, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(sub, w - 16);
+    lv_obj_set_style_text_font(sub, &lv_font_montserrat_12, 0);
+    purr_theme_apply(sub, PURR_TH_DIM);
+    lv_obj_align(sub, LV_ALIGN_BOTTOM_LEFT, 8, -4);
+}
+
 static void layout(void)
 {
     int w = w10m_disp_w(), h = w10m_disp_h();
@@ -156,18 +199,28 @@ static void layout(void)
     lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, 10, 6);
     lv_obj_align(s_home, LV_ALIGN_TOP_RIGHT, -10, 4);
     lv_obj_set_width(s_summary, w - 20);
+    lv_obj_set_height(s_summary, 44);
     lv_obj_align(s_summary, LV_ALIGN_TOP_LEFT, 10, 34);
-    lv_obj_set_size(s_list, w - 20, vh - 56 - 6);
-    lv_obj_align(s_list, LV_ALIGN_TOP_LEFT, 10, 56);
+    lv_obj_set_size(s_list, w - 20, vh - 84 - 6);
+    lv_obj_align(s_list, LV_ALIGN_TOP_LEFT, 10, 84);
     lv_obj_align(s_empty, LV_ALIGN_CENTER, 0, 10);
 }
 
 static void update_summary(int apps)
 {
-    char fast[16], main_mem[16], line[96];
-    fmt_bytes(fast, sizeof(fast), (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    char fast[16], big[16], low[16], main_mem[16], stk[16], spr[16], oth[16], line[320];
+    uint32_t f, b, l, stacks, spare, total;
+    purr_systasks_fast_ram(&f, &b, &l);
+    purr_systasks_totals(&stacks, &spare, &total);
+    fmt_bytes(stk, sizeof(stk), stacks);
+    fmt_bytes(spr, sizeof(spr), spare);
+    fmt_bytes(oth, sizeof(oth), total > f + stacks ? total - f - stacks : 0);
+    fmt_bytes(fast, sizeof(fast), f);
+    fmt_bytes(big, sizeof(big), b);
+    fmt_bytes(low, sizeof(low), l);
     fmt_bytes(main_mem, sizeof(main_mem), (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    snprintf(line, sizeof(line), "%d running  -  %s fast RAM free  -  %s memory free", apps, fast, main_mem);
+    snprintf(line, sizeof(line), "%d running  -  %s fast RAM free  -  %s memory free\nBiggest fast block %s  -  lowest fast RAM so far %s\nStacks %s (%s never used)  -  everything else %s", apps,
+             fast, main_mem, big, low, stk, spr, oth);
     lv_label_set_text(s_summary, line);
 }
 
@@ -185,6 +238,8 @@ static void rebuild(void)
         }
     }
     update_summary(k);
+    purr_systask_t sys[MAX_SYS];
+    int ns = purr_systasks(sys, MAX_SYS);
 
     uint32_t sig = 2166136261u;                                     /* the list only redraws when it would look different, so a scroll is not reset */
     for (int i = 0; i < k; i++) {
@@ -192,22 +247,41 @@ static void rebuild(void)
         sig = (sig ^ (uint32_t)(t[i].foreground | (t[i].frozen << 1) | (t[i].service << 2))) * 16777619u;
         sig = (sig ^ (t[i].memory >> 10)) * 16777619u;
     }
-    if (sig == s_sig && lv_obj_get_child_count(s_list) == (uint32_t)k) {
+    for (int i = 0; i < ns; i++) {
+        for (const char *c = sys[i].name; *c; c++) {
+            sig = (sig ^ (uint32_t)(uint8_t)*c) * 16777619u;
+        }
+        sig = (sig ^ (sys[i].stack >> 8)) * 16777619u;
+    }
+    uint32_t rows = (uint32_t)k + (k == 0 && ns > 0 ? 1u : 0u) + (ns > 0 ? (uint32_t)ns + 1u : 0u);
+    if (sig == s_sig && lv_obj_get_child_count(s_list) == rows) {
         layout();
         return;
     }
     s_sig = sig;
+    int32_t keep_y = lv_obj_get_scroll_y(s_list);                   /* the list is drawn again from scratch: put it back where the person had scrolled it */
     lv_obj_clean(s_list);
     int w = w10m_disp_w() - 20;
     for (int i = 0; i < k; i++) {
         make_row(&t[i], w);
     }
-    if (k == 0) {
+    if (ns > 0) {
+        if (k == 0) {
+            make_header("No apps running", w);
+        }
+        make_header("System services  -  what each holds in RAM", w);
+        for (int i = 0; i < ns; i++) {
+            make_sys_row(&sys[i], w);
+        }
+    }
+    if (k == 0 && ns == 0) {
         lv_obj_remove_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
     }
     layout();
+    lv_obj_update_layout(s_list);
+    lv_obj_scroll_to_y(s_list, keep_y, LV_ANIM_OFF);
 }
 
 static void build(void)

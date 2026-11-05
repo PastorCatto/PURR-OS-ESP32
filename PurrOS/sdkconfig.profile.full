@@ -1,2 +1,7 @@
 # CoreOS profile: full (the normal system)
 CONFIG_PURR_PROFILE_FULL=y
+
+# The main task stack: the default is 32 KB (sdkconfig.defaults) because a TLS download on this task overflowed 16 KB on the real device (2026-10-03). The full system
+# measured 26 KB of its 33 KB never used in normal use (Task Manager, owner, 2026-11-05), and a download now runs on a PSRAM-stack worker (purr_fetch.c), so the main
+# task keeps 16 KB: 16 KB of fast RAM given back. If a fetch cannot get its PSRAM stack it falls back to the caller's, and a serial `netinstall` could overflow this.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

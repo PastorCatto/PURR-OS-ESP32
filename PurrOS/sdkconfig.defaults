@@ -45,3 +45,12 @@ CONFIG_PARTITION_TABLE_OFFSET=0xA000
 # of whoever opens a file stays small). FatFs in ESP-IDF has no exFAT, so a card of 64 GB or more (sold as exFAT) has to be formatted FAT32 first.
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
+
+# The Task Manager lists the system's own tasks and the fast RAM their stacks hold (purr_systasks.c).
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
+# Internal RAM (owner, 2026-11-05): the Wi-Fi driver's code placed in IRAM took 17 KB (measured on the kernel image: static D/IRAM 220,287 -> 203,095 bytes), all
+# of it fast RAM that apps need. Wi-Fi runs from flash instead, a little slower.
+# CONFIG_ESP_WIFI_IRAM_OPT is not set
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
+

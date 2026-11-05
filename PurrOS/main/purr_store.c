@@ -971,7 +971,12 @@ static void job_task(void *arg)
     (void)arg;
     s_job_task = xTaskGetCurrentTaskHandle();
     s_job.msg[0] = '\0';
+    uint32_t fast0 = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     s_job.rc = run_job();
+    uint32_t fast1 = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG, "job \"%s\": fast RAM %u -> %u bytes (biggest free block %u, lowest ever %u)", s_job.what, (unsigned)fast0, (unsigned)fast1,
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));   /* what a job leaves behind: this task's own stack is still counted as used */
     snprintf(s_last, sizeof(s_last), "%s", s_job.msg);
     int slot = s_job.slot;
     s_job.busy = 0;
