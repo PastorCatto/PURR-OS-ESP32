@@ -70,6 +70,7 @@
 #include "purr_manifest.h"
 #include "purr_menu.h"
 #include "purr_net.h"
+#include "purr_netsettle.h"
 #include "purr_netrec.h"
 #include "purr_util.h"
 #include "purr_verify.h"
@@ -811,6 +812,7 @@ void purr_net_setup(purr_cli_t *cli)
         purr_cli_printf(cli, "%s: did not start (%s)\n", purr_net_wired() ? "ethernet" : "wifi",
                         esp_err_to_name(e));
     }
+    purr_net_settle_start();                    /* devices flagged to wait for Wi-Fi (the LoRa radio) bind once it has settled */
 }
 
 static int purr_net_install_run(purr_cli_t *cli, const char *component);
@@ -945,6 +947,7 @@ void purr_continue_install(purr_cli_t *cli)
         purr_net_install_run(cli, "kernel");
     }
     purr_net_install_run(cli, "modules");
+    purr_net_install_run(cli, "uiassets");             /* the shell's picture pack, if the release carries one */
     purr_stage2_step(cli, 2);                          /* the bootloader, if the server has a newer one */
 }
 
@@ -975,6 +978,9 @@ int purr_stage2_step(purr_cli_t *cli, int step)
             purr_swap_setup(cli);
         }
         return r;
+    }
+    if (step == 3) {                                    /* the shell's picture pack (ui_assets), if the release carries one */
+        return purr_net_install_run(cli, "uiassets");
     }
     return purr_net_install_run(cli, step == 0 ? "kernel" : "modules");
 }
@@ -1032,6 +1038,7 @@ static const net_install_component_t s_net_install_components[] = {
     {"kernel",  PURR_MOD_KERNEL,  "kernel"},
     {"loader",  PURR_MOD_LOADER,  "loader"},
     {"bootpkg", PURR_MOD_BOOTPKG, "bootpkg"},
+    {"uiassets", PURR_MOD_UIASSETS, "ui_assets"},   /* a data partition: no signature trailer, and only the used part is erased and written */
 };
 
 /* File-staged components (PurrOS/SPEC.md section 6.1, purr_swap.h): CoreOS, AppManager, the
@@ -1204,6 +1211,10 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
 
     const purr_manifest_entry_t *entry = purr_manifest_find(&man, component, CONFIG_IDF_TARGET,
                                                              purr_board()->name);
+    if (entry == NULL && strcmp(component, "uiassets") == 0) {      /* a release need not carry a picture pack: that is not a failure */
+        purr_cli_puts(cli, "no UI pack in this release\n");
+        return 0;
+    }
     if (entry == NULL) {
         purr_cli_printf(cli, "no %s entry for this board in the manifest\n", component);
         return 1;
@@ -1228,7 +1239,14 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
 
     uint8_t *image = NULL;
     size_t image_len = 0;
-    if (purr_fetch_alloc(image_url, &image, &image_len, 2 * 1024 * 1024) != ESP_OK) {
+    size_t max_len = strcmp(component, "uiassets") == 0 ? 5 * 1024 * 1024 : 2 * 1024 * 1024;     /* a picture pack can fill its 5 MB partition */
+    if (strcmp(component, "uiassets") == 0 && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < (size_t)entry->size + 4096) {
+        /* The pack is downloaded into one block of PSRAM and checked before anything is erased; say so plainly if there is no such block (apps running). */
+        purr_cli_printf(cli, "not enough free memory for the %u byte pack (largest block %u). Close apps or restart, then run: netinstall uiassets\n",
+                        (unsigned)entry->size, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        return 1;
+    }
+    if (purr_fetch_alloc(image_url, &image, &image_len, max_len) != ESP_OK) {
         purr_cli_puts(cli, "download failed\n");
         return 1;
     }
@@ -1318,21 +1336,46 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
      * left the bootloader unable to find a PURR image there at all ("no PURR image (partition
      * empty?)"), quietly removing the boot menu on the very next boot. */
     int whole_container = (comp->subtype == PURR_MOD_BOOTPKG);
+    int data_part = (comp->subtype == PURR_MOD_UIASSETS);       /* no trailer: the pack carries its own CRC, and the container's signature was checked above */
     const uint8_t *write_data = whole_container ? image : (image + hdr.payload_offset);
     uint32_t write_len = whole_container ? (uint32_t)image_len : hdr.payload_size;
     const uint8_t *verify_hash = whole_container ? got_hash : hdr.payload_sha256;
 
     /* kernel and loader also carry a signature trailer in the partition's last sector
      * (bootloader/SPEC.md section 3.1), so the image has to leave that sector free. */
-    if (whole_container ? write_len > slot->size : !purr_slot_trailer_fits(slot, write_len)) {
+    if (whole_container || data_part ? write_len > slot->size : !purr_slot_trailer_fits(slot, write_len)) {
         free(image);
         purr_cli_printf(cli, "the image is bigger than the %s partition\n", comp->partition_label);
         return 1;
     }
 
+    if (data_part) {                                    /* already the same pack: leave the flash alone (a failed download can never cost the icons) */
+        uint8_t have[512];
+        purr_sha256_t hs;
+        uint8_t hd[PURR_SHA256_LEN];
+        purr_sha256_init(&hs);
+        int same = 1;
+        for (uint32_t off = 0; off < write_len && same; off += sizeof(have)) {
+            uint32_t n = write_len - off < sizeof(have) ? write_len - off : (uint32_t)sizeof(have);
+            same = esp_partition_read(slot, off, have, n) == ESP_OK;
+            if (same) {
+                purr_sha256_update(&hs, have, n);
+            }
+        }
+        purr_sha256_final(&hs, hd);
+        if (same && memcmp(hd, verify_hash, sizeof(hd)) == 0) {
+            free(image);
+            purr_cli_printf(cli, "%s %s is already installed\n", component, hdr.version);
+            return 0;
+        }
+    }
     purr_cli_printf(cli, "writing to %s...\n", comp->partition_label);
     purr_console_flush();
-    if (esp_partition_erase_range(slot, 0, slot->size) != ESP_OK ||
+    uint32_t erase_len = data_part ? ((write_len + 4095u) & ~4095u) : slot->size;      /* a pack is a small part of its partition: erase only what it needs */
+    if (erase_len > slot->size) {
+        erase_len = slot->size;
+    }
+    if (esp_partition_erase_range(slot, 0, erase_len) != ESP_OK ||
         esp_partition_write(slot, 0, write_data, write_len) != ESP_OK) {
         free(image);
         purr_cli_puts(cli, "write failed\n");
@@ -1367,6 +1410,10 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
      * copied into the partition's last sector, so the bootloader can verify this slot. The
      * boot package is the exception -- it holds the whole container from offset 0. Then check
      * the result exactly the way the bootloader will. */
+    if (data_part) {
+        purr_cli_printf(cli, "%s %s installed. It takes effect at the next start.\n", component, hdr.version);
+        return 0;
+    }
     if (!whole_container) {
         if (purr_slot_trailer_write(slot, &hdr) != 0) {
             purr_cli_puts(cli, "could not write the signature trailer\n");
@@ -4596,7 +4643,8 @@ static const purr_cmd_t s_cmds[] = {
     {"store", "store [repos | list | add <url> | confirm | refresh | check | install <name> <repo-id> | remove <name> <repo-id> | bootstrap]: repositories and the Store", purr_store_cmd},
     {"sd", "sd [status | mount | unmount | ls [path] | test]: the SD card at /sd", purr_sd_cmd},
     {"gps", "gps [fix | watch | power on|off | rate <hz>]: the GPS receiver", purr_gps_cmd},
-    {"radio", "radio config <MHz> [...] | tx <text> | rx [seconds] | sleep: the LoRa radio", purr_radio_cmd},
+    {"radio", "radio config <MHz> [...] | tx <text> | rx [seconds] | sleep | status: the LoRa radio", purr_radio_cmd},
+    {"battery", "the battery gauge: the raw reading and what the OS makes of it", purr_battery_cmd},
     {"modem", "modem [status | power on|off | connect <apn> | disconnect | at <cmd>]: a cellular modem", purr_modem_cmd},
     {"hwdev", "hwdev [add <driver> <sda> <scl> <addr> | read <name> | remove <name>]: devices set up by hand or by Find hardware", purr_hwsetup_cmd},
 #endif

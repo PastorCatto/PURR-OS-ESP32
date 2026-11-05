@@ -119,6 +119,8 @@ static int job_stage2(oobe_job_t *job, void *arg)
         purr_fetch_set_progress(NULL);
         oobe_job_abort(job, "Some modules didn't install. You can add them later from Settings.");
     }
+    oobe_job_report(job, "Installing the pictures...", 800);
+    purr_stage2_step(&cli, 3);                          /* the shell's picture pack, if the release carries one; best effort, the words show without it */
     if (purr_login_has_accounts()) {                    /* only where nobody is typing: a restart in the middle of setting up an account would lose it */
         s_step = 2;
         oobe_job_report(job, "Checking the bootloader...", 960);

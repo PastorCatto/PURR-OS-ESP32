@@ -91,7 +91,7 @@ void purr_continue_install(purr_cli_t *cli);
 int purr_kernel_installed(void);                    /* the kernel slot holds an image and is not marked bad */
 int purr_stage2_pending(void);                      /* the same, without clearing it */
 int purr_stage2_take_pending(void);                 /* 1 if a recovery install is waiting to continue (clears the request) */
-int purr_stage2_step(purr_cli_t *cli, int step);    /* 0 = the kernel, 1 = the modules; returns 0 when it installed */
+int purr_stage2_step(purr_cli_t *cli, int step);    /* 0 = the kernel, 1 = the modules, 2 = the bootloader, 3 = the shell's picture pack; returns 0 when it installed (or had nothing to install) */
 
 /* Resets purrcfg's boot_fail_count to 0 once a boot has reached a stable, working state (right
  * before the login loop starts) -- the bootloader's failure-count ladder
