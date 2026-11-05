@@ -19,6 +19,13 @@ static void test_requested_does_the_swap(void)
 static void test_moving_resumes(void)
 {
     CHECK_EQ(run(PURR_UPD_MOVING, 0, 3), PURR_SWAP_RESUME_MOVE);
+    CHECK_EQ(run(PURR_UPD_MOVING, 2, 3), PURR_SWAP_RESUME_MOVE);
+}
+
+static void test_moving_gives_up(void)
+{
+    CHECK_EQ(run(PURR_UPD_MOVING, 3, 3), PURR_SWAP_NOTHING);     /* a swap that died in its write three times in a row is left alone: no boot loop */
+    CHECK_EQ(run(PURR_UPD_MOVING, 9, 3), PURR_SWAP_NOTHING);
 }
 
 static void test_unconfirmed_retries_then_rolls_back(void)
@@ -59,6 +66,7 @@ int main(void)
 {
     test_requested_does_the_swap();
     test_moving_resumes();
+    test_moving_gives_up();
     test_unconfirmed_retries_then_rolls_back();
     test_quiet_states_do_nothing();
     test_filenames();

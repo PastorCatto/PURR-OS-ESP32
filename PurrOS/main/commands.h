@@ -99,6 +99,11 @@ int purr_stage2_step(purr_cli_t *cli, int step);    /* 0 = the kernel, 1 = the m
  * count is already 0. */
 void purr_mark_boot_healthy(purr_cli_t *cli);
 
+/* Bootloader updates over the air are turned off (2026-11-05). The swap erases flash 0x0, which ESP-IDF aborts in every build
+ * (CONFIG_SPI_FLASH_DANGEROUS_WRITE_ABORTS), so a staged bootloader sent KittenOS into a boot loop with the screen never coming up. A
+ * bootloader reaches a device by a flash (tools/hw/make_hw_image.sh) until the swap is proven on a bench device. Set to 1 to bring it back. */
+#define PURR_BOOTLOADER_OTA 0
+
 /* KittenOS's side of a pending system-file update (PurrOS/SPEC.md section 6.1): swaps a staged
  * file into place, retries, or rolls back, as purr_swap_decide() says. Reboots and never
  * returns if it did anything; returns normally if there was nothing pending. Only meaningful

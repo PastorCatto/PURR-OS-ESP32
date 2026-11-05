@@ -128,7 +128,7 @@ int purr_sysupdate_check(int use_dev, char *msg, size_t cap)
         const purr_manifest_entry_t *be = purr_manifest_find(m, "bootloader", CONFIG_IDF_TARGET, purr_board()->name);
         purr_handoff_t hh;
         uint32_t want = 0;
-        if (be != NULL && purr_version_parse(be->version, strlen(be->version), &want) == 0 && purr_kernel_handoff(&hh) == 0 &&
+        if (PURR_BOOTLOADER_OTA && be != NULL && purr_version_parse(be->version, strlen(be->version), &want) == 0 && purr_kernel_handoff(&hh) == 0 &&
             want > hh.bootloader_version) {
             size_t n = strlen(what);
             snprintf(what + n, sizeof(what) - n, "%sbootloader %s", n ? ", " : "", be->version);

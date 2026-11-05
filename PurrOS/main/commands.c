@@ -919,13 +919,13 @@ void purr_continue_install(purr_cli_t *cli)
     } else {
         char ssid[PURR_NETREC_SSID_LEN] = "", pass[PURR_NETREC_PASS_LEN] = "";
         if (purr_netrec_load(ssid, pass) != 0) {
-            purr_cli_puts(cli, "stage 2: no saved recovery network, skipping\n");
+            purr_cli_puts(cli, "stage 2: no saved recovery network, skipping. Get online, then run: netinstall modules\n");
             return;
         }
         purr_cli_printf(cli, "stage 2: connecting to %s...\n", ssid);
         purr_console_flush();
         if (purr_net_connect(ssid, pass, 15000) != ESP_OK) {
-            purr_cli_puts(cli, "stage 2: could not connect, skipping\n");
+            purr_cli_puts(cli, "stage 2: could not connect, skipping. Get online, then run: netinstall modules\n");
             return;
         }
     }
@@ -1221,10 +1221,18 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
     }
     purr_cli_printf(cli, "found %s %s (%u bytes)\n", component, entry->version, (unsigned)entry->size);
 
+    if (strcmp(component, "bootloader") == 0 && !PURR_BOOTLOADER_OTA) {
+        purr_cli_puts(cli, "bootloader updates over the air are turned off; the bootloader is left as it is\n");
+        return 0;
+    }
     if (strcmp(component, "bootloader") == 0) {                /* only ever replace the running bootloader with a newer one */
         purr_handoff_t hh;
         uint32_t want = 0, have = purr_kernel_handoff(&hh) == 0 ? hh.bootloader_version : 0;
         purr_version_parse(entry->version, strlen(entry->version), &want);
+        if (have == 0) {                                       /* no version from the running bootloader: nothing says the one on offer is newer */
+            purr_cli_puts(cli, "the running bootloader's version is unknown, so it is left as it is\n");
+            return 0;
+        }
         if (want <= have) {
             purr_cli_printf(cli, "the bootloader is up to date (%u.%u.%u)\n", (unsigned)(have >> 24), (unsigned)((have >> 16) & 0xFF),
                             (unsigned)(have & 0xFFFF));
@@ -1799,6 +1807,10 @@ static void bootloader_swap(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg, 
     }
 
     /* DO_SWAP, or RESUME_MOVE after a restart in the middle of one. */
+    if (action == PURR_SWAP_RESUME_MOVE) {                /* counted before anything is tried: purr_swap_decide() stops resuming after a few, so a write that cannot finish does not loop */
+        cfg->update.attempts++;
+        purr_cfg_store(fl, cfg);
+    }
     uint8_t *file = NULL;
     uint32_t flen = 0;
     if (bl_read_file(BL_NEW, &file, &flen) != 0) {
@@ -1912,6 +1924,13 @@ void purr_swap_setup(purr_cli_t *cli)
         return;
     }
 
+    if (cfg.update.target == PURR_COMP_BOOTLOADER && !PURR_BOOTLOADER_OTA) {      /* a request left by an earlier build: dropped, never acted on */
+        cfg.update.state = PURR_UPD_FAILED;
+        cfg.update.attempts = 0;
+        purr_cfg_store(&fl, &cfg);
+        purr_cli_puts(cli, "swap: bootloader updates over the air are turned off; the pending one is dropped\n");
+        return;
+    }
     if (cfg.update.target == PURR_COMP_BOOTLOADER &&
         (action == PURR_SWAP_DO_SWAP || action == PURR_SWAP_RESUME_MOVE || action == PURR_SWAP_ROLLBACK)) {
         bootloader_swap(cli, &fl, &cfg, action);          /* flash 0x0, with a backup: not a rename of files */

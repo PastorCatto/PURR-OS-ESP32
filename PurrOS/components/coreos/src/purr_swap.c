@@ -7,8 +7,8 @@ purr_swap_action_t purr_swap_decide(const purr_update_t *update, uint8_t max_att
     switch (update->state) {
     case PURR_UPD_REQUESTED:
         return PURR_SWAP_DO_SWAP;
-    case PURR_UPD_MOVING:
-        return PURR_SWAP_RESUME_MOVE;
+    case PURR_UPD_MOVING:                 /* a restart in the middle of a swap: resume it, but not for ever (the bootloader's swap counts each resume in attempts) */
+        return (update->attempts >= max_attempts) ? PURR_SWAP_NOTHING : PURR_SWAP_RESUME_MOVE;
     case PURR_UPD_UNCONFIRMED:
         return (update->attempts >= max_attempts) ? PURR_SWAP_ROLLBACK : PURR_SWAP_RETRY;
     case PURR_UPD_NONE:
