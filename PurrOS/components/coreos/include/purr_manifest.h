@@ -128,11 +128,22 @@ typedef struct {
      * broke on a newer OS: the update service never offers it (plan8.md "Driver compatibility"). */
     uint16_t abi_min, abi_max;
     uint8_t blocked;
+    /* `withdrawn=yes`: the publisher pulled this version (it is bad). Every reader that picks an entry through purr_manifest_find() never sees it. */
+    uint8_t withdrawn;
 } purr_manifest_entry_t;
+
+#define PURR_MANIFEST_WITHDRAWN_LEN 160
+#define PURR_MANIFEST_REASON_LEN    64
 
 typedef struct {
     char release[PURR_MANIFEST_VERSION_LEN];
     char released[PURR_MANIFEST_DATE_LEN];
+    /* A release-wide list of withdrawn versions, for a device that is ALREADY on one and for the entry that has since been replaced:
+     *   withdrawn_versions=kernel@1.0.20,kittenos@1.0.20,*@1.0.20     (`*` is every component)
+     *   withdrawn_reason=the setup wizard showed two Wi-Fi pages        (shown to the person, one line)
+     * See OTA/SPEC.md "Withdrawing a release". */
+    char withdrawn_versions[PURR_MANIFEST_WITHDRAWN_LEN];
+    char withdrawn_reason[PURR_MANIFEST_REASON_LEN];
     purr_manifest_entry_t entries[PURR_MANIFEST_MAX_ENTRIES];
     int count;
     int dropped;         /* entries seen but rejected: missing field, bad size or hash */
@@ -147,6 +158,15 @@ int purr_manifest_parse(purr_manifest_t *m, const char *text, size_t len);
  * matches every chip or board; chip or board passed as NULL also matches anything. */
 const purr_manifest_entry_t *purr_manifest_find(const purr_manifest_t *m, const char *component,
                                                 const char *chip, const char *board);
+
+/* The same, but withdrawn entries are returned too: for saying why nothing is offered, and for the tool that writes the file. */
+const purr_manifest_entry_t *purr_manifest_find_any(const purr_manifest_t *m, const char *component,
+                                                    const char *chip, const char *board);
+
+/* 1 if `component` at `version` has been withdrawn: the manifest's own list names it (as "<component>@<version>" or "*@<version>"). The entry's own
+ * `withdrawn=yes` is checked by purr_manifest_find(); this one answers for a version that is NOT in the manifest any more, such as the one a device is running.
+ * `reason` (may be NULL) gets the release's note. */
+int purr_manifest_is_withdrawn(const purr_manifest_t *m, const char *component, const char *version, char *reason, size_t cap);
 
 #ifdef __cplusplus
 }

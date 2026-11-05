@@ -1,6 +1,7 @@
 #include "purr_manifest.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* This runs in CoreOS and the recovery loader (both real ESP-IDF apps), not the boot
@@ -114,6 +115,12 @@ static void apply_kv(purr_manifest_t *m, draft_t *d, const char *key, size_t kle
         }
     } else if (klen == 7 && strncmp(key, "blocked", 7) == 0) {
         d->e.blocked = vlen >= 1 && (val[0] == 'y' || val[0] == '1');
+    } else if (klen == 9 && strncmp(key, "withdrawn", 9) == 0) {
+        d->e.withdrawn = vlen >= 1 && (val[0] == 'y' || val[0] == '1');
+    } else if (klen == 18 && strncmp(key, "withdrawn_versions", 18) == 0) {
+        set_field(m->withdrawn_versions, sizeof(m->withdrawn_versions), val, vlen);
+    } else if (klen == 16 && strncmp(key, "withdrawn_reason", 16) == 0) {
+        set_field(m->withdrawn_reason, sizeof(m->withdrawn_reason), val, vlen);
     }
     /* Anything else is a newer field this reader does not know about yet: ignored. */
 }
@@ -192,12 +199,64 @@ static int matches(const char *field, const char *want)
     return want == NULL || strcmp(field, "any") == 0 || strcmp(field, want) == 0;
 }
 
+/* Whether the release-wide list names `component`@`version` ("*" in place of the component names every one). The list is comma separated. */
+static int list_names(const char *list, const char *component, const char *version)
+{
+    size_t cl = strlen(component), vl = strlen(version);
+    const char *p = list;
+    while (*p != '\0') {
+        while (*p == ',' || *p == ' ') {
+            p++;
+        }
+        const char *end = p;
+        while (*end != '\0' && *end != ',') {
+            end++;
+        }
+        const char *at = memchr(p, '@', (size_t)(end - p));
+        if (at != NULL) {
+            size_t nl = (size_t)(at - p), tl = (size_t)(end - at - 1);
+            int comp_ok = (nl == 1 && p[0] == '*') || (nl == cl && strncmp(p, component, cl) == 0);
+            if (comp_ok && tl == vl && strncmp(at + 1, version, vl) == 0) {
+                return 1;
+            }
+        }
+        p = end;
+    }
+    return 0;
+}
+
+int purr_manifest_is_withdrawn(const purr_manifest_t *m, const char *component, const char *version, char *reason, size_t cap)
+{
+    if (component == NULL || version == NULL || !list_names(m->withdrawn_versions, component, version)) {
+        return 0;
+    }
+    if (reason != NULL && cap > 0) {
+        snprintf(reason, cap, "%s", m->withdrawn_reason);
+    }
+    return 1;
+}
+
+const purr_manifest_entry_t *purr_manifest_find_any(const purr_manifest_t *m, const char *component,
+                                                    const char *chip, const char *board)
+{
+    for (int i = 0; i < m->count; i++) {
+        const purr_manifest_entry_t *e = &m->entries[i];
+        if (strcmp(e->component, component) == 0 && matches(e->chip, chip) && matches(e->board, board)) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+/* What every reader asks for. A withdrawn entry (its own flag, or named by the release's list) is skipped, so a later entry for the same component, if the
+ * manifest has one, is the one found; with none, the answer is "nothing to install". */
 const purr_manifest_entry_t *purr_manifest_find(const purr_manifest_t *m, const char *component,
                                                 const char *chip, const char *board)
 {
     for (int i = 0; i < m->count; i++) {
         const purr_manifest_entry_t *e = &m->entries[i];
-        if (strcmp(e->component, component) == 0 && matches(e->chip, chip) && matches(e->board, board)) {
+        if (strcmp(e->component, component) == 0 && matches(e->chip, chip) && matches(e->board, board) && !e->withdrawn &&
+            !list_names(m->withdrawn_versions, e->component, e->version)) {
             return e;
         }
     }

@@ -58,6 +58,36 @@ class RecoveryHosting(unittest.TestCase):
         self.assertNotIn("component=kernel", mods)             # components and modules stay in their own manifests
         self.assertTrue(os.path.exists(os.path.join(rdir, "legal.txt")))
 
+    def test_withdraw_marks_the_manifests_and_unwithdraw_takes_it_back(self):
+        self.run_recovery()
+        rdir = os.path.join(self.repo, "recovery")
+        ctx, out = make_ctx(self.tmp)
+        self.assertEqual(dev.withdraw(ctx, self.repo, "1.2.3", "kernel,kittenos", "wizard showed two Wi-Fi pages"), 0)
+        text = open(os.path.join(rdir, "recovery.manifest")).read()
+        self.assertIn("withdrawn_versions=kernel@1.2.3,kittenos@1.2.3", text)
+        self.assertIn("withdrawn_reason=wizard showed two Wi-Fi pages", text)
+        k = next(x for x in text.split("\n\n") if "component=kernel" in x)
+        l = next(x for x in text.split("\n\n") if "component=loader" in x)
+        self.assertIn("withdrawn=yes", k)                       # the entry says so too
+        self.assertNotIn("withdrawn=yes", l)                    # the loader was not named
+        self.assertIn("still hosts", out.getvalue())            # the tool says what the server still offers
+        self.assertIn("withdrawn_versions=", open(os.path.join(rdir, "modules.manifest")).read())
+        # the list survives the next publish: a new `dev recovery` writes it again
+        self.run_recovery()
+        self.assertIn("withdrawn_versions=kernel@1.2.3,kittenos@1.2.3", open(os.path.join(rdir, "recovery.manifest")).read())
+        self.assertEqual(dev.unwithdraw(ctx, self.repo, "1.2.3", "kernel,kittenos"), 0)
+        text = open(os.path.join(rdir, "recovery.manifest")).read()
+        self.assertNotIn("withdrawn", text)
+        self.assertFalse(os.path.exists(os.path.join(rdir, "withdrawn.list")))
+
+    def test_withdraw_refuses_a_bad_version_or_no_reason(self):
+        self.run_recovery()
+        ctx, _ = make_ctx(self.tmp)
+        self.assertEqual(dev.withdraw(ctx, self.repo, "latest", "*", "bad"), 1)
+        self.assertEqual(dev.withdraw(ctx, self.repo, "1.2.3", "*", ""), 1)
+        self.assertEqual(dev.withdraw(ctx, self.repo, "1.2.3", "ker nel", "bad"), 1)
+        self.assertEqual(dev.unwithdraw(ctx, self.repo, "9.9.9", "*"), 1)
+
     def test_a_ui_pack_is_a_component_signed_for_the_system_key(self):
         pack = os.path.join(self.tmp, "uiassets.cat")
         with open(pack, "wb") as fh:

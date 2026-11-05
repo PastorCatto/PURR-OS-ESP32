@@ -191,6 +191,45 @@ def _sha256_file(path):
         return hashlib.sha256(fh.read()).hexdigest()
 
 
+WITHDRAWN_LIST = "withdrawn.list"          # recovery/withdrawn.list: "reason=<one line>", then "<component>@<version>" per line ("*" is every component)
+
+
+def read_withdrawn(rdir):
+    """(reason, [token, ...]) from recovery/withdrawn.list; ("", []) if there is none."""
+    path = os.path.join(rdir, WITHDRAWN_LIST)
+    reason, tokens = "", []
+    if os.path.exists(path):
+        for line in open(path, encoding="utf-8").read().splitlines():
+            line = line.strip()
+            if line.startswith("reason="):
+                reason = line[len("reason="):].strip()
+            elif "@" in line and not line.startswith("#"):
+                tokens.append(line)
+    return reason, tokens
+
+
+def _write_withdrawn(rdir, reason, tokens):
+    path = os.path.join(rdir, WITHDRAWN_LIST)
+    if not tokens:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("reason=%s\n%s\n" % (reason, "\n".join(tokens)))
+
+
+def _is_withdrawn(tokens, component, version):
+    return ("%s@%s" % (component, version) in tokens) or ("*@%s" % version in tokens)
+
+
+def _withdrawn_lines(rdir):
+    """The release-wide lines for a manifest header (purr_manifest.h: withdrawn_versions, withdrawn_reason): [] when nothing is withdrawn."""
+    reason, tokens = read_withdrawn(rdir)
+    if not tokens:
+        return []
+    return ["withdrawn_versions=%s" % ",".join(tokens), "withdrawn_reason=%s" % reason]
+
+
 def build_recovery_manifests(repo):
     """Writes recovery/recovery.manifest (the components) and recovery/modules.manifest (everything else that is a PURR image)
     from the images in the folder. Files are named <component>-<board>.<ext>; the format is purr_manifest.h's. Returns
@@ -215,18 +254,25 @@ def build_recovery_manifests(repo):
                  "payload_sha256": f["payload_sha256"].hex()}
         (comps if entry["component"] in RECOVERY_COMPONENTS else mods).append(entry)
     stamp = time.strftime("%Y-%m-%d")
-    lines = ["release=dev-%s" % time.strftime("%Y%m%d%H%M%S"), "released=%s" % stamp, ""]
+    _reason, tokens = read_withdrawn(rdir)
+    lines = ["release=dev-%s" % time.strftime("%Y%m%d%H%M%S"), "released=%s" % stamp] + _withdrawn_lines(rdir) + [""]
     for e in comps:
         lines += ["component=%s" % e["component"], "version=%s" % e["version"], "chip=%s" % e["chip"],
                   "board=%s" % e["board"], "file=%s" % e["file"], "size=%d" % e["size"], "sha256=%s" % e["sha256"],
-                  "key=%s" % ("system" if e["component"] == "uiassets" else "boot"), "payload_size=%d" % e["payload_size"], "payload_sha256=%s" % e["payload_sha256"], ""]
+                  "key=%s" % ("system" if e["component"] == "uiassets" else "boot"), "payload_size=%d" % e["payload_size"], "payload_sha256=%s" % e["payload_sha256"]]
+        if _is_withdrawn(tokens, e["component"], e["version"]):
+            lines.append("withdrawn=yes")                    # the entry itself says so too, for a reader that only looks at entries
+        lines.append("")
     with open(os.path.join(rdir, "recovery.manifest"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
-    lines = ["release=dev-%s" % time.strftime("%Y%m%d%H%M%S"), "released=%s" % stamp, ""]
+    lines = ["release=dev-%s" % time.strftime("%Y%m%d%H%M%S"), "released=%s" % stamp] + _withdrawn_lines(rdir) + [""]
     for e in mods:
         lines += ["component=%s" % e["component"], "type=module", "version=%s" % e["version"], "chip=%s" % e["chip"],
                   "board=%s" % e["board"], "file=%s" % e["file"], "size=%d" % e["size"], "sha256=%s" % e["sha256"],
-                  "key=developer", "min_coreos=0.2.0", ""]
+                  "key=developer", "min_coreos=0.2.0"]
+        if _is_withdrawn(tokens, e["component"], e["version"]):
+            lines.append("withdrawn=yes")
+        lines.append("")
     with open(os.path.join(rdir, "modules.manifest"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     return comps, mods
@@ -266,6 +312,62 @@ def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules,
     comps, mods = build_recovery_manifests(dir)
     ctx.ok("recovery.manifest: %s; modules.manifest: %d module(s)" %
            (", ".join("%s %s" % (e["component"], e["version"]) for e in comps) or "no components", len(mods)))
+    return 0
+
+
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+
+
+def _tokens_for(version, components):
+    names = [c.strip() for c in (components or "*").split(",") if c.strip()] or ["*"]
+    return ["%s@%s" % (n, version) for n in names]
+
+
+def withdraw(ctx, dir, version, components="*", reason=""):
+    """Marks a version as withdrawn (bad) in the recovery manifests: devices stop offering and installing it, and one already running it is told."""
+    if not VERSION_RE.match(version or ""):
+        ctx.error("the version is like 1.0.20")
+        return 1
+    reason = " ".join((reason or "").split())[:60]
+    if not reason:
+        ctx.error("say why in a few words (--reason): the person sees it")
+        return 1
+    rdir = _recovery_dir(dir)
+    if not os.path.isdir(rdir):
+        ctx.error("%s has no recovery folder" % dir)
+        return 1
+    old_reason, tokens = read_withdrawn(rdir)
+    names = [c.strip() for c in (components or "*").split(",") if c.strip()]
+    if any(not re.match(r"^(\*|[A-Za-z0-9_]+)$", n) for n in names):
+        ctx.error("components: a comma list of names, or * for all")
+        return 1
+    for t in _tokens_for(version, components):
+        if t not in tokens:
+            tokens.append(t)
+    if len(",".join(tokens)) > 150:
+        ctx.error("too many withdrawn versions in one list (the device keeps 160 characters): unwithdraw the old ones first")
+        return 1
+    _write_withdrawn(rdir, reason, tokens)
+    comps, mods = build_recovery_manifests(dir)
+    still = ["%s %s" % (e["component"], e["version"]) for e in comps + mods if _is_withdrawn(tokens, e["component"], e["version"])]
+    ctx.ok("withdrawn: %s (%s)" % (", ".join(tokens), reason))
+    if still:
+        ctx.warn("the server still hosts %s, now marked withdrawn: devices are offered nothing for them until a good version is published with `dev recovery`" % ", ".join(still))
+    return 0
+
+
+def unwithdraw(ctx, dir, version, components="*"):
+    """Takes a version off the withdrawn list again."""
+    rdir = _recovery_dir(dir)
+    reason, tokens = read_withdrawn(rdir)
+    drop = set(_tokens_for(version, components))
+    keep = [t for t in tokens if t not in drop]
+    if len(keep) == len(tokens):
+        ctx.error("nothing withdrawn matches %s" % ", ".join(sorted(drop)))
+        return 1
+    _write_withdrawn(rdir, reason, keep)
+    build_recovery_manifests(dir)
+    ctx.ok("no longer withdrawn: %s" % ", ".join(sorted(drop)))
     return 0
 
 
@@ -479,6 +581,17 @@ SCRIPT = Script(
                        Param("uiassets", "path", default="", help="the signed UI icon pack (.cat from `uiassets package`), installed by stage 2"),
                        Param("legal", "path", default="", help="the legal and credits text file"),
                        Param("modules", "str", default="", help="module images to host, comma separated"))),
+        Action("withdraw", "Withdraw a version", withdraw,
+               help="mark a recovery version as bad: devices stop offering and installing it, and one running it is told",
+               params=(Param("dir", "path", default="rel/devrepo", help="the repository folder"),
+                       Param("version", "str", required=True, help="the version to withdraw, like 1.0.20"),
+                       Param("components", "str", default="*", help="which components, comma separated (default all)"),
+                       Param("reason", "str", required=True, help="a few words the person sees"))),
+        Action("unwithdraw", "Take back a withdrawal", unwithdraw,
+               help="remove a version from the withdrawn list",
+               params=(Param("dir", "path", default="rel/devrepo", help="the repository folder"),
+                       Param("version", "str", required=True, help="the version, like 1.0.20"),
+                       Param("components", "str", default="*", help="which components, comma separated (default all)"))),
         Action("publish", "Publish an app", publish,
                help="copy a built .cat into the repository folder and refresh the index",
                params=(Param("file", "path", required=True, help="the built app (.cat)"),

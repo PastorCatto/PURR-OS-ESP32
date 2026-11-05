@@ -281,6 +281,27 @@ version.
 - Installing apps from the repo goes through the `appmgr` catcall (the
   `device-admin` permission).
 
+## 8.1 Withdrawing a release (2026-11-05)
+
+A release that turns out to be bad must be stoppable at once, and a device already running it must be told. The manifest (section 5) carries it; nothing else changes.
+
+**Format**, all optional (an older reader ignores unknown keys, so a manifest with them is still valid for it):
+
+    withdrawn_versions=kernel@1.0.20,kittenos@1.0.20,*@1.0.20     release-wide: component@version, "*" is every component, comma separated, 160 characters at most
+    withdrawn_reason=the setup wizard showed two Wi-Fi pages         one line the person sees, 64 characters at most
+
+and, inside an entry, `withdrawn=yes` (the same version, marked on the entry that still names it). The release-wide list is what a device already ON that version needs, because the manifest only ever names the latest entry of each component.
+
+**What a device does** (`purr_manifest.c`; all of it through the one function every reader uses):
+1. `purr_manifest_find()` never returns a withdrawn entry (its own flag, or named by the list). The recovery loader, `netinstall`, stage 2, Settings > Updates, the module and driver installs and the dev-server check all go through it, so a withdrawn version is not offered and not installed. With nothing else for that component, the answer is "nothing to install".
+2. `purr_manifest_find_any()` still returns it, to say why nothing is offered; `purr_manifest_is_withdrawn(m, component, installed_version, reason)` answers for the version a device is running.
+3. The existing `blocked=yes` (driver index, plan8) stays what it was: a version that broke on a newer OS. Withdrawn is the publisher pulling a release.
+
+**Publisher side** (`purrstrap dev withdraw --version 1.0.20 [--components kernel,kittenos] --reason "..."`, `dev unwithdraw`): the list lives in `recovery/withdrawn.list` and is written into both manifests on every `dev recovery`, so a later publish does not lose it. The tool says what the server still hosts. For the official release the same lines go into the release's manifest assets (`tools/release/make_release.py`, not wired yet).
+
+**Not in the first step** (to build, in this order): (1) say it in words on the device: the loader and `netinstall` print the reason, Settings > Updates says "your version was withdrawn, update to X" and offers a lower version when the withdrawn one is installed (the update check only offers newer today); (2) re-read the manifest just before the last write in the loader, so a withdrawal during a download takes effect; (3) sign the manifest (`recovery.manifest.sig`, boot key) and remember the newest `release` stamp, so a replayed old manifest cannot hide a withdrawal and a forged one cannot withdraw (an unsigned flag can only block, never install, so the first step is safe without it); (4) the companion checks the manifest for a withdrawal of the running version every hour or so; (5) the Store's repository index (already signed) gets the same per-item flag; (6) a downgrade guard: an update source whose kernel is OLDER than the one installed (the official 1.0.11 against a 1.0.21 device) asks first.
+**Limits:** a device only learns of it when it next reads the manifest (there is no push), and a device built before this cannot honour the flag: for those the only protection is the server not offering the version, which `dev withdraw` also does while the entry is replaced.
+
 ## 9. Failure handling
 
 Every user-facing feature needs a fallback.

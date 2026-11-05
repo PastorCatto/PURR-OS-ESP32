@@ -314,8 +314,64 @@ static void test_driver_entry_abi_range_and_blocked(void)
     CHECK_EQ(m.entries[1].abi_min, 0);                 /* a malformed number is ignored, not guessed */
 }
 
+static void test_withdrawn_entry_is_never_found(void)
+{
+    const char *text =
+        "release=dev-1\n"
+        "\n"
+        "component=kernel\nversion=1.0.20\nfile=k.cat\nsize=100\nsha256=" HASH64 "\nwithdrawn=yes\n"
+        "\n"
+        "component=loader\nversion=1.0.20\nfile=l.cat\nsize=100\nsha256=" HASH64 "\n";
+    purr_manifest_t m;
+    purr_manifest_parse(&m, text, strlen(text));
+    CHECK_EQ(m.count, 2);
+    CHECK_EQ(m.entries[0].withdrawn, 1);
+    CHECK_EQ(m.entries[1].withdrawn, 0);
+    CHECK(purr_manifest_find(&m, "kernel", NULL, NULL) == NULL);       /* a client asking for the kernel is told there is none */
+    CHECK(purr_manifest_find_any(&m, "kernel", NULL, NULL) != NULL);   /* the tool and the "why" can still see it */
+    CHECK(purr_manifest_find(&m, "loader", NULL, NULL) != NULL);       /* only the withdrawn one is affected */
+}
+
+static void test_withdrawn_list_names_versions_and_wildcards(void)
+{
+    const char *text =
+        "release=dev-2\n"
+        "withdrawn_versions=kernel@1.0.20, kittenos@1.0.20,*@1.0.9\n"
+        "withdrawn_reason=the setup wizard showed two Wi-Fi pages\n"
+        "\n"
+        "component=kernel\nversion=1.0.21\nfile=k.cat\nsize=100\nsha256=" HASH64 "\n"
+        "\n"
+        "component=loader\nversion=1.0.9\nfile=l.cat\nsize=100\nsha256=" HASH64 "\n";
+    purr_manifest_t m;
+    char why[80] = "";
+    purr_manifest_parse(&m, text, strlen(text));
+    CHECK(purr_manifest_is_withdrawn(&m, "kernel", "1.0.20", why, sizeof(why)));       /* the version a device may be running */
+    CHECK_EQ(strcmp(why, "the setup wizard showed two Wi-Fi pages"), 0);
+    CHECK(purr_manifest_is_withdrawn(&m, "kittenos", "1.0.20", NULL, 0));
+    CHECK(!purr_manifest_is_withdrawn(&m, "kernel", "1.0.21", NULL, 0));               /* the good one is not on the list */
+    CHECK(!purr_manifest_is_withdrawn(&m, "kernel", "1.0.2", NULL, 0));                /* a prefix of a version is not that version */
+    CHECK(!purr_manifest_is_withdrawn(&m, "loader", "1.0.20", NULL, 0));               /* not named for that component */
+    CHECK(purr_manifest_is_withdrawn(&m, "loader", "1.0.9", NULL, 0));                 /* "*" is every component */
+    CHECK(purr_manifest_find(&m, "kernel", NULL, NULL) != NULL);                       /* 1.0.21 is offered */
+    CHECK(purr_manifest_find(&m, "loader", NULL, NULL) == NULL);                       /* the loader entry IS 1.0.9, which the list names */
+    CHECK(!purr_manifest_is_withdrawn(&m, "kernel", NULL, NULL, 0));
+}
+
+static void test_a_manifest_without_the_fields_withdraws_nothing(void)
+{
+    const char *text = "release=1\n\ncomponent=kernel\nversion=1.0.0\nfile=k.cat\nsize=100\nsha256=" HASH64 "\n";
+    purr_manifest_t m;
+    purr_manifest_parse(&m, text, strlen(text));
+    CHECK(purr_manifest_find(&m, "kernel", NULL, NULL) != NULL);
+    CHECK(!purr_manifest_is_withdrawn(&m, "kernel", "1.0.0", NULL, 0));
+    CHECK_EQ(m.withdrawn_versions[0], 0);
+}
+
 int main(void)
 {
+    test_withdrawn_entry_is_never_found();
+    test_withdrawn_list_names_versions_and_wildcards();
+    test_a_manifest_without_the_fields_withdraws_nothing();
     test_basic_parse();
     test_payload_fields();
     test_ui_pack_entry();
