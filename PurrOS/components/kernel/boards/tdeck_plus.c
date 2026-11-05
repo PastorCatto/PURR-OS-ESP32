@@ -126,6 +126,7 @@ static const purr_device_t s_devices[] = {
         .name = "lora0", .compatible = "lora-sx126x", .priority = PURR_PRI_OPTIONAL,
         .extra_pins = {9, 13, 45, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
         .cfg = &s_lora_cfg,
+        .defer = PURR_DEFER_NET,        /* the radio binds after Wi-Fi has settled: both share the owner's service, and bringing them up together was too much at start */
     },
     {
         .name = "trackball", .compatible = "trackball-gpio", .priority = PURR_PRI_OPTIONAL,

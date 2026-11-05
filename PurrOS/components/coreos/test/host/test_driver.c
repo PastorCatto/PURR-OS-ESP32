@@ -301,6 +301,66 @@ static void test_register_does_not_steal_an_already_bound_device(void)
     CHECK_EQ(s_swap_probe_calls, 0);
 }
 
+/* A device flagged PURR_DEFER_NET (the T-Deck Plus LoRa radio) is neither probed nor given its pins until Wi-Fi has settled. */
+static void test_defer_net_waits_for_wifi_then_binds(void)
+{
+    purr_pins_reset();
+    purr_driver_registry_reset();
+    s_swap_probe_calls = 0;
+    purr_device_t devs[] = {basic_device("radio", "fake-swap", PURR_PRI_OPTIONAL), basic_device("other", "fake-ok", PURR_PRI_OPTIONAL)};
+    devs[0].defer = PURR_DEFER_NET;
+    devs[0].extra_pins[0] = 9;
+    purr_board_t b = make_board(devs, 2);
+    purr_drivers_bind(&b, s_table, TABLE_COUNT);
+    CHECK_EQ(purr_device_state("radio"), PURR_DEV_DEFERRED);
+    CHECK_EQ(purr_device_state("other"), PURR_DEV_BOUND);                     /* only the flagged device waits */
+    CHECK(purr_pins_owner(9) == NULL);                                         /* its pins are still free */
+
+    CHECK_EQ(purr_driver_register(&b, &s_swap_driver_a), 0);                   /* the driver arrives while Wi-Fi starts: still waiting, not probed */
+    CHECK_EQ(purr_device_state("radio"), PURR_DEV_DEFERRED);
+    CHECK_EQ(s_swap_probe_calls, 0);
+    CHECK_EQ(purr_drivers_net_is_settled(), 0);
+
+    purr_drivers_net_settled(&b);                                              /* Wi-Fi settled: now it binds */
+    CHECK_EQ(purr_drivers_net_is_settled(), 1);
+    CHECK_EQ(purr_device_state("radio"), PURR_DEV_BOUND);
+    CHECK_EQ(s_swap_probe_calls, 1);
+    CHECK(purr_device_driver("radio") == &s_swap_driver_a);
+    CHECK(purr_pins_owner(9) != NULL);
+
+    purr_drivers_net_settled(&b);                                              /* calling it again changes nothing */
+    CHECK_EQ(s_swap_probe_calls, 1);
+}
+
+static void test_defer_net_with_no_driver_reports_no_driver_after_settling(void)
+{
+    purr_pins_reset();
+    purr_driver_registry_reset();
+    purr_device_t devs[] = {basic_device("radio", "fake-missing", PURR_PRI_OPTIONAL)};
+    devs[0].defer = PURR_DEFER_NET;
+    purr_board_t b = make_board(devs, 1);
+    purr_drivers_bind(&b, s_table, TABLE_COUNT);
+    CHECK_EQ(purr_device_state("radio"), PURR_DEV_DEFERRED);
+    purr_drivers_net_settled(&b);
+    CHECK_EQ(purr_device_state("radio"), PURR_DEV_NO_DRIVER);
+}
+
+static void test_a_flagged_device_registered_after_settling_binds_at_once(void)
+{
+    purr_pins_reset();
+    purr_driver_registry_reset();
+    s_swap_probe_calls = 0;
+    purr_device_t devs[] = {basic_device("radio", "fake-swap", PURR_PRI_OPTIONAL)};
+    devs[0].defer = PURR_DEFER_NET;
+    purr_board_t b = make_board(devs, 1);
+    purr_drivers_bind(&b, NULL, 0);
+    purr_drivers_net_settled(&b);
+    CHECK_EQ(purr_device_state("radio"), PURR_DEV_NO_DRIVER);
+    CHECK_EQ(purr_driver_register(&b, &s_swap_driver_a), 0);
+    CHECK_EQ(purr_device_state("radio"), PURR_DEV_BOUND);
+    CHECK_EQ(s_swap_probe_calls, 1);
+}
+
 static void test_unregister_calls_remove_and_frees_the_device(void)
 {
     purr_pins_reset();
@@ -485,6 +545,9 @@ int main(void)
     test_device_read_on_an_unbound_device_fails();
     test_register_binds_a_matching_unbound_device();
     test_register_does_not_steal_an_already_bound_device();
+    test_defer_net_waits_for_wifi_then_binds();
+    test_defer_net_with_no_driver_reports_no_driver_after_settling();
+    test_a_flagged_device_registered_after_settling_binds_at_once();
     test_unregister_calls_remove_and_frees_the_device();
     test_unregister_releases_pins_for_a_fresh_claim();
     test_register_after_unregister_rebinds_to_the_new_driver();

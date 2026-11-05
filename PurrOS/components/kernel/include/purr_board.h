@@ -147,7 +147,10 @@ typedef struct {
     purr_priority_t priority;
     int extra_pins[PURR_MAX_EXTRA_PINS];
     const void *cfg;
+    uint8_t defer;                /* 0, or PURR_DEFER_NET: do not claim pins or probe until Wi-Fi has settled (purr_drivers_net_settled) */
 } purr_device_t;
+
+#define PURR_DEFER_NET 1
 
 typedef struct {
     const char *name;             /* the board's codename */

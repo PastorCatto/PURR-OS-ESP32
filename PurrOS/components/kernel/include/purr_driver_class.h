@@ -77,12 +77,22 @@ typedef struct {
     uint8_t reserved;
 } purr_lora_rxinfo_t;
 
+/* What the radio has heard, for the status bar. `heard` is 0 until a packet has been received since the driver started. */
 typedef struct {
-    uint32_t version;                                       /* 1 */
+    uint8_t heard;
+    int8_t last_snr_db;
+    int16_t last_rssi_dbm;      /* of the last packet received */
+    uint32_t last_age_ms;       /* how long ago it arrived */
+    uint32_t rx_count;          /* packets received since the driver started */
+} purr_lora_status_t;
+
+typedef struct {
+    uint32_t version;                                       /* 1; 2 adds status (a version 1 table ends at sleep: never read past it) */
     int (*configure)(void *h, const purr_lora_cfg_t *cfg);  /* applies a configuration; 0 or < 0 */
     int (*send)(void *h, const uint8_t *data, size_t len, uint32_t timeout_ms);       /* one packet; 0 when it has gone out */
     int (*receive)(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms, purr_lora_rxinfo_t *info);  /* bytes of one packet, 0 if none arrived in time */
     int (*sleep)(void *h);                                  /* lowest power until the next call */
+    int (*status)(void *h, purr_lora_status_t *out);        /* version 2: what the radio last heard; 0 or < 0. Never touches the chip. */
 } purr_lora_ops_t;
 
 /* ---------------------------------------------------------------- sockets, shared by the offload devices (a modem, an AT Wi-Fi module) */

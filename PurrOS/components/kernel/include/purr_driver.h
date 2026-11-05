@@ -65,6 +65,7 @@ typedef enum {
     PURR_DEV_NO_DRIVER,
     PURR_DEV_PROBE_FAILED,
     PURR_DEV_PIN_CONFLICT,
+    PURR_DEV_DEFERRED,            /* flagged PURR_DEFER_NET and waiting for Wi-Fi to settle; no pins claimed, nothing probed */
 } purr_device_state_t;
 
 /* ---------------------------------------------------------------- pin registry */
@@ -103,6 +104,11 @@ void purr_drivers_bind(const purr_board_t *board, const purr_driver_t *const *ta
 
 /* The real one: purr_driver_table() as the driver list. */
 void purr_drivers_bind_all(const purr_board_t *board);
+
+/* Wi-Fi has settled (it has an address, or will not get one soon): binds the devices that were waiting for it (PURR_DEFER_NET). Safe to call more than once. A
+ * device flagged this way that is registered after this binds at once. */
+void purr_drivers_net_settled(const purr_board_t *board);
+int purr_drivers_net_is_settled(void);
 
 /* ---------------------------------------------------------------- plug-and-play
  *
