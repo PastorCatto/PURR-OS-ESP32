@@ -22,7 +22,7 @@ static const purr_cc_store_t *st;
 static const purr_cc_app_t *app;
 
 enum { PG_HOME, PG_LIST, PG_DETAIL, PG_REPOS, PG_REPO, PG_ADD, PG_CONFIRM, PG_WAIT };
-enum { J_NONE, J_REFRESH, J_CHECK, J_INSTALL, J_UPDATE_ALL, J_REMOVE, J_ADD, J_CONFIRM, J_REPO_REMOVE, J_BOOTSTRAP };
+enum { J_NONE, J_REFRESH, J_CHECK, J_INSTALL, J_UPDATE_ALL, J_REMOVE, J_ADD, J_CONFIRM, J_REPO_REMOVE, J_BOOTSTRAP, J_COMPANION };
 
 static int s_page = PG_HOME;
 static int s_mode;                                   /* the list: 0 apps, 1 assets and extras, 2 updates */
@@ -243,6 +243,7 @@ NO_OPT static void show_home(void)
     int up = st->updates();
     char sub[48];
     h_home[0] = 0;
+    h_home[4] = 0;
     if (up > 0) {
         put(sub, "", sizeof(sub));
         append_num(sub, up, sizeof(sub));
@@ -252,6 +253,7 @@ NO_OPT static void show_home(void)
     h_home[1] = ui->row("Apps", "From your repositories");
     h_home[2] = ui->row("Assets and extras", "Fonts, wallpapers, data");
     h_home[3] = ui->row("Repositories", "What you trust");
+    h_home[4] = ui->row("Background updates", st->setting("store.companion", 0) ? "On: looks for app updates" : "Off: tap to turn on");
     h_check = action("Check for updates");
     if (!st->sd_present()) {
         ui->label("No SD card: items that need one are not offered to install.", PURR_UI_ROLE_DIM);
@@ -442,6 +444,7 @@ NO_OPT static void on_job(int arg)
     case J_BOOTSTRAP:
     case J_REFRESH:
     case J_CHECK:
+    case J_COMPANION:
         show_home();
         break;
     case J_INSTALL:
@@ -472,6 +475,8 @@ NO_OPT static void on_click(int h)
             show_list(1, 0);
         } else if (h == h_home[3]) {
             show_repos();
+        } else if (h == h_home[4] && h_home[4] > 0) {              /* the Store's own switch for its background companion (store.companion) */
+            begin_job(J_COMPANION, "companion", st->setting("store.companion", 0) ? "off" : "on", "", "Changing...");
         } else if (h == h_check) {
             begin_job(J_CHECK, "check", "", "", "Checking...");
         }

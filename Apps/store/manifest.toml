@@ -1,5 +1,5 @@
 name = "store"
-version = "1.0.0"
+version = "1.0.1"
 description = "The Store: apps, assets and extras from the repositories you trust, with updates"
 class = "unprivileged"
 kind = "ui"

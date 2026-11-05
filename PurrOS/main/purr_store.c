@@ -916,6 +916,9 @@ int purr_store_bootstrap(char *msg, size_t cap)
 
 /* ------------------------------------------------------------------ jobs */
 
+static int companion_listed(void);
+static int companion_set(int on);
+
 static int run_job(void)
 {
     const char *w = s_job.what;
@@ -924,6 +927,19 @@ static int run_job(void)
     }
     if (strcmp(w, "repo-confirm") == 0) {
         return repo_confirm();
+    }
+    if (strcmp(w, "companion") == 0) {                      /* the Store's background companion, on or off (a Store setting) */
+        if (!is_admin_now()) {
+            setmsg("Only an administrator can change this.");
+            return -1;
+        }
+        int on = strcmp(s_job.a, "on") == 0;
+        if (companion_set(on) != 0) {
+            setmsg("Could not change it.");
+            return -1;
+        }
+        setmsg(on ? "Background updates are on." : "Background updates are off.");
+        return 0;
     }
     if (strcmp(w, "repo-remove") == 0) {
         return repo_remove(s_job.a);
@@ -1094,6 +1110,9 @@ static int cc_setting(const char *key, int fallback)
     if (key == NULL || strncmp(key, "store.", 6) != 0) {
         return fallback;
     }
+    if (strcmp(key, "store.companion") == 0) {              /* the truth is whether it is listed to start (an exec-once line), not a second copy of it */
+        return companion_listed();
+    }
     return purr_settings_kv_int(key, fallback);
 }
 
@@ -1137,7 +1156,24 @@ static int hours_set(const char *v, char *e, size_t c)
     return purr_settings_kv_set("store.check_hours", v) == 0 ? 0 : (snprintf(e, c, "could not save"), -1);
 }
 
+static int companion_get(char *o, size_t c)
+{
+    snprintf(o, c, "%s", companion_listed() ? "on" : "off");
+    return 0;
+}
+
+static int companion_setting_set(const char *v, char *e, size_t c)
+{
+    int on;
+    if (purr_settings_parse_bool(v, &on) != 0) {
+        snprintf(e, c, "expected on|off");
+        return -1;
+    }
+    return companion_set(on) == 0 ? 0 : (snprintf(e, c, "could not change it"), -1);
+}
+
 static const purr_setting_t s_store_keys[] = {
+    {"store.companion", "run the Store's background companion (it looks for app updates); off by default, it holds about 10 KB of fast RAM", "on|off", 1, companion_get, companion_setting_set},
     {"store.auto_update", "install app updates by themselves when the Store's check finds them", "on|off", 1, auto_get, auto_set},
     {"store.check_hours", "how often the Store's companion looks for updates, in hours", "1-168", 1, hours_get, hours_set},
 };
@@ -1309,6 +1345,65 @@ static void ensure_exec_once(const char *app)
     purr_catrt_reload(err, sizeof(err));
 }
 
+/* Whether the companion is listed to start after sign-in (the line ensure_exec_once adds). */
+static int companion_listed(void)
+{
+    static uint8_t buf[4300];
+    uint32_t n = 0;
+    if (read_file("/etc/apps.conf", buf, sizeof(buf) - 1, &n) < 0) {
+        return 0;
+    }
+    buf[n < sizeof(buf) ? n : sizeof(buf) - 1] = '\0';
+    for (const char *p = (const char *)buf; (p = strstr(p, "exec-once")) != NULL; p++) {
+        const char *eol = strchr(p, '\n');
+        const char *at = strstr(p, "storesvc");
+        if (at != NULL && (eol == NULL || at < eol)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void remove_exec_once(const char *app)
+{
+    static uint8_t in[4300], out[4300];
+    uint32_t n = 0;
+    if (read_file("/etc/apps.conf", in, sizeof(in) - 1, &n) < 0) {
+        return;
+    }
+    in[n < sizeof(in) ? n : sizeof(in) - 1] = '\0';
+    uint32_t o = 0;
+    for (const char *p = (const char *)in; *p != '\0';) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol != NULL ? (size_t)(eol - p) + 1 : strlen(p);
+        int drop = strncmp(p, "exec-once", 9) == 0 && memmem(p, len, app, strlen(app)) != NULL;
+        if (!drop && o + len < sizeof(out)) {
+            memcpy(out + o, p, len);
+            o += (uint32_t)len;
+        }
+        p += len;
+    }
+    purr_fs_write(fs(), "/etc/apps.conf", out, o);
+    char err[80];
+    purr_catrt_reload(err, sizeof(err));
+}
+
+/* The companion is an app task of its own (8 KB of fast RAM and its bookkeeping), so it is not started for everyone: the Store switches it on
+ * (store.companion). On: it may install apps, it is listed to start after sign-in, and it starts now. Off: it is stopped and unlisted. */
+static int companion_set(int on)
+{
+    char out[120];
+    if (on) {
+        purr_catrt_perm_put("storesvc", PURR_PERM_INSTALL_APPS, PURR_PERM_ALWAYS);          /* a background app cannot be asked: the Store grants its own companion */
+        ensure_exec_once("storesvc");
+        purr_catrt_dispatch("exec storesvc", out, sizeof(out));
+    } else {
+        purr_catrt_dispatch("close storesvc", out, sizeof(out));
+        remove_exec_once("storesvc");
+    }
+    return 0;
+}
+
 static void seed_task(void *arg)
 {
     (void)arg;
@@ -1339,13 +1434,10 @@ static void seed_task(void *arg)
             }
         }
         if (ok == purr_builtin_apps_count) {
-            purr_catrt_perm_put("storesvc", PURR_PERM_INSTALL_APPS, PURR_PERM_ALWAYS);          /* a background app cannot be asked: the Store grants its own companion */
-            ensure_exec_once("storesvc");
-            char out[120];
-            purr_catrt_dispatch("exec storesvc", out, sizeof(out));        /* start it now; exec-once does it from the next sign-in */
+            /* The companion is installed but NOT started: it is an app task that holds fast RAM, and the owner turns it on in the Store (store.companion). */
             purr_fs_write(fs(), marker, "1\n", 2);
             w10m_apps_changed_post();
-            ESP_LOGI(TAG, "the Store and its companion are installed for %s", u);
+            ESP_LOGI(TAG, "the Store and its companion are installed for %s (the companion is off until the Store turns it on)", u);
         }
     }
     vTaskDelete(NULL);
