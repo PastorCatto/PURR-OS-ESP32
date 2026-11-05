@@ -67,6 +67,13 @@ int purr_lvgl_get_rotation(void);
  * what is underneath is not tapped. NULL turns it off. */
 void purr_lvgl_set_edge_swipe(void (*cb)(void));
 
+/* A hook that sees every key before it is delivered (an LVGL key code, or the ASCII character). Return 1 to consume it. NULL turns it off. UI task. */
+void purr_lvgl_set_key_hook(int (*cb)(uint32_t key));
+
+/* A hook for holding the trackball's button down for `ms` milliseconds (called once per hold, on the UI task). While it is set a tap is delivered as
+ * Enter when the button is released, not when it is pressed, so a hold is never also a click. NULL turns it off. */
+void purr_lvgl_set_trackball_hold(void (*cb)(void), int ms);
+
 /* The trackball (the "trackball" device, see Modules/drivers/trackball_gpio_module.c) acts as arrow keys and Enter on the keypad. Rolling up or
  * down first offers the move to this handler (dy > 0 = further down; return 1 if it scrolled something) unless a text field has focus. */
 void purr_lvgl_set_scroll_handler(int (*cb)(int dy));

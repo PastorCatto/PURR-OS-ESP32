@@ -10,6 +10,11 @@
  *    styling code of its own.
  *
  * Everything here runs on the UI service task, the only place LVGL may be called from.
+ *
+ * There are two skins over the same roles, chosen at build time (Kconfig PURR_OFFICIAL_SHELL): the Windows 10 Mobile
+ * look (flat, square, accent fills) and the Android 2.2 look (grey bevelled buttons with small corners, black list rows
+ * with a divider, orange when pressed or selected, a gradient title bar). Callers name the role (a button, a list row, a
+ * title bar) and the skin decides how it looks, so shared code, apps' windows included, runs in either.
  */
 #ifndef PURR_W10M_THEME_H
 #define PURR_W10M_THEME_H
@@ -37,6 +42,9 @@ typedef enum {
     PURR_TH_SURFACE,        /* a raised block on a sheet (a notification, a settings row) */
     PURR_TH_ROW_PRESSED,    /* a list row while it is touched */
     PURR_TH_ICON,           /* a line icon (white art with alpha) recoloured to the accent */
+    PURR_TH_BUTTON,         /* a clickable object that acts as a button (apply to a plain object; lv_button already gets this) */
+    PURR_TH_LIST_ROW,       /* a tappable list row: its fill, edge or divider, and the pressed look (the three W10M row roles in one) */
+    PURR_TH_TITLE_BAR,      /* the header strip of a sheet or window; see purr_theme_title_bar() */
     PURR_TH_COUNT
 } purr_th_style_t;
 
@@ -46,6 +54,22 @@ void purr_theme_init(void);
 
 /* Adds one of the shared styles to an object (and its pressed-state twin where it has one). */
 void purr_theme_apply(lv_obj_t *obj, purr_th_style_t which);
+
+typedef enum {
+    PURR_SKIN_W10M,
+    PURR_SKIN_ANDROID,
+} purr_skin_t;
+
+/* Which skin this image was built with. */
+purr_skin_t purr_theme_skin(void);
+
+/* Dresses a window or sheet header made of a container, a back arrow and a title: the title bar role on the
+ * container, and in the Android skin the arrow is hidden (Back is a key there) and the title moves to the left edge.
+ * The container stays clickable and goes back when tapped, in both skins. */
+void purr_theme_title_bar(lv_obj_t *head, lv_obj_t *arrow, lv_obj_t *title);
+
+/* The text colour that reads on a PURR_TH_BUTTON: white on the W10M accent fill, dark on the Android grey bevel. */
+lv_color_t purr_theme_button_text_color(void);
 
 int purr_theme_accent_count(void);
 const purr_accent_t *purr_theme_accent_at(int index);

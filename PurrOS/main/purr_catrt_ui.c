@@ -64,14 +64,14 @@ typedef struct {
 static void win_layout_one(win_t *w)
 {
     int dw = w10m_disp_w(), dh = w10m_disp_h();
-    lv_obj_set_size(w->sheet, dw, dh - W10M_STATUS_H);
+    lv_obj_set_size(w->sheet, dw, dh - W10M_STATUS_H - W10M_NAV_H);
     lv_obj_set_pos(w->sheet, w->open ? 0 : dw, W10M_STATUS_H);
     lv_obj_set_size(w->head, dw, HEAD_H);
-    lv_obj_set_size(w->body, dw, dh - W10M_STATUS_H - HEAD_H);
+    lv_obj_set_size(w->body, dw, dh - W10M_STATUS_H - W10M_NAV_H - HEAD_H);
     lv_obj_align(w->body, LV_ALIGN_TOP_LEFT, 0, HEAD_H);
     for (int i = 0; i < PURR_CC_UI_MAX_WIDGETS; i++) {
         if (w->w[i] != NULL && lv_obj_has_flag(w->w[i], LV_OBJ_FLAG_USER_1)) {      /* a text area that fills */
-            lv_obj_set_height(w->w[i], dh - W10M_STATUS_H - HEAD_H - 16);
+            lv_obj_set_height(w->w[i], dh - W10M_STATUS_H - W10M_NAV_H - HEAD_H - 16);
         }
     }
     if (!w->open) {
@@ -87,6 +87,21 @@ static void back_clicked(lv_event_t *e)
     } else {
         purr_catrt_close_slot(slot);
     }
+}
+
+int purr_catrt_ui_back(void)
+{
+    for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
+        if (s_win[i].used && s_win[i].open) {
+            if (s_win[i].back_app) {
+                purr_catrt_post_ui(i, 0, "back");
+            } else {
+                purr_catrt_close_slot(i);
+            }
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void action_clicked(lv_event_t *e)
@@ -124,6 +139,7 @@ static void win_create(int slot, const char *name)
     lv_obj_set_style_text_font(w->title, &lv_font_montserrat_16, 0);
     purr_theme_apply(w->title, PURR_TH_TEXT);
     lv_obj_align(w->title, LV_ALIGN_LEFT_MID, 34, 0);
+    purr_theme_title_bar(w->head, arrow, w->title);
 
     w->act = lv_label_create(w->sheet);                 /* above the header, so it has its own tap area */
     lv_obj_set_style_text_font(w->act, &lv_font_montserrat_16, 0);
@@ -282,9 +298,7 @@ static lv_obj_t *make_row(win_t *w, const char *title, const char *sub)
     lv_obj_set_size(r, LV_PCT(100), 48);
     lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
-    purr_theme_apply(r, PURR_TH_SURFACE);
-    purr_theme_apply(r, PURR_TH_ACCENT_BORDER);
-    purr_theme_apply(r, PURR_TH_ROW_PRESSED);
+    purr_theme_apply(r, PURR_TH_LIST_ROW);
     lv_obj_add_event_cb(r, widget_event, LV_EVENT_CLICKED, NULL);
     int has_sub = sub != NULL && sub[0] != '\0';
     lv_obj_t *a = lv_label_create(r);
@@ -315,7 +329,7 @@ static lv_obj_t *make_textarea(win_t *w, int max_len, const char *placeholder, i
     lv_obj_set_style_text_font(ta, &lv_font_montserrat_14, 0);
     if (fill) {
         lv_obj_add_flag(ta, LV_OBJ_FLAG_USER_1);
-        lv_obj_set_height(ta, w10m_disp_h() - W10M_STATUS_H - HEAD_H - 16);
+        lv_obj_set_height(ta, w10m_disp_h() - W10M_STATUS_H - W10M_NAV_H - HEAD_H - 16);
     } else {
         lv_obj_set_height(ta, 90);
     }

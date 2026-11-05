@@ -201,7 +201,22 @@ static int s_kbd_down;
  * between two reads: a slower rate would drop steps. Each step becomes one arrow key; a click is Enter. Until the device is bound (the driver has to be
  * downloaded first) it is looked at once a second. */
 static int (*s_scroll_cb)(int dy);
+static int (*s_key_hook)(uint32_t key);
+static void (*s_tb_hold_cb)(void);
+static int s_tb_hold_ms, s_tb_hold_fired;
+static uint32_t s_tb_down_at;
 static int s_tb_bound, s_tb_dx, s_tb_dy, s_tb_click, s_tb_click_prev;
+
+void purr_lvgl_set_key_hook(int (*cb)(uint32_t key))
+{
+    s_key_hook = cb;
+}
+
+void purr_lvgl_set_trackball_hold(void (*cb)(void), int ms)
+{
+    s_tb_hold_cb = cb;
+    s_tb_hold_ms = ms;
+}
 static uint32_t s_tb_check;
 
 void purr_lvgl_set_scroll_handler(int (*cb)(int dy))
@@ -229,7 +244,17 @@ static void trackball_poll(void)
     s_tb_dy += (int8_t)b[1];
     s_tb_dx = s_tb_dx > 8 ? 8 : (s_tb_dx < -8 ? -8 : s_tb_dx);          /* a long roll leaves no tail of keys */
     s_tb_dy = s_tb_dy > 8 ? 8 : (s_tb_dy < -8 ? -8 : s_tb_dy);
-    if (b[2] && !s_tb_click_prev) {
+    if (s_tb_hold_cb == NULL) {
+        if (b[2] && !s_tb_click_prev) {
+            s_tb_click = 1;
+        }
+    } else if (b[2] && !s_tb_click_prev) {              /* pressed: a click is decided on release, a hold when the time is up */
+        s_tb_down_at = lv_tick_get();
+        s_tb_hold_fired = 0;
+    } else if (b[2] && !s_tb_hold_fired && lv_tick_elaps(s_tb_down_at) >= (uint32_t)s_tb_hold_ms) {
+        s_tb_hold_fired = 1;
+        s_tb_hold_cb();
+    } else if (!b[2] && s_tb_click_prev && !s_tb_hold_fired) {
         s_tb_click = 1;
     }
     s_tb_click_prev = b[2];
@@ -292,6 +317,11 @@ static void kbd_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     case 27:  k = LV_KEY_ESC; break;
     case '\t': k = LV_KEY_NEXT; break;
     default: break;
+    }
+    if (s_key_hook != NULL && s_key_hook(k)) {         /* the shell took it (the Back key) */
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->key = s_kbd_key;
+        return;
     }
     s_kbd_key = k;
     s_kbd_down = 1;

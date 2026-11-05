@@ -611,8 +611,8 @@ purr_ui_mode_t purr_ui_mode_get(void)
     if (strcmp(t, "nav") == 0) {
         return PURR_UI_MODE_NAV;
     }
-    if (strcmp(t, "w10m") == 0) {
-        return PURR_UI_MODE_W10M;
+    if (strcmp(t, "w10m") == 0 || strcmp(t, "android") == 0 || strcmp(t, "shell") == 0) {
+        return PURR_UI_MODE_W10M;          /* the official shell compiled into this image (Kconfig PURR_OFFICIAL_SHELL) */
     }
     return PURR_UI_MODE_CARD_SHELL;            /* "card_shell", empty, or anything unrecognized */
 }

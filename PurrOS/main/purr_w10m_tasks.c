@@ -135,7 +135,7 @@ static void make_row(const purr_catrt_task_t *t, int w)
     lv_obj_t *end = lv_obj_create(row);                             /* End: a wide tap area, the whole right edge of the row */
     lv_obj_remove_style_all(end);
     lv_obj_set_size(end, 64, ROW_H - 10);
-    purr_theme_apply(end, PURR_TH_ACCENT_BG);
+    purr_theme_apply(end, PURR_TH_BUTTON);
     lv_obj_clear_flag(end, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(end, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_align(end, LV_ALIGN_RIGHT_MID, -5, 0);
@@ -143,14 +143,14 @@ static void make_row(const purr_catrt_task_t *t, int w)
     lv_obj_t *end_label = lv_label_create(end);
     lv_label_set_text(end_label, "End");
     lv_obj_set_style_text_font(end_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(end_label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(end_label, purr_theme_button_text_color(), 0);
     lv_obj_center(end_label);
 }
 
 static void layout(void)
 {
     int w = w10m_disp_w(), h = w10m_disp_h();
-    int vh = h - W10M_STATUS_H;
+    int vh = h - W10M_STATUS_H - W10M_NAV_H;
     lv_obj_set_size(s_view, w, vh);
     lv_obj_set_pos(s_view, 0, W10M_STATUS_H);
     lv_obj_align(s_title, LV_ALIGN_TOP_LEFT, 10, 6);
@@ -229,14 +229,14 @@ static void build(void)
     s_home = lv_obj_create(s_view);                                 /* leave the app in front running and go to the start screen */
     lv_obj_remove_style_all(s_home);
     lv_obj_set_size(s_home, 78, 26);
-    purr_theme_apply(s_home, PURR_TH_ACCENT_BG);
+    purr_theme_apply(s_home, PURR_TH_BUTTON);
     lv_obj_clear_flag(s_home, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_home, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_home, home_clicked, LV_EVENT_CLICKED, NULL);
     lv_obj_t *home_label = lv_label_create(s_home);
     lv_label_set_text(home_label, LV_SYMBOL_HOME "  Home");
     lv_obj_set_style_text_font(home_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(home_label, lv_color_white(), 0);
+    lv_obj_set_style_text_color(home_label, purr_theme_button_text_color(), 0);
     lv_obj_center(home_label);
 
     s_summary = lv_label_create(s_view);

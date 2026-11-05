@@ -6,8 +6,17 @@
 #define PURR_W10M_PRIV_H
 
 #include "lvgl.h"
+#include "sdkconfig.h"
 
+/* What the shell reserves at the top (the status strip) and the bottom (the Android shell's key strip: Menu, Home, Back). Every sheet and
+ * window sizes itself between them. */
+#if CONFIG_PURR_SHELL_ANDROID
+#define W10M_STATUS_H 19
+#define W10M_NAV_H    28
+#else
 #define W10M_STATUS_H 18
+#define W10M_NAV_H    0
+#endif
 
 const lv_image_dsc_t *w10m_img(const char *name);   /* NULL when the asset is missing */
 int w10m_disp_w(void);
@@ -43,6 +52,7 @@ void w10m_place_sheet(lv_obj_t *sheet);
 
 /* The permission prompt (purr_w10m_perm.c): registers how the runtime asks the user. */
 void w10m_perm_init(void);
+int w10m_perm_is_open(void);                        /* a question is on screen: it has to be answered first */
 
 /* Rebuilds the tiles and the app list from the installed apps. UI task only. */
 void w10m_apps_changed(void);
@@ -54,6 +64,7 @@ void w10m_devportal_build(void);
 void w10m_devportal_layout(void);
 void w10m_devportal_open(void);
 int w10m_devportal_is_open(void);
+void w10m_devportal_back(void);                     /* up one page, or closes it (the Back key) */
 
 /* The task manager (purr_w10m_tasks.c): a list of every running app with its memory and an End button, opened from the control center's Tasks tile. UI task only. */
 void w10m_tasks_open(void);                         /* a second call goes back */
@@ -67,5 +78,6 @@ void w10m_settings_build(void);
 void w10m_settings_layout(void);
 void w10m_settings_open(void);
 int w10m_settings_is_open(void);
+void w10m_settings_back(void);                      /* up one page, or closes it from the first page (the Back key) */
 
 #endif /* PURR_W10M_PRIV_H */
