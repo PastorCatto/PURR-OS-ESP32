@@ -79,6 +79,8 @@ typedef enum {
     PAGE_SECURITY,
     PAGE_DEVELOPER,
     PAGE_ABOUT,
+    PAGE_GROUP_DISPLAY,                 /* the Android layout: Sound & display, over Display and Appearance */
+    PAGE_GROUP_APPS,                    /* the Android layout: Applications, over Manage applications and Development */
 } page_t;
 
 typedef struct {
@@ -101,6 +103,29 @@ static const section_t s_sections[] = {
     {"About",           "Version, security, storage",    "wp_about",           PAGE_ABOUT,    1},
 };
 #define N_SECTIONS ((int)(sizeof(s_sections) / sizeof(s_sections[0])))
+
+/* The Android layout (plan7.md, "Android shell build-out"): the same pages, grouped the way Froyo's Settings was. Every setting reachable in the
+ * table above is reachable here; Developer options sit under Applications > Development. */
+static const section_t s_sections_android[] = {
+    {"Wireless & networks", "Wi-Fi and wired",                         NULL, PAGE_NETWORK,       1},
+    {"Sound & display",     "Brightness, screen timeout, appearance", NULL, PAGE_GROUP_DISPLAY, 1},
+    {"Applications",        "Manage applications, development",       NULL, PAGE_GROUP_APPS,    1},
+    {"Accounts & sync",     "Users and passwords",                     NULL, PAGE_ACCOUNTS,      1},
+    {"Location & security", "Boot policy, security status",            NULL, PAGE_SECURITY,      1},
+    {"Date & time",         "Time zone and clock",                     NULL, PAGE_TIME,          1},
+    {"Hardware",            "Screen, input, battery",                  NULL, PAGE_DEVICES,       1},
+    {"About phone",         "Version, security, storage",              NULL, PAGE_ABOUT,         1},
+};
+
+static const section_t *sections(int *n)
+{
+    if (purr_theme_skin() == PURR_SKIN_ANDROID) {
+        *n = (int)(sizeof(s_sections_android) / sizeof(s_sections_android[0]));
+        return s_sections_android;
+    }
+    *n = N_SECTIONS;
+    return s_sections;
+}
 
 static lv_obj_t *s_set;                 /* the whole sheet */
 static lv_obj_t *s_head, *s_head_title;
@@ -285,11 +310,13 @@ static void search_changed(lv_event_t *e)
 {
     (void)e;
     const char *q = lv_textarea_get_text(s_search);
-    for (int i = 0; i < N_SECTIONS; i++) {
+    int n;
+    const section_t *secs = sections(&n);
+    for (int i = 0; i < n; i++) {
         if (s_rows[i] == NULL) {
             continue;
         }
-        int hit = q[0] == '\0' || contains_ci(s_sections[i].title, q) || contains_ci(s_sections[i].desc, q);
+        int hit = q[0] == '\0' || contains_ci(secs[i].title, q) || contains_ci(secs[i].desc, q);
         if (hit) {
             lv_obj_remove_flag(s_rows[i], LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -304,8 +331,10 @@ static void page_main(void)
     lv_obj_add_event_cb(s_search, search_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     memset(s_rows, 0, sizeof(s_rows));
-    for (int i = 0; i < N_SECTIONS; i++) {
-        const section_t *sec = &s_sections[i];
+    int nsec;
+    const section_t *secs = sections(&nsec);
+    for (int i = 0; i < nsec; i++) {
+        const section_t *sec = &secs[i];
         lv_obj_t *row = lv_obj_create(s_body);
         lv_obj_remove_style_all(row);
         lv_obj_set_size(row, LV_PCT(100), 40);
@@ -326,13 +355,14 @@ static void page_main(void)
             lv_obj_align(im, LV_ALIGN_LEFT_MID, 2, 0);
             lv_obj_remove_flag(im, LV_OBJ_FLAG_CLICKABLE);
         }
+        int tx = ic != NULL ? 44 : 8;                   /* the Android layout has no row icons */
         lv_obj_t *t = cm_text(row, sec->title);
-        lv_obj_align(t, LV_ALIGN_LEFT_MID, 44, -8);
+        lv_obj_align(t, LV_ALIGN_LEFT_MID, tx, -8);
         lv_obj_t *d = lv_label_create(row);
         lv_label_set_text(d, sec->desc);
         lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
         purr_theme_apply(d, PURR_TH_DIM);
-        lv_obj_align(d, LV_ALIGN_LEFT_MID, 44, 9);
+        lv_obj_align(d, LV_ALIGN_LEFT_MID, tx, 9);
     }
 }
 
@@ -359,8 +389,9 @@ static void shell_cb(lv_event_t *e)
     static const char *const modes[] = {"w10m", "nav", "card_shell"};
     int sel = (int)lv_dropdown_get_selected(lv_event_get_target(e));
     const purr_setting_t *s = purr_settings_find("ui.shell");
+    const char *mode = sel == 0 && purr_theme_skin() == PURR_SKIN_ANDROID ? "android" : (sel >= 0 && sel < 3 ? modes[sel] : "");
     char err[64] = "";
-    if (s != NULL && sel >= 0 && sel < 3 && s->set(modes[sel], err, sizeof(err)) == 0) {
+    if (s != NULL && sel >= 0 && sel < 3 && s->set(mode, err, sizeof(err)) == 0) {
         say("Saved. It takes effect after a restart.", 1);
     } else {
         say(err[0] ? err : "Could not save.", 0);
@@ -422,14 +453,15 @@ static void page_system(void)
     cm_dropdown(s_body, "0\xC2\xB0\n90\xC2\xB0\n180\xC2\xB0\n270\xC2\xB0", purr_lvgl_get_rotation() / 90, 120, rotation_cb);
 
     cm_space(s_body, 6);
-    cm_title(s_body, "Start screen");
+    cm_title(s_body, purr_theme_skin() == PURR_SKIN_ANDROID ? "Interface" : "Start screen");
     char cur[24] = "w10m";
     const purr_setting_t *s = purr_settings_find("ui.shell");
     if (s != NULL) {
         s->get(cur, sizeof(cur));
     }
     int sel = strcmp(cur, "nav") == 0 ? 1 : strcmp(cur, "card_shell") == 0 ? 2 : 0;
-    lv_obj_t *dd = cm_dropdown(s_body, "Windows 10 Mobile\nNavigation\nCard stack", sel, 170, shell_cb);
+    lv_obj_t *dd = cm_dropdown(s_body, purr_theme_skin() == PURR_SKIN_ANDROID ? "Android 2.2\nNavigation\nCard stack"
+                                                                                : "Windows 10 Mobile\nNavigation\nCard stack", sel, 170, shell_cb);
     if (!acting_admin()) {
         lv_obj_add_state(dd, LV_STATE_DISABLED);
         cm_dim(s_body, "Only an administrator can change this.");
@@ -454,12 +486,6 @@ static void start_say(const char *t)
     if (s_start_msg != NULL) {
         lv_label_set_text(s_start_msg, t);
     }
-}
-
-static void fast_cb(lv_event_t *e)
-{
-    int on = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
-    start_say(purr_boot_fast_set(on) == 0 ? (on ? "Fast startup is on." : "Fast startup is off.") : "Could not save that.");
 }
 
 static void bootmenu_cb(lv_event_t *e)
@@ -510,8 +536,7 @@ static void page_devices(void)
 
     cm_space(s_body, 4);
     cm_title(s_body, "Startup");
-    cm_switch(s_body, "Fast startup", purr_boot_fast_get(), fast_cb);
-    cm_dim(s_body, "Skips the logo and the boot menu on a normal start. The system is still checked every time. Anything unusual brings the screens back.");
+    cm_dim(s_body, "Fast startup is turned off for now. The logo and the boot menu show on every start.");
     lv_obj_t *bm = cm_button(s_body, "Restart to the boot menu", bootmenu_cb, NULL);
     lv_obj_set_width(bm, LV_PCT(100));
     s_start_msg = cm_dim(s_body, "");
@@ -548,7 +573,7 @@ static void page_devices(void)
     }
     cm_space(s_body, 4);
     cm_title(s_body, "Add hardware and updates");
-    cm_dim(s_body, "Finding and adding devices, drivers, the developer server and system updates are in the Device Manager app.");
+    cm_dim(s_body, "Finding and adding devices, drivers and the developer server are in the Device Manager app. System updates and reinstalling are under About.");
     cm_space(s_body, 8);
 }
 
@@ -842,9 +867,11 @@ static void page_personal(void)
     cm_title(s_body, "Effects");
     cm_switch(s_body, "Transparency effects", purr_theme_transparency(), transparency_cb);
     cm_dim(s_body, "Lets the wallpaper show through the status bar and sheets. Off is faster.");
-    cm_space(s_body, 4);
-    cm_text(s_body, "Tile opacity");
-    cm_slider(s_body, purr_theme_tile_opacity(), 40, 255, LV_EVENT_RELEASED, tile_opa_cb);
+    if (purr_theme_skin() != PURR_SKIN_ANDROID) {                   /* the Android shell has no tiles */
+        cm_space(s_body, 4);
+        cm_text(s_body, "Tile opacity");
+        cm_slider(s_body, purr_theme_tile_opacity(), 40, 255, LV_EVENT_RELEASED, tile_opa_cb);
+    }
     cm_space(s_body, 8);
 }
 
@@ -1609,12 +1636,20 @@ static void page_security(void)
     cm_dim(s_body, "App permissions (camera, location, files) are not built yet. For now an app can do what "
                    "the system lets any signed app do.");
 
-    cm_space(s_body, 4);
-    lv_obj_t *row = cm_row(s_body, "Developer options", "Developer mode, unsigned apps", acting_admin(),
-                           sec_open_dev_cb, NULL);
-    (void)row;
+    if (purr_theme_skin() != PURR_SKIN_ANDROID) {                   /* in the Android layout it is under Applications > Development */
+        cm_space(s_body, 4);
+        lv_obj_t *row = cm_row(s_body, "Developer options", "Developer mode, unsigned apps", acting_admin(),
+                               sec_open_dev_cb, NULL);
+        (void)row;
+    }
     make_status();
     sec_reload();
+}
+
+static void portal_cb(lv_event_t *e)
+{
+    (void)e;
+    w10m_devportal_open();
 }
 
 static void page_developer(void)
@@ -1649,22 +1684,144 @@ static void page_developer(void)
     if (!acting_admin()) {
         cm_dim(s_body, "Only an administrator can change developer options.");
     }
+    if (purr_theme_skin() == PURR_SKIN_ANDROID) {                   /* the Developer Portal is reached from here too */
+        cm_space(s_body, 6);
+        cm_title(s_body, "Developer Portal");
+        cm_row(s_body, "Developer Portal", "Build, install and test apps from a developer server", purr_security_dev_active(), portal_cb, NULL);
+    }
     make_status();
     sec_reload();
 }
 
 /* ---------------------------------------------------------------- About */
 
-/* The system update, reinstall, drivers and the developer server moved to the Device Manager app. */
+/* System update and reinstall: in Settings for every shell (Settings is shared). Device Manager keeps hardware, drivers and the developer server. */
+
+static int s_upd_dev;                              /* 1 = the developer server is the source, 0 = the official one */
+static lv_obj_t *s_upd_install_btn, *s_upd_src_btn;
+
+static void upd_src_text(void)
+{
+    purr_repo_server_t sv;
+    char buf[100];
+    if (s_upd_dev && purr_devsrv_get(&sv) == 0) {
+        snprintf(buf, sizeof(buf), "Source: %s", sv.name);
+    } else {
+        s_upd_dev = 0;
+        snprintf(buf, sizeof(buf), "Source: the official server");
+    }
+    if (s_upd_src_btn != NULL) {
+        cm_button_text(s_upd_src_btn, buf);
+    }
+}
+
+static void upd_src_cb(lv_event_t *e)
+{
+    (void)e;
+    s_upd_dev = !s_upd_dev;
+    upd_src_text();
+    if (s_upd_install_btn != NULL) {
+        lv_obj_add_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static int upd_check_run(job_t *j)
+{
+    j->flag = purr_sysupdate_check(j->a[0] == 'd', j->msg, sizeof(j->msg));
+    return j->flag >= 0 ? 0 : -1;
+}
+
+static void upd_check_done(job_t *j)
+{
+    say(j->msg, j->rc == 0);
+    if (s_upd_install_btn != NULL) {
+        if (j->flag == 1) {
+            lv_obj_remove_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void upd_check_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!acting_admin()) {
+        say("Only an administrator can check for updates.", 0);
+        return;
+    }
+    job_t *j = job_new(upd_check_run, upd_check_done);
+    if (j == NULL) {
+        say("Out of memory.", 0);
+        return;
+    }
+    j->a[0] = s_upd_dev ? 'd' : 'o';
+    j->stack = 10240;
+    say("Checking...", 1);
+    job_start(j);
+}
+
+static void upd_go(lv_event_t *e, int force, const char *again, const char *what)
+{
+    if (!acting_admin()) {
+        say("Only an administrator can do that.", 0);
+        return;
+    }
+    if (!confirm_tap(lv_event_get_target(e), again)) {
+        return;
+    }
+    if (purr_sysupdate_request(s_upd_dev, force) != 0) {
+        say("Could not ask for that.", 0);
+        return;
+    }
+    say(what, 1);
+    vTaskDelay(pdMS_TO_TICKS(600));
+    esp_restart();
+}
+
+static void upd_install_cb(lv_event_t *e)
+{
+    if (purr_sysupdate_includes_bootloader()) {
+        upd_go(e, 0, "Tap again: includes the bootloader", "Restarting into the updater...");
+    } else {
+        upd_go(e, 0, "Tap again to restart and update", "Restarting into the updater...");
+    }
+}
+
+static void upd_reinstall_cb(lv_event_t *e)
+{
+    upd_go(e, 1, "Tap again: reinstall (files are kept)", "Restarting to reinstall...");
+}
+
 static void about_system_section(void)
 {
     char kv[16], ov[16], buf[96];
     purr_sysupdate_versions(kv, ov);
     cm_space(s_body, 4);
-    cm_title(s_body, "System");
+    cm_title(s_body, "System update");
     snprintf(buf, sizeof(buf), PURR_BRAND_PRODUCT " %s, " PURR_BRAND_RECOVERY " %s", kv, ov);
     cm_text(s_body, buf);
-    cm_dim(s_body, "Updates and reinstalling are in the Device Manager app.");
+    s_upd_src_btn = NULL;
+    purr_repo_server_t sv;
+    if (purr_security_dev_active() && purr_devsrv_get(&sv) == 0) {
+        s_upd_src_btn = cm_button(s_body, "", upd_src_cb, NULL);
+        lv_obj_set_width(s_upd_src_btn, LV_PCT(100));
+    } else {
+        s_upd_dev = 0;
+    }
+    upd_src_text();
+    lv_obj_t *cb = cm_button(s_body, "Check for update", upd_check_cb, NULL);
+    lv_obj_set_width(cb, LV_PCT(100));
+    s_upd_install_btn = cm_button(s_body, "Install update", upd_install_cb, NULL);
+    lv_obj_set_width(s_upd_install_btn, LV_PCT(100));
+    lv_obj_add_flag(s_upd_install_btn, LV_OBJ_FLAG_HIDDEN);
+    make_status();
+
+    cm_space(s_body, 4);
+    cm_title(s_body, "Reinstall");
+    cm_dim(s_body, "Puts " PURR_BRAND_PRODUCT " back from the source above, kernel and " PURR_BRAND_RECOVERY " both, even if they look fine. Your files and accounts are kept.");
+    lv_obj_t *rb = cm_button(s_body, "Reinstall " PURR_BRAND_PRODUCT, upd_reinstall_cb, NULL);
+    lv_obj_set_width(rb, LV_PCT(100));
 }
 
 static void page_about(void)
@@ -1734,8 +1891,42 @@ static void page_about(void)
 
 /* ---------------------------------------------------------------- pages */
 
+static void group_row_cb(lv_event_t *e)
+{
+    show_page((page_t)(intptr_t)lv_event_get_user_data(e));
+}
+
+/* The two list pages of the Android layout: rows that open the pages the Windows layout reaches from the main list. */
+static void page_group(page_t group)
+{
+    if (group == PAGE_GROUP_DISPLAY) {
+        cm_row(s_body, "Display", "Brightness, screen timeout, rotation, interface", 1, group_row_cb, (void *)(intptr_t)PAGE_SYSTEM);
+        cm_row(s_body, "Appearance", "Colours, background and wallpaper", 1, group_row_cb, (void *)(intptr_t)PAGE_PERSONAL);
+    } else {
+        cm_row(s_body, "Manage applications", "Installed apps, install", 1, group_row_cb, (void *)(intptr_t)PAGE_APPS);
+        cm_row(s_body, "Development", "Developer mode, unsigned apps, the Developer Portal", 1, group_row_cb, (void *)(intptr_t)PAGE_DEVELOPER);
+    }
+}
+
 static const char *page_title(page_t p)
 {
+    if (purr_theme_skin() == PURR_SKIN_ANDROID) {
+        switch (p) {
+        case PAGE_SYSTEM:        return "Display";
+        case PAGE_DEVICES:       return "Hardware";
+        case PAGE_NETWORK:       return "Wireless & networks";
+        case PAGE_PERSONAL:      return "Appearance";
+        case PAGE_APPS:          return "Manage applications";
+        case PAGE_ACCOUNTS:      return "Accounts & sync";
+        case PAGE_TIME:          return "Date & time";
+        case PAGE_SECURITY:      return "Location & security";
+        case PAGE_DEVELOPER:     return "Development";
+        case PAGE_ABOUT:         return "About phone";
+        case PAGE_GROUP_DISPLAY: return "Sound & display";
+        case PAGE_GROUP_APPS:    return "Applications";
+        default:                 break;
+        }
+    }
     switch (p) {
     case PAGE_SYSTEM:    return "System";
     case PAGE_DEVICES:   return "Devices";
@@ -1755,6 +1946,14 @@ static const char *page_title(page_t p)
 
 static page_t page_parent(page_t p)
 {
+    if (purr_theme_skin() == PURR_SKIN_ANDROID) {
+        if (p == PAGE_SYSTEM || p == PAGE_PERSONAL) {
+            return PAGE_GROUP_DISPLAY;
+        }
+        if (p == PAGE_APPS || p == PAGE_DEVELOPER) {
+            return PAGE_GROUP_APPS;
+        }
+    }
     if (p == PAGE_DEVELOPER) {
         return PAGE_SECURITY;
     }
@@ -1793,6 +1992,8 @@ static void show_page(page_t page)
     case PAGE_SECURITY:  page_security(); break;
     case PAGE_DEVELOPER: page_developer(); break;
     case PAGE_ABOUT:     page_about(); break;
+    case PAGE_GROUP_DISPLAY:
+    case PAGE_GROUP_APPS: page_group(page); break;
     default:             page_main(); break;
     }
 }
@@ -1855,16 +2056,23 @@ void w10m_settings_open(void)
 
 int w10m_settings_is_open(void) { return s_open; }
 
+void w10m_settings_back(void)
+{
+    if (s_set != NULL && s_open) {
+        back_clicked(NULL);
+    }
+}
+
 void w10m_settings_layout(void)
 {
     if (s_set == NULL) {
         return;
     }
     int w = w10m_disp_w(), h = w10m_disp_h();
-    lv_obj_set_size(s_set, w, h - W10M_STATUS_H);
+    lv_obj_set_size(s_set, w, h - W10M_STATUS_H - W10M_NAV_H);
     lv_obj_set_pos(s_set, s_open ? 0 : w, W10M_STATUS_H);
     lv_obj_set_size(s_head, w, HEAD_H);
-    lv_obj_set_size(s_body, w, h - W10M_STATUS_H - HEAD_H);
+    lv_obj_set_size(s_body, w, h - W10M_STATUS_H - W10M_NAV_H - HEAD_H);
     lv_obj_align(s_body, LV_ALIGN_TOP_LEFT, 0, HEAD_H);
     if (!s_open) {
         lv_obj_add_flag(s_set, LV_OBJ_FLAG_HIDDEN);
@@ -1894,6 +2102,7 @@ void w10m_settings_build(void)
     lv_obj_set_style_text_font(s_head_title, &lv_font_montserrat_16, 0);
     purr_theme_apply(s_head_title, PURR_TH_TEXT);
     lv_obj_align(s_head_title, LV_ALIGN_LEFT_MID, 34, 0);
+    purr_theme_title_bar(s_head, arrow, s_head_title);
 
     s_body = lv_obj_create(s_set);
     lv_obj_remove_style_all(s_body);

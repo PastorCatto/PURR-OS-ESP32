@@ -15,6 +15,13 @@
 #define MAX_AP 8
 #define HEAD_H 24          /* part 2 only: a line for the install that runs in the background */
 #define BAR_H  40
+#define DROID_HEAD_H 22    /* the Froyo skin: a title bar on every page ("Wi-Fi", "2 of 5"), grey like the shell's, and a grey bottom bar with two equal buttons */
+#define DROID_BAR_H  34
+
+static int droid(void) { return purr_theme_skin() == PURR_SKIN_ANDROID; }
+static int head_px(void) { return droid() ? DROID_HEAD_H : HEAD_H; }
+static int bar_px(void) { return droid() ? DROID_BAR_H : BAR_H; }
+static const lv_font_t *head_font(void) { return droid() ? &lv_font_montserrat_14 : &lv_font_montserrat_20; }
 
 typedef enum { PG_WRONG, PG_DEVSERVER, PG_LEGAL, PG_WIFI, PG_RESTORING, PG_COLOUR, PG_ACCOUNT, PG_TIME, PG_DONE, PG_FINISHING } page_t;
 
@@ -32,6 +39,7 @@ static const page_t *s_pages;
 static int s_npages, s_idx, s_part;
 
 static lv_obj_t *s_sheet, *s_head, *s_body, *s_bar, *s_back, *s_next, *s_next_label;
+static lv_obj_t *s_title_lbl, *s_cnt_lbl;               /* the Froyo skin's title bar: the page name, and "2 of 5" (hidden while the install line uses that room) */
 static lv_obj_t *s_bg_label, *s_bg_bar;                  /* the background install, above the bottom bar */
 static lv_obj_t *s_strip_lbl, *s_strip_bar;              /* the loader's and the finishing page's strip: a status line and a thin bar up top */
 static lv_obj_t *s_status;                               /* the page's one-line result */
@@ -98,6 +106,56 @@ static void job_start(purr_oobe_job_t kind, const char *a, const char *b)
 static void wifi_list_build(void);
 static void srv_list_build(void);
 
+/* "n of N" in the Froyo title bar, unless the install's status line is using that corner. */
+static void cnt_refresh(void)
+{
+    if (s_cnt_lbl == NULL) {
+        return;
+    }
+    int busy = (s_bg_label != NULL && !lv_obj_has_flag(s_bg_label, LV_OBJ_FLAG_HIDDEN)) || (s_strip_lbl != NULL && !lv_obj_has_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN));
+    if (busy || s_npages < 2) {
+        lv_obj_add_flag(s_cnt_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_label_set_text_fmt(s_cnt_lbl, "%d of %d", s_idx + 1, s_npages);
+        lv_obj_remove_flag(s_cnt_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* The Froyo title bar's page name. */
+static const char *page_name(page_t p)
+{
+    switch (p) {
+    case PG_WRONG:
+        return s_ops != NULL && s_ops->reasons != NULL && purr_reason_is_first_run(s_ops->reasons()) ? "Welcome" : "Recovery";
+    case PG_DEVSERVER: return "Developer server";
+    case PG_LEGAL:     return "Legal and credits";
+    case PG_WIFI:      return "Wi-Fi";
+    case PG_RESTORING: return "Installing";
+    case PG_COLOUR:    return "Colour";
+    case PG_ACCOUNT:   return "Add an account";
+    case PG_TIME:      return "Date and time";
+    case PG_DONE:      return "All set";
+    case PG_FINISHING: return "Almost there";
+    }
+    return "";
+}
+
+/* The Back and Next buttons: two equal ones across the grey bar in the Froyo skin; the Windows-style sizes otherwise. */
+static void place_buttons(int first)
+{
+    int w = lv_display_get_horizontal_resolution(NULL);
+    if (droid()) {
+        int bw = first ? w - 12 : (w - 18) / 2;
+        lv_obj_set_size(s_next, bw, 26);
+        lv_obj_align(s_next, first ? LV_ALIGN_CENTER : LV_ALIGN_RIGHT_MID, first ? 0 : -6, 0);
+        lv_obj_set_size(s_back, bw, 26);
+        lv_obj_align(s_back, LV_ALIGN_LEFT_MID, 6, 0);
+        return;
+    }
+    lv_obj_set_width(s_next, first ? 200 : 110);
+    lv_obj_align(s_next, first ? LV_ALIGN_CENTER : LV_ALIGN_RIGHT_MID, first ? 0 : -10, 0);
+}
+
 /* The strip (the same look as part 2's background-install line): 24 px with the status on the right and a 3 px bar on its lower edge.
  * On while the loader restores or the system finishes; off on every other page of those parts, which get the room back. */
 static void strip_set(int on)
@@ -116,8 +174,10 @@ static void strip_set(int on)
         lv_obj_add_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_strip_bar, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_align(s_body, LV_ALIGN_TOP_LEFT, 0, on ? HEAD_H : 0);
-    lv_obj_set_height(s_body, h - (on ? HEAD_H : 0) - BAR_H);
+    int top = (on || droid()) ? head_px() : 0;                  /* the Froyo skin keeps its title bar on every page */
+    lv_obj_align(s_body, LV_ALIGN_TOP_LEFT, 0, top);
+    lv_obj_set_height(s_body, h - top - bar_px());
+    cnt_refresh();
 }
 
 static void bg_update(void)
@@ -264,7 +324,7 @@ static void page_wrong(void)
         lv_label_set_text(g, "Hi there, first time?");
         lv_label_set_long_mode(g, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(g, LV_PCT(100));
-        lv_obj_set_style_text_font(g, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_font(g, head_font(), 0);
         purr_theme_apply(g, PURR_TH_TEXT);
         w10m_text(s_body, "This is a network install.");
         w10m_space(s_body, 6);
@@ -276,7 +336,7 @@ static void page_wrong(void)
     lv_label_set_text(h, "Uh-oh, something went wrong.");
     lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(h, LV_PCT(100));
-    lv_obj_set_style_text_font(h, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(h, head_font(), 0);
     purr_theme_apply(h, PURR_TH_TEXT);
     w10m_text(s_body, "We need to recover this device.");
     w10m_space(s_body, 6);
@@ -625,7 +685,7 @@ static void page_colour(void)
 
 static void page_done(void)
 {
-    w10m_title(s_body, "All set!");
+    w10m_title(s_body, "Your " PURR_BRAND_PRODUCT " device is ready");
     char line[64];
     snprintf(line, sizeof(line), "Account:  %s", s_account[0] ? s_account : "-");
     w10m_text(s_body, line);
@@ -662,13 +722,13 @@ static void show_page(int idx)
     lv_obj_remove_flag(s_next, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_back, LV_OBJ_FLAG_HIDDEN);
     if (idx == 0) {
-        lv_obj_add_flag(s_back, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_width(s_next, 200);                          /* the only button on the first page: centred */
-        lv_obj_align(s_next, LV_ALIGN_CENTER, 0, 0);
-    } else {
-        lv_obj_set_width(s_next, 110);
-        lv_obj_align(s_next, LV_ALIGN_RIGHT_MID, -10, 0);
+        lv_obj_add_flag(s_back, LV_OBJ_FLAG_HIDDEN);            /* the only button on the first page: centred */
     }
+    place_buttons(idx == 0);
+    if (s_title_lbl != NULL) {
+        lv_label_set_text(s_title_lbl, page_name(s_pages[idx]));
+    }
+    cnt_refresh();
     set_next("Next", 1);
     lv_obj_scroll_to_y(s_body, 0, LV_ANIM_OFF);
     switch (s_pages[idx]) {
@@ -744,24 +804,41 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
     lv_obj_set_size(s_sheet, w, h);
     lv_obj_clear_flag(s_sheet, LV_OBJ_FLAG_SCROLLABLE);
 
-    int head_h = part == PURR_OOBE_PART_FIRSTBOOT ? HEAD_H : 0;       /* only part 2 has a header: the background install */
+    int head_h = droid() ? DROID_HEAD_H : part == PURR_OOBE_PART_FIRSTBOOT ? HEAD_H : 0;       /* the Windows-style part 2 has a header for the background install; the Froyo skin has a title bar on every page */
     s_head = lv_obj_create(s_sheet);
     lv_obj_remove_style_all(s_head);
     lv_obj_set_size(s_head, w, head_h > 0 ? head_h : 1);
     lv_obj_clear_flag(s_head, LV_OBJ_FLAG_SCROLLABLE);
+    s_title_lbl = s_cnt_lbl = NULL;
+    if (droid()) {
+        purr_theme_apply(s_head, PURR_TH_TITLE_BAR);
+        s_title_lbl = lv_label_create(s_head);
+        lv_obj_set_style_text_font(s_title_lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(s_title_lbl, lv_color_white(), 0);
+        lv_obj_align(s_title_lbl, LV_ALIGN_LEFT_MID, 8, 0);
+        s_cnt_lbl = lv_label_create(s_head);
+        lv_obj_set_style_text_font(s_cnt_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(s_cnt_lbl, lv_color_hex(0xBBBBBB), 0);
+        lv_obj_align(s_cnt_lbl, LV_ALIGN_RIGHT_MID, -8, 0);
+    }
 
     s_bar = lv_obj_create(s_sheet);
     lv_obj_remove_style_all(s_bar);
-    lv_obj_set_size(s_bar, w, BAR_H);
+    lv_obj_set_size(s_bar, w, bar_px());
     lv_obj_align(s_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_clear_flag(s_bar, LV_OBJ_FLAG_SCROLLABLE);
+    if (droid()) {
+        purr_theme_apply(s_bar, PURR_TH_TITLE_BAR);              /* the same grey as the title bar: Back and Next sit on it like Froyo's setup wizard */
+    }
     s_back = w10m_button(s_bar, "Back", back_clicked, NULL);
     lv_obj_set_size(s_back, 78, 28);
     lv_obj_align(s_back, LV_ALIGN_LEFT_MID, 10, 0);
     s_next = w10m_button(s_bar, "Next", next_clicked, NULL);
     lv_obj_set_size(s_next, 110, 28);
     lv_obj_align(s_next, LV_ALIGN_RIGHT_MID, -10, 0);
-    purr_theme_apply(s_next, PURR_TH_ACCENT_BG);
+    if (!droid()) {
+        purr_theme_apply(s_next, PURR_TH_ACCENT_BG);             /* the Froyo skin keeps the plain grey bevel; its Next is told apart by being on the right */
+    }
     s_next_label = lv_obj_get_child(s_next, 0);
 
     /* The install that carries on in the background: a line of text in the header and a thin bar under it. */
@@ -772,7 +849,7 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
     lv_obj_set_size(s_bg_bar, w, 3);
     lv_bar_set_range(s_bg_bar, 0, 1000);
     style_bar(s_bg_bar);
-    lv_obj_align(s_bg_bar, LV_ALIGN_TOP_LEFT, 0, HEAD_H - 2);
+    lv_obj_align(s_bg_bar, LV_ALIGN_TOP_LEFT, 0, head_px() - 2);
     lv_obj_add_flag(s_bg_label, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_bg_bar, LV_OBJ_FLAG_HIDDEN);
 
@@ -789,19 +866,19 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
         lv_obj_set_size(s_strip_bar, w, 3);
         lv_bar_set_range(s_strip_bar, 0, 1000);
         style_bar(s_strip_bar);
-        lv_obj_align(s_strip_bar, LV_ALIGN_TOP_LEFT, 0, HEAD_H - 2);
+        lv_obj_align(s_strip_bar, LV_ALIGN_TOP_LEFT, 0, head_px() - 2);
         lv_obj_add_flag(s_strip_lbl, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_strip_bar, LV_OBJ_FLAG_HIDDEN);
     }
 
     s_body = lv_obj_create(s_sheet);
     lv_obj_remove_style_all(s_body);
-    lv_obj_set_size(s_body, w, h - head_h - BAR_H);
+    lv_obj_set_size(s_body, w, h - head_h - bar_px());
     lv_obj_align(s_body, LV_ALIGN_TOP_LEFT, 0, head_h);
     lv_obj_set_flex_flow(s_body, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(s_body, 4, 0);
-    lv_obj_set_style_pad_hor(s_body, 12, 0);
-    lv_obj_set_style_pad_top(s_body, 10, 0);
+    lv_obj_set_style_pad_row(s_body, droid() ? 3 : 4, 0);
+    lv_obj_set_style_pad_hor(s_body, droid() ? 8 : 12, 0);
+    lv_obj_set_style_pad_top(s_body, droid() ? 6 : 10, 0);
     lv_obj_set_scrollbar_mode(s_body, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_scroll_dir(s_body, LV_DIR_VER);
 
