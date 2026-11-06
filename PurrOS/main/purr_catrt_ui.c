@@ -26,6 +26,9 @@
 #include "purr_ui_service.h"
 #include "purr_w10m_priv.h"
 #include "purr_w10m_theme.h"
+#if CONFIG_PURR_SHELL_ANDROID
+#include "purr_android_priv.h"
+#endif
 
 #define TAG "ui-cc"
 #define HEAD_H 30
@@ -37,6 +40,7 @@ typedef struct {
     lv_obj_t *sheet, *head, *title, *act, *body;
     lv_group_t *group;
     int back_app;
+    int light;                                          /* win_style(PURR_UI_STYLE_LIGHT): a white list with dark text */
     int open;
     int count;
     lv_obj_t *w[PURR_CC_UI_MAX_WIDGETS];               /* handle = index + 1 */
@@ -47,14 +51,14 @@ static win_t s_win[PURR_RT_MAX_APPS];
 typedef enum {
     OP_TITLE, OP_ACTION, OP_BACK, OP_CLEAR, OP_LABEL, OP_BUTTON, OP_ROW, OP_TEXTAREA, OP_SPACER,
     OP_SET_TEXT, OP_GET_TEXT, OP_FOCUS, OP_REMOVE,
-    OP_GRID, OP_GRID_BUTTON, OP_INPUT_LINE, OP_PROGRESS, OP_SLIDER, OP_SET_VALUE, OP_GET_VALUE, OP_IMAGE, OP_SET_IMAGE, OP_BUBBLE,
+    OP_GRID, OP_GRID_BUTTON, OP_INPUT_LINE, OP_PROGRESS, OP_SLIDER, OP_SET_VALUE, OP_GET_VALUE, OP_IMAGE, OP_SET_IMAGE, OP_BUBBLE, OP_WIN_STYLE, OP_CONV_ROW,
 } op_t;
 
 typedef struct {
     op_t op;
     int slot;
     char name[PURR_RT_NAME_LEN];                    /* the calling app, for creating its window */
-    const char *s1, *s2;
+    const char *s1, *s2, *s3, *s4;
     int i1, i2, i3;
     char *buf;
     size_t cap;
@@ -142,6 +146,22 @@ static void win_create(int slot, const char *name)
     purr_theme_apply(w->title, PURR_TH_TEXT);
     lv_obj_align(w->title, LV_ALIGN_LEFT_MID, 34, 0);
     purr_theme_title_bar(w->head, arrow, w->title);
+#if CONFIG_PURR_SHELL_ANDROID
+    lv_obj_set_style_bg_opa(w->head, LV_OPA_COVER, 0);                       /* the Android 2.2 title bar: a dark grey gradient, the app's own icon, white text */
+    lv_obj_set_style_bg_color(w->head, lv_color_hex(0x505050), 0);
+    lv_obj_set_style_bg_grad_color(w->head, lv_color_hex(0x2A2A2A), 0);
+    lv_obj_set_style_bg_grad_dir(w->head, LV_GRAD_DIR_VER, 0);
+    const lv_image_dsc_t *ic = and_app_icon(name);
+    if (ic != NULL) {
+        lv_obj_t *im = lv_image_create(w->head);
+        lv_image_set_src(im, ic);
+        lv_image_set_scale(im, 128);                                         /* the 48 pixel launcher icon at half size */
+        lv_obj_set_size(im, 24, 24);
+        lv_obj_remove_flag(im, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_align(im, LV_ALIGN_LEFT_MID, 4, 0);
+        lv_obj_align(w->title, LV_ALIGN_LEFT_MID, 32, 0);
+    }
+#endif
 
     w->act = lv_label_create(w->sheet);                 /* above the header, so it has its own tap area */
     lv_obj_set_style_text_font(w->act, &lv_font_montserrat_16, 0);
@@ -286,6 +306,9 @@ static lv_obj_t *make_label(win_t *w, const char *text, int role)
     lv_obj_set_width(l, LV_PCT(100));
     lv_obj_set_style_text_font(l, look[role].font, 0);
     purr_theme_apply(l, look[role].style);
+    if (w->light) {                                                          /* a light list: dark text whatever the theme's base is */
+        lv_obj_set_style_text_color(l, lv_color_hex(role == PURR_UI_ROLE_DIM ? 0x666666 : (role == PURR_UI_ROLE_TITLE || role == PURR_UI_ROLE_ACCENT) ? 0xB35C00 : 0x000000), 0);
+    }
     return l;
 }
 
@@ -345,6 +368,15 @@ static lv_obj_t *make_input_line(win_t *w, int max_len, const char *placeholder)
     lv_textarea_set_placeholder_text(ta, safe(placeholder, 64));
     lv_obj_set_width(ta, LV_PCT(100));
     lv_obj_set_style_text_font(ta, &lv_font_montserrat_14, 0);
+    if (w->light) {
+        lv_obj_set_style_bg_color(ta, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(ta, lv_color_black(), 0);
+        lv_obj_set_style_border_width(ta, 1, 0);
+        lv_obj_set_style_border_color(ta, lv_color_hex(0x888888), 0);
+        lv_obj_set_style_radius(ta, 3, 0);
+        lv_obj_set_style_text_color(ta, lv_color_hex(0x888888), LV_PART_TEXTAREA_PLACEHOLDER);
+    }
     lv_obj_add_event_cb(ta, widget_event, LV_EVENT_VALUE_CHANGED, NULL);
     lv_group_add_obj(w->group, ta);
     return ta;
@@ -357,6 +389,124 @@ static lv_obj_t *make_progress(win_t *w, int value, int max)
     lv_bar_set_range(b, 0, max < 1 ? 1 : max);
     lv_bar_set_value(b, value, LV_ANIM_OFF);
     return b;
+}
+
+static lv_color_t avatar_color(const char *name)
+{
+    static const uint32_t pal[] = {0x3B6EA8, 0x2E7D4F, 0x8A5AB0, 0xB5502F, 0x6B6B6B, 0x2A8F9E};
+    uint32_t h = 0;
+    for (; name != NULL && *name; name++) {
+        h = h * 31 + (uint8_t)*name;
+    }
+    return lv_color_hex(pal[h % 6]);
+}
+
+static lv_color_t tag_color(const char *tag)
+{
+    return lv_color_hex(!strcmp(tag, "MTS") ? 0x2E7D4F : !strcmp(tag, "RET") ? 0x3B6EA8 : !strcmp(tag, "MC") ? 0x8A5AB0 : !strcmp(tag, "ECHO") ? 0xB5502F : 0x6B6B6B);
+}
+
+/* A conversation or person row in the Froyo style (version 4): a coloured square with the first letter, the name over a line of text, the time on the right and a small tag
+ * under it. An unread row is tinted with an orange bar at its left edge; a failed send gets a red mark. */
+static lv_obj_t *make_conv_row(win_t *w, const char *name, const char *snippet, const char *when, const char *tag, int flags)
+{
+    name = safe(name, 40);
+    snippet = safe(snippet, 120);
+    when = safe(when, 12);
+    tag = safe(tag, 7);
+    int unread = (flags & PURR_UI_CONV_UNREAD) != 0, failed = (flags & PURR_UI_CONV_FAILED) != 0;
+    int dark = purr_theme_dark();                                           /* the widget follows the system's light or dark base: the app says what, the OS says how it looks */
+    uint32_t c_bg = unread ? (dark ? 0x3A2A10 : 0xFFF1DA) : (dark ? 0x1E1E1E : 0xFFFFFF), c_line = dark ? 0x3A3A3A : 0xD3D3D3, c_name = dark ? 0xFFFFFF : 0x000000,
+             c_sub = dark ? 0xB0B0B0 : 0x666666, c_press = dark ? 0x4A3A20 : 0xFFE3B0;
+    lv_obj_t *r = lv_obj_create(w->body);
+    lv_obj_remove_style_all(r);
+    lv_obj_set_size(r, LV_PCT(100), 44);
+    lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(r, lv_color_hex(c_bg), 0);
+    lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(r, 1, 0);
+    lv_obj_set_style_border_color(r, lv_color_hex(c_line), 0);
+    lv_obj_set_style_bg_color(r, lv_color_hex(c_press), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(r, lv_color_hex(c_press), LV_STATE_FOCUSED);
+    lv_obj_add_event_cb(r, widget_event, LV_EVENT_CLICKED, NULL);
+    if (unread) {
+        lv_obj_t *bar = lv_obj_create(r);
+        lv_obj_remove_style_all(bar);
+        lv_obj_set_size(bar, 3, 44);
+        lv_obj_set_style_bg_color(bar, lv_color_hex(0xF08A00), 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_align(bar, LV_ALIGN_LEFT_MID, 0, 0);
+    }
+    lv_obj_t *av = lv_obj_create(r);
+    lv_obj_remove_style_all(av);
+    lv_obj_set_size(av, 30, 30);
+    lv_obj_set_style_bg_color(av, avatar_color(name), 0);
+    lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(av, 3, 0);
+    lv_obj_remove_flag(av, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(av, LV_ALIGN_LEFT_MID, 8, 0);
+    char letter[2] = {name[0] >= 'a' && name[0] <= 'z' ? (char)(name[0] - 32) : (name[0] ? name[0] : '?'), 0};
+    lv_obj_t *lt = lv_label_create(av);
+    lv_label_set_text(lt, letter);
+    lv_obj_set_style_text_font(lt, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lt, lv_color_white(), 0);
+    lv_obj_center(lt);
+    int32_t mid_w = w10m_disp_w() - 20 - 8 - 30 - 8 - 58;
+    lv_obj_t *a = lv_label_create(r);
+    lv_label_set_text(a, name);
+    lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(a, mid_w);
+    lv_obj_set_style_text_font(a, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(a, lv_color_hex(c_name), 0);
+    lv_obj_align(a, LV_ALIGN_TOP_LEFT, 46, 4);
+    lv_obj_t *d = lv_label_create(r);
+    lv_label_set_text(d, snippet);
+    lv_label_set_long_mode(d, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(d, mid_w);
+    lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(d, lv_color_hex(c_sub), 0);
+    lv_obj_align(d, LV_ALIGN_TOP_LEFT, 46, 24);
+    if (when[0]) {
+        lv_obj_t *t = lv_label_create(r);
+        lv_label_set_text(t, when);
+        lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(t, lv_color_hex(c_sub), 0);
+        lv_obj_align(t, LV_ALIGN_TOP_RIGHT, -6, 4);
+    }
+    if (tag[0]) {
+        lv_obj_t *c = lv_obj_create(r);
+        lv_obj_remove_style_all(c);
+        lv_obj_set_size(c, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_color(c, tag_color(tag), 0);
+        lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(c, 2, 0);
+        lv_obj_set_style_pad_hor(c, 3, 0);
+        lv_obj_remove_flag(c, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *cl = lv_label_create(c);
+        lv_label_set_text(cl, tag);
+        lv_obj_set_style_text_font(cl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(cl, lv_color_white(), 0);
+        lv_obj_align(c, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
+    }
+    if (failed) {
+        lv_obj_t *e = lv_obj_create(r);
+        lv_obj_remove_style_all(e);
+        lv_obj_set_size(e, 14, 14);
+        lv_obj_set_style_bg_color(e, lv_color_hex(0xC62828), 0);
+        lv_obj_set_style_bg_opa(e, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(e, LV_RADIUS_CIRCLE, 0);
+        lv_obj_remove_flag(e, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *el = lv_label_create(e);
+        lv_label_set_text(el, "!");
+        lv_obj_set_style_text_font(el, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(el, lv_color_white(), 0);
+        lv_obj_center(el);
+        lv_obj_align(e, LV_ALIGN_TOP_RIGHT, -(6 + 8 * (int)strlen(when) + 4), 5);
+    }
+    return r;
 }
 
 /* A speech bubble for a message: `side` 0 sits on the left (received, light grey), 1 on the right (sent, light orange); `meta` is the small line under the text (time and state). */
@@ -372,7 +522,8 @@ static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *m
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_bg_color(b, lv_color_hex(side ? 0xFFE3B0 : 0xE4E4E4), 0);
+    int dark = purr_theme_dark();
+    lv_obj_set_style_bg_color(b, lv_color_hex(side ? (dark ? 0x7A4E10 : 0xFFE3B0) : (dark ? 0x3A3A3A : 0xE4E4E4)), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(b, 8, 0);
     lv_obj_set_style_pad_all(b, 5, 0);
@@ -384,7 +535,7 @@ static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *m
     lv_obj_set_width(t, LV_SIZE_CONTENT);
     lv_obj_set_style_max_width(t, maxw, 0);
     lv_obj_set_style_text_font(t, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(t, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(dark ? 0xFFFFFF : 0x000000), 0);
     if (meta != NULL && meta[0] != '\0') {
         lv_obj_t *m = lv_label_create(b);
         lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
@@ -392,7 +543,7 @@ static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *m
         lv_obj_set_width(m, LV_SIZE_CONTENT);
         lv_obj_set_style_max_width(m, maxw, 0);
         lv_obj_set_style_text_font(m, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(m, lv_color_hex(0x6B5A3A), 0);
+        lv_obj_set_style_text_color(m, lv_color_hex(dark ? 0xC8B890 : 0x6B5A3A), 0);
     }
     return row;
 }
@@ -441,6 +592,16 @@ static lv_obj_t *make_row(win_t *w, const char *title, const char *sub)
     lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
     purr_theme_apply(r, PURR_TH_LIST_ROW);
+    if (w->light) {                                                          /* a Froyo list row: white, a thin line under it, orange when pressed */
+        lv_obj_set_style_bg_color(r, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(r, 1, 0);
+        lv_obj_set_style_border_color(r, lv_color_hex(0xD3D3D3), 0);
+        lv_obj_set_style_radius(r, 0, 0);
+        lv_obj_set_style_bg_color(r, lv_color_hex(0xFFE3B0), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(r, lv_color_hex(0xFFE3B0), LV_STATE_FOCUSED);
+    }
     lv_obj_add_event_cb(r, widget_event, LV_EVENT_CLICKED, NULL);
     int has_sub = sub != NULL && sub[0] != '\0';
     lv_obj_t *a = lv_label_create(r);
@@ -449,6 +610,9 @@ static lv_obj_t *make_row(win_t *w, const char *title, const char *sub)
     lv_obj_set_width(a, LV_PCT(92));
     lv_obj_set_style_text_font(a, &lv_font_montserrat_14, 0);
     purr_theme_apply(a, PURR_TH_TEXT);
+    if (w->light) {
+        lv_obj_set_style_text_color(a, lv_color_black(), 0);
+    }
     lv_obj_align(a, LV_ALIGN_LEFT_MID, 10, has_sub ? -9 : 0);
     if (has_sub) {
         lv_obj_t *d = lv_label_create(r);
@@ -457,6 +621,9 @@ static lv_obj_t *make_row(win_t *w, const char *title, const char *sub)
         lv_obj_set_width(d, LV_PCT(92));
         lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
         purr_theme_apply(d, PURR_TH_DIM);
+        if (w->light) {
+            lv_obj_set_style_text_color(d, lv_color_hex(0x666666), 0);
+        }
         lv_obj_align(d, LV_ALIGN_LEFT_MID, 10, 10);
     }
     return r;
@@ -598,6 +765,19 @@ static void *exec(void *arg)
     case OP_BUBBLE:
         o = make_bubble(w, r->s1, r->i1, r->s2);
         break;
+    case OP_CONV_ROW:
+        o = make_conv_row(w, r->s1, r->s2, r->s3, r->s4, r->i1);
+        break;
+    case OP_WIN_STYLE:
+        w->light = r->i1 == PURR_UI_STYLE_LIGHT;
+        if (w->light) {
+            lv_obj_set_style_bg_color(w->sheet, lv_color_white(), 0);
+            lv_obj_set_style_bg_opa(w->sheet, LV_OPA_COVER, 0);
+        } else {
+            purr_theme_apply(w->sheet, PURR_TH_SHEET);
+        }
+        r->rc = 0;
+        break;
     case OP_PROGRESS:
         o = make_progress(w, r->i1, r->i2);
         break;
@@ -717,6 +897,12 @@ static int cc_slider(int min, int max, int value) { req_t r = {.op = OP_SLIDER, 
 static void cc_set_value(int h, int v) { req_t r = {.op = OP_SET_VALUE, .i1 = h, .i2 = v}; call(&r); }
 static int cc_get_value(int h) { req_t r = {.op = OP_GET_VALUE, .i1 = h}; return call(&r); }
 static int cc_bubble(const char *text, int side, const char *meta) { req_t r = {.op = OP_BUBBLE, .s1 = text, .i1 = side, .s2 = meta}; return call(&r); }
+static void cc_win_style(int style) { req_t r = {.op = OP_WIN_STYLE, .i1 = style}; call(&r); }
+static int cc_conv_row(const char *name, const char *snippet, const char *when, const char *tag, int flags)
+{
+    req_t r = {.op = OP_CONV_ROW, .s1 = name, .s2 = snippet, .s3 = when, .s4 = tag, .i1 = flags};
+    return call(&r);
+}
 static int cc_image(int height) { req_t r = {.op = OP_IMAGE, .i1 = height}; return call(&r); }
 
 #define IMG_FILE_MAX    (2u * 1024 * 1024)
@@ -794,7 +980,7 @@ static const purr_cc_ui_t s_cc_ui = {
     .spacer = cc_spacer, .set_text = cc_set_text, .get_text = cc_get_text, .focus = cc_focus,
     .remove = cc_remove, .status = cc_status,
     .grid = cc_grid, .grid_button = cc_grid_button, .input_line = cc_input_line, .progress = cc_progress, .slider = cc_slider,
-    .set_value = cc_set_value, .get_value = cc_get_value, .image = cc_image, .set_image = cc_set_image, .bubble = cc_bubble,
+    .set_value = cc_set_value, .get_value = cc_get_value, .image = cc_image, .set_image = cc_set_image, .bubble = cc_bubble, .win_style = cc_win_style, .conv_row = cc_conv_row,
 };
 
 /* ---------------------------------------------------------------- lifecycle and layout */

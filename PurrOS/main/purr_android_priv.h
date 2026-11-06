@@ -54,6 +54,10 @@ void and_shade_close(void);
 int and_shade_is_open(void);
 void and_shade_add(const char *title, const char *text);
 int and_shade_count(void);
+/* One notification row in the shade's look, made inside `parent` (the lock screen uses it). */
+lv_obj_t *and_note_row(lv_obj_t *parent, const char *title, const char *text);
+/* The picture for an app by name ("fr_<name>", an alias, or the generic one): the small icon an app window shows in its header. */
+const lv_image_dsc_t *and_app_icon(const char *app);
 /* The i-th notification, newest first: its title and text. 0, or -1 if there is none. */
 int and_shade_peek(int i, char *title, size_t tcap, char *text, size_t xcap);
 /* Redraws the notification list on the lock screen (called when the notifications change, and when the lock screen shows). */

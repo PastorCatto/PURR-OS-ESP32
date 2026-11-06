@@ -177,6 +177,16 @@ static const char *icon_for(const app_t *a, char *buf, size_t cap)
     return w10m_img(buf) != NULL ? buf : "fr_app";
 }
 
+const lv_image_dsc_t *and_app_icon(const char *app)
+{
+    app_t a;
+    memset(&a, 0, sizeof(a));
+    snprintf(a.name, sizeof(a.name), "%s", app);
+    char buf[40];
+    const lv_image_dsc_t *d = w10m_img(icon_for(&a, buf, sizeof(buf)));
+    return d != NULL ? d : w10m_img("fr_app");
+}
+
 /* ---------------------------------------------------------------- the pins */
 
 static void pins_default(void)
