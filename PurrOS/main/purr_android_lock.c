@@ -461,6 +461,12 @@ static void *signin_done_cb(void *arg)
         purr_theme_load_user(j->name);
         purr_session_started();
         and_home_reload();
+        {
+            char dn[PURR_USER_NAME_LEN];
+            if (purr_login_default_account(dn, sizeof(dn)) && strcmp(j->name, dn) == 0) {
+                and_shade_add("Change the default password", "This account uses the password MEOW. Change it in Settings > Accounts.");
+            }
+        }
         char msg[64];
         snprintf(msg, sizeof(msg), "Signed in as %s.", j->name);
         and_shade_add(PURR_BRAND_PRODUCT, msg);
@@ -627,6 +633,10 @@ static void si_show_state(int state)
     si_say("", 0xFFFFFF);
     lv_group_remove_all_objs(s_si_group);
     if (state == SI_LIST) {
+        char dn[PURR_USER_NAME_LEN];
+        if (purr_login_default_account(dn, sizeof(dn))) {
+            si_say("Default account: MEOW, password MEOW. Change it in Settings.", 0xFFB900);
+        }
         si_build_rows();
         lv_obj_remove_flag(s_si_list, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_si_who, LV_OBJ_FLAG_HIDDEN);

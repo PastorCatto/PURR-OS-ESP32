@@ -114,42 +114,50 @@ static int unattended_setup_pending(void)
     return 1;
 }
 
-/* A short, readable hex string from real randomness (esp_fill_random, the same source
- * purr_login_random_salt already uses) -- enough entropy that it is not guessable, short
- * enough to read off a console and type back in. */
-static void random_password(char *buf, size_t cap)
+/* The default account (owner, 2026-11-05): a device that was set up with nobody there, and left alone, gets an administrator called MEOW whose password is MEOW, so it can
+ * always be signed in to. It is a known password on purpose, so it is marked (DEFAULT_ACCOUNT_FILE) for as long as it is in force: the sign-in screen says what it is and the
+ * first session is told to change it. Changing that account's password, or removing it, clears the mark. */
+#define DEFAULT_ACCOUNT_NAME "MEOW"
+#define DEFAULT_ACCOUNT_PASS "MEOW"
+#define DEFAULT_ACCOUNT_FILE "/etc/default-account"
+
+static void default_account_clear(const char *name)
 {
-    uint8_t raw[6];
-    esp_fill_random(raw, sizeof(raw));
-    size_t n = 0;
-    for (size_t i = 0; i < sizeof(raw) && n + 2 < cap; i++) {
-        snprintf(buf + n, cap - n, "%02x", raw[i]);
-        n += 2;
+    if (name != NULL && strcmp(name, DEFAULT_ACCOUNT_NAME) == 0) {
+        purr_fs_remove(purr_login_fs(), DEFAULT_ACCOUNT_FILE);
     }
 }
 
-/* No one is known to be present to answer first_time_setup()'s prompts (an unattended
- * recovery install just finished) -- create a clearly-named fallback admin account instead
- * of blocking forever on a typed username that will never arrive, and print its generated
- * password so whoever eventually looks (the console, or its serial log) can actually log in
- * and fix things up properly. */
+int purr_login_default_account(char *name, size_t cap)
+{
+    int is_dir = 0;
+    uint32_t size = 0;
+    if (purr_fs_stat(purr_login_fs(), DEFAULT_ACCOUNT_FILE, &is_dir, &size) != 0 ||
+        purr_user_list_find(&s_users, DEFAULT_ACCOUNT_NAME) == NULL) {
+        return 0;
+    }
+    if (name != NULL && cap > 0) {
+        snprintf(name, cap, "%s", DEFAULT_ACCOUNT_NAME);
+    }
+    return 1;
+}
+
+/* No one is known to be present to answer first_time_setup()'s prompts (an unattended recovery install just finished): create the default administrator, MEOW with the
+ * password MEOW, instead of blocking forever on a typed username that will never arrive, and say so on the console. */
 static void unattended_first_account(void)
 {
-    char pass[16];
-    random_password(pass, sizeof(pass));
-    create_account("recovery", pass, PURR_ROLE_USER_ADMIN);
+    create_account(DEFAULT_ACCOUNT_NAME, DEFAULT_ACCOUNT_PASS, PURR_ROLE_USER_ADMIN);
     purr_login_persist();
+    purr_fs_mkdir(purr_login_fs(), "/etc");
+    purr_fs_write(purr_login_fs(), DEFAULT_ACCOUNT_FILE, DEFAULT_ACCOUNT_NAME "\n", sizeof(DEFAULT_ACCOUNT_NAME));
 
-    purr_user_t *u = purr_user_list_find(&s_users, "recovery");
+    purr_user_t *u = purr_user_list_find(&s_users, DEFAULT_ACCOUNT_NAME);
     s_current = *u;
 
-    put_str("Unattended recovery install: created a fallback admin account.\n");
-    put_str("  login: recovery\n");
-    put_str("  password: ");
-    put_str(pass);
-    put_str("\n");
-    put_str("Log in and create a real account, or change this one's password.\n");
-    memset(pass, 0, sizeof(pass));
+    put_str("Unattended install: created the default administrator account.\n");
+    put_str("  login: " DEFAULT_ACCOUNT_NAME "\n");
+    put_str("  password: " DEFAULT_ACCOUNT_PASS "\n");
+    put_str("Change the password in Settings > Accounts, or create your own account.\n");
 }
 
 static void first_time_setup(void)
@@ -419,6 +427,7 @@ purr_acct_result_t purr_login_account_set_password(const char *name, const char 
         return PURR_ACCT_BADPASS;
     }
     set_password_for(name, new_password);
+    default_account_clear(name);
     return purr_login_persist() == 0 ? PURR_ACCT_OK : PURR_ACCT_SAVE;
 }
 
@@ -438,6 +447,7 @@ purr_acct_result_t purr_login_account_remove(const char *name)
     }
     purr_user_list_remove(purr_login_users(), name);
     purr_shadow_list_remove(purr_login_shadow(), name);
+    default_account_clear(name);
     return purr_login_persist() == 0 ? PURR_ACCT_OK : PURR_ACCT_SAVE;
 }
 

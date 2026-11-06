@@ -39,6 +39,8 @@ void purr_login_set_root(int is_root);
 
 /* Whether any account exists (loads the account files the first time it is asked). */
 int purr_login_has_accounts(void);
+/* 1 (and the account's name in `name`) while the default administrator, MEOW with the password MEOW, is still in force; 0 once its password has been changed or it has been removed. */
+int purr_login_default_account(char *name, size_t cap);
 
 typedef enum {
     PURR_LOGIN_OK = 0,       /* signed in: purr_login_current() is the account */
