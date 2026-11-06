@@ -206,11 +206,11 @@ typedef struct {
     /* Version 4 (OS 1.0.27; ask for it with catcall_get("ui", 4)). A speech bubble for a message: side 0 on the left (received), 1 on the right (sent); `text` is the message and
      * `meta` the small line under it (time and state; NULL for none). It wraps, and takes at most about three quarters of the width. Returns the handle, or < 0. */
     int  (*bubble)(const char *text, int side, const char *meta);
-    /* The look of the window's list: PURR_UI_STYLE_DEFAULT (the system theme) or PURR_UI_STYLE_LIGHT (a light list with dark text, rows divided by thin lines: how Android 2.2's
-     * Messaging and Contacts look). Applies to what is made after the call and to the window's background; call it first on a page. */
+    /* Version 5 (OS 1.0.27; ask for it with catcall_get("ui", 5): an older system answers NULL). The look of the window's list: PURR_UI_STYLE_DEFAULT (the system theme) or PURR_UI_STYLE_LIGHT (a light list with dark text, rows divided by thin lines: how Android 2.2's
+     * Messaging and Contacts look). The Android shell draws it; the other shell ignores it and follows the system's light or dark base. Call it once, before the first page. */
     void (*win_style)(int style);
     /* A row for a conversation or a person: a coloured square with the first letter of `name`, the name, a line of `snippet`, `when` (a time, may be NULL) on the right and
-     * under it a small tag (may be NULL). flags: PURR_UI_CONV_UNREAD tints the row, PURR_UI_CONV_FAILED marks a failed send. Taps arrive as "click" like a row. */
+     * under it a small tag (may be NULL). In the Android shell a window that uses conv_row or bubble becomes a white page, as in Android 2.2. flags: PURR_UI_CONV_UNREAD tints the row, PURR_UI_CONV_FAILED marks a failed send. Taps arrive as "click" like a row. */
     int  (*conv_row)(const char *name, const char *snippet, const char *when, const char *tag, int flags);
 } purr_cc_ui_t;
 #define PURR_UI_STYLE_DEFAULT 0

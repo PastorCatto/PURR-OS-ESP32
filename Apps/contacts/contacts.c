@@ -131,7 +131,7 @@ NO_OPT static void fill_rows(void)
             if (k) append(sub, ", ", 64);
             append(sub, svc_name(c.a[k].service), 64);
         }
-        h_row[s_nrows] = ui->conv_row != NULL ? ui->conv_row(c.name, sub[0] ? sub : "No messaging address", NULL, NULL, 0) : ui->row(c.name, sub[0] ? sub : "No messaging address");
+        h_row[s_nrows] = ui->conv_row(c.name, sub[0] ? sub : "No messaging address", NULL, NULL, 0);
         s_row_id[s_nrows] = c.id;
         s_nrows++;
     }
@@ -318,17 +318,15 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
         return -1;
     }
     app = (const purr_cc_app_t *)env->catcall_get("app", 1);
-    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 4);
-    if (ui == NULL) {
-        ui = (const purr_cc_ui_t *)env->catcall_get("ui", 3);
-    }
+    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 5);
     ct = (const purr_cc_contacts_t *)env->catcall_get("contacts", 1);
     mq = (const purr_cc_messaging_t *)env->catcall_get("messaging", 1);
     if (ui == NULL) {
         ui = (const purr_cc_ui_t *)env->catcall_get("ui", 1);
         if (ui != NULL) {
             ui->win_title("Contacts");
-            ui->label("Contacts needs OS 1.0.27 or newer.", PURR_UI_ROLE_TITLE);
+            ui->label("Contacts needs a newer system.", PURR_UI_ROLE_TITLE);
+            ui->label("Reinstall the latest 1.0.27 from the loader, then open Contacts again.", PURR_UI_ROLE_DIM);
         }
         return ui != NULL ? 0 : -1;
     }
@@ -337,6 +335,7 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
         ui->label("Contacts needs OS 1.0.27 or newer.", PURR_UI_ROLE_TITLE);
         return 0;
     }
+    ui->win_style(PURR_UI_STYLE_LIGHT);                     /* a list window: the OS draws it the Android 2.2 way where that shell is in use */
     show_list();
     return 0;
 }

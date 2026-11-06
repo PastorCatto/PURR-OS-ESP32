@@ -1,5 +1,5 @@
 name = "messages"
-version = "0.1.1"
+version = "0.1.2"
 description = "Messages: one front end for messaging services such as Meshtastic, Reticulum and MeshCore"
 class = "unprivileged"
 kind = "ui"
@@ -8,7 +8,7 @@ entry = "messages_entry"
 
 [catcalls]
 console = "1.0"
-ui = "4.0"
+ui = "5.0"
 app = "1.0"
 sched = "1.0"
 system = "2.0"

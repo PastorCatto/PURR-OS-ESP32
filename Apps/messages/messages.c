@@ -6,7 +6,7 @@
  * Pictures folder (`files`), and an emoji is added from a small picker; the emoji draw only once an emoji font is on the device (showtime1.md, Part D).
  *
  * Pages: the thread list, a thread, new message (from contacts, or by typing an address), attach a picture, emoji, services and storage, and the "storage is full" choice.
- * Back goes up one page, then closes the app. Needs `ui` version 4 (the bubble), OS 1.0.27 or newer.
+ * Back goes up one page, then closes the app. Needs `ui` version 5 (the bubble and the conversation row), OS 1.0.27 or newer.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -778,7 +778,7 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
         return -1;
     }
     app = (const purr_cc_app_t *)env->catcall_get("app", 1);
-    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 4);
+    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 5);
     mq = (const purr_cc_messaging_t *)env->catcall_get("messaging", 1);
     ct = (const purr_cc_contacts_t *)env->catcall_get("contacts", 1);
     fl = (const purr_cc_files_t *)env->catcall_get("files", 1);
@@ -787,7 +787,8 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
         ui = (const purr_cc_ui_t *)env->catcall_get("ui", 1);
         if (ui != NULL) {
             ui->win_title("Messages");
-            ui->label("Messages needs OS 1.0.27 or newer.", PURR_UI_ROLE_TITLE);
+            ui->label("Messages needs a newer system.", PURR_UI_ROLE_TITLE);
+            ui->label("Reinstall the latest 1.0.27 from the loader, then open Messages again.", PURR_UI_ROLE_DIM);
         }
         return ui != NULL ? 0 : -1;
     }
@@ -799,6 +800,7 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
     if (fl != NULL) {
         fl->home(s_home, sizeof(s_home));
     }
+    ui->win_style(PURR_UI_STYLE_LIGHT);                     /* a list window: the OS draws it the Android 2.2 way where that shell is in use */
     start();
     return 0;
 }

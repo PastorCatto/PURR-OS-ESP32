@@ -415,7 +415,16 @@ static lv_obj_t *make_conv_row(win_t *w, const char *name, const char *snippet, 
     when = safe(when, 12);
     tag = safe(tag, 7);
     int unread = (flags & PURR_UI_CONV_UNREAD) != 0, failed = (flags & PURR_UI_CONV_FAILED) != 0;
-    int dark = purr_theme_dark();                                           /* the widget follows the system's light or dark base: the app says what, the OS says how it looks */
+#if CONFIG_PURR_SHELL_ANDROID
+    int dark = 0;                                                           /* the Android shell draws a conversation list the way Android 2.2 does: a white list, whatever the base */
+    if (!w->light) {
+        w->light = 1;
+        lv_obj_set_style_bg_color(w->sheet, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(w->sheet, LV_OPA_COVER, 0);
+    }
+#else
+    int dark = purr_theme_dark();                                           /* elsewhere the widget follows the system's light or dark base: the app says what, the OS says how it looks */
+#endif
     uint32_t c_bg = unread ? (dark ? 0x3A2A10 : 0xFFF1DA) : (dark ? 0x1E1E1E : 0xFFFFFF), c_line = dark ? 0x3A3A3A : 0xD3D3D3, c_name = dark ? 0xFFFFFF : 0x000000,
              c_sub = dark ? 0xB0B0B0 : 0x666666, c_press = dark ? 0x4A3A20 : 0xFFE3B0;
     lv_obj_t *r = lv_obj_create(w->body);
@@ -522,7 +531,16 @@ static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *m
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
+#if CONFIG_PURR_SHELL_ANDROID
+    int dark = 0;
+    if (!w->light) {                                                        /* a message thread is a white page in the Android shell too */
+        w->light = 1;
+        lv_obj_set_style_bg_color(w->sheet, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(w->sheet, LV_OPA_COVER, 0);
+    }
+#else
     int dark = purr_theme_dark();
+#endif
     lv_obj_set_style_bg_color(b, lv_color_hex(side ? (dark ? 0x7A4E10 : 0xFFE3B0) : (dark ? 0x3A3A3A : 0xE4E4E4)), 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(b, 8, 0);
@@ -769,6 +787,10 @@ static void *exec(void *arg)
         o = make_conv_row(w, r->s1, r->s2, r->s3, r->s4, r->i1);
         break;
     case OP_WIN_STYLE:
+#if !CONFIG_PURR_SHELL_ANDROID
+        r->rc = 0;                                  /* a light list is the Android shell's way; the other shell keeps following the system's light or dark base */
+        break;
+#endif
         w->light = r->i1 == PURR_UI_STYLE_LIGHT;
         if (w->light) {
             lv_obj_set_style_bg_color(w->sheet, lv_color_white(), 0);
@@ -975,7 +997,7 @@ static int cc_set_image(int h, const char *path)
 }
 
 static const purr_cc_ui_t s_cc_ui = {
-    .version = 4, .win_title = cc_win_title, .win_action = cc_win_action, .win_back = cc_win_back,
+    .version = 5, .win_title = cc_win_title, .win_action = cc_win_action, .win_back = cc_win_back,
     .clear = cc_clear, .label = cc_label, .button = cc_button, .row = cc_row, .textarea = cc_textarea,
     .spacer = cc_spacer, .set_text = cc_set_text, .get_text = cc_get_text, .focus = cc_focus,
     .remove = cc_remove, .status = cc_status,
