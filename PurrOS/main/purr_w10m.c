@@ -40,6 +40,7 @@
 #include "purr_ui_assets.h"
 #include "purr_power_plat.h"
 #include "purr_ui_service.h"
+#include "purr_notify.h"
 #include "purr_w10m_priv.h"
 #include "purr_wallpaper.h"
 #include "purr_w10m_theme.h"
@@ -1447,7 +1448,7 @@ static lv_obj_t *wp_image(lv_obj_t *parent, const char *asset)
  * the sign-in screen below, and what is on the device stays signed in behind this. */
 
 static lv_obj_t *s_lock;
-static lv_obj_t *s_lock_wall, *s_lock_time, *s_lock_date, *s_lock_hint;
+static lv_obj_t *s_lock_wall, *s_lock_time, *s_lock_date, *s_lock_hint, *s_lock_notes;
 static int s_lock_on;
 static int s_lock_y0, s_lock_drag;
 
@@ -1536,6 +1537,71 @@ static void lock_nudge_back_cb(lv_timer_t *t)
     (void)t;
 }
 
+/* The notifications on the lock screen, in the Lumia (Windows Phone 8) manner: no panel, the lines sit straight on the wallpaper, each led by a small flat square in the accent colour;
+ * a title in white and one line under it in light grey. Three at most. */
+static void lock_notes_refresh(void)
+{
+    if (s_lock == NULL || s_lock_notes == NULL) {
+        return;
+    }
+    lv_obj_clean(s_lock_notes);
+    int n = purr_notify_count();
+    for (int i = 0; i < 3 && i < n; i++) {
+        char t[32], x[64];
+        if (purr_notify_get(i, t, sizeof(t), x, sizeof(x)) != 0) {
+            break;
+        }
+        lv_obj_t *row = lv_obj_create(s_lock_notes);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(row, 8, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *sq = lv_obj_create(row);
+        lv_obj_remove_style_all(sq);
+        lv_obj_set_size(sq, 22, 22);
+        lv_obj_set_style_bg_color(sq, purr_theme_accent_color(), 0);
+        lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(sq, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *g = lv_label_create(sq);
+        lv_label_set_text(g, LV_SYMBOL_BELL);
+        lv_obj_set_style_text_font(g, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(g, lv_color_white(), 0);
+        lv_obj_center(g);
+        lv_obj_t *col = lv_obj_create(row);
+        lv_obj_remove_style_all(col);
+        lv_obj_set_size(col, disp_w() - 14 - 14 - 30, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+        lv_obj_remove_flag(col, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *a = lv_label_create(col);
+        lv_label_set_text(a, t);
+        lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(a, LV_PCT(100));
+        lv_obj_set_style_text_font(a, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(a, lv_color_white(), 0);
+        lv_obj_t *b = lv_label_create(col);
+        lv_label_set_text(b, x);
+        lv_label_set_long_mode(b, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_set_style_text_font(b, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(b, lv_color_hex(0xDDDDDD), 0);
+    }
+    if (n > 0) {
+        lv_obj_remove_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* A notification arrived (purr_notify.c, on the UI task): the banner as before, and the lock screen's lines. */
+void purr_shell_notified(const char *title, const char *text)
+{
+    char line[96];
+    snprintf(line, sizeof(line), "%s: %s", title, text);
+    w10m_banner(line, 0);
+    lock_notes_refresh();
+}
+
 static void build_lock(void)
 {
     s_lock = lv_obj_create(lv_layer_top());
@@ -1564,6 +1630,13 @@ static void build_lock(void)
     lv_obj_set_style_text_font(s_lock_hint, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_lock_hint, lv_color_hex(0xDDDDDD), 0);
 
+    s_lock_notes = lv_obj_create(s_lock);
+    lv_obj_remove_style_all(s_lock_notes);
+    lv_obj_set_flex_flow(s_lock_notes, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_lock_notes, 6, 0);
+    lv_obj_remove_flag(s_lock_notes, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
+
     lv_obj_add_event_cb(s_lock, lock_drag_cb, LV_EVENT_ALL, NULL);
     lv_timer_create(lock_nudge_back_cb, 400, NULL);
     lock_layout();
@@ -1579,6 +1652,8 @@ static void lock_layout(void)
     lv_obj_set_pos(s_lock, 0, s_lock_on ? 0 : -h);
     lv_obj_set_size(s_lock_wall, w, h);
     lv_obj_align(s_lock_wall, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_size(s_lock_notes, w - 28, LV_SIZE_CONTENT);
+    lv_obj_align(s_lock_notes, LV_ALIGN_TOP_LEFT, 14, 30);
     lv_obj_align(s_lock_time, LV_ALIGN_BOTTOM_LEFT, 14, -52);
     lv_obj_align(s_lock_date, LV_ALIGN_BOTTOM_LEFT, 16, -30);
     lv_obj_align(s_lock_hint, LV_ALIGN_BOTTOM_MID, 0, -6);
@@ -1593,6 +1668,7 @@ static void lock_show(void)
     w10m_tasks_close();
     s_lock_on = 1;
     lock_clock_refresh();
+    lock_notes_refresh();
     lv_obj_remove_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_y(s_lock, 0);
     if (s_cc_open) {

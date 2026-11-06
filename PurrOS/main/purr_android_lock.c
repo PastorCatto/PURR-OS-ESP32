@@ -81,7 +81,7 @@ static void clock_strings(char *tb, size_t tcap, char *db, size_t dcap)
 
 static lv_obj_t *s_lock, *s_lock_time, *s_lock_date, *s_lock_s1, *s_lock_s2, *s_lock_hint;
 #define LOCK_NOTES 3
-static lv_obj_t *s_lock_notes, *s_ln_t[LOCK_NOTES], *s_ln_x[LOCK_NOTES];
+static lv_obj_t *s_lock_notes;
 static lv_obj_t *s_lk_track, *s_lk_end, *s_lk_end_glyph, *s_lk_knob, *s_lk_chev[3];
 static int s_lock_on;
 
@@ -315,30 +315,26 @@ static void lk_layout(int w, int h, int top, int landscape)
     lk_set_pos(0);
 }
 
-/* The newest notifications under the clock: a title and one line each, as on Android's lock screen. Shown only while the screen is locked; "+N more" when there are more than fit. */
+/* The newest notifications under the clock, as rows in the same look as the shade's (a light grey bar, the small app icon, a title and a line): three at most, the last says how
+ * many more there are. Shown only while the screen is locked. */
 void and_lock_notes_refresh(void)
 {
     if (s_lock == NULL || s_lock_notes == NULL) {
         return;
     }
-    int n = and_shade_count(), shown = 0;
-    for (int i = 0; i < LOCK_NOTES; i++) {
+    lv_obj_clean(s_lock_notes);
+    int n = and_shade_count();
+    for (int i = 0; i < LOCK_NOTES && i < n; i++) {
         char t[40], x[64];
-        if (i < n && and_shade_peek(i, t, sizeof(t), x, sizeof(x)) == 0) {
-            if (i == LOCK_NOTES - 1 && n > LOCK_NOTES) {
-                snprintf(x, sizeof(x), "+%d more in the shade", n - LOCK_NOTES + 1);
-            }
-            lv_label_set_text(s_ln_t[i], t);
-            lv_label_set_text(s_ln_x[i], x);
-            lv_obj_remove_flag(s_ln_t[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(s_ln_x[i], LV_OBJ_FLAG_HIDDEN);
-            shown++;
-        } else {
-            lv_obj_add_flag(s_ln_t[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(s_ln_x[i], LV_OBJ_FLAG_HIDDEN);
+        if (and_shade_peek(i, t, sizeof(t), x, sizeof(x)) != 0) {
+            break;
         }
+        if (i == LOCK_NOTES - 1 && n > LOCK_NOTES) {
+            snprintf(x, sizeof(x), "+%d more in the shade", n - LOCK_NOTES + 1);
+        }
+        and_note_row(s_lock_notes, t, x);
     }
-    if (shown > 0) {
+    if (n > 0) {
         lv_obj_remove_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
@@ -384,26 +380,13 @@ void and_lock_build(void)
     s_lock_s2 = lock_label(&lv_font_montserrat_12, 0xD4E4E6);
     s_lock_hint = lock_label(&lv_font_montserrat_12, 0xE3F0F2);
     lv_label_set_text(s_lock_hint, LV_SYMBOL_LIST "  Slide to unlock");
-    s_lock_notes = lv_obj_create(s_lock);                 /* the notification list: a dim panel with up to three title and text pairs */
+    s_lock_notes = lv_obj_create(s_lock);                 /* the notification rows (and_lock_notes_refresh) */
     lv_obj_remove_style_all(s_lock_notes);
+    lv_obj_set_size(s_lock_notes, LV_PCT(60), LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(s_lock_notes, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_bg_color(s_lock_notes, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(s_lock_notes, LV_OPA_40, 0);
-    lv_obj_set_style_radius(s_lock_notes, 4, 0);
-    lv_obj_set_style_pad_all(s_lock_notes, 4, 0);
-    lv_obj_set_style_pad_row(s_lock_notes, 1, 0);
+    lv_obj_set_style_pad_row(s_lock_notes, 2, 0);
     lv_obj_clear_flag(s_lock_notes, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
-    for (int i = 0; i < LOCK_NOTES; i++) {
-        s_ln_t[i] = lv_label_create(s_lock_notes);
-        lv_obj_set_style_text_font(s_ln_t[i], &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(s_ln_t[i], lv_color_white(), 0);
-        lv_label_set_long_mode(s_ln_t[i], LV_LABEL_LONG_DOT);
-        s_ln_x[i] = lv_label_create(s_lock_notes);
-        lv_obj_set_style_text_font(s_ln_x[i], &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(s_ln_x[i], lv_color_hex(0xD4E4E6), 0);
-        lv_label_set_long_mode(s_ln_x[i], LV_LABEL_LONG_DOT);
-    }
 
     lk_build();
 
@@ -426,10 +409,6 @@ void and_lock_layout(void)
         lv_obj_align_to(s_lock_s1, s_lock_date, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 8);
         lv_obj_align_to(s_lock_s2, s_lock_s1, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 2);
         lv_obj_set_width(s_lock_notes, w * 64 / 100);
-        for (int i = 0; i < LOCK_NOTES; i++) {
-            lv_obj_set_width(s_ln_t[i], w * 64 / 100 - 8);
-            lv_obj_set_width(s_ln_x[i], w * 64 / 100 - 8);
-        }
         lv_obj_align_to(s_lock_notes, s_lock_s2, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 8);
         lk_layout(w, h, top, 1);
         lv_obj_align(s_lock_hint, LV_ALIGN_BOTTOM_LEFT, 14, -(bottom + 8));
@@ -439,10 +418,6 @@ void and_lock_layout(void)
         lv_obj_align_to(s_lock_s1, s_lock_date, LV_ALIGN_OUT_BOTTOM_MID, 0, 10);
         lv_obj_align_to(s_lock_s2, s_lock_s1, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
         lv_obj_set_width(s_lock_notes, w - 24);
-        for (int i = 0; i < LOCK_NOTES; i++) {
-            lv_obj_set_width(s_ln_t[i], w - 32);
-            lv_obj_set_width(s_ln_x[i], w - 32);
-        }
         lv_obj_align_to(s_lock_notes, s_lock_s2, LV_ALIGN_OUT_BOTTOM_MID, 0, 8);
         lk_layout(w, h, top, 0);
         lv_obj_align(s_lock_hint, LV_ALIGN_BOTTOM_MID, 0, -(bottom + 8));

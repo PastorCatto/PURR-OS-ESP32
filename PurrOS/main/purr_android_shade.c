@@ -190,6 +190,18 @@ int and_shade_is_open(void) { return s_open; }
 
 int and_shade_count(void) { return s_notes != NULL ? (int)lv_obj_get_child_count(s_notes) : 0; }
 
+/* A notification row in the shade's own look (a light grey bar, the small app icon, a title and a line), for the lock screen; not clickable there. */
+lv_obj_t *and_note_row(lv_obj_t *parent, const char *title, const char *text)
+{
+    lv_obj_t *r = make_row(parent, title, text, NULL, NULL, NULL);
+    lv_obj_remove_flag(r, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_width(r, LV_PCT(100));
+    return r;
+}
+
+/* A notification arrived (purr_notify.c, on the UI task): it goes in the shade, whose rows the lock screen shows too. */
+void purr_shell_notified(const char *title, const char *text) { and_shade_add(title, text); }
+
 int and_shade_peek(int i, char *title, size_t tcap, char *text, size_t xcap)
 {
     if (s_notes == NULL || i < 0 || i >= and_shade_count()) {
