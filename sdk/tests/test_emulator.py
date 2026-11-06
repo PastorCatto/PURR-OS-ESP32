@@ -1,5 +1,6 @@
 """The emulator layer (purrsdk/emulator.py), tested against a small fake of the emulator's headless program, so no QEMU is needed."""
 import os
+import socket
 import stat
 import sys
 import time
@@ -168,6 +169,26 @@ class Session(Base):
         os.environ["PURR_EMULATOR_DIR"] = self.root
         with self.assertRaises(emulator.EmulatorError):
             emulator.Headless(self.image, workdir=os.path.join(self.tmp, "w6"))
+
+
+class Serving(Base):
+    def test_a_taken_port_is_refused_and_named(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        self.addCleanup(sock.close)
+        port = sock.getsockname()[1]
+        with self.assertRaises(emulator.EmulatorError) as cm:
+            emulator.serve_folder(os.path.join(self.tmp, "repo"), port=port)
+        self.assertIn(str(port), str(cm.exception))
+        self.assertIn("already in use", str(cm.exception))
+
+    def test_a_free_port_is_not_taken(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        self.assertFalse(emulator._port_busy(port))
 
 
 class Steps(Base):

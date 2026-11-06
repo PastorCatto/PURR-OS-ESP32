@@ -18,6 +18,7 @@ The program does no waiting of its own between commands, so the caller paces the
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -311,17 +312,45 @@ ANDROID_PORTAL = [
     ("shot", "03-trust"),
     ("tap", 42, 187, 28),                          # Trust
     ("shot", "04-apps"),
+    ("drag", 160, 190, 160, 125, 10),              # scroll the page a little at a time (a long drag overshoots)
+    ("drag", 160, 190, 160, 100, 10),
+    ("shot", "05-available"),
+    ("tap", 270, 147, 30),                         # Install on the first app in the list
+    ("shot", "06-installed"),
 ]
 
 
-def serve_folder(folder, port=47801):
-    """Start the dev server on a folder (a child process); returns the DevServer. The guest reaches it at 10.0.2.2:PORT."""
+def _port_busy(port):
+    """True when something on this computer already answers on the port."""
+    sock = socket.socket()
+    sock.settimeout(0.5)
+    try:
+        return sock.connect_ex(("127.0.0.1", int(port))) == 0
+    finally:
+        sock.close()
+
+
+def serve_folder(folder, port=47801, wait=10):
+    """Start the dev server on a folder (a child process); returns the DevServer. The guest reaches it at 10.0.2.2:PORT.
+    Refuses a port that is already taken (the emulated device would talk to that server, not yours), and waits until the new server answers."""
     from . import devserver
+    if _port_busy(port):
+        raise EmulatorError("Port %d is already in use, probably by another dev server. The emulated device would reach that one instead of "
+                            "the one holding your app. Stop it first (or serve your build from there)." % port)
     srv = devserver.DevServer()
     r = srv.start(folder, port=port, name="purr run")
     if not r["ok"]:
         raise EmulatorError(r["text"])
-    return srv
+    end = time.time() + wait
+    while time.time() < end:
+        if not srv.running():
+            break
+        if _port_busy(port):
+            return srv
+        time.sleep(0.2)
+    log = " ".join(srv.status()["log"][-3:])
+    srv.stop()
+    raise EmulatorError("The dev server did not start on port %d. %s" % (port, log))
 
 
 def make_repo(cat_file, folder):
