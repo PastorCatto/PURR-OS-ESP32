@@ -62,6 +62,8 @@ void purr_catrt_setup(purr_cli_t *cli);
 /* Called after any successful sign-in (main.c): fixes home-folder ownership and starts the apps
  * that were waiting for a user. */
 void purr_session_started(void);
+/* Loads the driver files that were held back at start (everything but the input drivers) once somebody has signed in; once per start, on its own task. */
+void purr_drivers_load_deferred(void);
 
 /* F-10: assigns every /home/<name> that has no owner of its own yet to that account, by
  * name -- the one-time migration for a device upgrading to file ownership (Users/SPEC.md

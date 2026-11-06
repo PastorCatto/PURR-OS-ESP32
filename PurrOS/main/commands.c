@@ -7,6 +7,7 @@
 #include <sys/select.h>
 #include <unistd.h>
 
+#include "purr_io.h"
 #include "purr_brand.h"
 #include "esp_cache.h"
 #include "esp_chip_info.h"
@@ -865,7 +866,7 @@ int purr_kernel_installed(void)
 {
     const esp_partition_t *kp = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
     uint8_t first = 0;
-    return kp != NULL && esp_partition_read(kp, 0, &first, 1) == ESP_OK && first == 0xE9 && !purr_slot_marked_bad(kp);
+    return kp != NULL && purr_io_partition_read(kp, 0, &first, 1) == ESP_OK && first == 0xE9 && !purr_slot_marked_bad(kp);
 }
 
 /* Whether a recovery install is waiting to continue, without clearing the request. */
@@ -1254,17 +1255,13 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
                         (unsigned)entry->size, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         return 1;
     }
-    if (purr_fetch_alloc(image_url, &image, &image_len, max_len) != ESP_OK) {
-        purr_cli_puts(cli, "download failed\n");
+    esp_err_t fe = purr_fetch_alloc_checked(image_url, &image, &image_len, max_len, entry->size, entry->sha256);       /* three tries, each checked */
+    if (fe != ESP_OK) {
+        purr_cli_puts(cli, fe == ESP_ERR_INVALID_SIZE || fe == ESP_ERR_INVALID_CRC ? "download does not match the manifest (size or hash)\n" : "download failed\n");
         return 1;
     }
     uint8_t got_hash[PURR_SHA256_LEN];
     purr_sha256(image, image_len, got_hash);
-    if (image_len != entry->size || memcmp(got_hash, entry->sha256, PURR_SHA256_LEN) != 0) {
-        free(image);
-        purr_cli_puts(cli, "download does not match the manifest (size or hash)\n");
-        return 1;
-    }
 
     purr_cli_puts(cli, "verifying...\n");
     purr_console_flush();
@@ -1365,7 +1362,7 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
         int same = 1;
         for (uint32_t off = 0; off < write_len && same; off += sizeof(have)) {
             uint32_t n = write_len - off < sizeof(have) ? write_len - off : (uint32_t)sizeof(have);
-            same = esp_partition_read(slot, off, have, n) == ESP_OK;
+            same = purr_io_partition_read(slot, off, have, n) == ESP_OK;
             if (same) {
                 purr_sha256_update(&hs, have, n);
             }
@@ -1383,8 +1380,8 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
     if (erase_len > slot->size) {
         erase_len = slot->size;
     }
-    if (esp_partition_erase_range(slot, 0, erase_len) != ESP_OK ||
-        esp_partition_write(slot, 0, write_data, write_len) != ESP_OK) {
+    if (purr_io_partition_erase_range(slot, 0, erase_len) != ESP_OK ||
+        purr_io_partition_write(slot, 0, write_data, write_len) != ESP_OK) {
         free(image);
         purr_cli_puts(cli, "write failed\n");
         return 1;
@@ -1400,7 +1397,7 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
         if (n > sizeof(chunk)) {
             n = sizeof(chunk);
         }
-        if (esp_partition_read(slot, off, chunk, n) != ESP_OK) {
+        if (purr_io_partition_read(slot, off, chunk, n) != ESP_OK) {
             free(image);
             purr_cli_puts(cli, "read-back failed\n");
             return 1;
@@ -5858,6 +5855,173 @@ static int load_one_driver_image(const char *label, const uint8_t *image, size_t
  * own comment on why: a device already bound is never stolen, so loading drivers in any order
  * is safe). One bad file never stops the rest, same "log and skip, don't quarantine" treatment
  * kernelmods get -- this boundary is still young enough that quarantine feels premature. */
+/* ---- a driver that stopped the device (owner, 2026-11-05: one driver of the set crashed the whole device, and nothing said which).
+ * Around each driver's probe the kernel calls purr_driver_guard(): it writes the driver's file name to /boot/drivers.trying and removes it when the probe returns.
+ * If the device dies inside the probe the file is still there on the next start, and load_drivers_from() moves that driver into /boot/drivers.crashed before it loads
+ * anything, so the device comes up and the Device Manager can say which one it was (and try it again on purpose). */
+#define DRIVER_TRY_FILE    "/boot/drivers.trying"
+#define DRIVER_CRASHED_DIR "/boot/drivers.crashed"
+
+typedef struct {
+    char name[32];                                  /* the driver's own name (purr_driver_t.name) */
+    char file[48];                                  /* its file in /boot/drivers */
+} drv_file_t;
+static drv_file_t s_drv_files[16];
+static int s_ndrv_files;
+
+static void note_driver_file(const char *drv_name, const char *path)
+{
+    if (drv_name == NULL || path == NULL) {
+        return;
+    }
+    const char *base = strrchr(path, '/');
+    base = base != NULL ? base + 1 : path;
+    for (int i = 0; i < s_ndrv_files; i++) {
+        if (strcmp(s_drv_files[i].name, drv_name) == 0) {
+            snprintf(s_drv_files[i].file, sizeof(s_drv_files[i].file), "%s", base);
+            return;
+        }
+    }
+    if (s_ndrv_files < (int)(sizeof(s_drv_files) / sizeof(s_drv_files[0]))) {
+        snprintf(s_drv_files[s_ndrv_files].name, sizeof(s_drv_files[0].name), "%s", drv_name);
+        snprintf(s_drv_files[s_ndrv_files].file, sizeof(s_drv_files[0].file), "%s", base);
+        s_ndrv_files++;
+    }
+}
+
+void purr_driver_guard(const char *name, int begin)
+{
+    if (name == NULL || !purr_fs_mounted(&s_fs)) {
+        return;
+    }
+    if (uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t) < 4096) {
+        return;                                         /* a small task (the Wi-Fi settle task has 3 KB): the file system needs more stack than it can spare */
+    }
+    if (!begin) {
+        purr_fs_remove(&s_fs, DRIVER_TRY_FILE);
+        return;
+    }
+    const char *file = name;
+    for (int i = 0; i < s_ndrv_files; i++) {
+        if (strcmp(s_drv_files[i].name, name) == 0) {
+            file = s_drv_files[i].file;
+        }
+    }
+    char line[64];
+    int n = snprintf(line, sizeof(line), "%s\n", file);
+    purr_fs_mkdir(&s_fs, "/boot");
+    purr_fs_write(&s_fs, DRIVER_TRY_FILE, line, (uint32_t)n);
+}
+
+/* The drivers the firmware carries itself (s_temp_drivers: display, touch, keyboard, battery, keyboard backlight): planted into /boot/drivers on every start and
+ * loaded first, because without the display nothing can be shown at all. They are never held back and never set aside. */
+static int builtin_driver_file(const char *file)
+{
+    for (size_t i = 0; i < sizeof(s_temp_drivers) / sizeof(s_temp_drivers[0]); i++) {
+        if (strcmp(file, s_temp_drivers[i].filename) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void quarantine_crashed_driver(purr_cli_t *cli, const char *dir)
+{
+    uint8_t *buf = NULL;
+    uint32_t len = 0;
+    if (bl_read_file(DRIVER_TRY_FILE, &buf, &len) != 0) {
+        return;
+    }
+    char file[48];
+    size_t n = len < sizeof(file) - 1 ? len : sizeof(file) - 1;
+    memcpy(file, buf, n);
+    file[n] = '\0';
+    free(buf);
+    file[strcspn(file, "\r\n")] = '\0';
+    purr_fs_remove(&s_fs, DRIVER_TRY_FILE);
+    if (file[0] == '\0' || strchr(file, '/') != NULL || strstr(file, "..") != NULL || builtin_driver_file(file)) {
+        return;                                         /* (the firmware's own drivers are not set aside: without the display there is nothing to show) */
+    }
+    char from[96], to[96];
+    snprintf(from, sizeof(from), "%s/%s", dir, file);
+    purr_fs_mkdir(&s_fs, DRIVER_CRASHED_DIR);
+    snprintf(to, sizeof(to), "%s/%s", DRIVER_CRASHED_DIR, file);
+    purr_fs_remove(&s_fs, to);
+    if (purr_fs_rename(&s_fs, from, to) == 0) {
+        ESP_LOGW("drivers", "%s was starting when the device stopped last time: set aside in " DRIVER_CRASHED_DIR, file);
+        purr_cli_printf(cli, "drivers: %s stopped the device last time; set aside (Device Manager > Drivers)\n", file);
+    }
+}
+
+/* Which drivers load when. Signing in needs the input drivers and nothing else, so on the full system only those load at start (mode 1); every other file in
+ * /boot/drivers loads once somebody has signed in (mode 2, purr_drivers_load_deferred). A driver that stops the device during sign-in can then no longer lock
+ * anybody out before they have typed a word, and the memory the late drivers need is asked for when the system is idle rather than during the busiest second of
+ * the start. Wi-Fi is not a driver file and starts as before. Mode 0 loads everything (the recovery profiles, the text shell). The core list is by component
+ * name: the file is "<component>-<board>.cat". */
+static int s_drv_mode;
+static const char *const s_core_drivers[] = {"kbd-raw", "trackball-gpio"};
+#define DRIVER_SETTLE_FILE "/boot/drivers.settling"
+
+static int core_driver_file(const char *file)
+{
+    if (builtin_driver_file(file)) {
+        return 1;
+    }
+    for (size_t i = 0; i < sizeof(s_core_drivers) / sizeof(s_core_drivers[0]); i++) {
+        size_t n = strlen(s_core_drivers[i]);
+        if (strncmp(file, s_core_drivers[i], n) == 0 && file[n] == '-') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The other half of the protection. The marker above catches a driver that dies inside its own start-up; a driver that dies later (a task or interrupt it set
+ * up, a bad pin state, memory it used up) leaves no marker, and the recovery loader reinstalls the kernel without touching the file system, so the same drivers
+ * load again and the loop never ends. The bootloader counts every start and the OS clears the count only once it has run to a settled state (main.c), so a count
+ * of 2 or more here means the start before this one never got there. Then none of the downloaded drivers loads this time: they are all set aside, the device
+ * comes up, and Device Manager > Drivers offers each one back, one at a time, to find the one that is guilty. A power cut during a start does the same, which
+ * costs a few taps and nothing else. */
+static void quarantine_all_drivers(purr_cli_t *cli, const char *dir)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    int isdir = 0;
+    uint32_t sz = 0;
+    int late_died = purr_fs_stat(&s_fs, DRIVER_SETTLE_FILE, &isdir, &sz) == 0;      /* the late drivers were loading and the device stopped within 30 s of it */
+    int unsettled = load_cfg(cli, &fl, &cfg) == 0 && cfg.boot_fail_count >= 2;
+    if (!late_died && !unsettled) {
+        return;
+    }
+    purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);
+    module_listing_t l = {.count = 0};
+    if (purr_fs_list(&s_fs, dir, collect_module_row, &l) != 0) {
+        return;
+    }
+    int moved = 0;
+    for (int i = 0; i < l.count; i++) {
+        size_t n = strlen(l.names[i]);
+        if (l.is_dir[i] || n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0) {
+            continue;
+        }
+        if (builtin_driver_file(l.names[i]) || (!unsettled && core_driver_file(l.names[i]))) {
+            continue;                                   /* the firmware's own drivers never move; and if only the late drivers were running, the input drivers stay */
+        }
+        char from[96], to[96];
+        snprintf(from, sizeof(from), "%s/%s", dir, l.names[i]);
+        purr_fs_mkdir(&s_fs, DRIVER_CRASHED_DIR);
+        snprintf(to, sizeof(to), "%s/%s", DRIVER_CRASHED_DIR, l.names[i]);
+        purr_fs_remove(&s_fs, to);
+        if (purr_fs_rename(&s_fs, from, to) == 0) {
+            moved++;
+        }
+    }
+    if (moved > 0) {
+        ESP_LOGW("drivers", "the last start did not settle: %d downloaded driver(s) set aside in " DRIVER_CRASHED_DIR, moved);
+        purr_cli_printf(cli, "drivers: the last start did not settle; %d driver(s) set aside (Device Manager > Drivers)\n", moved);
+    }
+}
+
 /* Loads (verifies, relocates) one driver file and registers it with the board profile. For the hardware setup, which adds drivers after boot. */
 int purr_driver_load_file(const char *path)
 {
@@ -5865,12 +6029,18 @@ int purr_driver_load_file(const char *path)
     if (load_one_driver_file(path, &drv) != 0) {
         return -1;
     }
+    note_driver_file(drv->name, path);
     purr_driver_register(purr_board(), drv);
     return 0;
 }
 
 static void load_drivers_from(purr_cli_t *cli, const char *dir)
 {
+    int main_dir = strcmp(dir, PURR_DRIVERS_DIR) == 0;
+    if (main_dir && s_drv_mode != 2) {
+        quarantine_crashed_driver(cli, dir);
+        quarantine_all_drivers(cli, dir);
+    }
     module_listing_t l = {.count = 0};
     if (purr_fs_list(&s_fs, dir, collect_module_row, &l) != 0) {
         return; /* no drivers folder yet: nothing to load, not an error */
@@ -5883,6 +6053,9 @@ static void load_drivers_from(purr_cli_t *cli, const char *dir)
         if (n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0) {
             continue;
         }
+        if (main_dir && s_drv_mode != 0 && core_driver_file(l.names[i]) != (s_drv_mode == 1)) {
+            continue;                                   /* the other phase's */
+        }
         char path[80];
         snprintf(path, sizeof(path), "%s/%s", dir, l.names[i]);
 #if CONFIG_PURR_VERBOSE_BOOT
@@ -5890,6 +6063,7 @@ static void load_drivers_from(purr_cli_t *cli, const char *dir)
 #endif
         const purr_driver_t *drv = NULL;
         if (load_one_driver_file(path, &drv) == 0) {
+            note_driver_file(drv->name, path);
             purr_driver_register(purr_board(), drv);
 #if CONFIG_PURR_VERBOSE_BOOT
             purr_cli_printf(cli, "drivers: %s verified, loaded ('%s')\n", path, drv->name);
@@ -6007,6 +6181,50 @@ static int cmd_testkbdmodule(purr_cli_t *cli, int argc, char **argv)
  * That's the whole point: /system is swept and enforced before anything can even reach a
  * prompt, the same way both KittenOS and PURR OS already report the fs mount and Wi-Fi status
  * on `cli` at this point in boot. */
+#if CONFIG_PURR_PROFILE_FULL
+static void settle_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(30000));
+    purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);          /* the device ran 30 s with every driver loaded: whatever stops it later is not a start-up fault */
+    vTaskDelete(NULL);
+}
+
+static void late_quiet_put(void *ctx, char c) { (void)ctx; (void)c; }
+
+static void late_drivers_task(void *arg)
+{
+    (void)arg;
+    static purr_cli_t cli;
+    purr_cli_init(&cli, NULL, 0, late_quiet_put, NULL, "");
+    vTaskDelay(pdMS_TO_TICKS(5000));                    /* let the home screen finish drawing first (with automatic sign-in the session starts at boot, with nothing to wait for) */
+    purr_fs_write(&s_fs, DRIVER_SETTLE_FILE, "1\n", 2);  /* gone again after 30 s; still here at the next start means the device stopped inside that time */
+    s_drv_mode = 2;
+    load_drivers_from(&cli, PURR_DRIVERS_DIR);
+    s_drv_mode = 0;
+    purr_hwsetup_boot(&cli);                            /* bind the devices whose drivers have just arrived */
+    if (xTaskCreate(settle_task, "drv-settle", 4096, NULL, 3, NULL) != pdPASS) {
+        purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);
+    }
+    vTaskDelete(NULL);
+}
+
+/* Once, after the first sign-in of this start: loads the drivers that were held back (see s_drv_mode). On its own task with the stack a driver load needs. */
+void purr_drivers_load_deferred(void)
+{
+    static int started;
+    if (started || !purr_fs_mounted(&s_fs)) {
+        return;
+    }
+    started = 1;
+    if (xTaskCreate(late_drivers_task, "drv-late", 12288, NULL, 4, NULL) != pdPASS) {
+        started = 0;
+    }
+}
+#else
+void purr_drivers_load_deferred(void) {}
+#endif
+
 void purr_modules_setup(purr_cli_t *cli)
 {
     if (!purr_fs_mounted(&s_fs)) {
@@ -6031,7 +6249,11 @@ void purr_modules_setup(purr_cli_t *cli)
      * display is the one exception -- purr_kernel_init() must still bind it synchronously
      * before this function even runs (main.c's own hard halt otherwise), so it stays
      * compiled in. */
+#if CONFIG_PURR_PROFILE_FULL
+    s_drv_mode = 1;                         /* the input drivers now; the rest after sign-in (purr_drivers_load_deferred) */
+#endif
     load_drivers_from(cli, PURR_DRIVERS_DIR);
+    s_drv_mode = 0;
 #if CONFIG_PURR_PROFILE_FULL
     purr_hwsetup_boot(cli);                 /* the discovered profile (/etc/board.conf): bind its devices to the drivers just loaded */
 #endif

@@ -42,6 +42,10 @@ static int s_row[MAX_ROWS], s_row_kind[MAX_ROWS], s_nrow;       /* kind 1: a fou
 static int h_find, h_setup, h_drv, h_getdrv, h_add, h_read, h_remove, h_check, h_install, h_reinstall, h_src, h_devfind, h_devset;
 static int h_driver, h_sda, h_scl, h_addr, h_srvaddr;
 static int h_home_row[8];
+static int s_mdrv_row[12], s_nm;                      /* the rows of the built-in devices that have no driver, one tap gets just that driver */
+static char s_mdrv_compat[12][32];
+static int s_crash_row[8], s_nc;                      /* the rows of drivers set aside after they stopped the device */
+static char s_crash_name[8][32];
 
 /* ---------------------------------------------------------------- tiny string helpers */
 
@@ -147,6 +151,24 @@ NO_OPT static void mark_pressed(int h)
             s_cur_msg = s_pair_msg[i];
         }
     }
+}
+
+/* The text between the first pair of double quotes: the driver's name inside `needs the "x" driver`. */
+NO_OPT static void quoted(const char *s, char *out, int cap)
+{
+    out[0] = '\0';
+    while (*s && *s != '"') {
+        s++;
+    }
+    if (*s != '"') {
+        return;
+    }
+    s++;
+    int n = 0;
+    while (*s && *s != '"' && n < cap - 1) {
+        out[n++] = *s++;
+    }
+    out[n] = '\0';
 }
 
 NO_OPT static void begin_page(int page, const char *title, int plus)
@@ -313,15 +335,33 @@ NO_OPT static void show_drivers(void)
     }
     char mc[8];
     h_getdrv = 0;
+    s_nm = 0;
+    s_nc = 0;
     if (dv->info("missing", mc, sizeof(mc)) > 0 && to_int(mc) > 0) {
         char t[TXT];
-        put(t, "Get ", sizeof(t));
+        put(t, "Get all ", sizeof(t));
         append_num(t, to_int(mc), sizeof(t));
         append(t, to_int(mc) == 1 ? " missing driver" : " missing drivers", sizeof(t));
         h_getdrv = action(t);
-        ui->label("The built-in hardware below has no driver yet. They are downloaded from the official server, or from your developer server when one is in use.", PURR_UI_ROLE_DIM);
+        ui->label("Or tap one of these to get just that driver. They are downloaded from the official server, or from your developer server when one is in use.", PURR_UI_ROLE_DIM);
         for (int i = 0; i < 12 && dv->list("missing", i, a, sizeof(a), b, sizeof(b)) == 1; i++) {
-            ui->row(a, b);
+            char compat[32], sub[TXT];
+            quoted(b, compat, sizeof(compat));
+            put(sub, "driver \"", sizeof(sub));
+            append(sub, compat, sizeof(sub));
+            append(sub, "\": tap to get it", sizeof(sub));
+            if (s_nm < 12) {
+                put(s_mdrv_compat[s_nm], compat, 32);
+                s_mdrv_row[s_nm++] = ui->row(a, sub);
+            }
+        }
+    }
+    char cc[8];
+    if (dv->info("crashed", cc, sizeof(cc)) > 0 && to_int(cc) > 0) {
+        ui->label("These stopped the device while it was starting them, so they were set aside. Tap one to put it back and try it again after a restart.", PURR_UI_ROLE_ACCENT);
+        for (int i = 0; i < 8 && dv->list("crashed", i, a, sizeof(a), b, sizeof(b)) == 1; i++) {
+            put(s_crash_name[s_nc], a, 32);
+            s_crash_row[s_nc++] = ui->row(a, b);
         }
     }
     h_drv = action("Update drivers");
@@ -525,6 +565,19 @@ NO_OPT static void on_click(int h)
             begin_job(J_DRV, "update-drivers", "", "", "Checking for driver updates...");
         } else if (h_getdrv > 0 && h == h_getdrv) {
             begin_job(J_DRV, "get-drivers", "", "", "Getting the drivers...");
+        } else {
+            for (int i = 0; i < s_nm; i++) {
+                if (h == s_mdrv_row[i]) {
+                    begin_job(J_DRV, "get-driver", s_mdrv_compat[i], "", "Getting the driver...");
+                    return;
+                }
+            }
+            for (int i = 0; i < s_nc; i++) {
+                if (h == s_crash_row[i]) {
+                    begin_job(J_DRV, "retry-driver", s_crash_name[i], "", "Putting it back...");
+                    return;
+                }
+            }
         }
     } else if (s_page == PG_UPDATE) {
         if (h_src > 0 && h == h_src) {

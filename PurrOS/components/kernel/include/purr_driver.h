@@ -134,6 +134,10 @@ void purr_drivers_bind_extra(const purr_board_t *board);
 /* 1 if a driver for this compatible string is registered (loaded this boot). */
 int purr_driver_registered(const char *compatible);
 
+/* Called around every driver's probe (its first contact with the hardware), with begin = 1 before and 0 after. The OS writes what is being started to a marker
+ * file and clears it afterwards, so a driver that stops the device is known on the next start (main/commands.c). The default does nothing. */
+void purr_driver_guard(const char *driver_name, int begin);
+
 /* The other half: finds every device currently bound to exactly `drv`, calls its remove(),
  * releases the pins it claimed, and resets it to PURR_DEV_UNBOUND -- ready for a fresh
  * register() (a different driver, or a reloaded version of the same one) to claim it. A no-op

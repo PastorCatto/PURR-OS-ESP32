@@ -99,6 +99,12 @@ static int s_net_settled;
 static const purr_driver_t *const *s_boot_table;
 static int s_boot_table_count;
 
+__attribute__((weak)) void purr_driver_guard(const char *driver_name, int begin)
+{
+    (void)driver_name;
+    (void)begin;
+}
+
 static void bind_device(device_record_t *rec, const purr_device_t *dev, const purr_board_t *board,
                         const purr_driver_t *const *table, int table_count)
 {
@@ -124,7 +130,10 @@ static void bind_device(device_record_t *rec, const purr_device_t *dev, const pu
     }
 
     void *handle = NULL;
-    if (drv->probe(dev, board, &handle) != 0) {
+    purr_driver_guard(drv->name, 1);
+    int probed = drv->probe(dev, board, &handle);
+    purr_driver_guard(drv->name, 0);
+    if (probed != 0) {
         rec->state = PURR_DEV_PROBE_FAILED;
         return;
     }

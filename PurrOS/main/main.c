@@ -84,7 +84,7 @@ static int purros_installed(void)
     for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
         const esp_partition_t *p = esp_partition_find_first(ESP_PARTITION_TYPE_APP, slots[i], NULL);
         uint32_t first = 0;
-        if (p != NULL && esp_partition_read(p, 0, &first, sizeof(first)) == ESP_OK &&
+        if (p != NULL && purr_io_partition_read(p, 0, &first, sizeof(first)) == ESP_OK &&
             (first & 0xFF) == 0xE9) {
             return 1;
         }
@@ -106,6 +106,7 @@ void purr_session_started(void)
 #endif
     /* The apps that were waiting for a user start now. */
     purr_catrt_user_logged_in();
+    purr_drivers_load_deferred();               /* the drivers held back at start, now that somebody is in */
 }
 
 static void run_login(void)

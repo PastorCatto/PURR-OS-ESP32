@@ -6,6 +6,7 @@
  * Work that takes time runs on one worker task. start() returns at once; when the job ends the app gets PURR_APPEV_UI with the name "job"
  * (arg 0 = it worked, 1 = it did not), and result() holds the sentence. One job at a time.
  */
+#include "purr_io.h"
 #include "purr_catrt_devices.h"
 
 #include <stdio.h>
@@ -87,6 +88,12 @@ static int run(void)
     if (strcmp(w, "get-drivers") == 0) {
         return purr_hwsetup_get_missing(NULL, m, mc) > 0 ? 0 : -1;
     }
+    if (strcmp(w, "get-driver") == 0) {
+        return purr_hwsetup_get_one(s_job.a, NULL, m, mc) >= 0 ? 0 : -1;
+    }
+    if (strcmp(w, "retry-driver") == 0) {
+        return purr_hwsetup_retry(s_job.a, m, mc) == 0 ? 0 : -1;
+    }
     if (strcmp(w, "add") == 0) {
         int sda = 0, scl = 0, addr = 0;
         if (sscanf(s_job.b, "%d %d %i", &sda, &scl, &addr) != 3) {
@@ -150,7 +157,7 @@ static void job_task(void *arg)
     int slot = s_job.slot;
     s_job.busy = 0;
     purr_catrt_post_ui(slot, s_job.rc < 0 ? 1 : s_job.rc == 1 ? 2 : 0, "job");
-    vTaskDelete(NULL);
+    vTaskDelete(NULL);                                  /* a fast-RAM stack on purpose: a driver the job loads runs its start-up on this stack, and may hand buffers from it to the hardware (DMA), which cannot read PSRAM */
 }
 
 static int cc_start(const char *what, const char *a, const char *b)
@@ -249,6 +256,15 @@ static int cc_list(const char *what, int i, char *a, size_t acap, char *b, size_
         snprintf(b, bcap, "needs the \"%s\" driver", compat);
         return 1;
     }
+    if (strcmp(what, "crashed") == 0) {
+        char nm[32];
+        if (i >= purr_hwsetup_crashed(nm, sizeof(nm), i)) {
+            return 0;
+        }
+        put(a, acap, nm);
+        snprintf(b, bcap, "stopped the device last time: tap to try again");
+        return 1;
+    }
     if (strcmp(what, "drivers") == 0) {
         static purr_hwsetup_driver_t drv[PURR_HWSETUP_MAX_DRIVERS];
         int n = purr_hwsetup_list_drivers(drv, PURR_HWSETUP_MAX_DRIVERS);
@@ -295,6 +311,8 @@ static int cc_info(const char *what, char *out, size_t cap)
         snprintf(out, cap, "%d", to_set_up());
     } else if (strcmp(what, "missing") == 0) {
         snprintf(out, cap, "%d", purr_hwsetup_missing(NULL, 0, -1, NULL, 0));
+    } else if (strcmp(what, "crashed") == 0) {
+        snprintf(out, cap, "%d", purr_hwsetup_crashed(NULL, 0, -1));
     } else if (strcmp(what, "bootloader-update") == 0) {
         snprintf(out, cap, "%d", purr_sysupdate_includes_bootloader() ? 1 : 0);
     } else {

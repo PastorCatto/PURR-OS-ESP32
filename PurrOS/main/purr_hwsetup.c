@@ -8,6 +8,8 @@
 #include "esp_heap_caps.h"
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
 #include "commands.h"
@@ -290,6 +292,16 @@ static int name_clean(const char *in, char *out, size_t cap)
     return n > 0;
 }
 
+typedef struct { purr_sha256_t sha; size_t total; } rdback_t;
+
+static int rdback_cb(void *ctx, const void *data, uint32_t n)
+{
+    rdback_t *r = ctx;
+    purr_sha256_update(&r->sha, data, n);
+    r->total += n;
+    return 0;
+}
+
 /* Fetches the entry's file, checks it against the index (size and SHA-256), writes /boot/drivers/<name>.cat. The loader checks the signature
  * when it loads. keep_old: park the file being replaced as .bak. Returns 0 or -1 with why. */
 static int download_driver(const source_t *s, const purr_manifest_entry_t *e, int keep_old, char *path, size_t pathcap, char *why, size_t whycap)
@@ -303,15 +315,28 @@ static int download_driver(const source_t *s, const purr_manifest_entry_t *e, in
     snprintf(url, sizeof(url), "%s%s", s->dir, e->file);
     uint8_t *buf = NULL;
     size_t len = 0;
-    if (fetch(s, url, &buf, &len, DRIVER_MAX) != 0) {
-        snprintf(why, whycap, "could not download %s", e->file);
-        return -1;
+    int reached = 0, matched = 0;
+    for (int attempt = 1; attempt <= 3 && !matched; attempt++) {        /* one small file at a time, tried again before giving up */
+        if (attempt > 1) {
+            vTaskDelay(pdMS_TO_TICKS(1500 * (attempt - 1)));
+        }
+        buf = NULL;
+        len = 0;
+        if (fetch(s, url, &buf, &len, DRIVER_MAX) != 0) {
+            continue;
+        }
+        reached = 1;
+        uint8_t digest[PURR_SHA256_LEN];
+        purr_sha256(buf, len, digest);
+        if (len == e->size && memcmp(digest, e->sha256, PURR_SHA256_LEN) == 0) {
+            matched = 1;
+        } else {
+            free(buf);
+            buf = NULL;
+        }
     }
-    uint8_t digest[PURR_SHA256_LEN];
-    purr_sha256(buf, len, digest);
-    if (len != e->size || memcmp(digest, e->sha256, PURR_SHA256_LEN) != 0) {
-        free(buf);
-        snprintf(why, whycap, "%s does not match the index (size or hash)", e->file);
+    if (!matched) {
+        snprintf(why, whycap, reached ? "%s does not match the index (size or hash)" : "could not download %s", e->file);
         return -1;
     }
     purr_fs_t *fs = purr_login_fs();
@@ -325,10 +350,19 @@ static int download_driver(const source_t *s, const purr_manifest_entry_t *e, in
         purr_fs_rename(fs, path, bak);
     }
     int rc = purr_fs_write(fs, path, buf, (uint32_t)len) < 0 ? -1 : 0;
-    free(buf);
     if (rc != 0) {
         snprintf(why, whycap, "could not save it (the file system is full?)");
+    } else {
+        rdback_t rb = {0};
+        purr_sha256_init(&rb.sha);
+        uint8_t back[PURR_SHA256_LEN];
+        if (purr_fs_read(fs, path, rdback_cb, &rb) < 0 || (purr_sha256_final(&rb.sha, back), rb.total != len || memcmp(back, e->sha256, sizeof(back)) != 0)) {
+            purr_fs_remove(fs, path);                                   /* a file that does not read back as written is not left to be loaded */
+            snprintf(why, whycap, "%s did not read back as written", e->file);
+            rc = -1;
+        }
     }
+    free(buf);
     return rc;
 }
 
@@ -522,6 +556,93 @@ int purr_hwsetup_get_missing(void (*progress)(const char *), char *summary, size
         snprintf(summary, cap, "Could not get a driver: %.100s.", first_fail);
     }
     return got;
+}
+
+int purr_hwsetup_get_one(const char *compatible, void (*progress)(const char *), char *summary, size_t cap)
+{
+    summary[0] = '\0';
+    if (compatible == NULL || compatible[0] == '\0') {
+        snprintf(summary, cap, "Which driver?");
+        return -1;
+    }
+    if (!purr_fs_mounted(purr_login_fs())) {
+        snprintf(summary, cap, "The file system is not ready.");
+        return -1;
+    }
+    if (purr_driver_registered(compatible)) {
+        snprintf(summary, cap, "The %.40s driver is already loaded.", compatible);
+        return 0;
+    }
+    source_t src[2];
+    int nsrc = sources(src, 2);
+    s_idx = big_calloc(sizeof(*s_idx));
+    if (s_idx == NULL) {
+        snprintf(summary, cap, "Out of memory.");
+        return -1;
+    }
+    say(progress, "Reading the driver list...");
+    int cnt = 0;
+    for (int i = 0; i < nsrc; i++) {
+        cnt = load_index(&src[i], cnt);
+    }
+    char why[96] = "";
+    say(progress, "Getting the %s driver...", compatible);
+    int rc = ensure_driver(compatible, src, nsrc, cnt, why, sizeof(why));
+    free(s_idx);
+    s_idx = NULL;
+    if (rc != 0) {
+        snprintf(summary, cap, "Could not get it: %.110s.", why);
+        return -1;
+    }
+    snprintf(summary, cap, "Got the %.40s driver.", compatible);
+    return 1;
+}
+
+#define CRASHED_DIR "/boot/drivers.crashed"
+
+typedef struct { int want, n; char *out; size_t cap; } crashed_t;
+
+static void crashed_cb(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)size;
+    crashed_t *c = ctx;
+    size_t len = strlen(name);
+    if (is_dir || len < 5 || strcmp(name + len - 4, ".cat") != 0) {
+        return;
+    }
+    if (c->n == c->want && c->out != NULL) {
+        snprintf(c->out, c->cap, "%.*s", (int)(len - 4), name);
+    }
+    c->n++;
+}
+
+int purr_hwsetup_crashed(char *name, size_t cap, int i)
+{
+    crashed_t c = {.want = i, .n = 0, .out = name, .cap = cap};
+    if (purr_fs_list(purr_login_fs(), CRASHED_DIR, crashed_cb, &c) != 0) {
+        return 0;
+    }
+    return c.n;
+}
+
+int purr_hwsetup_retry(const char *name, char *summary, size_t cap)
+{
+    char clean[32];
+    if (!name_clean(name, clean, sizeof(clean))) {
+        snprintf(summary, cap, "Which driver?");
+        return -1;
+    }
+    purr_fs_t *fs = purr_login_fs();
+    char from[80], to[64];
+    snprintf(from, sizeof(from), CRASHED_DIR "/%s.cat", clean);
+    snprintf(to, sizeof(to), DRIVERS_DIR "/%s.cat", clean);
+    purr_fs_mkdir(fs, DRIVERS_DIR);
+    if (purr_fs_rename(fs, from, to) != 0) {
+        snprintf(summary, cap, "Could not put it back.");
+        return -1;
+    }
+    snprintf(summary, cap, "Put the %.30s driver back. Restart to try it; if it stops the device again it is set aside again.", clean);
+    return 0;
 }
 
 /* ---------------------------------------------------------------- the installed drivers and updates */

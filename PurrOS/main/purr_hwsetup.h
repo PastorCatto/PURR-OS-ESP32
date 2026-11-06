@@ -53,6 +53,14 @@ int purr_hwsetup_update_drivers(void (*progress)(const char *), char *summary, s
 /* The built-in (board) devices that have no driver and are not running: how many there are, and when i >= 0 the name and driver name of the i-th. */
 int purr_hwsetup_missing(char *name, size_t cap, int i, char *compat, size_t ccap);
 
+/* The same for one driver, by its `compatible` name (the Device Manager lets a person pick). Returns 1 if it was got, 0 if it was already loaded, < 0 with the summary saying why. */
+int purr_hwsetup_get_one(const char *compatible, void (*progress)(const char *), char *summary, size_t cap);
+
+/* The drivers set aside because the device stopped while starting them (/boot/drivers.crashed): how many, and when i >= 0 the name of the i-th. retry puts one back
+ * in /boot/drivers; it starts at the next restart, and is set aside again if it stops the device again. */
+int purr_hwsetup_crashed(char *name, size_t cap, int i);
+int purr_hwsetup_retry(const char *name, char *summary, size_t cap);
+
 /* Downloads and loads the driver of every such device (from the official server, or the dev server in developer mode), checked like any driver; the devices bind at once and
  * the files stay in /boot/drivers for the next start. Returns how many were got (summary says what happened). */
 int purr_hwsetup_get_missing(void (*progress)(const char *), char *summary, size_t cap);
