@@ -21,6 +21,13 @@ extern "C" {
 /* Starts the flash task. Until it runs, every call goes straight through. */
 void purr_io_start(void);
 
+/* A worker task with its stack in PSRAM (falling back to fast RAM if there is none to spare), for jobs that are long and deep but only ever touch flash through the
+ * hand-over above. End it with purr_task_exit(), which knows which kind it was. */
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+BaseType_t purr_task_create_ext(TaskFunction_t fn, const char *name, uint32_t stack_bytes, void *arg, UBaseType_t prio, TaskHandle_t *out);
+void purr_task_exit(void);
+
 esp_err_t purr_io_partition_read(const esp_partition_t *p, size_t offset, void *dst, size_t size);
 esp_err_t purr_io_partition_write(const esp_partition_t *p, size_t offset, const void *src, size_t size);
 esp_err_t purr_io_partition_erase_range(const esp_partition_t *p, size_t offset, size_t size);

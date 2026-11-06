@@ -54,6 +54,25 @@ void purr_io_start(void)
     }
 }
 
+BaseType_t purr_task_create_ext(TaskFunction_t fn, const char *name, uint32_t stack_bytes, void *arg, UBaseType_t prio, TaskHandle_t *out)
+{
+    if (xTaskCreateWithCaps(fn, name, stack_bytes, arg, prio, out, MALLOC_CAP_SPIRAM) == pdPASS) {
+        return pdPASS;
+    }
+    ESP_LOGW(TAG, "%s: no PSRAM for its stack, using fast RAM", name);
+    return xTaskCreate(fn, name, stack_bytes, arg, prio, out);
+}
+
+void purr_task_exit(void)
+{
+    int marker;
+    if (!esp_ptr_internal(&marker)) {
+        vTaskDeleteWithCaps(NULL);                      /* a PSRAM stack: IDF frees it and the task record */
+    } else {
+        vTaskDelete(NULL);
+    }
+}
+
 /* The caller's stack is in PSRAM, so it cannot run a flash operation itself. */
 static int must_hand_over(void)
 {

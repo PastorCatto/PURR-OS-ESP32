@@ -1,11 +1,13 @@
 #include "purr_fetch.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "purr_util.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -121,6 +123,9 @@ static esp_err_t fetch_into_inline(const char *url, uint8_t *buf, size_t cap, si
         }
     }
     close_client(client);
+    if (content_length > 0 && got != (size_t)content_length) {
+        return ESP_ERR_INVALID_SIZE;               /* the connection closed early: a short body is a failed download, not a small file */
+    }
     *out_len = got;
     return ESP_OK;
 }
@@ -153,6 +158,9 @@ static esp_err_t fetch_local_into_inline(const char *url, uint8_t *buf, size_t c
         }
     }
     close_client(client);
+    if (content_length > 0 && got != (size_t)content_length) {
+        return ESP_ERR_INVALID_SIZE;
+    }
     *out_len = got;
     return ESP_OK;
 }
@@ -218,6 +226,10 @@ static esp_err_t fetch_alloc_inline(const char *url, uint8_t **out, size_t *out_
         }
     }
     close_client(client);
+    if (content_length > 0 && got != (size_t)content_length) {
+        free(buf);
+        return ESP_ERR_INVALID_SIZE;
+    }
     *out = buf;
     *out_len = got;
     return ESP_OK;
@@ -311,4 +323,38 @@ esp_err_t purr_fetch_alloc(const char *url, uint8_t **out, size_t *out_len, size
     *out = NULL;
     fetch_req_t r = {.op = OP_ALLOC, .url = url, .cap = max_len, .out = out, .out_len = out_len};
     return fetch_note(&r);
+}
+
+/* One file, checked, tried again: each attempt is a whole download followed by the size and SHA-256 the index promised, so a dropped connection, a short body
+ * and a flipped bit all take the same road (wait, fetch again) before the caller is told. Nothing is returned that failed the check. */
+#define CHECKED_ATTEMPTS 3
+
+esp_err_t purr_fetch_alloc_checked(const char *url, uint8_t **out, size_t *out_len, size_t max_len, size_t want_size, const uint8_t want_sha256[32])
+{
+    esp_err_t e = ESP_FAIL;
+    for (int attempt = 1; attempt <= CHECKED_ATTEMPTS; attempt++) {
+        *out = NULL;
+        e = purr_fetch_alloc(url, out, out_len, max_len);
+        if (e == ESP_OK) {
+            uint8_t digest[32];
+            purr_sha256(*out, *out_len, digest);
+            if (*out_len != want_size) {
+                e = ESP_ERR_INVALID_SIZE;
+            } else if (memcmp(digest, want_sha256, sizeof(digest)) != 0) {
+                e = ESP_ERR_INVALID_CRC;
+            } else {
+                s_last_error[0] = '\0';
+                return ESP_OK;
+            }
+            const char *name = strrchr(url, '/');
+            snprintf(s_last_error, sizeof(s_last_error), "%.40s: %s", name != NULL ? name + 1 : url, e == ESP_ERR_INVALID_SIZE ? "size differs from the index" : "hash differs from the index");
+            free(*out);
+            *out = NULL;
+        }
+        ESP_LOGW(TAG, "attempt %d of %d for %s: %s", attempt, CHECKED_ATTEMPTS, url, esp_err_to_name(e));
+        if (attempt < CHECKED_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(2000 * attempt));   /* 2 s, then 4 s: long enough for a Wi-Fi hiccup or a server restart to pass */
+        }
+    }
+    return e;
 }

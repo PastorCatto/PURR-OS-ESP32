@@ -6,6 +6,7 @@
 #define PURR_FETCH_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -27,6 +28,12 @@ void purr_fetch_set_progress(purr_fetch_progress_fn fn);
 
 /* "<file>: <why>" for the last fetch that failed (ESP error name), or "" if the last one worked: so a failure can say what it was. */
 const char *purr_fetch_last_error(void);
+
+/* purr_fetch_alloc() for a file the index described: up to three whole attempts (a 2 s then a 4 s wait between them), each checked against want_size and
+ * want_sha256. Returns ESP_OK only for a buffer that passed both; otherwise the last failure: ESP_ERR_INVALID_SIZE or ESP_ERR_INVALID_CRC when the bytes
+ * arrived but were not the file, or the fetch's own error. purr_fetch_last_error() says which file and why. A response whose length the server stated and
+ * that ended short is a failed attempt in every fetch function, not just this one. */
+esp_err_t purr_fetch_alloc_checked(const char *url, uint8_t **out, size_t *out_len, size_t max_len, size_t want_size, const uint8_t want_sha256[32]);
 
 /* GETs into a caller-supplied buffer. Fails if the response is larger than cap. */
 esp_err_t purr_fetch_into(const char *url, uint8_t *buf, size_t cap, size_t *out_len);

@@ -9,6 +9,7 @@
  *   /home/<user>/assets/<item>/...        flash assets and extras, with a .version file
  *   /sd/purr/<item>/...                   SD card assets (when an SD card is mounted)
  */
+#include "purr_io.h"
 #include "purr_store.h"
 
 #include <ctype.h>
@@ -981,7 +982,7 @@ static void job_task(void *arg)
     int slot = s_job.slot;
     s_job.busy = 0;
     purr_catrt_post_ui(slot, s_job.rc < 0 ? 1 : s_job.rc == 2 ? 2 : 0, "job");
-    vTaskDelete(NULL);
+    purr_task_exit();
 }
 
 static int gate(int admin_only)
@@ -1014,7 +1015,7 @@ static int cc_start(const char *what, const char *a, const char *b)
     snprintf(s_job.what, sizeof(s_job.what), "%s", what);
     snprintf(s_job.a, sizeof(s_job.a), "%s", a != NULL ? a : "");
     snprintf(s_job.b, sizeof(s_job.b), "%s", b != NULL ? b : "");
-    if (xTaskCreate(job_task, "store-job", 14336, NULL, 3, NULL) != pdPASS) {
+    if (purr_task_create_ext(job_task, "store-job", 14336, NULL, 3, NULL) != pdPASS) {
         s_job.busy = 0;
         return PURR_STORE_BAD;
     }
@@ -1445,12 +1446,12 @@ static void seed_task(void *arg)
             ESP_LOGI(TAG, "the Store and its companion are installed for %s (the companion is off until the Store turns it on)", u);
         }
     }
-    vTaskDelete(NULL);
+    purr_task_exit();
 }
 
 void purr_store_session_started(void)
 {
-    if (purr_builtin_apps_count > 0 && xTaskCreate(seed_task, "store-seed", 12288, NULL, 3, NULL) != pdPASS) {
+    if (purr_builtin_apps_count > 0 && purr_task_create_ext(seed_task, "store-seed", 12288, NULL, 3, NULL) != pdPASS) {
         ESP_LOGW(TAG, "could not start the Store seeding task");
     }
 }
