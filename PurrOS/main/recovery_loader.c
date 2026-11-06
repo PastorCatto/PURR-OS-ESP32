@@ -620,15 +620,9 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
 
     uint8_t *image = NULL;
     size_t image_len = 0;
-    if (purr_fetch_alloc(url, &image, &image_len, MAX_IMAGE_SIZE) != ESP_OK) {
-        status("download failed");
-        return -1;
-    }
-    uint8_t got_hash[PURR_SHA256_LEN];
-    purr_sha256(image, image_len, got_hash);
-    if (image_len != entry->size || memcmp(got_hash, entry->sha256, PURR_SHA256_LEN) != 0) {
-        free(image);
-        status("download does not match the manifest (size or hash)");
+    esp_err_t fe = purr_fetch_alloc_checked(url, &image, &image_len, MAX_IMAGE_SIZE, entry->size, entry->sha256);    /* three tries, each checked */
+    if (fe != ESP_OK) {
+        status(fe == ESP_ERR_INVALID_SIZE || fe == ESP_ERR_INVALID_CRC ? "download does not match the manifest (size or hash)" : "download failed");
         return -1;
     }
 
@@ -687,9 +681,25 @@ static int fetch_and_install_module(const char *name, const char *label, uint8_t
     statusf("writing to %s...", label);
     int ok = (esp_partition_erase_range(slot, 0, slot->size) == ESP_OK &&
              esp_partition_write(slot, 0, write_data, write_len) == ESP_OK);
+    if (ok) {                                       /* read it back and compare, rather than trust the write (install_kittenos does the same) */
+        purr_sha256_t rs;
+        uint8_t rd[PURR_SHA256_LEN], chunk[512];
+        purr_sha256_init(&rs);
+        for (uint32_t off = 0; off < write_len && ok; off += sizeof(chunk)) {
+            uint32_t n = write_len - off < sizeof(chunk) ? write_len - off : (uint32_t)sizeof(chunk);
+            ok = esp_partition_read(slot, off, chunk, n) == ESP_OK;
+            if (ok) {
+                purr_sha256_update(&rs, chunk, n);
+            }
+        }
+        purr_sha256_final(&rs, rd);
+        uint8_t want[PURR_SHA256_LEN];
+        purr_sha256(write_data, write_len, want);
+        ok = ok && memcmp(rd, want, sizeof(rd)) == 0;
+    }
     free(image);
     if (!ok) {
-        status("write failed");
+        status("write failed (the flash does not hold what was written)");
         return -1;
     }
 
@@ -827,17 +837,12 @@ static int restore_components(int include_kernel)
         } else {
             resolve_url(purr_recovery_manifest_url(), entry->file, url, sizeof(url));
             status_step(purr_recovery_source_name() != NULL ? "Downloading " PURR_BRAND_PRODUCT " from your dev server" : "Downloading " PURR_BRAND_PRODUCT);
-            uint8_t got_hash[PURR_SHA256_LEN];
-            if (purr_fetch_alloc(url, &image, &image_len, MAX_IMAGE_SIZE) != ESP_OK) {
-                status("The download didn't finish.");
+            esp_err_t fe = purr_fetch_alloc_checked(url, &image, &image_len, MAX_IMAGE_SIZE, entry->size, entry->sha256);
+            if (fe != ESP_OK) {
+                status(fe == ESP_ERR_INVALID_SIZE || fe == ESP_ERR_INVALID_CRC ? "The download didn't match what the server promised." : "The download didn't finish.");
                 failures++;
             } else {
-                purr_sha256(image, image_len, got_hash);
-                if (image_len != entry->size ||
-                    memcmp(got_hash, entry->sha256, PURR_SHA256_LEN) != 0) {
-                    status("The download didn't match what the server promised.");
-                    failures++;
-                } else if (install_kittenos(image, image_len) != 0) {
+                if (install_kittenos(image, image_len) != 0) {
                     failures++;
                 }
                 free(image);
