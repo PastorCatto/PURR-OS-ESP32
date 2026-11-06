@@ -38,3 +38,19 @@ def image():
 
 def purrcfg():
     return _load("purrsdk_purrcfg", os.path.join("lib", "purrcfg.py"))
+
+
+def uiassets():
+    """purrstrap's pack writer (scripts/uiassets.py): the packer, the PNG reader and the RGB565 conversion, so a pack made by the kit is the pack the
+    release tools make. It imports purrstrap's `lib`, so purrstrap's folder is on the import path while it loads."""
+    if "purrsdk_uiassets" in sys.modules:
+        return sys.modules["purrsdk_uiassets"]
+    folder = purrstrap_dir()
+    added = folder not in sys.path
+    if added:
+        sys.path.insert(0, folder)
+    try:
+        return _load("purrsdk_uiassets", os.path.join("scripts", "uiassets.py"))
+    finally:
+        if added:
+            sys.path.remove(folder)

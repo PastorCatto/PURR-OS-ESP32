@@ -22,7 +22,7 @@ from . import formats, keybag, minitoml, p256
 
 FORMAT = 2
 ENDORSE_PREFIX = b"PURRREPO\0"
-TYPES = ("app", "asset", "extra")
+TYPES = ("app", "asset", "extra", "theme")
 TARGETS = ("flash", "sd", "any")
 
 

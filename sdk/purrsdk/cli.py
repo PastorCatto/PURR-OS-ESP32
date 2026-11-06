@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, inspector, keys, minitoml, projects, release, repo, runner, workspace
+from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, inspector, keys, minitoml, projects, release, repo, runner, ui, workspace
 
 TTY = sys.stdout.isatty()
 COL = {"ok": "92", "warn": "93", "bad": "91", "info": "96", "dim": "90"}
@@ -346,6 +346,29 @@ def cmd_font(a):
     return 0 if rep["ok"] else 1
 
 
+def cmd_ui(a):
+    if a.action == "pack":
+        out = a.out or "pack.bin"
+        try:
+            r = ui.pack_folder(a.target, out)
+        except ValueError as e:
+            print(paint("Not this time: ", "bad") + str(e))
+            return 1
+        print(paint("Packed.", "ok") + " %s: %d picture(s), %s bytes (cap %s)" % (r["path"], r["count"], format(r["bytes"], ","), format(ui.MAX_PACK_BYTES, ",")))
+        print("   " + ", ".join(r["names"][:12]) + (", ..." if len(r["names"]) > 12 else ""))
+        print(paint("Check it:", "dim") + " purr ui check %s --shell w10m|android" % out)
+        return 0
+    rep = ui.check(a.target, a.shell)
+    if a.json:
+        print(json.dumps(rep, indent=1))
+    else:
+        print("%s\n" % a.target)
+        for c in rep["checks"]:
+            line(c["status"], c["name"], c["text"])
+        print("\n" + ("This passes the checks." if rep["ok"] else "This fails the checks: see the lines marked ✗."))
+    return 0 if rep["ok"] else 1
+
+
 def cmd_config(a):
     if a.action == "schema":
         for s in configs.settings_schema():
@@ -386,7 +409,7 @@ def build_parser():
     s.add_argument("--keys", action="append", help="a folder of extra public keys (<role>_<id>.pub.bin)")
     s.set_defaults(fn=cmd_inspect)
 
-    s = sub.add_parser("new", help="start a project: app, driver, board or flavor")
+    s = sub.add_parser("new", help="start a project: app, driver, board, flavor or theme")
     s.add_argument("kind", choices=projects.KINDS)
     s.add_argument("name")
     s.add_argument("--class", dest="driver_class", default="sensor-i2c", help="for a driver: gnss, lora, modem, wifi, bluetooth or sensor-i2c")
@@ -494,6 +517,14 @@ def build_parser():
     s.add_argument("--max-size", type=int, default=font.DEFAULT_MAX_BYTES, help="the size cap in bytes (default %d, 1 MB)" % font.DEFAULT_MAX_BYTES)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_font)
+
+    s = sub.add_parser("ui", help="make a UI pack from a folder of PNGs, or check a pack or a theme folder the way the OS will")
+    s.add_argument("action", choices=("pack", "check"))
+    s.add_argument("target", help="for `pack`: the folder of PNGs; for `check`: a pack.bin or a theme folder")
+    s.add_argument("--out", help="for `pack`: the pack file (default pack.bin)")
+    s.add_argument("--shell", choices=ui.SHELLS, help="for `check`: this shell's picture names (UI/PACK-NAMES.md); a pack must have every required name, a theme folder may leave some out")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_ui)
 
     sub.add_parser("version", help="print the kit's version").set_defaults(fn=lambda a: print("PURR Developer Kit", __version__) or 0)
     return p

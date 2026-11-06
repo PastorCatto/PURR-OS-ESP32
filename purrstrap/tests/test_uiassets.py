@@ -179,5 +179,92 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(ua.package(ctx, "no_such_board", os.path.join(tmp, "nope.bin"), "1.0.0", ""), 1)
 
 
+def write_png(path, w, h, rgba):
+    import zlib
+    def chunk(tag, data):
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + rgba[y * w * 4:(y + 1) * w * 4] for y in range(h))
+    with open(path, "wb") as fh:
+        fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) +
+                 chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+class PerShellPackTests(unittest.TestCase):
+    """Flash map v2: a pack is a file (no partition lookup, no padding), at most 5 MB, packaged under a per-shell component name."""
+
+    def test_build_writes_the_pack_without_a_partition_or_padding(self):
+        from helpers import make_ctx
+        tmp = tempfile.mkdtemp()
+        src = os.path.join(tmp, "png")
+        os.makedirs(src)
+        write_png(os.path.join(src, "wp_system.png"), 2, 2, bytes([255, 0, 0, 255] * 4))
+        out = os.path.join(tmp, "out", "pack.bin")
+        ctx, _ = make_ctx(tmp)
+        self.assertEqual(ua.build(ctx, "tdeck_plus", src, out, True), 0)
+        data = open(out, "rb").read()
+        magic, count, _crc = struct.unpack(ua.HEADER_FMT, data[:12])
+        self.assertEqual((magic, count), (ua.MAGIC, 1))
+        self.assertEqual(len(data), ua.used_length(data))            # nothing after the last picture but alignment
+        self.assertEqual(len(data), 12 + ua.ENTRY_SIZE + 12)
+
+    def test_the_size_cap_is_5_mb_and_exactly_the_cap_is_allowed(self):
+        from helpers import make_ctx
+        tmp = tempfile.mkdtemp()
+        ctx, _ = make_ctx(tmp)
+        self.assertEqual(ua.MAX_PACK_BYTES, 5 * 1024 * 1024)
+        images = [("a", 3, 2, bytes(12)), ("b", 2, 2, bytes(8))]
+        size = len(ua.pack(images))
+        keep, ua.MAX_PACK_BYTES = ua.MAX_PACK_BYTES, size
+        try:
+            self.assertEqual(ua._write_pack(ctx, images, os.path.join(tmp, "ok.bin"), "x"), 0)
+            ua.MAX_PACK_BYTES = size - 1
+            big = os.path.join(tmp, "big.bin")
+            self.assertEqual(ua._write_pack(ctx, images, big, "x"), 1)
+        finally:
+            ua.MAX_PACK_BYTES = keep
+        self.assertFalse(os.path.exists(big))
+        # and a real over-the-cap pack (three 1024-wide pictures, about 5.4 MB)
+        over = [("a", 1024, 1024, bytes(1024 * 1024 * 2)), ("b", 1024, 1024, bytes(1024 * 1024 * 2)), ("c", 1024, 600, bytes(1024 * 600 * 2))]
+        self.assertEqual(ua._write_pack(ctx, over, os.path.join(tmp, "over.bin"), "x"), 1)
+
+    def test_the_package_name_picks_the_component(self):
+        from lib import image as pimg
+        from helpers import make_ctx
+        blob = ua.pack([("a", 2, 2, b"\x01" * 8)])
+        tmp = tempfile.mkdtemp()
+        src = os.path.join(tmp, "pack.bin")
+        with open(src, "wb") as fh:
+            fh.write(blob)
+        ctx, _ = make_ctx(tmp)
+        for name in ("ui_w10m", "ui_android"):
+            dest = os.path.join(tmp, name + ".cat")
+            self.assertEqual(ua.package(ctx, "tdeck_plus", src, "1.0.29", dest, name=name), 0)
+            data = open(dest, "rb").read()
+            f = pimg.header_fields(pimg.parse_header(data))
+            self.assertEqual((f["name"], f["image_type"], f["flags"] & 0xFF), (name, pimg.IMG_MODULE, pimg.MOD_UIASSETS))
+            self.assertEqual(data[pimg.HEADER_SIZE:], blob)
+        # no name: the old component, and the old default file name
+        self.assertEqual(ua.package(ctx, "tdeck_plus", src, "1.0.29", os.path.join(tmp, "d.cat")), 0)
+        self.assertEqual(pimg.header_fields(pimg.parse_header(open(os.path.join(tmp, "d.cat"), "rb").read()))["name"], "uiassets")
+
+    def test_an_unknown_component_name_is_refused(self):
+        from helpers import make_ctx
+        tmp = tempfile.mkdtemp()
+        src = os.path.join(tmp, "pack.bin")
+        with open(src, "wb") as fh:
+            fh.write(ua.pack([("a", 2, 2, b"\x01" * 8)]))
+        ctx, _ = make_ctx(tmp)
+        for bad in ("kernel", "ui w10m", "", "../x"):
+            self.assertEqual(ua.package(ctx, "tdeck_plus", src, "1.0.29", os.path.join(tmp, "x.cat"), name=bad), 1, bad)
+        self.assertFalse(os.path.exists(os.path.join(tmp, "x.cat")))
+
+    def test_the_script_offers_name_with_the_three_components(self):
+        pkg = next(a for a in ua.SCRIPT.actions if a.name == "package")
+        p = next(x for x in pkg.params if x.name == "name")
+        self.assertEqual(p.default, "uiassets")
+        self.assertEqual(tuple(p.choices), ("uiassets", "ui_w10m", "ui_android"))
+
+
 if __name__ == "__main__":
     unittest.main()

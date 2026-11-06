@@ -1,5 +1,7 @@
-"""Packs images into the `ui_assets` partition purr_ui_assets.c reads (the LVGL UI's asset
-pack, PurrOS/main/purr_ui_config.h's "image" widgets reference by name).
+"""Packs images into a UI pack file, `pack.bin`: the shell's pictures by name (flash map v2, plan1.md:
+`/ui/<shell>/pack.bin` and `/ui/themes/<id>/pack.bin` in LittleFS; until then purr_ui_assets.c read the
+same bytes from a raw `ui_assets` partition, which the new partition table no longer has).
+PurrOS/main/purr_ui_config.h's "image" widgets reference the pictures by name.
 
 Takes a directory of PNG files (filename without extension = the asset name
 purr_ui_config.c's `asset = "name"` property looks up), decodes each with a small pure-Python
@@ -11,8 +13,8 @@ data. That exact layout was verified against the real xtensa-esp32s3-elf cross-c
 other way around -- the netrec record_t struct earlier in this project got bitten by
 exactly the mistake that check was for (an unaccounted-for compiler padding byte).
 
-Not signed (OTA/SPEC.md's reasoning for every other plain-data partition: not executable
-code) -- just a CRC32 (zlib's, byte-for-byte what purr_crc32 computes) over the directory and
+The file itself is not signed (OTA/SPEC.md's reasoning for every other plain-data file: not executable
+code); `package` wraps it for the release, where the system key signs it -- just a CRC32 (zlib's, byte-for-byte what purr_crc32 computes) over the directory and
 pixel data, checked once at init by purr_ui_assets_init() so a corrupt or partial write (an
 interrupted netinstall, say) is read as "no assets" rather than garbage.
 
@@ -21,7 +23,6 @@ else (palette, grayscale, 16-bit, interlaced) is refused with a clear error rath
 silently mishandled.
 """
 
-import csv
 import os
 import re
 import struct
@@ -38,6 +39,8 @@ CF_RGB565A8 = 1                           # an RGB565 plane (w*h*2) then an 8-bi
 ALIGN = 4                                 # every entry's data starts on a 4-byte boundary
 ENTRY_SIZE = struct.calcsize(ENTRY_FMT)
 BOARDS = ("tdeck", "tdeck_plus")          # the only boards that build LVGL in at all
+MAX_PACK_BYTES = 5 * 1024 * 1024          # a pack is a file in LittleFS now: the cap the release tools and `purr ui check` apply
+PACK_COMPONENTS = ("uiassets", "ui_w10m", "ui_android")   # the names a packed pack can carry; the last two are the per-shell packs, `uiassets` the old single one
 
 
 # -- a small, pure-Python PNG decoder (8bpc RGB/RGBA, non-interlaced only) -------------
@@ -208,6 +211,21 @@ def parse_lvgl_array(path):
     return name, w, h, data, cf
 
 
+def _write_pack(ctx, images, out, what):
+    """Packs, applies the 5 MB cap, writes the file (no padding: it is a file in LittleFS, not a partition)."""
+    image = pack(images)
+    if len(image) > MAX_PACK_BYTES:
+        ctx.error(f"packed {what} are {len(image)} bytes, more than the {MAX_PACK_BYTES}-byte cap "
+                  f"({len(image) - MAX_PACK_BYTES} over)")
+        return 1
+    dest = out or os.path.join(ctx.repo_root, "rel", "ui", "pack.bin")
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(image)
+    ctx.ok(f"{dest}: {len(images)} asset(s), {len(image)} bytes")
+    return 0
+
+
 def import_lvgl(ctx, board, src, out, skip):
     if board not in BOARDS:
         ctx.error(f"unknown board {board!r}")
@@ -215,10 +233,6 @@ def import_lvgl(ctx, board, src, out, skip):
     if not os.path.isdir(src):
         ctx.error(f"{src}: no such directory")
         return 1
-    found = find_partition(ctx, ctx.repo_root, board, "ui_assets")
-    if found is None:
-        return 1
-    offset, size = found
     skipped = {s.strip() for s in skip.split(",") if s.strip()}
     images = []
     for fname in sorted(os.listdir(src)):
@@ -235,49 +249,18 @@ def import_lvgl(ctx, board, src, out, skip):
     if not images:
         ctx.error(f"{src}: no ui_img_*_png.c files")
         return 1
-    image = pack(images)
-    if len(image) > size:
-        ctx.error(f"packed assets are {len(image)} bytes, more than the {size}-byte "
-                  f"ui_assets partition ({len(image) - size} over); skip some with --skip")
-        return 1
-    image += b"\xff" * (size - len(image))
-    dest = out or os.path.join(ctx.repo_root, "rel", "ui_assets", f"{board}.ui_assets.bin")
-    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-    with open(dest, "wb") as fh:
-        fh.write(image)
-    used = len(pack(images))
-    ctx.ok(f"{dest}: {len(images)} asset(s), {used} of {size} bytes used (partition offset {offset:#x})")
-    return 0
-
-
-def find_partition(ctx, repo_root, board, name):
-    path = os.path.join(repo_root, "PurrOS", "partitions", f"{board}.csv")
-    if not os.path.isfile(path):
-        ctx.error(f"{path}: no such file")
-        return None
-    with open(path, newline="", encoding="utf-8") as fh:
-        for row in csv.reader(fh):
-            row = [c.strip() for c in row]
-            if not row or not row[0] or row[0].startswith("#"):
-                continue
-            if row[0] == name:
-                return int(row[3], 0), int(row[4], 0)
-    ctx.error(f"{path}: no {name!r} partition")
-    return None
+    return _write_pack(ctx, images, out, "assets")
 
 
 def build(ctx, board, assets_dir, out, alpha=False):
+    """A folder of PNGs to a pack file. `alpha` decides for the whole folder: RGB565A8 for every picture (an RGB one gets an opaque
+    plane), or plain RGB565 for every picture."""
     if board not in BOARDS:
         ctx.error(f"unknown board {board!r} (LVGL only builds for {', '.join(BOARDS)})")
         return 1
     if not os.path.isdir(assets_dir):
         ctx.error(f"{assets_dir}: no such directory")
         return 1
-
-    found = find_partition(ctx, ctx.repo_root, board, "ui_assets")
-    if found is None:
-        return 1
-    offset, size = found
 
     pngs = sorted(f for f in os.listdir(assets_dir) if f.lower().endswith(".png"))
     if not pngs:
@@ -299,25 +282,7 @@ def build(ctx, board, assets_dir, out, alpha=False):
         else:
             images.append((name, w, h, to_rgb565(w, h, channels, pixels)))
             ctx.info(f"{fname}: {w}x{h}, {channels} channel(s) -> {w * h * 2} bytes RGB565")
-
-    image = pack(images)
-    if len(image) > size:
-        ctx.error(f"packed assets are {len(image)} bytes, more than the {size}-byte "
-                 f"ui_assets partition ({len(image) - size} over)")
-        return 1
-    image += b"\xff" * (size - len(image))     # pad to the full partition, erased-flash style
-
-    dest = out or os.path.join(ctx.repo_root, "rel", "ui_assets", f"{board}.ui_assets.bin")
-    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-    with open(dest, "wb") as fh:
-        fh.write(image)
-
-    ctx.ok(f"{dest}: {len(images)} asset(s), {len(image)} bytes (partition offset {offset:#x})")
-    ctx.info("flash it with:")
-    ctx.info(f"  python -m esptool --chip esp32s3 -b 460800 write_flash {offset:#x} {dest}")
-    ctx.info("(add -p <PORT> for the device's serial port; this only overwrites the "
-              "ui_assets partition, nothing else on the device.)")
-    return 0
+    return _write_pack(ctx, images, out, "assets")
 
 
 def used_length(data):
@@ -341,11 +306,15 @@ def used_length(data):
     return (total + ALIGN - 1) // ALIGN * ALIGN
 
 
-def package(ctx, board, file, version, out):
-    """Wraps a built pack into the unsigned PURR_IMG_MODULE container (subtype PURR_MOD_UIASSETS) that stage 2 and
-    `netinstall uiassets` install; sign it with `keys sign` (the boot key, or the release's system key) before publishing."""
+def package(ctx, board, file, version, out, name="uiassets"):
+    """Wraps a built pack into the unsigned PURR_IMG_MODULE container (subtype PURR_MOD_UIASSETS) that stage 2 installs; `name`
+    is the component: `ui_w10m` or `ui_android` for the per-shell packs (flash map v2), `uiassets` for the old single pack.
+    Sign it with `keys sign` (the release's system key) before publishing."""
     if board not in BOARDS:
         ctx.error(f"unknown board {board!r} (LVGL only builds for {', '.join(BOARDS)})")
+        return 1
+    if name not in PACK_COMPONENTS:
+        ctx.error(f"unknown component {name!r}: one of {', '.join(PACK_COMPONENTS)}")
         return 1
     if not os.path.isfile(file):
         ctx.error(f"{file}: no such file")
@@ -357,44 +326,47 @@ def package(ctx, board, file, version, out):
     except ValueError as e:
         ctx.error(f"{file}: {e}")
         return 1
-    image = pimg.make_image("uiassets", version, pimg.IMG_MODULE, pimg.MOD_UIASSETS, data[:n], pimg.CHIP_ESP32S3)
-    dest = out or f"uiassets-{board}.cat"
+    if n > MAX_PACK_BYTES:
+        ctx.error(f"{file}: the pack is {n} bytes, more than the {MAX_PACK_BYTES}-byte cap")
+        return 1
+    image = pimg.make_image(name, version, pimg.IMG_MODULE, pimg.MOD_UIASSETS, data[:n], pimg.CHIP_ESP32S3)
+    dest = out or f"{name}-{board}.cat"
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     with open(dest, "wb") as fh:
         fh.write(image)
-    ctx.ok(f"{dest}: {len(image)} bytes (uiassets {version}, {n} of {len(data)} bytes of the pack, unsigned)")
-    ctx.info(f"sign it: purrstrap keys sign --key boot.key --image {dest} --key-id <id>")
+    ctx.ok(f"{dest}: {len(image)} bytes ({name} {version}, {n} of {len(data)} bytes of the pack, unsigned)")
+    ctx.info(f"sign it: purrstrap keys sign --key <system key> --image {dest} --key-id <id>")
     return 0
 
 
 SCRIPT = Script(
     name="uiassets",
     title="UI asset pack",
-    description="Pack PNG images into the ui_assets partition the LVGL UI's \"image\" "
-                "widgets reference by name.",
+    description="Pack PNG images into a UI pack file (pack.bin) the LVGL UI's pictures are read from by name, "
+                "and wrap a pack as a release component (ui_w10m, ui_android).",
     actions=(
         Action("import-lvgl", "Import LVGL arrays", import_lvgl,
                help="pack SquareLine/LVGL image arrays (ui_img_*_png.c) as they are, alpha included",
                params=(
                    Param("board", "choice", default="tdeck_plus", choices=BOARDS,
-                         help="the board (decides the ui_assets partition's offset/size)"),
+                         help="the board"),
                    Param("src", "path", required=True,
                          help="directory holding the ui_img_<name>_png.c files"),
                    Param("out", "path", default="",
-                         help="output file (default: rel/ui_assets/<board>.ui_assets.bin)"),
+                         help="output file (default: rel/ui/pack.bin)"),
                    Param("skip", "str", default="",
                          help="asset names to leave out, comma separated"),
                )),
         Action("build", "Build", build,
-               help="decode a directory of PNGs and pack them for the ui_assets partition",
+               help="decode a directory of PNGs and pack them into a pack file (at most 5 MB)",
                params=(
                    Param("board", "choice", default="tdeck_plus", choices=BOARDS,
-                         help="the board (decides the ui_assets partition's offset/size)"),
+                         help="the board"),
                    Param("assets_dir", "path", required=True,
                          help="directory of .png files; each file name (without .png) "
                               "becomes the asset name"),
                    Param("out", "path", default="",
-                         help="output file (default: rel/ui_assets/<board>.ui_assets.bin)"),
+                         help="output file (default: rel/ui/pack.bin)"),
                    Param("alpha", "bool", default=False,
                          help="keep each PNG's alpha channel (RGB565A8, 3 bytes a pixel) instead "
                               "of flattening to opaque RGB565; the Android shell's icons need it"),
@@ -405,11 +377,13 @@ SCRIPT = Script(
                    Param("board", "choice", default="tdeck_plus", choices=BOARDS,
                          help="the board the pack is for"),
                    Param("file", "path", required=True,
-                         help="the pack built by `uiassets build` (the padding to the partition's size is left out)"),
+                         help="the pack built by `uiassets build`"),
                    Param("version", "str", required=True,
-                         help="the pack's version, for example 1.0.17"),
+                         help="the pack's version, for example 1.0.29"),
                    Param("out", "path", default="",
-                         help="output file (default: uiassets-<board>.cat)"),
+                         help="output file (default: <name>-<board>.cat)"),
+                   Param("name", "choice", default="uiassets", choices=PACK_COMPONENTS,
+                         help="the component: ui_w10m or ui_android (a shell's own pack), or uiassets (the old single pack)"),
                )),
     ),
 )

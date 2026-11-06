@@ -1,0 +1,69 @@
+The pictures in this folder are the artwork of windows-10-mobile-lvgl by Felix Biego,
+https://github.com/fbiego/windows-10-mobile-lvgl
+used under the MIT licence below (also quoted in THIRD_PARTY.md at the top of this repository).
+
+Upstream commit: c62690fe35509a2f61d058886c67ad3e276f3ce8
+
+What was taken, and how (tools/ui/w10m_pack.py): for each picture name the Windows 10 Mobile shell asks for (UI/PACK-NAMES.md),
+the upstream PNG (squareline/assets/<name>.png) is copied unchanged; where upstream has only the SquareLine image array
+(src/ui/images/ui_img_<name>_png.c) its RGB565 colour plane and 8-bit alpha plane are expanded to an RGBA PNG (the same pixels:
+checked against the pictures upstream has both of). Nothing is resized or recoloured.
+
+  wp_system             32 x 32   upstream PNG, copied
+  wp_devices            32 x 32   SquareLine array, converted
+  wp_network            32 x 32   SquareLine array, converted
+  wp_personalization    32 x 32   SquareLine array, converted
+  wp_apps               32 x 32   SquareLine array, converted
+  wp_account            32 x 32   SquareLine array, converted
+  wp_time               32 x 32   SquareLine array, converted
+  wp_privacy            32 x 32   SquareLine array, converted
+  wp_about              32 x 32   SquareLine array, converted
+  wp_settings           32 x 32   upstream PNG, copied
+  wifi_icon             24 x 24   SquareLine array, converted
+  wifi_ic               16 x 16   upstream PNG, copied
+  brightness_ic         16 x 16   upstream PNG, copied
+  settings_ic           16 x 16   upstream PNG, copied
+  airplane_ic           16 x 16   upstream PNG, copied
+  cellular_ic           16 x 16   upstream PNG, copied
+  bluetooth_ic          16 x 16   upstream PNG, copied
+  battery_ic            16 x 16   upstream PNG, copied
+  hotspot_ic            16 x 16   upstream PNG, copied
+  vpn_ic                16 x 16   upstream PNG, copied
+  location_ic           16 x 16   upstream PNG, copied
+  img0                 320 x 569  upstream PNG, copied
+  img1                 320 x 569  upstream PNG, copied
+  img2                 320 x 569  upstream PNG, copied
+  img3                 320 x 569  upstream PNG, copied
+  img4                 320 x 569  upstream PNG, copied
+  img5                 320 x 569  upstream PNG, copied
+  img6                 320 x 569  upstream PNG, copied
+  img7                 320 x 569  upstream PNG, copied
+  img8                 320 x 569  upstream PNG, copied
+  img9                 320 x 569  upstream PNG, copied
+
+Some of this imagery (the Windows-style icons and the wallpapers) is not Felix Biego's to license; THIRD_PARTY.md says it is placeholder
+art to be replaced before anything is shipped.
+
+----------------------------------------------------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2024 Felix Biego
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

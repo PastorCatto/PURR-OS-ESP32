@@ -8,7 +8,7 @@ froyo-release branch. Nothing here is Google application artwork or a phone make
 
 Each source is resampled once, here, to the size the shell draws it at, with alpha handled
 premultiplied (so edges do not pick up a dark fringe), and written as a PNG named for the asset it
-becomes. `purrstrap uiassets build --alpha true` packs the folder for the ui_assets partition.
+becomes. `purrstrap uiassets build --alpha` packs the folder into the Android shell's pack (pack.bin, ui_android).
 Nothing is ever scaled on the device.
 
   python3 tools/ui/froyo_pack.py --launcher <dir of launcher pngs> --status <dir of status pngs> --out UI/android-assets

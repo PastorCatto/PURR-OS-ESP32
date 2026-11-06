@@ -1,9 +1,10 @@
-"""Projects: start one from a template, build it, sign it. Four kinds:
+"""Projects: start one from a template, build it, sign it. Five kinds:
 
     app      a PURR app (AppSDK): unprivileged starter
     driver   a freestanding driver for a device class (templates.py)
     board    a board.toml: checked, then written out as the kernel's board file and a device profile
     flavor   a brand.toml: checked, then built into the boot package with your names and colours
+    theme    a UI theme: a theme.conf and a folder of PNGs, built into the pack.bin the device reads (ui.py)
 """
 
 import os
@@ -13,8 +14,9 @@ import shutil
 from . import boards as boards_mod
 from . import brand as brand_mod
 from . import minitoml, runner, templates, workspace
+from . import ui as ui_mod
 
-KINDS = ("app", "driver", "board", "flavor")
+KINDS = ("app", "driver", "board", "flavor", "theme")
 APP_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -75,6 +77,15 @@ def new(ws, kind, name, **opts):
         _write(os.path.join(dest, "purr-project.toml"), minitoml.dumps({"project": {"kind": "board", "name": name, "version": "0.1.0"}}))
         files = ["board.toml", "purr-project.toml"]
         nxt = "This starts as a copy of the T-Deck Plus. Change the pins and devices to match your board, then Build."
+    elif kind == "theme":
+        if not ui_mod.THEME_ID_RE.match(name):
+            raise ProjectError("Name a theme with 1 to 39 letters, digits, underscores or dashes: it becomes the folder /ui/themes/<name> on the device.")
+        _write(os.path.join(dest, "theme.conf"), ui_mod.THEME_CONF_TEMPLATE % {"name": name})
+        _write(os.path.join(dest, "README.txt"), ui_mod.THEME_README)
+        os.makedirs(os.path.join(dest, "images"))
+        _write(os.path.join(dest, "purr-project.toml"), minitoml.dumps({"project": {"kind": "theme", "name": name, "version": "0.1.0"}}))
+        files = ["theme.conf", "README.txt", "images/", "purr-project.toml"]
+        nxt = "Fill in theme.conf, put PNG pictures in images/ (the names are in UI/PACK-NAMES.md), then Build, or `purr ui pack` and `purr ui check`."
     else:
         _write(os.path.join(dest, "brand.toml"), brand_mod.TEMPLATE)
         _write(os.path.join(dest, "purr-project.toml"), minitoml.dumps({"project": {"kind": "flavor", "name": name, "version": "0.1.0"}, "flavor": {"board": opts.get("board", "tdeck_plus")}}))
@@ -202,6 +213,33 @@ def build(ws, path, board="tdeck_plus", key=None, key_id=0, password=None, on_li
                 return finish(False)
         else:
             notes.append("Not signed yet: choose a key to sign it. A device in developer mode runs unsigned apps from your own folder.")
+        return finish(True)
+
+    if kind == "theme":
+        conf_path = os.path.join(path, "theme.conf")
+        if not os.path.isfile(conf_path):
+            say("There is no theme.conf in the project.")
+            return finish(False)
+        with open(conf_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        items, _values = ui_mod.check_conf_text(text, os.path.getsize(conf_path))
+        for item in items:
+            if item["status"] in ("bad", "warn"):
+                say("[%s] %s: %s" % (item["status"], item["name"], item["text"]))
+        if any(item["status"] == "bad" for item in items):
+            say("Fix the problems above, then build again.")
+            return finish(False)
+        out = os.path.join(out_dir, name)
+        os.makedirs(out, exist_ok=True)
+        try:
+            r = ui_mod.pack_folder(os.path.join(path, "images"), os.path.join(out, "pack.bin"))
+        except ValueError as e:
+            say("The pack did not build: %s" % e)
+            return finish(False)
+        shutil.copyfile(conf_path, os.path.join(out, "theme.conf"))
+        artifacts += [os.path.join(out, "theme.conf"), r["path"]]
+        say("Packed %d picture(s), %d bytes." % (r["count"], r["bytes"]))
+        notes.append("Copy the folder %s to /ui/themes/%s on the device (or the SD card's ui/themes folder). Check it first: purr ui check %s --shell <w10m|android>." % (out, name, out))
         return finish(True)
 
     raise ProjectError("Cannot build a %r project." % kind)
