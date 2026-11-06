@@ -1,5 +1,5 @@
 name = "messages"
-version = "0.1.0"
+version = "0.1.1"
 description = "Messages: one front end for messaging services such as Meshtastic, Reticulum and MeshCore"
 class = "unprivileged"
 kind = "ui"

@@ -131,7 +131,7 @@ NO_OPT static void fill_rows(void)
             if (k) append(sub, ", ", 64);
             append(sub, svc_name(c.a[k].service), 64);
         }
-        h_row[s_nrows] = ui->row(c.name, sub[0] ? sub : "No messaging address");
+        h_row[s_nrows] = ui->conv_row != NULL ? ui->conv_row(c.name, sub[0] ? sub : "No messaging address", NULL, NULL, 0) : ui->row(c.name, sub[0] ? sub : "No messaging address");
         s_row_id[s_nrows] = c.id;
         s_nrows++;
     }
@@ -318,7 +318,10 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
         return -1;
     }
     app = (const purr_cc_app_t *)env->catcall_get("app", 1);
-    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 3);
+    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 4);
+    if (ui == NULL) {
+        ui = (const purr_cc_ui_t *)env->catcall_get("ui", 3);
+    }
     ct = (const purr_cc_contacts_t *)env->catcall_get("contacts", 1);
     mq = (const purr_cc_messaging_t *)env->catcall_get("messaging", 1);
     if (ui == NULL) {

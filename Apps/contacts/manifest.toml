@@ -1,5 +1,5 @@
 name = "contacts"
-version = "0.1.0"
+version = "0.1.1"
 description = "Contacts: the address book, with one address per messaging service"
 class = "unprivileged"
 kind = "ui"

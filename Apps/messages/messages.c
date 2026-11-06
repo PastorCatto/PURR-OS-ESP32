@@ -229,23 +229,16 @@ NO_OPT static void show_list(void)
             break;
         }
         purr_cc_msg_thread_t *t = &s_th[i];
-        char title[64], sub[64];
-        title[0] = '\0';
-        append(title, t->name[0] ? t->name : t->peer, 64);
-        append(title, "   ", 64);
-        append(title, svc_tag(t->service), 64);
+        char sub[64], tm[8];
         sub[0] = '\0';
-        if (t->unread > 0) {
-            append(sub, "(", 64);
-            append_num(sub, t->unread, 64);
-            append(sub, ") ", 64);
-            unread_total += (int)t->unread;
-        }
         if (t->last_dir == PURR_MSGCC_OUT) {
             append(sub, t->last_state == PURR_MSGCC_FAILED ? "Not sent: " : "You: ", 64);
         }
         append(sub, t->last[0] ? t->last : "Picture", 64);
-        s_row[s_nrows] = ui->row(title, sub);
+        fmt_time(t->last_time, tm, sizeof(tm));
+        unread_total += (int)t->unread;
+        s_row[s_nrows] = ui->conv_row(t->name[0] ? t->name : t->peer, sub, tm, svc_tag(t->service),
+                                      (t->unread > 0 ? PURR_UI_CONV_UNREAD : 0) | (t->last_dir == PURR_MSGCC_OUT && t->last_state == PURR_MSGCC_FAILED ? PURR_UI_CONV_FAILED : 0));
         s_row_thread[s_nrows] = t->id;
         s_nrows++;
     }
