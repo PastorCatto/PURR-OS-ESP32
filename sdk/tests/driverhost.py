@@ -35,7 +35,7 @@ class KVCfg(C.Structure):
 
 
 class Device(C.Structure):
-    _fields_ = [("name", C.c_char_p), ("compatible", C.c_char_p), ("priority", C.c_int), ("extra_pins", C.c_int * 6), ("cfg", PTR)]
+    _fields_ = [("name", C.c_char_p), ("compatible", C.c_char_p), ("priority", C.c_int), ("extra_pins", C.c_int * 6), ("cfg", PTR), ("defer", c_u8)]
 
 
 PROBE = C.CFUNCTYPE(C.c_int, C.POINTER(Device), PTR, C.POINTER(PTR))

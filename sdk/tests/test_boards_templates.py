@@ -66,8 +66,10 @@ class Boards(unittest.TestCase):
         self.assertIn("bus=uart", text)
         self.assertIn("device=trackball\ncompatible=trackball-gpio", text)
         self.assertIn("device=sd0\ncompatible=sd-spi", text)
+        self.assertIn("device=kbd-backlight\n", text)
+        self.assertIn("device=kbdraw\n", text)
         self.assertNotIn("speaker", text)                # templates (no driver yet) are not written
-        self.assertEqual(n, 5)
+        self.assertEqual(n, 6)
 
 
 class Templates(unittest.TestCase):
