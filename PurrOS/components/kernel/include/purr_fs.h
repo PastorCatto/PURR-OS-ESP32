@@ -62,6 +62,10 @@ int purr_fs_read(purr_fs_t *fs, const char *path, purr_fs_read_fn cb, void *ctx)
 /* Create or replace a file. The old contents stay until the new file is closed. */
 int purr_fs_write(purr_fs_t *fs, const char *path, const void *data, uint32_t len);
 
+/* Adds to the end of a file, creating it if there is none. */
+int purr_fs_append(purr_fs_t *fs, const char *path, const void *data, uint32_t len);
+/* Up to cap bytes from offset (*got of them); *total is the file's size. */
+int purr_fs_read_at(purr_fs_t *fs, const char *path, uint32_t offset, void *buf, uint32_t cap, uint32_t *got, uint32_t *total);
 int purr_fs_mkdir(purr_fs_t *fs, const char *path);
 int purr_fs_remove(purr_fs_t *fs, const char *path);      /* a file or an empty directory */
 int purr_fs_rename(purr_fs_t *fs, const char *from, const char *to);

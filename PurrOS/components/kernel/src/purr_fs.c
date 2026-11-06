@@ -190,6 +190,49 @@ int purr_fs_write(purr_fs_t *fs, const char *path, const void *data, uint32_t le
     return lfs_file_close(&fs->lfs, &file);
 }
 
+int purr_fs_append(purr_fs_t *fs, const char *path, const void *data, uint32_t len)
+{
+    NEED_MOUNT(fs);
+    lfs_file_t file;
+    struct lfs_file_config fc = {.buffer = fs->file_buf};
+    int e = lfs_file_opencfg(&fs->lfs, &file, path, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_APPEND, &fc);
+    if (e < 0) {
+        return e;
+    }
+    if (len > 0) {
+        lfs_ssize_t n = lfs_file_write(&fs->lfs, &file, data, len);
+        if (n < 0 || (uint32_t)n != len) {
+            lfs_file_close(&fs->lfs, &file);
+            return n < 0 ? (int)n : LFS_ERR_NOSPC;
+        }
+    }
+    return lfs_file_close(&fs->lfs, &file);
+}
+
+int purr_fs_read_at(purr_fs_t *fs, const char *path, uint32_t offset, void *buf, uint32_t cap, uint32_t *got, uint32_t *total)
+{
+    NEED_MOUNT(fs);
+    lfs_file_t file;
+    struct lfs_file_config fc = {.buffer = fs->file_buf};
+    int e = lfs_file_opencfg(&fs->lfs, &file, path, LFS_O_RDONLY, &fc);
+    if (e < 0) {
+        return e;
+    }
+    lfs_soff_t size = lfs_file_size(&fs->lfs, &file);
+    *total = size < 0 ? 0 : (uint32_t)size;
+    *got = 0;
+    if (size >= 0 && offset < (uint32_t)size && cap > 0) {
+        lfs_file_seek(&fs->lfs, &file, (lfs_soff_t)offset, LFS_SEEK_SET);
+        lfs_ssize_t n = lfs_file_read(&fs->lfs, &file, buf, cap);
+        if (n < 0) {
+            lfs_file_close(&fs->lfs, &file);
+            return (int)n;
+        }
+        *got = (uint32_t)n;
+    }
+    return lfs_file_close(&fs->lfs, &file);
+}
+
 int purr_fs_mkdir(purr_fs_t *fs, const char *path)
 {
     NEED_MOUNT(fs);

@@ -85,7 +85,7 @@ static void test_parse_hostile(void)
     CHECK_EQ(t.count, 1);
     CHECK_EQ(purr_perm_set(&t, big, PURR_PERM_KEEP_AWAKE, PURR_PERM_ALWAYS), -1);
     CHECK_EQ(purr_perm_set(&t, "", PURR_PERM_KEEP_AWAKE, PURR_PERM_ALWAYS), -1);
-    CHECK_EQ(purr_perm_set(&t, "x", 7, PURR_PERM_ALWAYS), -1);
+    CHECK_EQ(purr_perm_set(&t, "x", PURR_PERM_COUNT, PURR_PERM_ALWAYS), -1);          /* one past the last is refused */
     CHECK_EQ(purr_perm_set(&t, "x", PURR_PERM_KEEP_AWAKE, 9), -1);
 }
 
@@ -112,6 +112,26 @@ static void test_full_forget_reset(void)
     CHECK(purr_perm_by_name("keep-awake") == PURR_PERM_KEEP_AWAKE && purr_perm_by_name("wifi") == -1);
 }
 
+static void test_messaging_permissions(void)
+{
+    CHECK(purr_perm_by_name("messaging") == PURR_PERM_MESSAGING && purr_perm_by_name("contacts") == PURR_PERM_CONTACTS && purr_perm_by_name("radio") == PURR_PERM_RADIO);
+    CHECK(purr_perm_describe(PURR_PERM_MESSAGING) != NULL && purr_perm_describe(PURR_PERM_RADIO) != NULL);
+    purr_perm_t t;
+    memset(&t, 0, sizeof(t));
+    CHECK_EQ(purr_perm_decide(&t, "messages", PURR_PERM_MESSAGING, 0), PURR_PERM_PROMPT);       /* asked at first use */
+    purr_perm_set(&t, "messages", PURR_PERM_MESSAGING, PURR_PERM_ALWAYS);
+    purr_perm_set(&t, "messages", PURR_PERM_CONTACTS, PURR_PERM_NEVER);
+    CHECK_EQ(purr_perm_decide(&t, "messages", PURR_PERM_MESSAGING, 0), PURR_PERM_YES);
+    CHECK_EQ(purr_perm_decide(&t, "messages", PURR_PERM_CONTACTS, 0), PURR_PERM_NO);
+    char text[256];
+    purr_perm_format(&t, text, sizeof(text));
+    purr_perm_t t2;
+    memset(&t2, 0, sizeof(t2));
+    purr_perm_parse(&t2, text);
+    CHECK_EQ(purr_perm_state(&t2, "messages", PURR_PERM_MESSAGING), PURR_PERM_ALWAYS);        /* saved and read back by name */
+    CHECK_EQ(purr_perm_state(&t2, "messages", PURR_PERM_CONTACTS), PURR_PERM_NEVER);
+}
+
 int main(void)
 {
     test_decide();
@@ -119,5 +139,6 @@ int main(void)
     test_file_round_trip();
     test_parse_hostile();
     test_full_forget_reset();
+    test_messaging_permissions();
     TK_DONE("test_perm");
 }

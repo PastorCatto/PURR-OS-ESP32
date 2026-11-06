@@ -25,7 +25,10 @@ extern "C" {
 #define PURR_PERM_SYSTEM_FILES   3  /* "system-files": read system files, read-only (administrators only) */
 #define PURR_PERM_MANAGE_DEVICES 4  /* "manage-devices": find, set up and remove hardware, update drivers and the system (administrators only) */
 #define PURR_PERM_INSTALL_APPS 5    /* "install-apps": install, update and remove apps and downloads from the repositories the system trusts */
-#define PURR_PERM_COUNT      6
+#define PURR_PERM_MESSAGING 6       /* "messaging": read and send messages through the shared message layer, and list the messaging services (Messaging/SPEC.md) */
+#define PURR_PERM_CONTACTS  7       /* "contacts": read and change the address book (Messaging/SPEC.md) */
+#define PURR_PERM_RADIO     8       /* "radio": ask for the LoRa radio lease (Messaging/SPEC.md section 4) */
+#define PURR_PERM_COUNT      9
 
 /* What the user has said about one permission of one app. */
 #define PURR_PERM_ASK    0          /* not decided: ask at first use */

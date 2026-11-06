@@ -13,6 +13,9 @@ static const struct {
     {"system-files", "read the system's files (read-only)"},
     {"manage-devices", "find and set up hardware, and update drivers and the system"},
     {"install-apps", "install, update and remove apps and downloads"},
+    {"messaging", "read and send your messages"},
+    {"contacts", "read and change your contacts"},
+    {"radio", "use the LoRa radio"},
 };
 
 const char *purr_perm_name(int perm)
