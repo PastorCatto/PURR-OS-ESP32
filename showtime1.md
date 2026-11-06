@@ -6,10 +6,10 @@
 
 | Part | What | State |
 |---|---|---|
-| A | The SDK up to spec (kit 1.1.0), with the emulator built into it | not started; waiting for the keyword |
-| B | Document the whole repository (not `archive/`): at least 100 pages, with hyperlinks to everything | not started; waiting for the keyword |
+| A | The SDK up to spec (kit 1.1.0), with the emulator built into it | **started 2026-11-05 (the keyword was given)** |
+| B | Document the whole repository (not `archive/`): at least 100 pages, with hyperlinks to everything | not started; follows Part A |
 | C | The front README, opening with a quote from the owner | a first version is written (uncommitted); the quote slot is open |
-| D | Custom fonts loaded from TTF files, and fonts as Store assets | designed here; waiting for the keyword |
+| D | Custom fonts loaded from TTF files, and fonts as Store assets | designed here; follows Part A |
 
 Order: A, then B, then C. C needs only the owner's words, so it can be done at any point once they are given.
 
@@ -133,3 +133,5 @@ The aim: if AI ever disappears, the owner can still carry on developing from the
 - 2026-11-05 (later): the owner answered the questions (above): emulator and messaging covered, two helpers, Markdown only, kit 1.1.0, documentation written for easy reading and for carrying on without AI. Still waiting for the keyword.
 - 2026-11-05 (later still): the owner confirmed the `Partner-*` folders stay out of the documentation. All five questions are answered; only the keyword is missing.
 - 2026-11-05 (evening): the owner added Part D (custom fonts from files, fonts in the Store) and said the apps will move to a new repository that Claude will be given access to. A first README was written (Part C) and is waiting for review; the quote slot is empty on purpose.
+- 2026-11-05 (night): the owner gave the keyword. **Showtime starts before the key rotation**; the rotation (plan3, due 7 November) is done after it, at the owner's choice. Part A is started.
+
