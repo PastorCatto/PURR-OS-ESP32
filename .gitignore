@@ -66,3 +66,7 @@ PurrOS/components/coreos/test/host/fuzz/crash-*.bin
 # local build outputs and signed test packages (tools/vm)
 out/
 repos/*/keys/
+
+# The assistant's working notes and hand-offs (kept out of the repository)
+/Claude/
+/CLAUDE.md
