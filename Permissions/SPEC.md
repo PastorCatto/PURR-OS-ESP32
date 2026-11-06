@@ -43,7 +43,9 @@ app's own storage folder, `system` (read-only battery, time, memory), audio outp
 |------------|--------|
 | `wifi` | Scanning and connecting |
 | `bluetooth` | Bluetooth |
-| `radio` | LoRa and similar radios |
+| `radio` | LoRa and similar radios. A messaging service asks for the radio lease with it (`../Messaging/SPEC.md`). |
+| `messaging` | Reading and sending messages through the shared message layer, and listing the messaging services (`../Messaging/SPEC.md`). Added 2026-11-05, draft. |
+| `contacts` | Reading and changing the address book (`../Messaging/SPEC.md`). Added 2026-11-05, draft. |
 | `gps` | Location, as parsed fixes |
 | `gps-raw` | The raw GPS stream (`gps_raw`) |
 | `shared-storage` | Files outside the app's own folder: the signed-in user's home, read and write (`files` catcall). The SD card is not mounted by any driver yet. |
