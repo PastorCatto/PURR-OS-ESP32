@@ -380,6 +380,14 @@ void oobe_firstboot_run(void)
             ESP_LOGI(TAG, "stage 2 install %s", s_stage2_started ? "started in the background" : "could not start");
         }
     }
+    /* The wizard is up: this start is healthy. Until now it was only marked at the login prompt, which the wizard never reaches (its last page restarts), so a person who
+     * restarted the device during setup was counted as a failed start, and a couple of those sent the loader to reinstall the whole device unattended (2026-11-05: a
+     * second install, and an administrator called "recovery" with a password nobody saw). */
+    {
+        static purr_cli_t healthy_cli;
+        purr_cli_init(&healthy_cli, NULL, 0, quiet_put, NULL, "");
+        purr_mark_boot_healthy(&healthy_cli);
+    }
     oobe_ui_run(purr_login_has_accounts() ? PURR_OOBE_PART_FINISHING : PURR_OOBE_PART_FIRSTBOOT, &k_ops, 0);
     purr_console_set_muted(0);                          /* LVGL did not start: the caller carries on with the text setup */
 }
