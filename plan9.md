@@ -146,3 +146,5 @@ A draft with renders of the Froyo-style Messages app was made and shown to the o
 
 **Owner answers, 2026-11-05 (last):** a message export goes to the SD card; MTP support comes later (copy to a computer, and share to another device); automatic fallback stays off unless the user changes it. What is left open is only the radio keeper and Reticulum over Wi-Fi, both to be measured.
 
+**Built 2026-11-05 (night), compiled and host-tested, not run on a device:** the message store and address book (host tests), the `messaging` and `contacts` catcalls, `ui` version 4 (`bubble`), Messages 0.1.0, Contacts 0.1.0, the Echo test service and notifications on the lock screen; all in the 1.0.27 set and on the dev server. First run in the VM headless (`ESP32-Emulator` `headless_tap` example with the VM board) is recorded below once done. Known gaps: no emoji font yet (the picker inserts the characters, which draw once a font exists), no SD export target (no SD card is mounted by the OS yet), services register at run time, not from the manifest.
+

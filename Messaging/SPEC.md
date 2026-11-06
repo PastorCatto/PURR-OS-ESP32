@@ -1,6 +1,8 @@
-# Messaging spec (draft 0.1, 2026-11-05)
+# Messaging spec (draft 0.2, 2026-11-05)
 
-The Messages and Contacts apps and the way messaging services plug into them. **Nothing here is built.** It records the owner's decisions of 2026-11-05 and the questions that are still open. The
+The Messages and Contacts apps and the way messaging services plug into them.
+
+**Status (2026-11-05, night).** Built and compiled, not yet seen on a device: the message store and the address book (`PurrOS/components/coreos/src/purr_msgstore.c`, `purr_contacts.c`, 51 and 31 host checks), the `messaging` and `contacts` catcalls (`PurrOS/main/purr_catrt_msg.c`, full profile only), the `messaging`, `contacts` and `radio` permissions, the `ui` version 4 `bubble`, the Messages 0.1.0, Contacts 0.1.0 and Echo (test service) apps in `Apps/`, and notifications on the lock screen. Not built: the manifest `[provides.messaging]` section (a service registers at run time with `service_register` today), the radio lease and the radio keeper, channels, hiding a service's own app, the emoji font (Part D of `../showtime1.md`), MTP, and the three real services. Section 2 below is the target; the run-time registration is the first step toward it. It records the owner's decisions of 2026-11-05 and the questions that are still open. The
 screens are drafted in the artifact shown to the owner (Froyo style, 320 by 240); the plan is in `../plan9.md` ("Messages and Contacts apps").
 
 Related: permissions (`../Permissions/SPEC.md`), the app manifest and runtime (`../AppSDK/SPEC.md`, `../AppRuntime/SPEC.md`), the catcalls (`../Catcalls/SPEC.md`), the Store and repositories
