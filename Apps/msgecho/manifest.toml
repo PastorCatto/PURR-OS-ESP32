@@ -1,5 +1,5 @@
 name = "msgecho"
-version = "1.0.0"
+version = "1.0.1"
 description = "A test messaging service: it answers every message you send it, so the Messages app can be tried without a radio"
 class = "unprivileged"
 kind = "ui"

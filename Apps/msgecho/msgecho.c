@@ -154,7 +154,7 @@ static void on_destroy(int reason)
 static const purr_app_table2_t s_table = {
     .base = {.abi_version = PURR_APP_ABI_VERSION_2, .on_create = on_create, .on_destroy = on_destroy},
     .on_event = on_event,
-    .memory_needed = 8192, .kind = 2, .flags = 0,
+    .memory_needed = 8192, .kind = 2, .flags = 0x01 | 0x04 /* may keep running in the background; never chosen as an out-of-memory victim */,
 };
 
 __attribute__((used))
