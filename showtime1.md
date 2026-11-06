@@ -10,6 +10,7 @@
 | B | Document the whole repository (not `archive/`): at least 100 pages, with hyperlinks to everything | not started; follows Part A |
 | C | The front README, opening with a quote from the owner | a first version is written (uncommitted); the quote slot is open |
 | D | Custom fonts loaded from TTF files, and fonts as Store assets | designed here; follows Part A |
+| E | The Windows 10 Mobile shell at `ui` version 4, and a Windows 10 style user screen with the list at the side | written down; render first |
 
 Order: A, then B, then C. C needs only the owner's words, so it can be done at any point once they are given.
 
@@ -101,6 +102,16 @@ Area by area in the order above. For each: read the plan, read the code, build t
 
 **Done when:** a TTF placed on the device (or installed from the Store) can be chosen in Settings and is used by the shell and by apps; replacing the emoji font file changes the emoji with no rebuild; a damaged font file is refused and the shell keeps working; the kernel still fits its slot with the option on; the measured cost is written in the plan.
 
+## Part E: the Windows 10 Mobile shell brought up to version 4, and a Windows 10 style user screen (added by the owner, 2026-11-05)
+
+**What the owner asked for, in the words used:** "update the Windows 10 Mobile UI to version 4 and add a user screen like Windows 10 that has the list on the side." Written down as understood; the first step is to confirm the reading with the owner.
+
+1. **The shell at `ui` version 4.** The Messages work added version 4 of the `ui` catcall (the `bubble` widget) in `purr_catrt_ui.c`, shared by both shells. In the VM, which runs the Windows 10 Mobile shell, the apps already run, but the bubble uses fixed light colours made for the Froyo look. To do: draw the version 4 widgets in the Windows 10 Mobile style (the theme's accent, the dark or light setting, flat tiles, no gradients), and check every widget of versions 1 to 4 in that shell against its own render. If "version 4" meant the shell's own revision number, say so and rename it in the plan.
+2. **A Windows 10 style user screen.** The Windows 10 sign-in screen shows the picture and name of the chosen account in the middle and **the list of accounts down the side** (bottom left on a PC), so another account is one tap away. The Windows 10 Mobile shell has its own sign-in screen (`purr_w10m.c`) today; the new screen keeps that screen's rules (an account list, a password, lock-out after repeated failures, the default account note from the MEOW change) and lays them out as a side list with the chosen account's panel beside it. The Froyo shell keeps its own sign-in.
+3. **Checked the way the rest of the UI is:** a render first (the host LVGL renderer, `tools/lvgl_host/`), shown to the owner, then built; the VM runs the shell, so it can be tested there headless.
+
+**Done when:** each version 4 widget looks right in the Windows 10 Mobile style, and the user screen with the list at the side has been shown as a render, built, and seen working in the VM with at least two accounts.
+
 ## The apps repository (the owner is creating it)
 
 The owner will make a **new repository for the apps** and then give this session access to it (and to the other Claude) so the work can be finished there. It is the "separate repository that holds only apps" that `Repositories/SPEC.md` describes: pre-compiled packages, each linking to its source, with a signed `repo.json` and `index.json`. Until it exists nothing is moved. When access is given, the order is: list what belongs in it (the apps in `Apps/`, the new Messages and Contacts apps once written), build and sign each with the developer key, publish the packages and the index, check every file by size and hash from a fresh download, point the Store's default repository at it, and update plan8 and the documentation. Keys and passphrases are never written into that repository either.
@@ -134,4 +145,5 @@ The aim: if AI ever disappears, the owner can still carry on developing from the
 - 2026-11-05 (later still): the owner confirmed the `Partner-*` folders stay out of the documentation. All five questions are answered; only the keyword is missing.
 - 2026-11-05 (evening): the owner added Part D (custom fonts from files, fonts in the Store) and said the apps will move to a new repository that Claude will be given access to. A first README was written (Part C) and is waiting for review; the quote slot is empty on purpose.
 - 2026-11-05 (night): the owner gave the keyword. **Showtime starts before the key rotation**; the rotation (plan3, due 7 November) is done after it, at the owner's choice. Part A is started.
+- 2026-11-05 (night): the owner added Part E (the Windows 10 Mobile shell at ui version 4, and a Windows 10 style user screen with the account list at the side). The Messages work (not part of this plan) ran first at the owner's request.
 
