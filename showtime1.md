@@ -154,3 +154,50 @@ The aim: if AI ever disappears, the owner can still carry on developing from the
 - **For the owner (Part A):** (1) the kit has no VM image and no published test key; making one needs the boot-key passphrase (a trust block with a test developer key), so it waits for you. (2) The emulator's window binary has a board file for third-party hardware in its board picker; say whether that name may stay, or whether the owner-embargoed partner project is involved. (3) The source offer in the emulator notices points at the emulator project's GitHub address; confirm that repository is public. (4) The Espressif ROM images have no separate licence text in the fork; the notice says they are loaded unchanged. (5) The emulator needs macOS 26 or newer on Intel (QEMU's build target).
 - Next in Part A: the guide `sdk/docs/13-first-hour.md` once `purr run` is verified past Trust; the Studio "Run it" tile; the rest of the spec table. Parts B to E not started.
 
+
+## The owner's answers (2026-11-06) and what they change
+
+These replace the open questions above. Nothing here is a secret; the signing passphrase is given by the owner to one command at a time.
+
+| # | Decision | What it changes |
+|---|----------|-----------------|
+| 1 | The owner supplies the passphrase for the 1.0.27 republish (`release27f.sh`) and does the device update. | I run it once, with the passphrase in that one command's environment, and verify the manifests. |
+| 3 | Key rotation (plan3) is **held**. | Not started, no date. |
+| 4 | **Version bump after the clip fix.** 1.0.27 (with the lock-row clip fix) is the **stable, known-good** release. Everything after it goes into **1.0.28**, so a new bug is easy to place. | 27 is frozen once published. New firmware work (touch panics, the drawer icons, Part E) builds as 1.0.28. |
+| 5 | A VM image, two ways. **(a)** The kit builds its own VM image on the user's machine: `purr run` finds none, asks "to run in the VM we need an image; build one now?", and on yes builds it, then runs. **(b)** The kit also ships a **blank** VM image that installs itself from the **official OTA server**. | Design below. |
+| 5b | The official OTA server is about 16 releases behind (the official `recovery.manifest` says 1.0.11; the dev server has 1.0.27). It needs an update. | See "Official OTA catch-up" below. |
+| 6 | The third-party hardware board is renamed **Playtime** (board id `playtime`). | The board file belongs to the emulator project; its session was asked. No partner name or upstream repository name in anything shipped. |
+| 7 | The emulator's GitHub repository is public (checked: the repository answers without a login). | The source offer stands. Two things found in the check: GitHub shows **no licence file** although the notice says MIT OR Apache-2.0, and `headless_tap.rs` and `metro.rs` (what the kit is built from) are not yet committed there. Both are for the owner, who is the emulator maintainer. |
+| 8 | ROM licence: leave a note, do not ask Espressif yet. | The notice says the ROM images are loaded unchanged and that no separate licence text came with them. |
+| 9 | Do not require macOS 26. Rosetta 2 runs an x86_64 emulator on Apple Silicon Macs. | The emulator's session was asked to rebuild with a low deployment target and report the lowest it reaches. |
+| 10 | More headless runs of Find servers, Trust, Install, launch are allowed, with steps close together; on my own processes only. | Done next, then `sdk/docs/13-first-hour.md`. |
+| 11, 12 | The two touch panics: an emulator trace is wanted. The owner is the emulator maintainer; talk to the emulator's session. The new display-wake work may be the cause of the second one. | A trace run (`-d guest_errors,unimp`, I2C/SPI tracing) once the emulator's session says how to switch it on; then the firmware fix goes into 1.0.28. |
+| 13 | The Android drawer's text tiles get icons as part of the Part E parity. Art: use open-source Android-style art if a licence allows; otherwise new, original art. Nothing copyrighted. | Recorded in the Part E parity table. |
+| 14 | Part B: the target is a **minimum of about 20,000 words**, not 50,000; two helpers in parallel, used economically. | Part B scope below is lowered. |
+| 15 | README quote: the slot stays empty; the owner fills it in. | A marked, empty place at the top of the README. |
+| 16 | Part D: a UI font and an emoji font, open licences preferred; outline (monochrome) emoji first, then colour emoji as soon as it can be done. | Part D order. |
+| 17 | Part E starts from the Android shell's feature list; the Windows 10 style user screen follows parity. Only original art, apart from the icons already in use and the gear icon. | |
+| 18 | The owner creates the apps repository today and gives access; until then apps stay on the dev server. | |
+| 19 | The owner checks typing in the emulator himself. | |
+
+### VM image design (decision 5)
+
+What was found when reading the code:
+- `tools/vm/mkimage_dbg.sh` already makes the scenarios the kit needs: `first` (a blank device that starts in the recovery loader) and `auto` (the loader installs unattended). A flash image needs a **trust block signed with the boot key**, and the boot key's passphrase is the owner's. So a ready-made blank image is made **once by the owner's signing step** and shipped in the kit; the user's machine cannot sign a trust block.
+- The VM flavor compiles in the **host dev server** (`http://10.0.2.2:47801/recovery-vm/...`) as the recovery and module address. A blank image that pulls from the **official** server needs a VM build whose address is the official release folder, and the official release must carry the VM-flavor loader, KittenOS and kernel (the VM has the W5500 network and no Wi-Fi, so the real device's images do not fit).
+- (a) "Build on the user's machine" is therefore an **assembly**, not a compile: the kit takes the signed parts it carries (bootloader, partition table, boot package, loader, KittenOS, kernel, trust block), lays them into a 16 MB flash image, and the user's own apps and developer key are added by the usual signing and the dev server. That takes seconds, and `purr run` can offer it. A compile of the OS stays a repository task.
+- (b) the blank image is the same assembly with the kernel and KittenOS slots left empty; the loader fetches them from the official release at first start.
+
+Plan, in order: (1) a `purr vm` command and the prompt in `purr run` (testable now with the parts the repository builds); (2) the VM-flavor loader with the official address, built as 1.0.28; (3) the official release folder for the VM, published by the owner; (4) the owner's one signing step for the trust block shipped in the kit.
+
+### Official OTA catch-up (decision 5b)
+
+The official releases are GitHub release assets (`JumpingJaguar1` recovery, `JumpingJaguar2` modules and drivers, `JumpingJaguar3` the app repository placeholder). `tools/release/make_release.py` builds the folder (a version above what is published; other boards' images are carried over). Uploading assets to the project's GitHub releases is outward-facing and the owner does it; I prepare the folder and the checks (every file named in a manifest fetched, size and sha256 compared). The version to publish is **1.0.27** once the republish is verified on the device, as the stable release; 1.0.28 follows. Not done: no folder built yet (it needs the passphrase), and the upload.
+
+### Part B scope after the owner's answer
+
+At least about 20,000 words of Markdown, hyperlinked, checked with `tools/docs/check_links.py` and counted with `tools/docs/count_words.py`; every chapter still opens with a short version; the runbook, glossary and start-here pages stay. Two helpers at most, each given whole chapters to write from the code, so the cost stays low.
+
+## Progress log (2026-11-06, after the owner's answers)
+
+- Checked: the emulator repository is public; the official `recovery.manifest` is at 1.0.11. Messaged the emulator's session (rename to Playtime, a low macOS deployment target, how to switch on the trace). A request to also commit and push was held back: it is the owner's repository and decision.
