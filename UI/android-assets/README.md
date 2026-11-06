@@ -22,3 +22,10 @@ Made with `tools/ui/froyo_pack.py` from the Froyo resources; pack with
 
 The icons keep their alpha channel (RGB565 plus an 8-bit alpha plane, 3 bytes a pixel), 49 images in
 about 145 KB. The wallpapers for the shell are separate and original.
+
+## Licence
+
+The icons here that come from Android (everything with a `fr_` or `st_` name) are the Android Open Source Project's, under the Apache License, Version 2.0 (`NOTICE`). The files that are
+original to PURR OS (the `kb_` key legends, and any wallpaper or other art made for this shell) are offered under the same licence, the Apache License, Version 2.0, in respect of the
+Android Open Source Project, as is the shell's source (the `purr_android` files in `PurrOS/main/`). The rest of PURR OS is under the GNU General Public License version 3 (`LICENSE`).
+

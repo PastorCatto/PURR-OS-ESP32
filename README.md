@@ -344,7 +344,7 @@ To report a security problem, see [SECURITY.md](SECURITY.md) section 16.
 
 PURR OS is free software under the **GNU General Public License, version 3**. The licence text is in [LICENSE](LICENSE).
 
-The Android 2.2 (Froyo) style shell is released under the **Apache License, Version 2.0**, the licence the Android Open Source Project itself uses, in respect of that project. That covers the shell's source (the `purr_android` files in [PurrOS/main/](PurrOS/main/)) and the artwork in [UI/android-assets/](UI/android-assets/). The icons there come from the Android Open Source Project and remain under its Apache 2.0 licence; the notice is in [UI/android-assets/NOTICE](UI/android-assets/NOTICE). The look of the shell was recreated for PURR OS rather than copied from Android's source, and it is offered under the same licence by choice.
+The Android 2.2 (Froyo) style shell is released under the **Apache License, Version 2.0**, the licence the Android Open Source Project itself uses, in respect of that project. That covers the shell's source (the `purr_android` files in [PurrOS/main/](PurrOS/main/), each marked with an SPDX line) and all the artwork in [UI/android-assets/](UI/android-assets/), both the icons that come from the Android Open Source Project and the original art made for PURR OS. The licence text and the Android notice are in [UI/android-assets/NOTICE](UI/android-assets/NOTICE). The look of the shell was recreated for PURR OS rather than copied from Android's source, and it is offered under the same licence by choice. The rest of the project stays under the GPL.
 
 Third-party material that the system uses, with its licence and what was changed, is listed in [THIRD_PARTY.md](THIRD_PARTY.md).
 

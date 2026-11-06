@@ -50,6 +50,8 @@ repositories, and the battery, signal and Wi-Fi status icons from `frameworks/ba
 (`tools/ui/froyo_pack.py`) and renamed for its asset. Nothing is scaled on the device. The
 resampled PNGs are in `UI/android-assets/`; `purrstrap uiassets build --alpha` packs them.
 
+**Licence of the shell itself.** The Android style shell's source (`PurrOS/main/purr_android*.c` and `.h`, each marked with an SPDX line) and the original artwork made for it (the `kb_` key legends and the wallpapers) are released under the Apache License, Version 2.0, the same licence as the Android resources above, in respect of the Android Open Source Project. The rest of PURR OS is under the GNU General Public License version 3 (`LICENSE`).
+
 Not used, on purpose: Google application artwork (Gmail, Maps, Market and the like) and any phone
 maker's skin or icons, which are not under that licence. The shell's wallpapers and layout are
 original.

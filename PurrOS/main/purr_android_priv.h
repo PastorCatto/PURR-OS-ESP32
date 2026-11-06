@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * The Android 2.2 (Froyo) style shell is licensed under the Apache License, Version 2.0, the licence the Android Open Source Project uses, in respect of that project.
+ * The licence text is in UI/android-assets/NOTICE; the rest of PURR OS is under the GNU GPL version 3 (LICENSE). See THIRD_PARTY.md. */
 /*
  * purr_android_priv.h - what the pieces of the Android style shell share (plan7.md, "Android shell build-out").
  *
