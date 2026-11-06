@@ -43,6 +43,8 @@
 #include "purr_notify.h"
 #include "purr_w10m_priv.h"
 #include "purr_wallpaper.h"
+#include "purr_resetnote_os.h"
+#include "purr_sysupdate.h"
 #include "purr_w10m_theme.h"
 
 static void lock_on_sleep(int on);
@@ -1697,7 +1699,7 @@ static int s_bfu_busy;
 #define BFU_ROW_H   38
 #define BFU_SIDE_W  116
 #define BFU_STRIP_H 56
-static lv_obj_t *s_bfu_panel;
+static lv_obj_t *s_bfu_panel, *s_bfu_ver;
 static lv_obj_t *s_bfu_rows[PURR_USER_MAX + 1];
 static int s_bfu_nrows, s_bfu_sel = -1, s_bfu_other;
 static char s_bfu_name[PURR_USER_NAME_LEN];             /* the chosen account; empty while "Other user" is chosen */
@@ -1754,6 +1756,10 @@ static void *signin_done_cb(void *arg)
         char msg[64];
         snprintf(msg, sizeof(msg), "Signed in as %s.", j->name);
         add_note(PURR_BRAND_PRODUCT, msg);
+        char why[400];
+        if (purr_resetnote_pending(NULL, 0, why, sizeof(why))) {
+            add_note("Your data was reset", why);        /* until it is dismissed in Settings > About */
+        }
         char dn[PURR_USER_NAME_LEN];
         if (purr_login_default_account(dn, sizeof(dn)) && strcmp(j->name, dn) == 0) {
             add_note("Change the default password", "This account uses the password MEOW. Change it in Settings > Accounts.");
@@ -2109,10 +2115,22 @@ static void build_bfu(void)
     }
     bfu_layout();
     lv_group_focus_obj(s_bfu_sel == s_bfu_other ? s_bfu_user : s_bfu_pass);
-    char dn[PURR_USER_NAME_LEN];
-    if (purr_login_default_account(dn, sizeof(dn))) {
+    char dn[PURR_USER_NAME_LEN], reset[96];
+    if (purr_login_store_unreadable()) {                 /* the most important thing to say: the accounts are there, they just could not be read */
+        bfu_say("Can't read the account list. Your files are safe. Restart to try again.", 0xFFB900);
+    } else if (purr_resetnote_pending(reset, sizeof(reset), NULL, 0)) {
+        bfu_say(reset, 0xFFB900);                        /* why data was wiped or replaced: shown until it is dismissed in Settings > About */
+    } else if (purr_login_default_account(dn, sizeof(dn))) {
         bfu_say("Default account: MEOW, password MEOW. Change it in Settings.", 0xFFB900);
     }
+    char kv[16], ov[16], line[48];                       /* which system this is, small, in the corner (the About page has the same) */
+    purr_sysupdate_versions(kv, ov);
+    snprintf(line, sizeof(line), PURR_BRAND_PRODUCT " %s", kv);
+    s_bfu_ver = lv_label_create(s_bfu);
+    lv_label_set_text(s_bfu_ver, line);
+    lv_obj_set_style_text_font(s_bfu_ver, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_bfu_ver, lv_color_hex(0xDDDDDD), 0);
+    lv_obj_align(s_bfu_ver, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
 }
 
 static void bfu_layout(void)

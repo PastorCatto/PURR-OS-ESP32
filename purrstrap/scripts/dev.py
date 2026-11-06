@@ -186,6 +186,42 @@ def _safe_recovery_name(name):
     return bool(RECOVERY_FILE_RE.match(name)) and ".." not in name
 
 
+def _atomic_write(path, data):
+    """Writes a file so a reader sees the old one or the new one, never half of either (a temporary name, then a rename)."""
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+
+
+def _atomic_copy(src, dst):
+    with open(src, "rb") as fh:
+        _atomic_write(dst, fh.read())
+
+
+KEEP_GENERATIONS = 3                       # immutable copies of each image kept (the newest ones), so a device in the middle of an OTA can finish
+
+
+def _immutable_name(component, board, sha, ext):
+    """The name an image is published under: it holds the hash, so the same name is always the same bytes. A manifest that names it can never be
+    contradicted by a later publish (2026-11-06: files replaced in place under fixed names made an OTA that overlapped a publish fail its size and hash check)."""
+    return "%s-%s.%s.%s" % (component, board, sha[:10], ext)
+
+
+def _prune_immutable(rdir, keep):
+    """Removes immutable copies beyond the newest KEEP_GENERATIONS of each image; `keep` (names the current manifests use) are never removed."""
+    groups = {}
+    for fn in os.listdir(rdir):
+        m = re.match(r"^([A-Za-z0-9_]+-[A-Za-z0-9_]+)\.[0-9a-f]{10}\.(cat|kitt)$", fn)
+        if m:
+            groups.setdefault(m.group(1), []).append(fn)
+    for names in groups.values():
+        names.sort(key=lambda n: os.path.getmtime(os.path.join(rdir, n)), reverse=True)
+        for fn in names[KEEP_GENERATIONS:]:
+            if fn not in keep:
+                os.remove(os.path.join(rdir, fn))
+
+
 def _sha256_file(path):
     with open(path, "rb") as fh:
         return hashlib.sha256(fh.read()).hexdigest()
@@ -248,8 +284,12 @@ def build_recovery_manifests(repo):
         if not pimg.is_purr_image(data) or len(data) < pimg.HEADER_SIZE:
             continue
         f = pimg.header_fields(pimg.parse_header(data))
-        entry = {"component": m.group(1), "board": m.group(2), "file": fn, "size": len(data),
-                 "sha256": hashlib.sha256(data).hexdigest(), "version": f["version"] or "0.0.0",
+        sha = hashlib.sha256(data).hexdigest()
+        immutable = _immutable_name(m.group(1), m.group(2), sha, m.group(3))
+        if not os.path.exists(os.path.join(rdir, immutable)):
+            _atomic_write(os.path.join(rdir, immutable), data)             # before the manifest that names it
+        entry = {"component": m.group(1), "board": m.group(2), "file": immutable, "size": len(data),
+                 "sha256": sha, "version": f["version"] or "0.0.0",
                  "chip": CHIPS.get(f["chip_id"], "any"), "payload_size": f["payload_size"],
                  "payload_sha256": f["payload_sha256"].hex()}
         (comps if entry["component"] in RECOVERY_COMPONENTS else mods).append(entry)
@@ -263,8 +303,7 @@ def build_recovery_manifests(repo):
         if _is_withdrawn(tokens, e["component"], e["version"]):
             lines.append("withdrawn=yes")                    # the entry itself says so too, for a reader that only looks at entries
         lines.append("")
-    with open(os.path.join(rdir, "recovery.manifest"), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines))
+    _atomic_write(os.path.join(rdir, "recovery.manifest"), "\n".join(lines).encode("utf-8"))
     lines = ["release=dev-%s" % time.strftime("%Y%m%d%H%M%S"), "released=%s" % stamp] + _withdrawn_lines(rdir) + [""]
     for e in mods:
         lines += ["component=%s" % e["component"], "type=module", "version=%s" % e["version"], "chip=%s" % e["chip"],
@@ -273,8 +312,8 @@ def build_recovery_manifests(repo):
         if _is_withdrawn(tokens, e["component"], e["version"]):
             lines.append("withdrawn=yes")
         lines.append("")
-    with open(os.path.join(rdir, "modules.manifest"), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines))
+    _atomic_write(os.path.join(rdir, "modules.manifest"), "\n".join(lines).encode("utf-8"))
+    _prune_immutable(rdir, {e["file"] for e in comps + mods})
     return comps, mods
 
 
@@ -301,7 +340,7 @@ def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules,
         if room is not None and size > room:
             ctx.error("%s: its payload is %d bytes and the %s partition holds %d: %d too many (the loader could not install it)" % (src, size, comp, room, size - room))
             return 1
-        shutil.copyfile(src, os.path.join(rdir, "%s-%s%s" % (comp, board, ext)))
+        _atomic_copy(src, os.path.join(rdir, "%s-%s%s" % (comp, board, ext)))
         ctx.ok("%s -> recovery/%s-%s%s" % (comp, comp, board, ext))
     for src in [x for x in (modules or "").split(",") if x.strip()]:
         src = src.strip()
@@ -314,10 +353,10 @@ def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules,
         if name in RECOVERY_COMPONENTS or not re.match(r"^[A-Za-z0-9_]+$", name):
             ctx.error("%s: a module cannot be called %r" % (src, name))
             return 1
-        shutil.copyfile(src, os.path.join(rdir, "%s-%s.cat" % (name, board)))
+        _atomic_copy(src, os.path.join(rdir, "%s-%s.cat" % (name, board)))
         ctx.ok("module %s -> recovery/%s-%s.cat" % (name, name, board))
     if legal:
-        shutil.copyfile(legal, os.path.join(rdir, "legal.txt"))
+        _atomic_copy(legal, os.path.join(rdir, "legal.txt"))
         ctx.ok("legal text -> recovery/legal.txt")
     comps, mods = build_recovery_manifests(dir)
     ctx.ok("recovery.manifest: %s; modules.manifest: %d module(s)" %

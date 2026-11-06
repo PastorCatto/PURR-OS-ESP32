@@ -15,6 +15,8 @@
 #include "purr_cfgstore.h"
 #include "purr_console.h"
 #include "purr_kernel.h"
+#include "purr_resetnote.h"
+#include "purr_resetnote_os.h"
 #include "purr_settings.h"
 #include "purr_userstore.h"
 
@@ -169,8 +171,22 @@ int purr_login_default_account(char *name, size_t cap)
 
 /* No one is known to be present to answer first_time_setup()'s prompts (an unattended recovery install just finished): create the default administrator, MEOW with the
  * password MEOW, instead of blocking forever on a typed username that will never arrive, and say so on the console. */
+static void count_home(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)name;
+    (void)size;
+    if (is_dir) {
+        (*(int *)ctx)++;
+    }
+}
+
 static void unattended_first_account(void)
 {
+    int homes = 0;
+    purr_fs_list(purr_login_fs(), "/home", count_home, &homes);
+    if (homes > 0) {                                   /* user folders but no account list: say so, it is probably not a fresh device (plan7.md) */
+        purr_resetnote_record(PURR_RESET_DEFAULT_OVER_HOMES, homes, 1);
+    }
     create_account(DEFAULT_ACCOUNT_NAME, DEFAULT_ACCOUNT_PASS, PURR_ROLE_USER_ADMIN);
     purr_login_persist();
     purr_fs_mkdir(purr_login_fs(), "/etc");

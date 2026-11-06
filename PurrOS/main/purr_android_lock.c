@@ -27,6 +27,7 @@
 
 #include "commands.h"
 #include "login.h"
+#include "purr_resetnote_os.h"
 #include "purr_android_priv.h"
 #include "purr_battery.h"
 #include "purr_brand.h"
@@ -510,6 +511,10 @@ static void *signin_done_cb(void *arg)
         char msg[64];
         snprintf(msg, sizeof(msg), "Signed in as %s.", j->name);
         and_shade_add(PURR_BRAND_PRODUCT, msg);
+        char why[400];
+        if (purr_resetnote_pending(NULL, 0, why, sizeof(why))) {
+            and_shade_add("Your data was reset", why);
+        }
     } else if (j->result == PURR_LOGIN_WAIT) {
         char msg[64];
         snprintf(msg, sizeof(msg), "Too many tries. Wait %u s.", (unsigned)j->wait_s);
@@ -673,8 +678,12 @@ static void si_show_state(int state)
     si_say("", 0xFFFFFF);
     lv_group_remove_all_objs(s_si_group);
     if (state == SI_LIST) {
-        char dn[PURR_USER_NAME_LEN];
-        if (purr_login_default_account(dn, sizeof(dn))) {
+        char dn[PURR_USER_NAME_LEN], reset[96];
+        if (purr_login_store_unreadable()) {
+            si_say("Can't read the account list. Your files are safe. Restart to try again.", 0xFFB900);
+        } else if (purr_resetnote_pending(reset, sizeof(reset), NULL, 0)) {
+            si_say(reset, 0xFFB900);                     /* why data was wiped or replaced, until it is dismissed in Settings > About */
+        } else if (purr_login_default_account(dn, sizeof(dn))) {
             si_say("Default account: MEOW, password MEOW. Change it in Settings.", 0xFFB900);
         }
         si_build_rows();

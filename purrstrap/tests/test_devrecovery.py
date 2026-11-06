@@ -2,6 +2,7 @@
 import hashlib
 import http.client
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -48,15 +49,52 @@ class RecoveryHosting(unittest.TestCase):
         self.assertEqual(len(stanzas), 4)
         k = next(s for s in stanzas if "component=kernel" in s)
         data = open(os.path.join(rdir, "kernel-tdeck_plus.cat"), "rb").read()
-        for want in ("version=1.2.3", "chip=esp32s3", "board=tdeck_plus", "file=kernel-tdeck_plus.cat",
-                     "size=%d" % len(data), "sha256=" + hashlib.sha256(data).hexdigest(), "key=boot"):
+        sha = hashlib.sha256(data).hexdigest()
+        for want in ("version=1.2.3", "chip=esp32s3", "board=tdeck_plus", "file=kernel-tdeck_plus.%s.cat" % sha[:10],
+                     "size=%d" % len(data), "sha256=" + sha, "key=boot"):
             self.assertIn(want, k)
-        self.assertIn("file=kittenos-tdeck_plus.kitt", text)
+        self.assertRegex(text, r"file=kittenos-tdeck_plus\.[0-9a-f]{10}\.kitt")        # named by its hash: the same name is always the same bytes
+        self.assertEqual(open(os.path.join(rdir, "kernel-tdeck_plus.%s.cat" % sha[:10]), "rb").read(), data)
         mods = open(os.path.join(rdir, "modules.manifest")).read()
         self.assertIn("component=about", mods)
         self.assertIn("type=module", mods)
         self.assertNotIn("component=kernel", mods)             # components and modules stay in their own manifests
         self.assertTrue(os.path.exists(os.path.join(rdir, "legal.txt")))
+
+    def named_kernel(self):
+        text = open(os.path.join(self.repo, "recovery", "recovery.manifest")).read()
+        return next(l.split("=", 1)[1] for l in text.splitlines() if l.startswith("file=kernel-"))
+
+    def test_a_republish_never_changes_what_an_older_manifest_names(self):
+        # A device that has read the manifest and is still downloading must find the same bytes: the images are named by their hash, the old ones stay
+        # for a few generations, and the manifest is replaced last.
+        self.run_recovery()
+        rdir = os.path.join(self.repo, "recovery")
+        old_name = self.named_kernel()
+        old_bytes = open(os.path.join(rdir, old_name), "rb").read()
+        with open(self.files["kernel"], "wb") as fh:
+            fh.write(img("kernel", "1.2.4", b"a different kernel" * 10))
+        rc, _ = self.run_recovery()
+        self.assertEqual(rc, 0)
+        new_name = self.named_kernel()
+        self.assertNotEqual(old_name, new_name)
+        self.assertEqual(open(os.path.join(rdir, old_name), "rb").read(), old_bytes)         # the first manifest's file is still there, unchanged
+        self.assertTrue(os.path.exists(os.path.join(rdir, new_name)))
+        self.assertEqual([f for f in os.listdir(rdir) if ".tmp-" in f], [])                   # nothing half written is left behind
+
+    def test_old_generations_are_pruned_but_a_few_stay(self):
+        rdir = os.path.join(self.repo, "recovery")
+        names = []
+        for i in range(5):
+            with open(self.files["kernel"], "wb") as fh:
+                fh.write(img("kernel", "1.2.%d" % (10 + i), b"kernel number %d" % i * 4))
+            self.run_recovery()
+            names.append(self.named_kernel())
+            os.utime(os.path.join(rdir, names[-1]), (1000 + i, 1000 + i))                     # distinct ages for the pruning
+        left = [f for f in os.listdir(rdir) if re.match(r"^kernel-tdeck_plus\.[0-9a-f]{10}\.cat$", f)]
+        self.assertEqual(len(left), dev.KEEP_GENERATIONS)
+        self.assertIn(names[-1], left)                                                       # the newest is always kept
+        self.assertNotIn(names[0], left)
 
     def test_an_image_bigger_than_its_slot_is_refused(self):
         big = os.path.join(self.tmp, "kittenos-big.kitt")
@@ -107,8 +145,9 @@ class RecoveryHosting(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(rdir, "uiassets-tdeck_plus.cat")))
         text = open(os.path.join(rdir, "recovery.manifest")).read()
         stanza = next(s for s in text.split("\n\n") if "component=uiassets" in s)
-        for want in ("version=1.0.17", "file=uiassets-tdeck_plus.cat", "key=system", "payload_size=300"):
+        for want in ("version=1.0.17", "key=system", "payload_size=300"):
             self.assertIn(want, stanza)
+        self.assertRegex(stanza, r"file=uiassets-tdeck_plus\.[0-9a-f]{10}\.cat")
         self.assertNotIn("component=uiassets", open(os.path.join(rdir, "modules.manifest")).read())
         self.assertEqual(len([s for s in text.split("\n\n") if "component=" in s]), 5)
 

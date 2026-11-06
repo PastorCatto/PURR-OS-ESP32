@@ -66,6 +66,8 @@
 #include "purr_runtime.h"
 #include "purr_fs.h"
 #include "purr_kernel.h"
+#include "purr_resetnote.h"
+#include "purr_resetnote_os.h"
 #include "purr_slot_trailer.h"
 #include "purr_trust_os.h"
 #include "purr_lvgl.h"
@@ -332,6 +334,23 @@ void purr_fs_setup(purr_cli_t *cli)
         e = purr_fs_mount(&s_fs, &bd);        /* one retry before giving up on a clean mount */
     }
     if (e == LFS_ERR_CORRUPT) {
+        /* Say WHY before the data goes (the reason survives the wipe: it is kept outside the data partition). A blank, never-formatted partition is just a new
+         * device and needs no warning; one with a superblock (or any bytes in its first two blocks) held data. */
+        uint8_t head[16];
+        int had_data = 0;
+        for (uint32_t blk = 0; blk < 2 && blk < bd.block_count && !had_data; blk++) {
+            if (bd.read(bd.ctx, blk, 0, head, sizeof(head)) == 0) {
+                for (size_t i = 0; i < sizeof(head); i++) {
+                    if (head[i] != 0xFF) {
+                        had_data = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (had_data) {
+            purr_resetnote_record(PURR_RESET_AUTO_FORMAT, e, 1);
+        }
         purr_cli_printf(cli, "root: not mounted (%s), formatting...\n", purr_fs_strerror(e));
         e = purr_fs_format(&s_fs, &bd);
         if (e != 0) {

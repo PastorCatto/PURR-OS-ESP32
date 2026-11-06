@@ -39,6 +39,7 @@
 
 #include "commands.h"
 #include "login.h"
+#include "purr_resetnote_os.h"
 #include "purr_appmgr.h"
 #include "purr_catrt.h"
 #include "purr_battery.h"
@@ -1853,11 +1854,33 @@ static void about_system_section(void)
     lv_obj_set_width(rb, LV_PCT(100));
 }
 
+static void about_reset_dismiss_cb(lv_event_t *e)
+{
+    (void)e;
+    purr_resetnote_dismiss();
+    say("Dismissed. Open this page again to refresh it.", 1);
+}
+
 static void page_about(void)
 {
     char buf[96];
     cm_title(s_body, PURR_BRAND_PRODUCT);
     cm_text(s_body, purr_system_name());
+    {
+        char kv[16], ov[16];
+        purr_sysupdate_versions(kv, ov);
+        snprintf(buf, sizeof(buf), "Version %s, recovery %s", kv, ov);        /* which build this is: it was not shown anywhere before */
+        cm_text(s_body, buf);
+        char why[400];
+        if (purr_resetnote_pending(NULL, 0, why, sizeof(why))) {
+            cm_space(s_body, 4);
+            cm_title(s_body, "Your data was reset");
+            lv_obj_t *l = cm_text(s_body, why);
+            lv_obj_set_style_text_color(l, lv_color_hex(0xFFB900), 0);
+            lv_obj_t *gb = cm_button(s_body, "Got it", about_reset_dismiss_cb, NULL);
+            lv_obj_set_width(gb, LV_PCT(100));
+        }
+    }
 
     purr_secure_status_t st;
     purr_secure_status(&st);

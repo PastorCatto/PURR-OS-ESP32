@@ -55,6 +55,19 @@ typedef struct {
     uint32_t crc32;
 } off_record_t;
 
+/* The data-reset notice record. */
+#define RST_MAGIC 0x54535250u   /* 'PRST' little-endian */
+#define RST_OFFSET 0x400
+
+typedef struct {
+    uint32_t magic;
+    uint32_t seq;
+    uint8_t why;            /* 0 = cleared (the seq stays) */
+    uint8_t had_data;
+    int16_t detail;
+    uint32_t crc32;
+} rst_record_t;
+
 static int read_net(const esp_partition_t *p, record_t *rec)
 {
     if (purr_io_partition_read(p, 0, rec, sizeof(*rec)) != ESP_OK) {
@@ -71,6 +84,14 @@ static int read_src(const esp_partition_t *p, src_record_t *src)
     return src->magic == SRC_MAGIC && src->crc32 == purr_crc32(0, src, offsetof(src_record_t, crc32)) ? 0 : -1;
 }
 
+static int read_rst(const esp_partition_t *p, rst_record_t *rst)
+{
+    if (purr_io_partition_read(p, RST_OFFSET, rst, sizeof(*rst)) != ESP_OK) {
+        return -1;
+    }
+    return rst->magic == RST_MAGIC && rst->crc32 == purr_crc32(0, rst, offsetof(rst_record_t, crc32)) ? 0 : -1;
+}
+
 static int read_off(const esp_partition_t *p, off_record_t *off)
 {
     if (purr_io_partition_read(p, OFF_OFFSET, off, sizeof(*off)) != ESP_OK) {
@@ -81,12 +102,13 @@ static int read_off(const esp_partition_t *p, off_record_t *off)
 
 /* Writes the records that are given (one that is left out reads as empty). The whole sector is erased first, so a caller that changes one record passes the others
  * it read before. */
-static void write_all(const esp_partition_t *p, const record_t *net, const src_record_t *src, const off_record_t *off)
+static void write_all(const esp_partition_t *p, const record_t *net, const src_record_t *src, const off_record_t *off, const rst_record_t *rst)
 {
     if (purr_io_partition_erase_range(p, 0, p->erase_size) != ESP_OK ||
         (net != NULL && purr_io_partition_write(p, 0, net, sizeof(*net)) != ESP_OK) ||
         (src != NULL && purr_io_partition_write(p, SRC_OFFSET, src, sizeof(*src)) != ESP_OK) ||
-        (off != NULL && purr_io_partition_write(p, OFF_OFFSET, off, sizeof(*off)) != ESP_OK)) {
+        (off != NULL && purr_io_partition_write(p, OFF_OFFSET, off, sizeof(*off)) != ESP_OK) ||
+        (rst != NULL && purr_io_partition_write(p, RST_OFFSET, rst, sizeof(*rst)) != ESP_OK)) {
         ESP_LOGW(TAG, "could not save the recovery record");
     }
 }
@@ -94,7 +116,7 @@ static void write_all(const esp_partition_t *p, const record_t *net, const src_r
 void purr_netrec_save(const char *ssid, const char *pass)
 {
     const esp_partition_t *p = find();
-    if (p == NULL || p->size < OFF_OFFSET + sizeof(off_record_t)) {
+    if (p == NULL || p->size < RST_OFFSET + sizeof(rst_record_t)) {
         return;
     }
     record_t rec;
@@ -107,7 +129,9 @@ void purr_netrec_save(const char *ssid, const char *pass)
     int have_src = read_src(p, &src) == 0;                 /* keep the chosen server across a network change */
     off_record_t off;
     int have_off = read_off(p, &off) == 0;
-    write_all(p, &rec, have_src ? &src : NULL, have_off ? &off : NULL);
+    rst_record_t rst;
+    int have_rst = read_rst(p, &rst) == 0;
+    write_all(p, &rec, have_src ? &src : NULL, have_off ? &off : NULL, have_rst ? &rst : NULL);
 }
 
 int purr_netrec_load(char ssid[PURR_NETREC_SSID_LEN], char pass[PURR_NETREC_PASS_LEN])
@@ -132,15 +156,17 @@ int purr_netrec_load(char ssid[PURR_NETREC_SSID_LEN], char pass[PURR_NETREC_PASS
 void purr_netrec_save_source(const char *base, const char *name, const char *id)
 {
     const esp_partition_t *p = find();
-    if (p == NULL || p->size < OFF_OFFSET + sizeof(off_record_t)) {
+    if (p == NULL || p->size < RST_OFFSET + sizeof(rst_record_t)) {
         return;
     }
     record_t net;
     int have_net = read_net(p, &net) == 0;
     off_record_t off;
     int have_off = read_off(p, &off) == 0;
+    rst_record_t rst;
+    int have_rst = read_rst(p, &rst) == 0;
     if (base == NULL || base[0] == '\0') {                 /* clear the choice: back to the official server */
-        write_all(p, have_net ? &net : NULL, NULL, have_off ? &off : NULL);
+        write_all(p, have_net ? &net : NULL, NULL, have_off ? &off : NULL, have_rst ? &rst : NULL);
         return;
     }
     src_record_t src;
@@ -150,7 +176,7 @@ void purr_netrec_save_source(const char *base, const char *name, const char *id)
     snprintf(src.name, sizeof(src.name), "%s", name ? name : "");
     snprintf(src.id, sizeof(src.id), "%s", id ? id : "");
     src.crc32 = purr_crc32(0, &src, offsetof(src_record_t, crc32));
-    write_all(p, have_net ? &net : NULL, &src, have_off ? &off : NULL);
+    write_all(p, have_net ? &net : NULL, &src, have_off ? &off : NULL, have_rst ? &rst : NULL);
 }
 
 int purr_netrec_load_source(char base[PURR_NETREC_SRC_BASE_LEN], char name[PURR_NETREC_SRC_NAME_LEN],
@@ -158,7 +184,7 @@ int purr_netrec_load_source(char base[PURR_NETREC_SRC_BASE_LEN], char name[PURR_
 {
     base[0] = name[0] = id[0] = '\0';
     const esp_partition_t *p = find();
-    if (p == NULL || p->size < OFF_OFFSET + sizeof(off_record_t)) {
+    if (p == NULL || p->size < RST_OFFSET + sizeof(rst_record_t)) {
         return -1;
     }
     src_record_t src;
@@ -175,7 +201,7 @@ int purr_netrec_load_source(char base[PURR_NETREC_SRC_BASE_LEN], char name[PURR_
 void purr_netrec_save_official(const char *recovery, const char *modules, const char *message, uint32_t seq)
 {
     const esp_partition_t *p = find();
-    if (p == NULL || p->size < OFF_OFFSET + sizeof(off_record_t)) {
+    if (p == NULL || p->size < RST_OFFSET + sizeof(rst_record_t)) {
         return;
     }
     record_t net;
@@ -190,7 +216,9 @@ void purr_netrec_save_official(const char *recovery, const char *modules, const 
     snprintf(off.modules, sizeof(off.modules), "%s", modules ? modules : "");
     snprintf(off.message, sizeof(off.message), "%s", message ? message : "");
     off.crc32 = purr_crc32(0, &off, offsetof(off_record_t, crc32));
-    write_all(p, have_net ? &net : NULL, have_src ? &src : NULL, &off);
+    rst_record_t rst;
+    int have_rst = read_rst(p, &rst) == 0;
+    write_all(p, have_net ? &net : NULL, have_src ? &src : NULL, &off, have_rst ? &rst : NULL);
 }
 
 int purr_netrec_load_official(char recovery[PURR_NETREC_OFF_URL_LEN], char modules[PURR_NETREC_OFF_URL_LEN], char message[PURR_NETREC_OFF_MSG_LEN], uint32_t *seq)
@@ -198,7 +226,7 @@ int purr_netrec_load_official(char recovery[PURR_NETREC_OFF_URL_LEN], char modul
     recovery[0] = modules[0] = message[0] = '\0';
     *seq = 0;
     const esp_partition_t *p = find();
-    if (p == NULL || p->size < OFF_OFFSET + sizeof(off_record_t)) {
+    if (p == NULL || p->size < RST_OFFSET + sizeof(rst_record_t)) {
         return -1;
     }
     off_record_t off;
@@ -210,5 +238,60 @@ int purr_netrec_load_official(char recovery[PURR_NETREC_OFF_URL_LEN], char modul
     memcpy(modules, off.modules, sizeof(off.modules));
     memcpy(message, off.message, sizeof(off.message));
     *seq = off.seq;
+    return 0;
+}
+
+static void write_rst(uint8_t why, int16_t detail, uint8_t had_data)
+{
+    const esp_partition_t *p = find();
+    if (p == NULL || p->size < RST_OFFSET + sizeof(rst_record_t)) {
+        return;
+    }
+    record_t net;
+    int have_net = read_net(p, &net) == 0;
+    src_record_t src;
+    int have_src = read_src(p, &src) == 0;
+    off_record_t off;
+    int have_off = read_off(p, &off) == 0;
+    rst_record_t old, rst;
+    uint32_t seq = read_rst(p, &old) == 0 ? old.seq : 0;
+    memset(&rst, 0, sizeof(rst));
+    rst.magic = RST_MAGIC;
+    rst.seq = seq + 1;
+    rst.why = why;
+    rst.had_data = had_data;
+    rst.detail = detail;
+    rst.crc32 = purr_crc32(0, &rst, offsetof(rst_record_t, crc32));
+    write_all(p, have_net ? &net : NULL, have_src ? &src : NULL, have_off ? &off : NULL, &rst);
+}
+
+void purr_netrec_save_resetnote(uint8_t why, int16_t detail, uint8_t had_data)
+{
+    write_rst(why == 0 ? 1 : why, detail, had_data);
+}
+
+void purr_netrec_clear_resetnote(void)
+{
+    write_rst(0, 0, 0);
+}
+
+int purr_netrec_load_resetnote(uint8_t *why, int16_t *detail, uint8_t *had_data, uint32_t *seq)
+{
+    *why = 0;
+    *detail = 0;
+    *had_data = 0;
+    *seq = 0;
+    const esp_partition_t *p = find();
+    if (p == NULL || p->size < RST_OFFSET + sizeof(rst_record_t)) {
+        return -1;
+    }
+    rst_record_t rst;
+    if (read_rst(p, &rst) != 0 || rst.why == 0) {
+        return -1;
+    }
+    *why = rst.why;
+    *detail = rst.detail;
+    *had_data = rst.had_data;
+    *seq = rst.seq;
     return 0;
 }

@@ -41,4 +41,12 @@ int purr_netrec_load_source(char base[PURR_NETREC_SRC_BASE_LEN], char name[PURR_
 void purr_netrec_save_official(const char *recovery, const char *modules, const char *message, uint32_t seq);
 int purr_netrec_load_official(char recovery[PURR_NETREC_OFF_URL_LEN], char modules[PURR_NETREC_OFF_URL_LEN], char message[PURR_NETREC_OFF_MSG_LEN], uint32_t *seq);
 
+/* The data-reset notice (plan7.md): why the data partition was wiped, or why the account list was replaced by the default account. Written BEFORE the wipe so it
+ * survives it, in this sector (outside the data partition). `why` is a PURR_RESET_* value (purr_resetnote.h), `detail` the file system's error code (0 if none),
+ * `had_data` whether the storage held a file system, `seq` counts the notices. save keeps seq rising; clear removes the notice (seq is kept); load returns 0 if a
+ * notice is pending. */
+void purr_netrec_save_resetnote(uint8_t why, int16_t detail, uint8_t had_data);
+int purr_netrec_load_resetnote(uint8_t *why, int16_t *detail, uint8_t *had_data, uint32_t *seq);
+void purr_netrec_clear_resetnote(void);
+
 #endif /* PURR_NETREC_H */

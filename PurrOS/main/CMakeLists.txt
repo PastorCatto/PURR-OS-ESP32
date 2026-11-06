@@ -1,4 +1,4 @@
-set(main_srcs "main.c" "commands.c" "recovery_loader.c" "recovery_screen.c" "login.c" "purr_slot_trailer.c" "purr_trust_os.c"
+set(main_srcs "main.c" "commands.c" "recovery_loader.c" "recovery_screen.c" "login.c" "purr_slot_trailer.c" "purr_trust_os.c" "purr_resetnote_os.c"
               "purr_catrt.c" "purr_catrt_storage.c" "purr_settings.c" "purr_power_plat.c" "purr_catrt_power.c" "purr_catrt_files.c" "purr_battery.c" "purr_radio_bars.c" "purr_clock.c" "purr_bootupdate.c" "purr_kbdlight.c"
               "oobe_job.c" "oobe_ui.c" "recovery_app.c" "purr_hwscan_plat.c" "purr_hwsetup.c" "purr_netsettle.c" "purr_sysupdate.c" "oobe_firstboot.c" "purr_lan_discover.c" "purr_recovery_src.c" "purr_drvcmds.c" "purr_catrt_devices.c" "purr_store.c" "purr_builtin_apps.c" "purr_sd.c")
 set(main_reqs kernel coreos littlefs esp_partition esp_system esp_timer esp_wifi
