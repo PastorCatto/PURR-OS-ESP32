@@ -10,7 +10,7 @@ emulator/run-emulator my-flash.bin t-deck-plus-vm card.img   # with an SD card i
 bin/purr emulator                                            # the same, on the kit's VM image
 ```
 
-`my-flash.bin` is a full flash image (bootloader at 0x0, partition table at 0x8000, system after). The emulator works on a copy in `emulator/run/`; the file you give is never changed. Booting takes about a minute of real time: the emulated chip is slower than the real one. `emulator/boards/` lists the boards you can name; `t-deck-plus-vm` is the one to use for PURR OS.
+`my-flash.bin` is a full flash image (bootloader at 0x0, partition table at 0xA000 for PURR OS, system after). The emulator works on a copy in `emulator/run/`; the file you give is never changed. Booting takes about a minute of real time: the emulated chip is slower than the real one. `emulator/boards/` lists the boards you can name; `t-deck-plus-vm` is the one to use for PURR OS.
 
 ## Without a window
 
