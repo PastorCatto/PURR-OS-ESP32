@@ -157,6 +157,7 @@ static const char *icon_for(const app_t *a, char *buf, size_t cap)
     }
     static const struct { const char *app, *icon; } alias[] = {
         {"files", "fr_folder"}, {"devices", "fr_settings"}, {"notes", "fr_app"}, {"store", "fr_app"},
+        {"photos", "fr_gallery"}, {"gallery", "fr_gallery"}, {"messages", "fr_messaging"}, {"sms", "fr_messaging"},     /* the stock Froyo Gallery and Messaging art (AOSP, Apache 2.0: THIRD_PARTY.md) */
     };
     size_t n = snprintf(buf, cap, "fr_");
     for (const char *s = a->name; *s != '\0' && n + 1 < cap; s++) {

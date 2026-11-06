@@ -1,0 +1,28 @@
+name = "clock"
+version = "0.1.0"
+description = "A clock with a stopwatch and a timer"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "clock_entry"
+
+[catcalls]
+console = "1.0"
+ui = "1.0"
+sched = "1.0"
+system = "1.0"
+app = "1.0"
+
+[permissions]
+requests = []
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 16384
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "Clock"
+icon = ""

@@ -1,0 +1,28 @@
+name = "photos"
+version = "0.2.0"
+description = "Browse and view your pictures (JPEG, PNG, BMP), with a slideshow and delete"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.2.0"
+entry = "photos_entry"
+
+[catcalls]
+console = "1.0"
+ui = "3.0"
+app = "1.0"
+files = "1.0"
+sched = "1.0"
+
+[permissions]
+requests = ["shared-storage"]
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 20480
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "Photos"
+icon = ""
