@@ -400,3 +400,13 @@ there is no second TLS session; the page polls that job and falls back to "could
 ### Closed (2026-10-28, owner)
 Owner verified the whole reset and restore flows on the device several times (that is how the bugs above were found). Plan1 is complete.
 The one leftover, the bootloader reset crash-loop (core 1 not parked), moves to plan3 item 6.
+
+## Flash map v2: LittleFS gets everything that is not a slot (owner, 2026-11-06; designed, nothing built)
+
+**Owner's rule.** Only the kernel, the recovery loader and KittenOS keep dedicated slots, besides what the system itself requires (the bootloader, the partition table, `nvs`, `purrcfg`, `phy_init`, `bootpkg` and `netrec`: all read before or without a file system). Everything else (pictures, UI packs and themes, shells, apps, drivers, modules) lives in LittleFS; a small partition only if something cannot.
+
+**Today (T-Deck Plus, 16 MB, `PurrOS/partitions/tdeck_plus.csv`).** `nvs` 0xB000 (16 KB), `purrcfg` 0xF000 (8 KB), `phy_init` 0x11000 (4 KB), `bootpkg` 0x12000 (56 KB), `kittenos` 0x20000 (1.5 MB), `kernel` 0x1A0000 (1.875 MB), `loader` 0x380000 (1.5 MB), `netrec` 0x500000 (4 KB), **`ui_assets` 0x501000 (5 MB)**, `root` (LittleFS) 0xA01000 (**0x5FF000, about 6 MB**).
+
+**Proposed.** Drop `ui_assets`; `root` starts at 0x501000 and runs to the end of flash: **0xAFF000 bytes, about 10.75 MiB, nearly twice today's** (+5 MB). Nothing else moves. The raw picture partition and `netinstall uiassets` go away: the per-shell packs, themes and shells are files in LittleFS (plan7.md).
+
+**What it costs.** (1) A partition-table change **cannot be an OTA** (the table is at 0xA000, bootloader OTA is off): a **cable flash, and a full erase of `root`** (its start moves from 0xA01000 to 0x501000), as with every layout change so far (the comment in the CSV). (2) Places that know the old layout: `purrstrap/scripts/uiassets.py` (it writes the pack for the raw partition), `main/purr_ui_assets.c` and `.h`, `main/main.c`, `main/commands.c` (`netinstall uiassets`), `tools/hw/make_hw_image.sh`, `tools/vm/mkimage_dbg.sh` (the root erase range for the blank-device scenarios), `bootloader/partitions.csv`, `partitions/tdeck.csv`, `docs/02-flash-map-and-partitions.md`, the SDK board profile and the emulator's image layout. (3) The LittleFS lookahead buffer (`look_buf`, 32 bytes = 256 blocks per pass) is small for 2,800 blocks; raise it to 64 or 128 bytes. (4) KittenOS is within 15 KB of its slot (1,557,184 of 1,572,864 bytes), so its slot is not a candidate for shrinking. The 8 MB Waveshare board keeps its own table.
