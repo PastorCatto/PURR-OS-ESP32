@@ -1,0 +1,38 @@
+name = "msgecho"
+version = "1.0.0"
+description = "A test messaging service: it answers every message you send it, so the Messages app can be tried without a radio"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "msgecho_entry"
+
+[catcalls]
+console = "1.0"
+ui = "1.0"
+sched = "1.0"
+app = "1.0"
+messaging = "1.0"
+
+[permissions]
+requests = ["messaging"]
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 8192
+threads = 1
+background = true
+saves_state = false
+
+[display]
+name = "Echo service"
+icon = ""
+
+# Draft: the section that will make the OS list this app as a messaging service without it having to register at run time (Messaging/SPEC.md section 2).
+[provides.messaging]
+version    = "1.0"
+name       = "Echo"
+tag        = "ECHO"
+address    = "any text"
+text_max   = 200
+images     = "none"
+needs      = []

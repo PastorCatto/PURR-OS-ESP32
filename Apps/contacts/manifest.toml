@@ -1,0 +1,28 @@
+name = "contacts"
+version = "0.1.0"
+description = "Contacts: the address book, with one address per messaging service"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "contacts_entry"
+
+[catcalls]
+console = "1.0"
+ui = "3.0"
+app = "1.0"
+contacts = "1.0"
+messaging = "1.0"
+
+[permissions]
+requests = ["contacts", "messaging"]
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 16384
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "Contacts"
+icon = ""

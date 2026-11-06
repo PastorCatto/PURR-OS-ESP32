@@ -1,0 +1,31 @@
+name = "messages"
+version = "0.1.0"
+description = "Messages: one front end for messaging services such as Meshtastic, Reticulum and MeshCore"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "messages_entry"
+
+[catcalls]
+console = "1.0"
+ui = "4.0"
+app = "1.0"
+sched = "1.0"
+system = "2.0"
+messaging = "1.0"
+contacts = "1.0"
+files = "1.0"
+
+[permissions]
+requests = ["messaging", "contacts", "shared-storage"]
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 24576
+threads = 1
+background = true
+saves_state = false
+
+[display]
+name = "Messages"
+icon = ""
