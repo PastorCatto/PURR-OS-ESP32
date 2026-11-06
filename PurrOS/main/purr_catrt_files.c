@@ -184,6 +184,32 @@ static int cc_read(const char *path, uint32_t offset, void *buf, size_t len)
     return (int)r.got;
 }
 
+/* The whole of a file into PSRAM, with the calling app's permission, for the ui catcall's pictures. 0 and *out (the caller frees it) / *len, else a PURR_FILES_* code. */
+int purr_catrt_files_load(const char *path, uint8_t **out, size_t *len, size_t max)
+{
+    uint32_t size = 0;
+    int is_dir = 0;
+    int rc = cc_stat(path, &size, &is_dir);
+    if (rc != PURR_FILES_OK) {
+        return rc;
+    }
+    if (is_dir || size == 0 || size > max) {
+        return PURR_FILES_BAD;
+    }
+    uint8_t *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        return PURR_FILES_BAD;
+    }
+    int got = cc_read(path, 0, buf, size);               /* one read: cc_read starts from the top each time */
+    if (got != (int)size) {
+        free(buf);
+        return got < 0 ? got : PURR_FILES_BAD;
+    }
+    *out = buf;
+    *len = size;
+    return PURR_FILES_OK;
+}
+
 static int cc_mkdir(const char *path)
 {
     int a = allow(path, 1);

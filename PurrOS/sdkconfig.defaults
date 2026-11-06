@@ -53,4 +53,3 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # of it fast RAM that apps need. Wi-Fi runs from flash instead, a little slower.
 # CONFIG_ESP_WIFI_IRAM_OPT is not set
 # CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
-

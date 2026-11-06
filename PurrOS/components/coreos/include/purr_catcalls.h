@@ -92,13 +92,24 @@ typedef struct {
 } purr_cc_storage_t;
 
 /* ------------------------------------------------------------------- system */
+/* The time of day in the device's time zone (Settings > Date and time), broken down. */
 typedef struct {
-    uint32_t version;                                   /* 1 */
+    int year;                                           /* 2026 */
+    int mon;                                            /* 1 to 12 */
+    int mday;                                           /* 1 to 31 */
+    int hour, min, sec;
+    int wday;                                           /* 0 = Sunday */
+} purr_cc_tm_t;
+
+typedef struct {
+    uint32_t version;                                   /* 2 (1 had no local_time; ask for it with catcall_get("system", 2)) */
     uint32_t (*uptime_ms)(void);
     uint32_t (*free_heap)(void);
     uint32_t (*largest_free_block)(void);
     int      (*battery_percent)(void);                  /* -1 if the board has no gauge */
     int64_t  (*unix_time)(void);                        /* seconds, or 0 if the clock is unset */
+    /* Version 2. Fills `out` with the local time and returns 0, or < 0 if the clock has not been set. */
+    int      (*local_time)(purr_cc_tm_t *out);
 } purr_cc_system_t;
 
 /* -------------------------------------------------------------------- event */
@@ -135,6 +146,10 @@ typedef struct {
 #define PURR_UI_ROLE_DIM    1     /* secondary text */
 #define PURR_UI_ROLE_TITLE  2     /* a heading in the accent colour */
 #define PURR_UI_ROLE_ACCENT 3     /* emphasis in the accent colour */
+/* Version 3 (OS 1.0.23) roles; an older OS draws them as PURR_UI_ROLE_TEXT. */
+#define PURR_UI_ROLE_BIG    4     /* 40 pt digits and headings: a clock, a calculator's result */
+#define PURR_UI_ROLE_MEDIUM 5     /* 28 pt */
+#define PURR_UI_ROLE_MONO   6     /* an 8 x 16 monospace face, for a terminal */
 
 /* The header's action button (win_action), by name of the symbol: */
 #define PURR_UI_ACT_NONE    0
@@ -171,7 +186,26 @@ typedef struct {
     /* Version 2. A message for the status strip at the top of the screen: it takes the strip for 5 seconds (bad = 1: an error, in amber).
      * Use it for what a button did ("Copied", "Could not delete it"); an error also belongs in the page, next to the button that failed. */
     void (*status)(const char *msg, int bad);
+    /* Version 3 (OS 1.0.23; ask for it with catcall_get("ui", 3), an older OS answers NULL). */
+    /* A grid of buttons: `cols` across, each `row_h` pixels tall (20 to 80). Returns the grid's handle; grid_button() adds the next button to it (they fill
+     * left to right and wrap) and returns the button's handle, which gets "click" like any button. The buttons can be reached with the trackball. */
+    int  (*grid)(int cols, int row_h);
+    int  (*grid_button)(int grid, const char *text);
+    /* A one-line text field (typing, and the keyboard's Enter, arrive as "changed"; read it with get_text, fill it with set_text). */
+    int  (*input_line)(int max_len, const char *placeholder);
+    /* A bar from 0 to max, and a slider from min to max ("changed" while it moves). set_value / get_value work on both. */
+    int  (*progress)(int value, int max);
+    int  (*slider)(int min, int max, int value);
+    void (*set_value)(int h, int value);
+    int  (*get_value)(int h);
+    /* A picture frame `height` pixels tall and as wide as the window; set_image() fills it from a JPEG, PNG or BMP under the user's files (the `files` catcall's
+     * paths and its "shared-storage" permission: it answers like that catcall, PURR_FILES_*, and may ask). The picture is scaled to fit. Returns 0, or
+     * PURR_UI_IMG_TOO_BIG (more than about a megapixel or 2 MB), PURR_UI_IMG_UNSUPPORTED, or a PURR_FILES_* code. */
+    int  (*image)(int height);
+    int  (*set_image)(int h, const char *path);
 } purr_cc_ui_t;
+#define PURR_UI_IMG_TOO_BIG      -4
+#define PURR_UI_IMG_UNSUPPORTED  -5
 
 
 /* -------------------------------------------------------------------- power */
@@ -247,6 +281,8 @@ typedef struct {
  *   "setup"           set up everything the last "find" recognised
  *   "update-drivers"  download newer versions of the installed drivers
  *   "get-drivers"     get the driver of every built-in device that has none (the SD card's, the GPS's...); they start at once
+ *   "get-driver"      get one of them: a = the driver's name as list("missing") gives it in b (OS 1.0.23)
+ *   "retry-driver"    put back a driver that stopped the device (list("crashed")); a = its name; it starts at the next restart (OS 1.0.23)
  *   "add"             add a device by hand: a = driver name, b = "<sda> <scl> <addr>"
  *   "read"            a reading from a running device: a = its name
  *   "remove"          remove a found device from the profile: a = its name
@@ -256,7 +292,7 @@ typedef struct {
  *   "dev-find"        look for developer servers on the network
  *   "dev-use"         use developer server number a (from list("servers"))
  *   "dev-set"         use the developer server at the typed address a
- * list(what, i, a, acap, b, bcap): row i of "found", "profile", "board", "missing" (built-in devices with no driver), "drivers" or "servers" (a = title, b = a line under it); 1 if there is such a row, 0 if not.
+ * list(what, i, a, acap, b, bcap): row i of "found", "profile", "board", "missing" (built-in devices with no driver; b is `needs the "<driver>" driver`), "crashed" (drivers set aside after the device stopped starting them, 1.0.23), "drivers" or "servers" (a = title, b = a line under it); 1 if there is such a row, 0 if not.
  * info(what, out, cap): "versions" (kernel and KittenOS), "devserver" (the one in use), "dev-mode" ("1" or "0"), "to-set-up" (how many found devices are not set up), "missing" (how many built-in devices have no driver).
  * restart() restarts the device (after an update or new drivers). */
 #define PURR_DEVICES_OK       0

@@ -20,6 +20,7 @@
 
 #include "purr_catcalls.h"
 #include "purr_catrt.h"
+#include "purr_catrt_files.h"
 #include "purr_lvgl.h"
 #include "purr_runtime.h"
 #include "purr_ui_service.h"
@@ -46,6 +47,7 @@ static win_t s_win[PURR_RT_MAX_APPS];
 typedef enum {
     OP_TITLE, OP_ACTION, OP_BACK, OP_CLEAR, OP_LABEL, OP_BUTTON, OP_ROW, OP_TEXTAREA, OP_SPACER,
     OP_SET_TEXT, OP_GET_TEXT, OP_FOCUS, OP_REMOVE,
+    OP_GRID, OP_GRID_BUTTON, OP_INPUT_LINE, OP_PROGRESS, OP_SLIDER, OP_SET_VALUE, OP_GET_VALUE, OP_IMAGE, OP_SET_IMAGE,
 } op_t;
 
 typedef struct {
@@ -267,8 +269,15 @@ static lv_obj_t *make_label(win_t *w, const char *text, int role)
         {&lv_font_montserrat_12, PURR_TH_DIM},
         {&lv_font_montserrat_16, PURR_TH_ACCENT_TEXT},
         {&lv_font_montserrat_14, PURR_TH_ACCENT_TEXT},
+        {&lv_font_montserrat_40, PURR_TH_TEXT},                 /* BIG */
+        {&lv_font_montserrat_28, PURR_TH_TEXT},                 /* MEDIUM */
+#if LV_FONT_UNSCII_16
+        {&lv_font_unscii_16, PURR_TH_TEXT},                     /* MONO */
+#else
+        {&lv_font_montserrat_14, PURR_TH_TEXT},                 /* MONO, where the monospace face is not built (KittenOS, the loader) */
+#endif
     };
-    if (role < 0 || role > 3) {
+    if (role < 0 || role > 6) {
         role = 0;
     }
     lv_obj_t *l = lv_label_create(w->body);
@@ -280,15 +289,110 @@ static lv_obj_t *make_label(win_t *w, const char *text, int role)
     return l;
 }
 
-static lv_obj_t *make_button(win_t *w, const char *text)
+static lv_obj_t *make_button_in(lv_obj_t *parent, const char *text)
 {
-    lv_obj_t *b = lv_button_create(w->body);
+    lv_obj_t *b = lv_button_create(parent);
     lv_obj_t *l = lv_label_create(b);
     lv_label_set_text(l, safe(text, 64));
     lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
     lv_obj_center(l);
     lv_obj_add_event_cb(b, widget_event, LV_EVENT_CLICKED, NULL);
     return b;
+}
+
+static lv_obj_t *make_button(win_t *w, const char *text)
+{
+    return make_button_in(w->body, text);
+}
+
+/* ---- version 3: a grid of buttons, a one-line field, a bar, a slider, a picture frame */
+
+#define GRID_GAP 3
+
+static lv_obj_t *make_grid(win_t *w, int cols, int row_h)
+{
+    cols = cols < 1 ? 1 : cols > 8 ? 8 : cols;
+    row_h = row_h < 20 ? 20 : row_h > 80 ? 80 : row_h;
+    lv_obj_t *g = lv_obj_create(w->body);
+    lv_obj_remove_style_all(g);
+    lv_obj_set_width(g, LV_PCT(100));
+    lv_obj_set_height(g, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(g, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_gap(g, GRID_GAP, 0);
+    lv_obj_set_user_data(g, (void *)(intptr_t)((cols << 8) | row_h));
+    return g;
+}
+
+static lv_obj_t *make_grid_button(win_t *w, lv_obj_t *g, const char *text)
+{
+    int cfg = (int)(intptr_t)lv_obj_get_user_data(g), cols = cfg >> 8, row_h = cfg & 0xFF;
+    if (cols < 1) {
+        return NULL;                                           /* not a grid */
+    }
+    lv_obj_t *b = make_button_in(g, text);
+    lv_obj_update_layout(g);
+    lv_obj_set_size(b, (lv_obj_get_content_width(g) - (cols - 1) * GRID_GAP) / cols, row_h);
+    lv_group_add_obj(w->group, b);                             /* the trackball reaches every key */
+    return b;
+}
+
+static lv_obj_t *make_input_line(win_t *w, int max_len, const char *placeholder)
+{
+    lv_obj_t *ta = lv_textarea_create(w->body);
+    lv_textarea_set_one_line(ta, true);
+    lv_textarea_set_max_length(ta, max_len < 1 || max_len > 256 ? 256 : (uint32_t)max_len);
+    lv_textarea_set_placeholder_text(ta, safe(placeholder, 64));
+    lv_obj_set_width(ta, LV_PCT(100));
+    lv_obj_set_style_text_font(ta, &lv_font_montserrat_14, 0);
+    lv_obj_add_event_cb(ta, widget_event, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_group_add_obj(w->group, ta);
+    return ta;
+}
+
+static lv_obj_t *make_progress(win_t *w, int value, int max)
+{
+    lv_obj_t *b = lv_bar_create(w->body);
+    lv_obj_set_size(b, LV_PCT(100), 10);
+    lv_bar_set_range(b, 0, max < 1 ? 1 : max);
+    lv_bar_set_value(b, value, LV_ANIM_OFF);
+    return b;
+}
+
+static lv_obj_t *make_slider(win_t *w, int min, int max, int value)
+{
+    lv_obj_t *sl = lv_slider_create(w->body);
+    lv_obj_set_width(sl, LV_PCT(92));
+    lv_slider_set_range(sl, min, max <= min ? min + 1 : max);
+    lv_slider_set_value(sl, value, LV_ANIM_OFF);
+    lv_obj_add_event_cb(sl, widget_event, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_group_add_obj(w->group, sl);
+    return sl;
+}
+
+/* A picture's bytes and the descriptor LVGL decodes them from (JPEG, PNG and BMP are decoded on demand); freed with the widget. */
+typedef struct {
+    lv_image_dsc_t dsc;
+    uint8_t *data;
+    uint32_t w, h;                                      /* what the file says its size is */
+} pic_t;
+
+static void pic_deleted(lv_event_t *e)
+{
+    pic_t *p = lv_obj_get_user_data(lv_event_get_target(e));
+    if (p != NULL) {
+        free(p->data);
+        free(p);
+    }
+}
+
+static lv_obj_t *make_image(win_t *w, int height)
+{
+    lv_obj_t *im = lv_image_create(w->body);
+    lv_obj_set_size(im, LV_PCT(100), height < 40 ? 40 : height > 400 ? 400 : height);
+    lv_image_set_inner_align(im, LV_IMAGE_ALIGN_CENTER);       /* scaled to fit by set_image */
+    lv_obj_add_event_cb(im, pic_deleted, LV_EVENT_DELETE, NULL);
+    return im;
 }
 
 static lv_obj_t *make_row(win_t *w, const char *title, const char *sub)
@@ -442,6 +546,77 @@ static void *exec(void *arg)
         }
         o = NULL;
         break;
+    case OP_GRID:
+        o = make_grid(w, r->i1, r->i2);
+        break;
+    case OP_GRID_BUTTON: {
+        lv_obj_t *g = get_widget(w, r->i1);
+        o = g != NULL ? make_grid_button(w, g, r->s1) : NULL;
+        break;
+    }
+    case OP_INPUT_LINE:
+        o = make_input_line(w, r->i1, r->s1);
+        break;
+    case OP_PROGRESS:
+        o = make_progress(w, r->i1, r->i2);
+        break;
+    case OP_SLIDER:
+        o = make_slider(w, r->i1, r->i2, r->i3);
+        break;
+    case OP_SET_VALUE:
+        if ((o = get_widget(w, r->i1)) != NULL) {
+            if (lv_obj_check_type(o, &lv_slider_class)) {
+                lv_slider_set_value(o, r->i2, LV_ANIM_OFF);
+                r->rc = 0;
+            } else if (lv_obj_check_type(o, &lv_bar_class)) {
+                lv_bar_set_value(o, r->i2, LV_ANIM_OFF);
+                r->rc = 0;
+            }
+        }
+        o = NULL;
+        break;
+    case OP_GET_VALUE:
+        r->rc = 0;
+        if ((o = get_widget(w, r->i1)) != NULL) {
+            r->rc = lv_obj_check_type(o, &lv_slider_class) ? lv_slider_get_value(o) : lv_obj_check_type(o, &lv_bar_class) ? lv_bar_get_value(o) : 0;
+        }
+        o = NULL;
+        break;
+    case OP_IMAGE:
+        o = make_image(w, r->i1);
+        break;
+    case OP_SET_IMAGE: {
+        lv_obj_t *im = get_widget(w, r->i1);
+        if (im == NULL || !lv_obj_check_type(im, &lv_image_class)) {
+            break;                                      /* rc stays -1: the caller keeps its buffer */
+        }
+        pic_t *p = calloc(1, sizeof(*p));
+        if (p == NULL) {
+            break;
+        }
+        p->data = (uint8_t *)r->buf;                    /* the widget owns the bytes from here */
+        p->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        p->dsc.header.cf = LV_COLOR_FORMAT_RAW;
+        p->dsc.data_size = (uint32_t)r->cap;
+        p->dsc.data = p->data;
+        p->w = (uint32_t)r->i2;
+        p->h = (uint32_t)r->i3;
+        pic_t *old = lv_obj_get_user_data(im);
+        lv_obj_set_user_data(im, p);
+        lv_image_set_src(im, &p->dsc);
+        lv_obj_update_layout(im);
+        if (p->w > 0 && p->h > 0) {                     /* fit the frame, keeping the shape: LVGL scales 256 = 1x around the middle */
+            uint32_t sx = (uint32_t)lv_obj_get_width(im) * 256u / p->w, sy = (uint32_t)lv_obj_get_height(im) * 256u / p->h;
+            uint32_t sc = sx < sy ? sx : sy;
+            lv_image_set_scale(im, sc < 8 ? 8 : sc > 4096 ? 4096 : sc);
+        }
+        if (old != NULL) {
+            free(old->data);
+            free(old);
+        }
+        r->rc = 0;
+        break;
+    }
     }
     if (o != NULL) {                                    /* a widget was just made */
         r->rc = add_widget(w, o);
@@ -491,11 +666,93 @@ static void cc_status(const char *msg, int bad)
     }
 }
 
+/* ---- version 3 */
+
+static int cc_grid(int cols, int row_h) { req_t r = {.op = OP_GRID, .i1 = cols, .i2 = row_h}; return call(&r); }
+static int cc_grid_button(int grid, const char *t) { req_t r = {.op = OP_GRID_BUTTON, .i1 = grid, .s1 = t}; return call(&r); }
+static int cc_input_line(int max, const char *ph) { req_t r = {.op = OP_INPUT_LINE, .i1 = max, .s1 = ph}; return call(&r); }
+static int cc_progress(int value, int max) { req_t r = {.op = OP_PROGRESS, .i1 = value, .i2 = max}; return call(&r); }
+static int cc_slider(int min, int max, int value) { req_t r = {.op = OP_SLIDER, .i1 = min, .i2 = max, .i3 = value}; return call(&r); }
+static void cc_set_value(int h, int v) { req_t r = {.op = OP_SET_VALUE, .i1 = h, .i2 = v}; call(&r); }
+static int cc_get_value(int h) { req_t r = {.op = OP_GET_VALUE, .i1 = h}; return call(&r); }
+static int cc_image(int height) { req_t r = {.op = OP_IMAGE, .i1 = height}; return call(&r); }
+
+#define IMG_FILE_MAX    (2u * 1024 * 1024)
+#define IMG_MAX_PIXELS  1000000u
+
+/* The size a picture says it has, and what it is: 1 PNG, 2 JPEG, 3 BMP, 0 not one of those. Read from the file's own header, before anything is decoded. */
+static int sniff_picture(const uint8_t *d, size_t n, uint32_t *w, uint32_t *h)
+{
+    if (n >= 24 && memcmp(d, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        *w = (uint32_t)d[16] << 24 | (uint32_t)d[17] << 16 | (uint32_t)d[18] << 8 | d[19];
+        *h = (uint32_t)d[20] << 24 | (uint32_t)d[21] << 16 | (uint32_t)d[22] << 8 | d[23];
+        return 1;
+    }
+    if (n >= 26 && d[0] == 'B' && d[1] == 'M') {
+        int32_t bw = (int32_t)((uint32_t)d[18] | (uint32_t)d[19] << 8 | (uint32_t)d[20] << 16 | (uint32_t)d[21] << 24);
+        int32_t bh = (int32_t)((uint32_t)d[22] | (uint32_t)d[23] << 8 | (uint32_t)d[24] << 16 | (uint32_t)d[25] << 24);
+        *w = bw < 0 ? (uint32_t)-bw : (uint32_t)bw;
+        *h = bh < 0 ? (uint32_t)-bh : (uint32_t)bh;
+        return 3;
+    }
+    if (n >= 4 && d[0] == 0xFF && d[1] == 0xD8) {
+        size_t i = 2;
+        while (i + 9 < n) {
+            if (d[i] != 0xFF) {
+                i++;
+                continue;
+            }
+            uint8_t m = d[i + 1];
+            if (m == 0xFF) {
+                i++;
+                continue;
+            }
+            if ((m >= 0xC0 && m <= 0xCF) && m != 0xC4 && m != 0xC8 && m != 0xCC) {       /* a start-of-frame marker: height, then width */
+                *h = (uint32_t)d[i + 5] << 8 | d[i + 6];
+                *w = (uint32_t)d[i + 7] << 8 | d[i + 8];
+                return 2;
+            }
+            size_t len = (size_t)d[i + 2] << 8 | d[i + 3];
+            i += 2 + (len < 2 ? 2 : len);
+        }
+    }
+    return 0;
+}
+
+/* The file is read and checked here, on the app's own task, so the UI task is never kept waiting on a flash read; only the finished buffer goes across. */
+static int cc_set_image(int h, const char *path)
+{
+    uint8_t *data = NULL;
+    size_t len = 0;
+    int rc = purr_catrt_files_load(path, &data, &len, IMG_FILE_MAX);
+    if (rc != PURR_FILES_OK) {
+        return rc;
+    }
+    uint32_t pw = 0, ph = 0;
+    if (sniff_picture(data, len, &pw, &ph) == 0) {
+        free(data);
+        return PURR_UI_IMG_UNSUPPORTED;
+    }
+    if (pw == 0 || ph == 0 || (uint64_t)pw * ph > IMG_MAX_PIXELS) {
+        free(data);
+        return PURR_UI_IMG_TOO_BIG;
+    }
+    req_t r = {.op = OP_SET_IMAGE, .i1 = h, .i2 = (int)pw, .i3 = (int)ph, .buf = (char *)data, .cap = len};
+    call(&r);
+    if (r.rc != 0) {
+        free(data);                                     /* the widget did not take it */
+        return PURR_FILES_BAD;
+    }
+    return 0;
+}
+
 static const purr_cc_ui_t s_cc_ui = {
-    .version = 2, .win_title = cc_win_title, .win_action = cc_win_action, .win_back = cc_win_back,
+    .version = 3, .win_title = cc_win_title, .win_action = cc_win_action, .win_back = cc_win_back,
     .clear = cc_clear, .label = cc_label, .button = cc_button, .row = cc_row, .textarea = cc_textarea,
     .spacer = cc_spacer, .set_text = cc_set_text, .get_text = cc_get_text, .focus = cc_focus,
     .remove = cc_remove, .status = cc_status,
+    .grid = cc_grid, .grid_button = cc_grid_button, .input_line = cc_input_line, .progress = cc_progress, .slider = cc_slider,
+    .set_value = cc_set_value, .get_value = cc_get_value, .image = cc_image, .set_image = cc_set_image,
 };
 
 /* ---------------------------------------------------------------- lifecycle and layout */

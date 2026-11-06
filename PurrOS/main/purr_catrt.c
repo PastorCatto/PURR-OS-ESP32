@@ -864,9 +864,28 @@ static int64_t cc_unix_time(void)
     return t < 1000000000 ? 0 : (int64_t)t;     /* an unset clock reads as 0 */
 }
 
+/* The time in the device's zone (the TZ the settings applied); < 0 while the clock is unset. */
+static int cc_local_time(purr_cc_tm_t *out)
+{
+    time_t t = time(NULL);
+    if (out == NULL || t < 1000000000) {
+        return -1;
+    }
+    struct tm tm;
+    localtime_r(&t, &tm);
+    out->year = tm.tm_year + 1900;
+    out->mon = tm.tm_mon + 1;
+    out->mday = tm.tm_mday;
+    out->hour = tm.tm_hour;
+    out->min = tm.tm_min;
+    out->sec = tm.tm_sec;
+    out->wday = tm.tm_wday;
+    return 0;
+}
+
 static const purr_cc_system_t s_cc_system = {
-    .version = 1, .uptime_ms = cc_uptime_ms, .free_heap = cc_free_heap,
-    .largest_free_block = cc_largest_block, .battery_percent = cc_battery, .unix_time = cc_unix_time,
+    .version = 2, .uptime_ms = cc_uptime_ms, .free_heap = cc_free_heap,
+    .largest_free_block = cc_largest_block, .battery_percent = cc_battery, .unix_time = cc_unix_time, .local_time = cc_local_time,
 };
 
 static int cc_emit(const char *name, const char *data)
