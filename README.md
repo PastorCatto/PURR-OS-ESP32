@@ -321,6 +321,7 @@ Specifications, one per area:
 
 | Area | Document |
 |---|---|
+| The documentation (start here) | [docs/README.md](docs/README.md), [docs/start-here.md](docs/start-here.md), [docs/runbook.md](docs/runbook.md) |
 | Security overview | [SECURITY.md](SECURITY.md) |
 | Bootloader and boot package | [bootloader/SPEC.md](bootloader/SPEC.md) |
 | The system | [PurrOS/SPEC.md](PurrOS/SPEC.md) |

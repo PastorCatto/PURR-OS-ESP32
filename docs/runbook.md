@@ -143,7 +143,7 @@ New `src/*.c` files for host tests are picked up by a glob; the device's CMake s
 | Forgetting the target | Without `-DIDF_TARGET=esp32s3` the build is for plain ESP32 and fails in `purr_kernel.c`. | Always pass it when configuring. |
 | Editing sources during a build | A bogus link error. | Do not edit a file ninja still has to compile. |
 | `switch` in an app or driver | It makes a jump table, which the relocator must treat as code. | Fixed in [purrstrap/scripts/modules.py](../purrstrap/scripts/modules.py); check with `objdump -d x.o` for `jx`. |
-| Apps on PSRAM stacks | Apps do flash I/O, which cannot run from a PSRAM stack. | Each app task takes an 8 KB internal stack. Internal RAM is the scarce resource. |
+| Flash calls on a PSRAM stack | Since 1.0.22 an app's task stack, queue and semaphores are in PSRAM by default (setting `apps.psram_stacks`, 1 = on). IDF aborts a flash operation made from a PSRAM stack. | Flash access goes through `purr_io` (the `flash_io` task); a missed direct call aborts loudly and names itself. Internal RAM is still the scarce resource. Details in [06-app-runtime.md](06-app-runtime.md) and [plan7.md](../plan7.md). |
 | Baked-in drivers | The display, touch and keyboard driver files in `/boot/drivers` are planted every start. | Deferral and quarantine must exempt them (the 1.0.24 hang). |
 | `dev recovery` forgets files | It regenerates manifests from the folder. | Pass the system modules with `--modules`; verify every file afterwards. |
 | New programs hang in state `U` | A macOS prompt to allow debugging other apps is waiting for an answer. | Answer the prompt. Do not `kill -9` `lldb` or `debugserver`. |

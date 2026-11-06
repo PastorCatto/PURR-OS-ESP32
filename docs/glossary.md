@@ -10,7 +10,7 @@
 
 | Term | Meaning | Read more |
 |------|---------|-----------|
-| **Admission** | The app runtime's check that there is enough memory before it starts another app. Each app task takes an 8 KB stack from internal RAM, so internal RAM, not PSRAM, is the limit. | [06-app-runtime.md](06-app-runtime.md) |
+| **Admission** | The app runtime's check that there is enough memory before it starts another app. Since 1.0.22 app stacks are in PSRAM by default (with a way back to internal RAM), but internal RAM is still the scarce resource. | [06-app-runtime.md](06-app-runtime.md) |
 | **App** | A freestanding module (no libc) loaded into PSRAM at run time. Apps are sideloaded through the Developer Portal or the Store; only Settings is built into the shell. | [06-app-runtime.md](06-app-runtime.md), [16-apps.md](16-apps.md) |
 | **Board** | A description of a piece of hardware (pins, display, keyboard, and so on), written as a `board.toml` and turned into a board file and a device profile. The reference board is `tdeck_plus`. | [19-boards.md](19-boards.md) |
 | **Boot key** | The signing key (id 1) that signs the boot package, KittenOS, the loader, the kernel and the trust block. Its public half is compiled into the bootloader and the firmware. | [03-trust-and-keys.md](03-trust-and-keys.md) |
