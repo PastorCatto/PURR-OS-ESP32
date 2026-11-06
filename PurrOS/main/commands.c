@@ -968,7 +968,8 @@ void purr_continue_install(purr_cli_t *cli)
         purr_net_install_run(cli, "kernel");
     }
     purr_net_install_run(cli, "modules");
-    purr_net_install_run(cli, "uiassets");             /* the shell's picture pack, if the release carries one */
+    purr_net_install_run(cli, "ui_w10m");              /* the picture packs of both shells, if the release carries them: the kernel's shell is not known here */
+    purr_net_install_run(cli, "ui_android");
     purr_stage2_step(cli, 2);                          /* the bootloader, if the server has a newer one */
 }
 
@@ -1000,8 +1001,10 @@ int purr_stage2_step(purr_cli_t *cli, int step)
         }
         return r;
     }
-    if (step == 3) {                                    /* the shell's picture pack (ui_assets), if the release carries one */
-        return purr_net_install_run(cli, "uiassets");
+    if (step == 3) {                                    /* the picture packs of both shells, if the release carries them */
+        int a = purr_net_install_run(cli, "ui_w10m");
+        int b = purr_net_install_run(cli, "ui_android");
+        return a != 0 ? a : b;
     }
     return purr_net_install_run(cli, step == 0 ? "kernel" : "modules");
 }
@@ -1059,8 +1062,15 @@ static const net_install_component_t s_net_install_components[] = {
     {"kernel",  PURR_MOD_KERNEL,  "kernel"},
     {"loader",  PURR_MOD_LOADER,  "loader"},
     {"bootpkg", PURR_MOD_BOOTPKG, "bootpkg"},
-    {"uiassets", PURR_MOD_UIASSETS, "ui_assets"},   /* a data partition: no signature trailer, and only the used part is erased and written */
+    /* A shell's picture pack is a FILE in LittleFS now (/ui/<shell>/pack.bin, plan1.md "Flash map v2"), written by install_ui_pack() below, so there is no partition. */
+    {"ui_w10m", PURR_MOD_UIASSETS, NULL},
+    {"ui_android", PURR_MOD_UIASSETS, NULL},
 };
+
+static int is_ui_pack(const char *component)
+{
+    return strcmp(component, "ui_w10m") == 0 || strcmp(component, "ui_android") == 0;
+}
 
 /* File-staged components (PurrOS/SPEC.md section 6.1, purr_swap.h): CoreOS, AppManager, the
  * runtimes and the drivers bundle actually live as files in /boot, so net_install stages
@@ -1201,6 +1211,56 @@ static int purr_net_install_modules(purr_cli_t *cli);
  * domain-level-only rule keeps out of a module's reach. The netinstall module
  * (Modules/netinstall/netinstall_module.c) reaches it only through the single opaque
  * core_table_net_install() wrapper below. */
+static int sha_feed(void *ctx, const void *data, uint32_t len)
+{
+    purr_sha256_update((purr_sha256_t *)ctx, data, len);
+    return 0;
+}
+
+/* Writes a shell's picture pack as /ui/<shell>/pack.bin (the component is ui_<shell>). The container's signature was checked by the caller; the pack carries its own
+ * CRC, which the UI checks again at start. Skips the write when the same pack is already there, and reads the file back to compare before saying it worked. */
+static int install_ui_pack(purr_cli_t *cli, const char *component, const char *version, const uint8_t *pack, uint32_t len, const uint8_t *want_hash)
+{
+    purr_fs_t *fs = purr_login_fs();
+    if (fs == NULL || !purr_fs_mounted(fs)) {
+        purr_cli_puts(cli, "the file system is not available, so the picture pack cannot be installed\n");
+        return 1;
+    }
+    char dir[32], path[48];
+    snprintf(dir, sizeof(dir), "/ui/%s", component + 3);              /* ui_w10m -> /ui/w10m */
+    snprintf(path, sizeof(path), "%s/pack.bin", dir);
+    uint8_t hd[PURR_SHA256_LEN];
+    purr_sha256_t hs;
+    purr_sha256_init(&hs);
+    if (purr_fs_read(fs, path, sha_feed, &hs) == 0) {
+        purr_sha256_final(&hs, hd);
+        if (memcmp(hd, want_hash, sizeof(hd)) == 0) {
+            purr_cli_printf(cli, "%s %s is already installed\n", component, version);
+            return 0;
+        }
+    }
+    purr_fs_mkdir(fs, "/ui");                                          /* ignored if they exist */
+    purr_fs_mkdir(fs, dir);
+    purr_cli_printf(cli, "writing %s...\n", path);
+    purr_console_flush();
+    if (purr_fs_write_kept(fs, path, pack, len) != 0) {
+        purr_cli_puts(cli, "write failed\n");
+        return 1;
+    }
+    purr_sha256_init(&hs);
+    if (purr_fs_read(fs, path, sha_feed, &hs) != 0) {
+        purr_cli_puts(cli, "read-back failed\n");
+        return 1;
+    }
+    purr_sha256_final(&hs, hd);
+    if (memcmp(hd, want_hash, sizeof(hd)) != 0) {
+        purr_cli_puts(cli, "read-back hash mismatch: the write did not take\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s %s installed. It takes effect at the next start.\n", component, version);
+    return 0;
+}
+
 static int purr_net_install_run(purr_cli_t *cli, const char *component)
 {
     if (strcmp(component, "modules") == 0) {
@@ -1232,7 +1292,7 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
 
     const purr_manifest_entry_t *entry = purr_manifest_find(&man, component, CONFIG_IDF_TARGET,
                                                              purr_board()->name);
-    if (entry == NULL && strcmp(component, "uiassets") == 0) {      /* a release need not carry a picture pack: that is not a failure */
+    if (entry == NULL && is_ui_pack(component)) {                    /* a release need not carry a picture pack: that is not a failure */
         purr_cli_puts(cli, "no UI pack in this release\n");
         return 0;
     }
@@ -1268,11 +1328,11 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
 
     uint8_t *image = NULL;
     size_t image_len = 0;
-    size_t max_len = strcmp(component, "uiassets") == 0 ? 5 * 1024 * 1024 : 2 * 1024 * 1024;     /* a picture pack can fill its 5 MB partition */
-    if (strcmp(component, "uiassets") == 0 && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < (size_t)entry->size + 4096) {
+    size_t max_len = is_ui_pack(component) ? 5 * 1024 * 1024 : 2 * 1024 * 1024;                 /* a picture pack is limited to 5 MB */
+    if (is_ui_pack(component) && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < (size_t)entry->size + 4096) {
         /* The pack is downloaded into one block of PSRAM and checked before anything is erased; say so plainly if there is no such block (apps running). */
-        purr_cli_printf(cli, "not enough free memory for the %u byte pack (largest block %u). Close apps or restart, then run: netinstall uiassets\n",
-                        (unsigned)entry->size, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        purr_cli_printf(cli, "not enough free memory for the %u byte pack (largest block %u). Close apps or restart, then run: netinstall %s\n",
+                        (unsigned)entry->size, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT), component);
         return 1;
     }
     esp_err_t fe = purr_fetch_alloc_checked(image_url, &image, &image_len, max_len, entry->size, entry->sha256);       /* three tries, each checked */
@@ -1344,6 +1404,11 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
                         purr_verify_name(vr));
     }
 
+    if (is_ui_pack(component)) {                       /* a picture pack is a file in LittleFS, not a partition */
+        int r = install_ui_pack(cli, component, hdr.version, image + hdr.payload_offset, hdr.payload_size, hdr.payload_sha256);
+        free(image);
+        return r;
+    }
     const esp_partition_t *slot = esp_partition_find_first(ESP_PARTITION_TYPE_ANY,
                                                             ESP_PARTITION_SUBTYPE_ANY,
                                                             comp->partition_label);
@@ -1361,46 +1426,21 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
      * left the bootloader unable to find a PURR image there at all ("no PURR image (partition
      * empty?)"), quietly removing the boot menu on the very next boot. */
     int whole_container = (comp->subtype == PURR_MOD_BOOTPKG);
-    int data_part = (comp->subtype == PURR_MOD_UIASSETS);       /* no trailer: the pack carries its own CRC, and the container's signature was checked above */
     const uint8_t *write_data = whole_container ? image : (image + hdr.payload_offset);
     uint32_t write_len = whole_container ? (uint32_t)image_len : hdr.payload_size;
     const uint8_t *verify_hash = whole_container ? got_hash : hdr.payload_sha256;
 
     /* kernel and loader also carry a signature trailer in the partition's last sector
      * (bootloader/SPEC.md section 3.1), so the image has to leave that sector free. */
-    if (whole_container || data_part ? write_len > slot->size : !purr_slot_trailer_fits(slot, write_len)) {
+    if (whole_container ? write_len > slot->size : !purr_slot_trailer_fits(slot, write_len)) {
         free(image);
         purr_cli_printf(cli, "the image is bigger than the %s partition\n", comp->partition_label);
         return 1;
     }
 
-    if (data_part) {                                    /* already the same pack: leave the flash alone (a failed download can never cost the icons) */
-        uint8_t have[512];
-        purr_sha256_t hs;
-        uint8_t hd[PURR_SHA256_LEN];
-        purr_sha256_init(&hs);
-        int same = 1;
-        for (uint32_t off = 0; off < write_len && same; off += sizeof(have)) {
-            uint32_t n = write_len - off < sizeof(have) ? write_len - off : (uint32_t)sizeof(have);
-            same = purr_io_partition_read(slot, off, have, n) == ESP_OK;
-            if (same) {
-                purr_sha256_update(&hs, have, n);
-            }
-        }
-        purr_sha256_final(&hs, hd);
-        if (same && memcmp(hd, verify_hash, sizeof(hd)) == 0) {
-            free(image);
-            purr_cli_printf(cli, "%s %s is already installed\n", component, hdr.version);
-            return 0;
-        }
-    }
     purr_cli_printf(cli, "writing to %s...\n", comp->partition_label);
     purr_console_flush();
-    uint32_t erase_len = data_part ? ((write_len + 4095u) & ~4095u) : slot->size;      /* a pack is a small part of its partition: erase only what it needs */
-    if (erase_len > slot->size) {
-        erase_len = slot->size;
-    }
-    if (purr_io_partition_erase_range(slot, 0, erase_len) != ESP_OK ||
+    if (purr_io_partition_erase_range(slot, 0, slot->size) != ESP_OK ||
         purr_io_partition_write(slot, 0, write_data, write_len) != ESP_OK) {
         free(image);
         purr_cli_puts(cli, "write failed\n");
@@ -1435,10 +1475,6 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
      * copied into the partition's last sector, so the bootloader can verify this slot. The
      * boot package is the exception -- it holds the whole container from offset 0. Then check
      * the result exactly the way the bootloader will. */
-    if (data_part) {
-        purr_cli_printf(cli, "%s %s installed. It takes effect at the next start.\n", component, hdr.version);
-        return 0;
-    }
     if (!whole_container) {
         if (purr_slot_trailer_write(slot, &hdr) != 0) {
             purr_cli_puts(cli, "could not write the signature trailer\n");

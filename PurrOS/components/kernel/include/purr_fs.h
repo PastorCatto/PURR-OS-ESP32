@@ -35,7 +35,7 @@ typedef struct {
     purr_bd_t bd;
     uint8_t read_buf[PURR_FS_CACHE];
     uint8_t prog_buf[PURR_FS_CACHE];
-    uint8_t look_buf[32];
+    uint8_t look_buf[64];                  /* 512 blocks per pass: the root file system is about 2,800 blocks since flash map v2 */
     uint8_t file_buf[PURR_FS_CACHE];      /* one file open at a time */
     int mounted;
     int poisoned;                         /* a read failed for good: the next operation remounts first (see purr_fs.c, bd_read); 2 = unmounted, mount pending */

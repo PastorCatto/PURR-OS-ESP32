@@ -215,6 +215,38 @@ static void test_the_official_address_is_allowed(void)
     CHECK(!purr_repo_url_allowed(PURR_REPO_STORE, "https://user:pw@example.org/", why, sizeof(why)));
 }
 
+static void test_theme_items(void)
+{
+    purr_repo_index_t idx;
+    char err[96];
+    purr_repo_kind_t store = PURR_REPO_STORE;
+    const char *z = "\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"";
+    char doc[2048];
+    snprintf(doc, sizeof(doc),
+        "{\"format\":2,\"repo\":{\"id\":\"x\",\"name\":\"n\",\"kind\":\"store\"},\"apps\":["
+        "{\"name\":\"night\",\"title\":\"Night\",\"version\":\"1.0\",\"type\":\"theme\",\"category\":\"w10m\",\"size\":300000,%s,\"url\":\"night.bin\",\"dest\":\"pack.bin\"},"
+        "{\"name\":\"big\",\"version\":\"1.0\",\"type\":\"theme\",\"size\":3000000,%s,\"url\":\"big.bin\",\"dest\":\"pack.bin\"},"
+        "{\"name\":\"toobig\",\"version\":\"1.0\",\"type\":\"theme\",\"size\":9000000,%s,\"url\":\"tb.bin\",\"dest\":\"pack.bin\"},"
+        "{\"name\":\"nodest\",\"version\":\"1.0\",\"type\":\"theme\",\"size\":10,%s,\"url\":\"n.bin\"},"
+        "{\"name\":\"elsewhere\",\"version\":\"1.0\",\"type\":\"theme\",\"size\":10,%s,\"url\":\"e.bin\",\"dest\":\"icons/pack.bin\"},"
+        "{\"name\":\"climb\",\"version\":\"1.0\",\"type\":\"theme\",\"size\":10,%s,\"url\":\"c.bin\",\"dest\":\"../pack.bin\"},"
+        "{\"name\":\"asset\",\"version\":\"1.0\",\"type\":\"asset\",\"size\":3000000,%s,\"url\":\"a.bin\",\"dest\":\"x.bin\"}"
+        "]}", z, z, z, z, z, z, z);
+    CHECK_EQ(purr_repo_index_parse(doc, strlen(doc), &idx, &store, err, sizeof(err)), 0);
+    CHECK_EQ(idx.count, 2);                                   /* a theme up to 4 MB with dest pack.bin; an ordinary asset keeps the 512 KB limit */
+    const purr_repo_app_t *t = purr_repo_index_find(&idx, "night");
+    CHECK(t != NULL);
+    CHECK_EQ(t->type, PURR_REPO_ITEM_THEME);
+    CHECK(strcmp(t->category, "w10m") == 0);
+    CHECK(strcmp(t->dest, "pack.bin") == 0);
+    CHECK(purr_repo_index_find(&idx, "big") != NULL);
+    CHECK(purr_repo_index_find(&idx, "toobig") == NULL);
+    CHECK(purr_repo_index_find(&idx, "nodest") == NULL);
+    CHECK(purr_repo_index_find(&idx, "elsewhere") == NULL);
+    CHECK(purr_repo_index_find(&idx, "climb") == NULL);
+    CHECK(purr_repo_index_find(&idx, "asset") == NULL);
+}
+
 static void test_format2_index_rules(void)
 {
     purr_repo_index_t idx;
@@ -254,5 +286,6 @@ int main(void)
     test_the_trusted_list_is_untrusted_input();
     test_the_official_address_is_allowed();
     test_format2_index_rules();
+    test_theme_items();
     TK_DONE("test_repo_trust");
 }

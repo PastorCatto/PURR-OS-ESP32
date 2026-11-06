@@ -349,6 +349,7 @@ static int parse_app(jp_t *j, purr_repo_app_t *a, int *valid)
                     if (strcmp(v, "app") == 0) a->type = PURR_REPO_ITEM_APP;
                     else if (strcmp(v, "asset") == 0) a->type = PURR_REPO_ITEM_ASSET;
                     else if (strcmp(v, "extra") == 0) a->type = PURR_REPO_ITEM_EXTRA;
+                    else if (strcmp(v, "theme") == 0) a->type = PURR_REPO_ITEM_THEME;
                     else ok = 0;                          /* a kind of item this OS does not know */
                 } else if (r == -2) ok = 0;
             }
@@ -407,12 +408,15 @@ static int parse_app(jp_t *j, purr_repo_app_t *a, int *valid)
     }
     if (!have_name || !have_ver || !have_sha || !have_url || !have_size) ok = 0;
     if (ok && (!name_ok(a->name) || !version_ok(a->version) || !rel_ok(a->url) ||
-               a->size == 0 || a->size > PURR_REPO_MAX_PACKAGE ||
+               a->size == 0 || a->size > (a->type == PURR_REPO_ITEM_THEME ? PURR_REPO_MAX_THEME : PURR_REPO_MAX_PACKAGE) ||
                purr_repo_hex_to_sha256(sha_hex, a->sha256) != 0)) {
         ok = 0;
     }
     if (ok && a->type != PURR_REPO_ITEM_APP && !dest_ok(a->dest)) {
         ok = 0;                                          /* an asset or extra must say where it goes, and plainly */
+    }
+    if (ok && a->type == PURR_REPO_ITEM_THEME && strcmp(a->dest, "pack.bin") != 0) {
+        ok = 0;                                          /* a theme is one pack file, and its name is fixed */
     }
     if (ok && a->type == PURR_REPO_ITEM_APP && a->dest[0] != '\0') {
         ok = 0;

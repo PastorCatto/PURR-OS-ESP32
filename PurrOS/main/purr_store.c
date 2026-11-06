@@ -29,6 +29,7 @@
 #include "login.h"
 #include "purr_brand.h"
 #include "purr_sd.h"
+#include "purr_ui_assets.h"
 #include "purr_catcalls.h"
 #include "purr_catrt.h"
 #include "purr_catrt_power.h"
@@ -512,11 +513,11 @@ static void asset_version(const purr_repo_app_t *a, char *out, size_t cap)
     char path[160];
     uint8_t v[24];
     out[0] = '\0';
-    const char *roots[2] = {NULL, "/sd/purr"};
+    const char *roots[4] = {NULL, "/sd/purr", "/ui/themes", "/sd/ui/themes"};         /* the last two are where a theme goes */
     char ar[64];
     assets_root(ar, sizeof(ar));
     roots[0] = ar;
-    for (int r = 0; r < 2; r++) {
+    for (int r = 0; r < 4; r++) {
         snprintf(path, sizeof(path), "%s/%s/.version", roots[r], a->name);
         if (read_file(path, v, sizeof(v), NULL) > 0) {
             snprintf(out, cap, "%s", (const char *)v);
@@ -649,6 +650,14 @@ static void rm_tree(const char *path, int depth)
 static int asset_dest(const purr_repo_app_t *a, char *out, size_t cap, char *why, size_t whycap)
 {
     int sd = sd_present_now();
+    if (a->type == PURR_REPO_ITEM_THEME) {                       /* /ui/themes/<name> in LittleFS (three slots), or the same folder on the SD card */
+        if (a->target == PURR_REPO_TARGET_SD && !sd) {
+            snprintf(why, whycap, "%s is for an SD card, and there is none.", a->title);
+            return -1;
+        }
+        snprintf(out, cap, a->target == PURR_REPO_TARGET_SD ? "/sd/ui/themes/%s" : "/ui/themes/%s", a->name);
+        return 0;
+    }
     int use_sd = a->target == PURR_REPO_TARGET_SD || (a->target == PURR_REPO_TARGET_ANY && sd && a->needs_sd);
     if (a->needs_sd && !sd) {
         snprintf(why, whycap, "%s needs an SD card, and there is none.", a->title);
@@ -733,6 +742,10 @@ static int install_item(const char *name, const char *repo_id)
             setmsg("%s", why);
             goto done;
         }
+        if (a->type == PURR_REPO_ITEM_THEME && strncmp(dest, "/sd/", 4) != 0 && purr_ui_theme_slots_used(a->name) >= PURR_UI_THEME_SLOTS) {
+            setmsg("Three themes are installed. Remove one in Settings first, or put this one on the SD card.");
+            goto done;
+        }
         if (strncmp(dest, "/sd/", 4) != 0) {                   /* flash: leave room (never past 90 % full) */
             uint32_t used = 0, total = 0;
             if (purr_fs_usage(fs(), &used, &total) == 0 && total > 0 && ((uint64_t)used * 4096 + a->size) * 100 > (uint64_t)total * 4096 * 90) {
@@ -787,6 +800,18 @@ static int install_item(const char *name, const char *repo_id)
             setmsg("Could not write %s.", a->dest);
             goto done;
         }
+        if (a->type == PURR_REPO_ITEM_THEME) {                  /* what Settings shows: the index entry's title, the repository, the shell it is for */
+            char conf[220], title[64], who[40];
+            snprintf(title, sizeof(title), "%s", a->title);
+            snprintf(who, sizeof(who), "%s", e->name);
+            for (char *c = title; *c; c++) { if ((unsigned char)*c < 32) *c = ' '; }
+            for (char *c = who; *c; c++) { if ((unsigned char)*c < 32) *c = ' '; }
+            const char *shell = strcmp(a->category, "w10m") == 0 || strcmp(a->category, "android") == 0 ? a->category : "any";
+            snprintf(conf, sizeof(conf), "name=%s\nauthor=%s\nversion=%s\nshell=%s\n", title, who, a->version, shell);
+            char cf[200];
+            snprintf(cf, sizeof(cf), "%s/theme.conf", dest);
+            x_write(cf, conf, (uint32_t)strlen(conf));
+        }
         char vfile[200];
         snprintf(vfile, sizeof(vfile), "%s/.version", dest);
         x_write(vfile, a->version, (uint32_t)strlen(a->version));
@@ -810,6 +835,14 @@ static int remove_item(const char *name, const char *repo_id)
                 if (purr_apps_remove(name) != 0) {
                     setmsg("%s is not installed.", name);
                     return -1;
+                }
+            } else if (s_items[i].type == PURR_REPO_ITEM_THEME) {
+                purr_ui_theme_remove(name);
+                char sdir[120];
+                snprintf(sdir, sizeof(sdir), "/sd/ui/themes/%s", name);
+                if (sd_present_now()) {
+                    rm_tree(sdir, 0);
+                    x_remove(sdir);
                 }
             } else {
                 char ar[64], dir[120];
@@ -1484,7 +1517,7 @@ int purr_store_cmd(purr_cli_t *cli, int argc, char **argv)
         for (int i = 0; i < s_nitems; i++) {
             const purr_store_item_t *it = &s_items[i];
             purr_cli_printf(cli, "%-16s %-8s %-10s %s%s%s  [%s %s]\n", it->name, it->version, it->tier, it->installed[0] ? "installed " : "", it->installed[0] ? it->installed : "",
-                            it->state == PURR_STORE_UPDATE ? "  UPDATE" : "", it->type == 0 ? "app" : it->type == 1 ? "asset" : "extra", it->repo);
+                            it->state == PURR_STORE_UPDATE ? "  UPDATE" : "", it->type == 0 ? "app" : it->type == 1 ? "asset" : it->type == 2 ? "extra" : "theme", it->repo);
         }
         if (s_nitems == 0) {
             purr_cli_printf(cli, "nothing offered yet: store refresh\n");

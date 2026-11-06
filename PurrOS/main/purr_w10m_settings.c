@@ -40,6 +40,7 @@
 #include "commands.h"
 #include "login.h"
 #include "purr_resetnote_os.h"
+#include "purr_ui_assets.h"
 #include "purr_appmgr.h"
 #include "purr_catrt.h"
 #include "purr_battery.h"
@@ -815,6 +816,79 @@ static void wallpaper_cb(lv_event_t *e)
     purr_wallpaper_set((int)lv_dropdown_get_selected(lv_event_get_target(e)));      /* saved, and the shell redraws */
 }
 
+/* Themes (plan7.md): chosen here, applied at the next start. The ids live in static storage because the rows keep pointers to them. */
+static char s_theme_ids[PURR_UI_THEME_SLOTS + 8][40];
+
+static void theme_pick_cb(lv_event_t *e)
+{
+    if (!acting_admin()) {
+        say("Only an administrator can change the theme.", 0);
+        return;
+    }
+    const char *id = lv_event_get_user_data(e);
+    int r = purr_ui_theme_select(id);
+    if (r == 0) {
+        say(id[0] ? "Theme chosen. It takes effect when the device restarts." : "No theme. The shell's own pictures are used after the next restart.", 1);
+    } else if (r == -2) {
+        say("Three themes are installed. Remove one first, then choose this one from the SD card.", 0);
+    } else {
+        say("Could not choose that theme.", 0);
+    }
+}
+
+static void theme_remove_cb(lv_event_t *e)
+{
+    if (!acting_admin()) {
+        say("Only an administrator can remove a theme.", 0);
+        return;
+    }
+    char chosen[40];
+    if (!purr_ui_theme_chosen(chosen, sizeof(chosen))) {
+        say("No theme is chosen.", 0);
+        return;
+    }
+    if (!confirm_tap(lv_event_get_target(e), "Tap again to remove it")) {
+        return;
+    }
+    say(purr_ui_theme_remove(chosen) == 0 ? "Removed. Open this page again to refresh it." : "Could not remove it.", 1);
+}
+
+static void theme_section(void)
+{
+    static purr_theme_info_t th[PURR_UI_THEME_SLOTS + 6];
+    int n = purr_ui_theme_list(th, PURR_UI_THEME_SLOTS + 6);
+    char chosen[40] = "", line[112], sub[96];
+    purr_ui_theme_chosen(chosen, sizeof(chosen));
+    cm_space(s_body, 4);
+    cm_title(s_body, "Theme");
+    const char *in_use = purr_ui_assets_theme();
+    snprintf(line, sizeof(line), "In use: %s", in_use[0] ? in_use : "none (the shell's own pictures)");
+    cm_dim(s_body, line);
+    if (purr_ui_assets_theme_failed()[0]) {
+        snprintf(line, sizeof(line), "The theme %s could not be loaded, so the shell's own pictures are used.", purr_ui_assets_theme_failed());
+        lv_obj_set_style_text_color(cm_dim(s_body, line), lv_color_hex(0xFFB900), 0);
+    }
+    s_theme_ids[0][0] = '\0';
+    cm_row(s_body, chosen[0] ? "None" : "None (chosen)", "The shell's own pictures", 1, theme_pick_cb, (void *)s_theme_ids[0]);
+    for (int i = 0; i < n && i < PURR_UI_THEME_SLOTS + 6; i++) {
+        snprintf(s_theme_ids[i + 1], sizeof(s_theme_ids[i + 1]), "%s", th[i].id);
+        char title[64];
+        snprintf(title, sizeof(title), "%s%s", th[i].name, strcmp(chosen, th[i].id) == 0 ? " (chosen)" : "");
+        snprintf(sub, sizeof(sub), "%s%s%s%s%s", th[i].author, th[i].author[0] && th[i].version[0] ? ", " : "", th[i].version,
+                 strcmp(th[i].shell, "any") != 0 && strcmp(th[i].shell, purr_ui_assets_shell()) != 0 ? ", for another shell" : "",
+                 th[i].on_sd ? ", on the SD card" : "");
+        cm_row(s_body, title, sub[0] ? sub : NULL, 1, theme_pick_cb, (void *)s_theme_ids[i + 1]);
+    }
+    if (n == 0) {
+        cm_dim(s_body, "No themes are installed.");
+    }
+    cm_dim(s_body, "Up to three themes are kept on the device; more can wait on the SD card and are copied in when chosen. A change takes effect when the device restarts.");
+    if (chosen[0]) {
+        lv_obj_t *rb = cm_button(s_body, "Remove the chosen theme", theme_remove_cb, NULL);
+        lv_obj_set_width(rb, LV_PCT(100));
+    }
+}
+
 static void page_personal(void)
 {
     cm_title(s_body, "Colours");
@@ -865,6 +939,7 @@ static void page_personal(void)
         cm_dropdown(s_body, names, purr_wallpaper_get(), 150, wallpaper_cb);
     }
     cm_dim(s_body, "On the start, lock and sign-in screens. It stays when you switch the shell.");
+    theme_section();
 
     cm_space(s_body, 4);
     cm_title(s_body, "Effects");
