@@ -99,7 +99,7 @@ class RecoveryHosting(unittest.TestCase):
     def test_an_image_bigger_than_its_slot_is_refused(self):
         big = os.path.join(self.tmp, "kittenos-big.kitt")
         with open(big, "wb") as fh:
-            fh.write(img("kittenos", "1.2.4", b"x" * (0x180000 + 100), kind=pimg.IMG_RECOVERY))
+            fh.write(img("kittenos", "1.2.4", b"x" * (0x1C0000 + 100), kind=pimg.IMG_RECOVERY))
         rc, out = self.run_recovery(kittenos=big)
         self.assertEqual(rc, 1)
         self.assertIn("too many", out)
@@ -150,6 +150,54 @@ class RecoveryHosting(unittest.TestCase):
         self.assertRegex(stanza, r"file=uiassets-tdeck_plus\.[0-9a-f]{10}\.cat")
         self.assertNotIn("component=uiassets", open(os.path.join(rdir, "modules.manifest")).read())
         self.assertEqual(len([s for s in text.split("\n\n") if "component=" in s]), 5)
+
+    def test_the_two_per_shell_ui_packs_are_components_signed_for_the_system_key(self):
+        for comp in ("ui_w10m", "ui_android"):
+            pack = os.path.join(self.tmp, comp + ".cat")
+            with open(pack, "wb") as fh:
+                fh.write(img(comp, "1.0.29", comp.encode() * 40, flags=pimg.MOD_UIASSETS))
+            rc, _ = self.run_recovery(**{comp: pack})
+            self.assertEqual(rc, 0, comp)
+        rdir = os.path.join(self.repo, "recovery")
+        text = open(os.path.join(rdir, "recovery.manifest")).read()
+        modules = open(os.path.join(rdir, "modules.manifest")).read()
+        for comp, size in (("ui_w10m", 7 * 40), ("ui_android", 10 * 40)):
+            self.assertTrue(os.path.exists(os.path.join(rdir, "%s-tdeck_plus.cat" % comp)))
+            stanza = next(s for s in text.split("\n\n") if "component=%s\n" % comp in s + "\n")
+            for want in ("version=1.0.29", "key=system", "payload_size=%d" % size, "board=tdeck_plus"):
+                self.assertIn(want, stanza)
+            self.assertRegex(stanza, r"file=%s-tdeck_plus\.[0-9a-f]{10}\.cat" % comp)
+            self.assertNotIn("component=%s" % comp, modules)          # a component, not a module
+        self.assertEqual(len([s for s in text.split("\n\n") if "component=" in s]), 6)
+        self.assertIn("ui_w10m", dev.RECOVERY_COMPONENTS)
+        self.assertIn("ui_android", dev.RECOVERY_COMPONENTS)
+
+    def test_a_ui_pack_is_capped_at_5_mb_instead_of_a_slot(self):
+        limit = 5 * 1024 * 1024
+        self.assertEqual(dev.SLOT_BYTES["ui_w10m"], limit)
+        self.assertEqual(dev.SLOT_BYTES["ui_android"], limit)
+        for comp in ("ui_w10m", "ui_android"):
+            ok = os.path.join(self.tmp, comp + "-ok.cat")
+            with open(ok, "wb") as fh:
+                fh.write(img(comp, "1.0.29", b"\x00" * limit, flags=pimg.MOD_UIASSETS))
+            rc, out = self.run_recovery(**{comp: ok})
+            self.assertEqual(rc, 0, "exactly the cap is allowed")
+            big = os.path.join(self.tmp, comp + "-big.cat")
+            with open(big, "wb") as fh:
+                fh.write(img(comp, "1.0.29", b"\x00" * (limit + 1), flags=pimg.MOD_UIASSETS))
+            rc, out = self.run_recovery(**{comp: big})
+            self.assertEqual(rc, 1)
+            self.assertIn("1 too many", out)
+            self.assertIn("UI pack", out)
+
+    def test_a_module_cannot_take_a_ui_pack_name(self):
+        for comp in ("ui_w10m", "ui_android"):
+            clash = os.path.join(self.tmp, "clash-%s.cat" % comp)
+            with open(clash, "wb") as fh:
+                fh.write(img(comp, "1.0.0"))
+            rc, out = self.run_recovery(modules=clash)
+            self.assertEqual(rc, 1)
+            self.assertIn("cannot be called", out)
 
     def test_refuses_what_is_not_an_image_or_a_bad_module_name(self):
         junk = os.path.join(self.tmp, "junk.cat")

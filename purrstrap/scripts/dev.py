@@ -47,7 +47,8 @@ CHIPS = {pimg.CHIP_ANY: "any", pimg.CHIP_ESP32: "esp32", pimg.CHIP_ESP32S3: "esp
 MAX_PACKAGE = 512 * 1024
 RECOVERY_DIR = "recovery"
 RECOVERY_VM_DIR = "recovery-vm"                  # the same files built for the emulator (the VM flavor's recovery URL points here)
-RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader", "uiassets")      # the files the loader and KittenOS fetch by name
+RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader", "uiassets", "ui_w10m", "ui_android")      # the files the loader and KittenOS fetch by name
+SYSTEM_KEY_COMPONENTS = ("uiassets", "ui_w10m", "ui_android")      # signed by the release's system key, not the boot key
 RECOVERY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")    # a plain file name: no slash, so no way out of the folder
 
 
@@ -299,7 +300,7 @@ def build_recovery_manifests(repo):
     for e in comps:
         lines += ["component=%s" % e["component"], "version=%s" % e["version"], "chip=%s" % e["chip"],
                   "board=%s" % e["board"], "file=%s" % e["file"], "size=%d" % e["size"], "sha256=%s" % e["sha256"],
-                  "key=%s" % ("system" if e["component"] == "uiassets" else "boot"), "payload_size=%d" % e["payload_size"], "payload_sha256=%s" % e["payload_sha256"]]
+                  "key=%s" % ("system" if e["component"] in SYSTEM_KEY_COMPONENTS else "boot"), "payload_size=%d" % e["payload_size"], "payload_sha256=%s" % e["payload_sha256"]]
         if _is_withdrawn(tokens, e["component"], e["version"]):
             lines.append("withdrawn=yes")                    # the entry itself says so too, for a reader that only looks at entries
         lines.append("")
@@ -319,14 +320,18 @@ def build_recovery_manifests(repo):
 
 # The partitions these images are written into (PurrOS/partitions.csv): an image whose payload is bigger cannot be installed, and the loader's only message is "something went
 # wrong while installing" (2026-11-05, a KittenOS 11 KB over its 1.5 MB slot). Refused here instead.
-SLOT_BYTES = {"kernel": 0x1E0000, "kittenos": 0x180000, "loader": 0x180000, "bootpkg": 0xE000, "bootloader": 0xA000, "uiassets": 0x500000}
+# The two per-shell UI packs are files in LittleFS now (flash map v2), not a partition: they get a size cap instead of a slot. `uiassets`, the old
+# single pack for the raw partition (gone from the new table), keeps its old slot size.
+SLOT_BYTES = {"kernel": 0x220000, "kittenos": 0x1C0000, "loader": 0x1C0000, "bootpkg": 0xE000, "bootloader": 0xA000, "uiassets": 0x500000,
+              "ui_w10m": 5 * 1024 * 1024, "ui_android": 5 * 1024 * 1024}
 
 
-def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader="", uiassets=""):
+def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader="", uiassets="", ui_w10m="", ui_android=""):
     rdir = _recovery_dir(dir)
     os.makedirs(rdir, exist_ok=True)
     given = {"kernel": (kernel, ".cat"), "kittenos": (kittenos, ".kitt"), "loader": (loader, ".cat"),
-             "bootpkg": (bootpkg, ".cat"), "bootloader": (bootloader, ".cat"), "uiassets": (uiassets, ".cat")}
+             "bootpkg": (bootpkg, ".cat"), "bootloader": (bootloader, ".cat"), "uiassets": (uiassets, ".cat"),
+             "ui_w10m": (ui_w10m, ".cat"), "ui_android": (ui_android, ".cat")}
     for comp, (src, ext) in given.items():
         if not src:
             continue
@@ -338,7 +343,8 @@ def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules,
         room = SLOT_BYTES.get(comp)
         size = pimg.header_fields(pimg.parse_header(head))["payload_size"]
         if room is not None and size > room:
-            ctx.error("%s: its payload is %d bytes and the %s partition holds %d: %d too many (the loader could not install it)" % (src, size, comp, room, size - room))
+            what = "limit for a UI pack is" if comp.startswith("ui_") else "%s partition holds" % comp
+            ctx.error("%s: its payload is %d bytes and the %s %d: %d too many (the loader could not install it)" % (src, size, what, room, size - room))
             return 1
         _atomic_copy(src, os.path.join(rdir, "%s-%s%s" % (comp, board, ext)))
         ctx.ok("%s -> recovery/%s-%s%s" % (comp, comp, board, ext))
@@ -627,7 +633,9 @@ SCRIPT = Script(
                        Param("loader", "path", default="", help="the recovery loader image (.cat)"),
                        Param("bootpkg", "path", default="", help="the boot package image (.cat)"),
                        Param("bootloader", "path", default="", help="the signed bootloader image (.cat), installed by KittenOS with a backup"),
-                       Param("uiassets", "path", default="", help="the signed UI icon pack (.cat from `uiassets package`), installed by stage 2"),
+                       Param("uiassets", "path", default="", help="the signed single UI icon pack (.cat from `uiassets package`), the old raw-partition layout; the device no longer uses it"),
+                       Param("ui_w10m", "path", default="", help="the signed Windows 10 Mobile shell's pack (.cat from `uiassets package --name ui_w10m`), installed by stage 2 as /ui/w10m/pack.bin; at most 5 MB"),
+                       Param("ui_android", "path", default="", help="the signed Android shell's pack (.cat from `uiassets package --name ui_android`), installed by stage 2 as /ui/android/pack.bin; at most 5 MB"),
                        Param("legal", "path", default="", help="the legal and credits text file"),
                        Param("modules", "str", default="", help="module images to host, comma separated"))),
         Action("withdraw", "Withdraw a version", withdraw,

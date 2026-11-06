@@ -1,20 +1,16 @@
 # Name,   Type, SubType, Offset,  Size
 #
-# ui_assets (added for the LVGL UI's asset-pack chunk): raw, unsigned binary images/icons
-# purr_ui_config.c's widgets reference by name -- not executable code, so it doesn't go
-# through purr_image_verify() the way kernel/kittenos/bootpkg/modules do, same reasoning
-# OTA/SPEC.md gives for every other plain-data partition here. 5 MB since 2026-10-26 (it was
-# 512 KB) to hold the original Windows 10 Mobile style art unchanged (plan7.md); carved out of
-# root, which shrinks to 6 MB and now starts at 0xA01000 -- a full erase + reformat of root is
-# needed on any device flashed with an older layout, same as every other partition-table change
-# this project has made.
+# Flash map v2 (1.0.29, plan1.md): only the kernel, the recovery loader and KittenOS have slots of their own, besides what is read without a file system (nvs,
+# purrcfg, phy_init, bootpkg, netrec). Everything else -- the picture packs, themes, shells, apps, drivers and modules -- is a file in LittleFS (`root`), which
+# runs from 0x5C1000 to the end of the 16 MB flash (0xA3F000 bytes, about 10.2 MiB). The 5 MB raw `ui_assets` partition is gone. The three slots each got 256 KB of
+# room to grow (owner, 2026-11-06): kittenos 1.75 MB, kernel 2.125 MB, loader 1.75 MB. Changing this table is not an OTA: it needs a cable flash and a full erase
+# of root (its start moved from 0xA01000), as every layout change has.
 nvs,      data, nvs,     0xB000,  0x4000
 purrcfg,  data, 0x40,    0xF000,  0x2000
 phy_init, data, phy,     0x11000, 0x1000
 bootpkg,  data, 0x40,    0x12000, 0xE000
-kittenos, app,  factory, 0x20000, 0x180000
-kernel,   app,  ota_0,   0x1A0000, 0x1E0000
-loader,   app,  test,    0x380000, 0x180000
-netrec,    data, 0x41,    0x500000, 0x1000
-ui_assets, data, 0x42,    0x501000, 0x500000
-root,      data, 0x83,    0xA01000, 0x5FF000
+kittenos, app,  factory, 0x20000, 0x1C0000
+kernel,   app,  ota_0,   0x1E0000, 0x220000
+loader,   app,  test,    0x400000, 0x1C0000
+netrec,    data, 0x41,    0x5C0000, 0x1000
+root,      data, 0x83,    0x5C1000, 0xA3F000
