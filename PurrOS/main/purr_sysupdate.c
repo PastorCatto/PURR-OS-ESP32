@@ -16,6 +16,10 @@
 #include "purr_fetch.h"
 #include "purr_kernel.h"
 #include "purr_manifest.h"
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#include "purr_notify.h"
+#endif
+#include "purr_recovery_src.h"
 #include "purr_netrec.h"
 #include "purr_slot_trailer.h"
 #include "purr_trust_os.h"
@@ -103,7 +107,13 @@ int purr_sysupdate_check(int use_dev, char *msg, size_t cap)
         }
         snprintf(url, sizeof(url), "%s/recovery/recovery.manifest", sv.base);
     } else {
-        snprintf(url, sizeof(url), "%s", CONFIG_PURR_RECOVERY_MANIFEST_URL);
+        char moved[96];
+        if (purr_recovery_check_moved(moved, sizeof(moved))) {     /* a signed move file: the next addresses are the new ones */
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+            purr_notify_add("Updates have moved", moved);
+#endif
+        }
+        snprintf(url, sizeof(url), "%s", purr_recovery_official_manifest_url());
     }
     uint8_t *buf = NULL;
     size_t len = 0;

@@ -54,6 +54,8 @@
 #include "purr_net.h"
 #include "purr_settings.h"
 #include "purr_sysupdate.h"
+#include "purr_recovery_src.h"
+#include "purr_repo.h"
 #include "purr_trust_os.h"
 #include "purr_wallpaper.h"
 #include "purr_ui_service.h"
@@ -1794,6 +1796,18 @@ static void upd_reinstall_cb(lv_event_t *e)
     upd_go(e, 1, "Tap again: reinstall (files are kept)", "Restarting to reinstall...");
 }
 
+/* Back to the compiled default address, after a signed move (plan8.md). */
+static void upd_default_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!acting_admin()) {
+        say("Only an administrator can do that.", 0);
+        return;
+    }
+    purr_recovery_move_clear();
+    say("Updates come from the default address again. Restart this page to see it.", 1);
+}
+
 static void about_system_section(void)
 {
     char kv[16], ov[16], buf[96];
@@ -1802,6 +1816,20 @@ static void about_system_section(void)
     cm_title(s_body, "System update");
     snprintf(buf, sizeof(buf), PURR_BRAND_PRODUCT " %s, " PURR_BRAND_RECOVERY " %s", kv, ov);
     cm_text(s_body, buf);
+    {
+        char scheme[8], host[96], path[96];
+        uint16_t port;
+        if (purr_repo_url_split(purr_recovery_official_manifest_url(), scheme, sizeof(scheme), host, sizeof(host), &port, path, sizeof(path)) == 0) {
+            snprintf(buf, sizeof(buf), "Updates come from %.60s", host);
+            cm_dim(s_body, buf);
+        }
+        if (purr_recovery_official_moved()) {
+            snprintf(buf, sizeof(buf), "Moved by a signed message from the project (number %u).", (unsigned)purr_recovery_move_seq());
+            cm_dim(s_body, buf);
+            lv_obj_t *db = cm_button(s_body, "Use the default address", upd_default_cb, NULL);
+            lv_obj_set_width(db, LV_PCT(100));
+        }
+    }
     s_upd_src_btn = NULL;
     purr_repo_server_t sv;
     if (purr_security_dev_active() && purr_devsrv_get(&sv) == 0) {

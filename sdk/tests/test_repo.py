@@ -92,5 +92,48 @@ class Repository(unittest.TestCase):
             repo.build(folder, os.path.join(d, "o"), "wrongpassword")
 
 
+@unittest.skipUnless(helpers.HAVE_CRYPTO, "needs the cryptography package")
+class MovingTheAddress(unittest.TestCase):
+    OLD = "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar1/recovery.manifest"
+    NEW_R = "https://example.org/hub/os/stable/recovery.manifest"
+    NEW_M = "https://example.org/hub/os/stable/modules.manifest"
+
+    def key(self):
+        d = helpers.tmpdir()
+        k = helpers.Key()
+        from cryptography.hazmat.primitives import serialization
+        path = os.path.join(d, "boot.key")
+        with open(path, "wb") as fh:
+            fh.write(k.priv.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.BestAvailableEncryption(b"bootpw1")))
+        return d, k, path
+
+    def test_the_file_is_written_and_signed(self):
+        d, k, path = self.key()
+        text = repo.move(os.path.join(d, "out"), self.OLD, self.NEW_R, self.NEW_M, path, 1, "bootpw1", 3, "Updates now come from the PURR hub.")
+        self.assertEqual(open(os.path.join(d, "out", "moved.txt")).read(), text)
+        self.assertEqual(text.splitlines()[:3], ["moved=1", "seq=3", "key_id=1"])
+        sig = bytes.fromhex(open(os.path.join(d, "out", "moved.txt.sig")).read())
+        self.assertEqual(len(sig), 64)
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec, utils
+        r, s = int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big")
+        k.priv.public_key().verify(utils.encode_dss_signature(r, s), text.encode(), ec.ECDSA(hashes.SHA256()))
+
+    def test_bad_input_is_refused(self):
+        d, k, path = self.key()
+        out = os.path.join(d, "out")
+        for args in (("http://example.org/x/recovery.manifest", self.NEW_M), (self.NEW_R, "https://example.org/hub/os/stable/index.json"),
+                     ("https://example.org/a b/recovery.manifest", self.NEW_M)):
+            with self.assertRaises(repo.RepoError):
+                repo.move(out, self.OLD, args[0], args[1], path, 1, "bootpw1", 1)
+        with self.assertRaises(repo.RepoError):
+            repo.move(out, self.OLD, self.NEW_R, self.NEW_M, path, 1, "bootpw1", 0)
+        with self.assertRaises(repo.RepoError):
+            repo.move(out, self.OLD, self.NEW_R, self.NEW_M, path, 1, "bootpw1", 1, "no\nnewlines")
+        with self.assertRaises(repo.RepoError):
+            repo.move(out, self.OLD, self.NEW_R, self.NEW_M, path, 1, "wrong password", 1)
+        self.assertFalse(os.path.exists(os.path.join(out, "moved.txt")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -772,6 +772,7 @@ static int restore_components(int include_kernel)
     wiz_progress(0, steps, 0);
     purr_fetch_set_progress(fetch_progress);
     status("Checking what to install...");
+    purr_recovery_check_moved(NULL, 0);                    /* a signed move file may have shifted the official address (plan8.md) */
     uint8_t *manifest_buf = NULL;
     size_t manifest_len = 0;
     if (purr_fetch_alloc(purr_recovery_manifest_url(), &manifest_buf, &manifest_len,

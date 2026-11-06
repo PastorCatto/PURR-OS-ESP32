@@ -232,3 +232,26 @@ Design: an OS-side Store job `drivers` (`purr_store.c`, next to `check`), so the
 
 ### The apps repository (owner, 2026-11-05)
 The owner is creating a new repository for the apps and will give this session access. The plan for moving the apps and publishing them there is in `showtime1.md` ("The apps repository").
+
+## The hub: one repository for OTAs, apps, games and channels (owner decisions, 2026-11-06)
+
+The owner's repository **PURR-OS-HUB** (`https://github.com/PastorCatto/PURR-OS-HUB`, public, MIT; today only a LICENSE and a README, its description still says "drivers") becomes the place everything is served from: the OS images (OTA), apps, games, drivers and extras, in **channels**. It replaces the apps repository of the previous section. The release process moves to it at **1.1**: the proper release is the first to be served from the hub.
+
+**What goes where.** Small signed metadata (manifests, indexes, `hub.json`, the docs, CI checks) is in git. The big files (kernel, loader, KittenOS, app and game packages) are GitHub release assets or the Pages site, never committed. Signing stays offline on the owner's computer; CI only verifies hashes and signatures against public keys and never holds the boot key or any passphrase. GitHub is the host **for now, not forever**: the address the firmware uses is meant to become an address the owner controls, so the host can change.
+
+**Layout (draft).** `hub.json` (signed list of channels: id, base URL, trust rule, floor rule), `os/stable|beta|dev/` (the three manifests), and one repository each (own `repo.json` and `index.json` with signatures) for `apps/`, `games/`, `drivers/`, `extras/`. A **game** is an app of kind "game" (the `game` permission exists); a separate catalogue lets third parties run theirs under their own key and rules.
+
+**Who does the work.** The Store service (the companion) does the checks: the OS update check, the app and game updates, the hub's channel list. **The install of OS images stays in the recovery loader and KittenOS**, which keep their own copy of the source, so a broken OS can still repair itself. The Store service is the hub's client for now; that is a choice for now, not for good.
+
+**Third-party apps and games** arrive as **pull requests** that add an index entry (source link, commit, package address, sha256). CI checks the hash and the permissions asked for; the owner merges and signs the index.
+
+**Legacy.** Only the owner's development devices (and possibly one device sent to a friend) have the JumpingJaguar addresses compiled in; they keep working and are not the focus. **There is no bridge release** (owner, 2026-11-06): 1.0.28 is rebuilt with the move mechanism below, because it has not been installed or uploaded; the proper release, 1.1, is served from the hub.
+
+### Moving the OTA address (built into 1.0.28)
+
+The recovery addresses were compile-time constants (`CONFIG_PURR_RECOVERY_MANIFEST_URL`, `CONFIG_PURR_MODULE_INDEX_URL`), each image (kernel, loader, KittenOS) carrying its own copy. Now:
+1. **A stored official source** (two manifest addresses, a sequence number) in the `netrec` partition next to the network record and the dev-server record (so the loader, which has no file system, can read it). `purr_recovery_manifest_url()`, `_modules_url()` and `_legal_url()` use, in order: a chosen dev server, the stored source, the compiled default.
+2. **A signed redirect file**, `moved.txt` with `moved.txt.sig` (ECDSA P-256 over SHA-256, 128 hex digits, as the repository files), next to the manifest the device is asking. It is `key=value` lines: `moved=1`, `seq`, `key_id`, `from` (the exact manifest address being asked), `recovery`, `modules`, `message`. The device follows it only if the signature verifies against a key in its bag with the boot role (not revoked), `from` equals the address it asked, `seq` is above the stored one, both new addresses are https and end in `/recovery.manifest` and `/modules.manifest`. A file naming the compiled default clears the stored source (a way back).
+3. **When:** before an OS update check (kernel) and before the loader fetches its manifest, only when no dev server is in use. A move shows a notice with the file's message, and Settings > Updates shows where updates come from.
+4. **Safety:** a redirect cannot install code: images are verified against the boot key from any host, and the floors still apply. A wrong or hostile host can only withhold updates, which the way back and the signed file cover.
+Tooling: `purr repo move` (the SDK, `sdk/purrsdk/repo.py`) makes and signs the file. **Built and checked in 1.0.28 (2026-11-06):** the host test `test_move.c` (31 checks, with files signed by the Python tool), and in the VM the recovery loader fetched a signed `moved.txt`, followed it ("recsrc: followed move 1") and, on the next boot, used the stored source and did not ask the old address again. Not run: the kernel's update check (`purr_sysupdate_check`) and the Settings page (compiled, not seen); not run on a device. Tests: host tests for the parse and the rules (including a Python-signed fixture); a VM check against the dev server. Not run on a device.

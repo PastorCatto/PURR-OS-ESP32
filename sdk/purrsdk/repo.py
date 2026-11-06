@@ -246,6 +246,29 @@ def endorse(repo_pub_or_folder, system_key, key_id, password, out=None):
     return end
 
 
+def move(folder, from_url, recovery_url, modules_url, system_key, key_id, password, seq, message=""):
+    """The signed redirect that moves a device's OTA address (plan8.md, "Moving the OTA address"): writes moved.txt and moved.txt.sig into `folder` and returns
+    the text. Put both next to the recovery.manifest the devices ask (`from_url` is that manifest's address, exactly). Signed with a key the devices already have
+    (the boot key); `seq` must be above the one of the last move."""
+    for what, u in (("from", from_url), ("recovery", recovery_url), ("modules", modules_url)):
+        if not u.startswith("https://") or len(u) >= 120 or any(c <= " " or c > "~" for c in u):
+            raise RepoError("The %s address must be https, under 120 characters, with no spaces: %s" % (what, u))
+    if not recovery_url.endswith("/recovery.manifest") or not modules_url.endswith("/modules.manifest"):
+        raise RepoError("The new addresses must end in /recovery.manifest and /modules.manifest.")
+    if int(seq) < 1 or not 1 <= int(key_id) <= 255:
+        raise RepoError("seq must be 1 or more, and the key id 1 to 255.")
+    if len(message) > 79 or any(c < " " or c > "~" for c in message):
+        raise RepoError("The message is shown to the user: printable ASCII, 79 characters at most.")
+    text = "moved=1\nseq=%d\nkey_id=%d\nfrom=%s\nrecovery=%s\nmodules=%s\nmessage=%s\n" % (int(seq), int(key_id), from_url, recovery_url, modules_url, message)
+    sig = sign_bytes(load_private(system_key, password), text.encode())
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "moved.txt"), "w", newline="\n") as fh:
+        fh.write(text)
+    with open(os.path.join(folder, "moved.txt.sig"), "wb") as fh:
+        fh.write(sig.hex().encode())
+    return text
+
+
 # ------------------------------------------------------------------------------------------------------------------ checking (no extra packages)
 
 def _read(base, rel):

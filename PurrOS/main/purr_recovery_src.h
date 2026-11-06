@@ -10,6 +10,7 @@
 #define PURR_RECOVERY_SRC_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "purr_lan_discover.h"
 
@@ -53,5 +54,15 @@ const char *purr_recovery_source_name(void);
 #ifdef __cplusplus
 }
 #endif
+
+/* The official source: the compiled default, or what a signed move file (purr_move.h, plan8.md) set. A dev server does not change these. */
+const char *purr_recovery_official_manifest_url(void);
+const char *purr_recovery_official_modules_url(void);
+int purr_recovery_official_moved(void);                  /* 1 if a move is in force */
+uint32_t purr_recovery_move_seq(void);
+void purr_recovery_move_clear(void);                     /* back to the compiled default (the seq is kept) */
+/* Asks the official server for moved.txt next to the manifest it uses now (the network must be up) and follows it if it is signed and valid. Returns 1 if the source
+ * changed (message gets the text to show the user), 0 otherwise (no file, not valid, or a dev server in use). */
+int purr_recovery_check_moved(char *message, size_t cap);
 
 #endif /* PURR_RECOVERY_SRC_H */

@@ -92,6 +92,18 @@ It builds the kernel, loader and KittenOS packages from `out/stdfull`, `out/stdm
 
 For testing, `purrstrap dev recovery` copies images into the developer server's `recovery/` folder under the names `<component>-<board>.cat` (note: a dash, where release files use an underscore) and regenerates both manifests **from the files in the folder**, so the system modules must be passed with `--modules`. `dev withdraw --version 1.0.20 --reason "..."` marks a bad version; the list is kept in `recovery/withdrawn.list` and written into both manifests on every later `dev recovery`.
 
+## Moving the OTA address (built in 1.0.28)
+
+The recovery addresses used to be constants in every image. Since 1.0.28 a device can be told, by a small signed file, that its updates come from somewhere else (the hub, [plan8.md](../plan8.md)). Read this before you change where the official releases live.
+
+1. **The file.** `moved.txt` and `moved.txt.sig` sit next to the `recovery.manifest` the device asks. It is `key=value` lines (`moved=1`, `seq`, `key_id`, `from`, `recovery`, `modules`, `message`); the signature is ECDSA P-256 over SHA-256 of the exact bytes, 128 hex digits. Make both with `purr repo move OUTFOLDER --from-url ... --recovery ... --modules ... --seq N --key <boot key> --message "..."` (the passphrase is read from the prompt or the environment of that one command).
+2. **The rules** ([purr_move.c](../PurrOS/components/coreos/src/purr_move.c), [purr_move.h](../PurrOS/components/coreos/include/purr_move.h)): a boot-role key in the device's bag that is not revoked has signed it; `from` is exactly the address the device asked; `seq` is above the last move it followed; both new addresses are https and end in `/recovery.manifest` and `/modules.manifest`. A file that names the compiled default clears the stored source and keeps `seq`, so an old file cannot be replayed.
+3. **Where it is kept.** A third record in the `netrec` partition ([purr_netrec.c](../PurrOS/components/kernel/src/purr_netrec.c)), next to the network record and the dev-server record, so the recovery loader (no file system) reads it too. `purr_recovery_manifest_url()` and the other address functions in [purr_recovery_src.c](../PurrOS/main/purr_recovery_src.c) use: a chosen dev server, else the stored source, else the compiled default.
+4. **When it runs.** Before the kernel's update check ([purr_sysupdate.c](../PurrOS/main/purr_sysupdate.c)) and before the loader fetches its manifest ([recovery_loader.c](../PurrOS/main/recovery_loader.c)), unless a dev server is in use. Settings > About > System update shows where updates come from and, after a move, offers "Use the default address".
+5. **What it cannot do.** It cannot install code: images are verified against the boot key from any host, and the version floors still apply. A hostile host can only withhold updates.
+
+Checked: a host test with files signed by the Python tool; in the emulator the loader followed a signed move and used the stored source after a restart. Not checked: the kernel's update check path and the Settings page in the emulator; nothing on a device.
+
 ## Channels (designed, not built)
 
 The owner decided on 2026-11-01 ([plan3.md](../plan3.md)):

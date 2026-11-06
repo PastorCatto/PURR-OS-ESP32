@@ -38,3 +38,7 @@ People add it with the address of the release, like `https://github.com/me/my-ap
 - **untrusted**: something does not match (a bad signature, or a changed key). It works only with developer mode on, and the Store says so.
 
 If you ever change the key, it is a different repository: everyone has to add it again and confirm the new fingerprint. That is on purpose.
+
+## Moving the official update address (project only)
+
+`purr repo move OUTFOLDER --from-url <the recovery.manifest devices ask now> --recovery <the new one> --modules <the new modules.manifest> --seq 1 --key <the boot key> [--message "..."]` writes `moved.txt` and `moved.txt.sig`. Put both next to the manifest the devices ask. A device follows it only if the boot key signed it, `from` is the address it asked, `seq` is higher than the last move it followed, and the new addresses are https and end in `/recovery.manifest` and `/modules.manifest`. This needs the boot key, so only the project can do it; it has nothing to do with your own repository. How it works: [docs/08](../../docs/08-updates-and-release-channels.md).

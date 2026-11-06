@@ -9,6 +9,8 @@
 #ifndef PURR_NETREC_H
 #define PURR_NETREC_H
 
+#include <stdint.h>
+
 #define PURR_NETREC_SSID_LEN 33
 #define PURR_NETREC_PASS_LEN 65
 
@@ -29,5 +31,14 @@ int purr_netrec_load(char ssid[PURR_NETREC_SSID_LEN], char pass[PURR_NETREC_PASS
 void purr_netrec_save_source(const char *base, const char *name, const char *id);
 int purr_netrec_load_source(char base[PURR_NETREC_SRC_BASE_LEN], char name[PURR_NETREC_SRC_NAME_LEN],
                             char id[PURR_NETREC_SRC_ID_LEN]);
+
+/* The official source: where the OS update check asks for recovery.manifest and modules.manifest when a signed move file (purr_move.h) has told the device the
+ * official location changed. Stored in the same sector (the recovery loader and KittenOS have no file system and read it from here too). `seq` is the number of the
+ * last move followed: it is kept when the source is cleared (back to the compiled default), so an old move file cannot be replayed. save with empty addresses clears
+ * the source and keeps seq. load returns 0 if a record is there (the addresses are empty when it has been cleared), -1 if there was never one (seq 0). */
+#define PURR_NETREC_OFF_URL_LEN 120
+#define PURR_NETREC_OFF_MSG_LEN 80
+void purr_netrec_save_official(const char *recovery, const char *modules, const char *message, uint32_t seq);
+int purr_netrec_load_official(char recovery[PURR_NETREC_OFF_URL_LEN], char modules[PURR_NETREC_OFF_URL_LEN], char message[PURR_NETREC_OFF_MSG_LEN], uint32_t *seq);
 
 #endif /* PURR_NETREC_H */

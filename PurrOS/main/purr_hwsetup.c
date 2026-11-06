@@ -14,6 +14,7 @@
 
 #include "commands.h"
 #include "purr_abi.h"
+#include "purr_recovery_src.h"
 #include "purr_board.h"
 #include "purr_driver.h"
 #include "purr_driver_bus.h"
@@ -198,7 +199,7 @@ static int sources(source_t *out, int max)
     int n = 0;
     if (n < max) {
         char dir[200];
-        url_dir(CONFIG_PURR_MODULE_INDEX_URL, dir, sizeof(dir));
+        url_dir(purr_recovery_official_modules_url(), dir, sizeof(dir));
         snprintf(out[n].index_url, sizeof(out[n].index_url), "%sdrivers.manifest", dir);
         snprintf(out[n].dir, sizeof(out[n].dir), "%s", dir);
         out[n].local = 0;

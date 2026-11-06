@@ -271,6 +271,13 @@ def cmd_repo(a):
             pw = password(a, "System key password: ")
             e = repo.endorse(a.folder, resolve_key(ws_of(a), a.key), a.key_id, pw)
             print(paint("Endorsed ", "ok") + "repository %s with key %d. Rebuild to include it." % (repo.pretty_fingerprint(e["repo_id"]), e["key_id"]))
+        elif a.action == "move":
+            if not (a.from_url and a.recovery and a.modules and a.seq and a.key):
+                print(paint("Not this time: ", "bad") + "`move` needs --from-url, --recovery, --modules, --seq and --key (see sdk/docs/11-repositories.md).")
+                return 1
+            pw = password(a, "System key password: ")
+            repo.move(a.folder, a.from_url, a.recovery, a.modules, resolve_key(ws_of(a), a.key), a.key_id, pw, a.seq, a.message or "")
+            print(paint("Wrote ", "ok") + "moved.txt and moved.txt.sig into %s. Put both next to %s." % (a.folder, a.from_url))
         elif a.action == "verify":
             r = repo.verify(a.folder, [ws_of(a).keys])
             print("%s: %s, repository %s, %d item(s), %s layout" % (r["name"] or "?", paint(r["tier"], "ok" if r["ok"] else "bad"), repo.pretty_fingerprint(r["id"]) if r["id"] else "?", r["apps"], r.get("layout", "?")))
@@ -444,15 +451,18 @@ def build_parser():
     s.add_argument("--yes", action="store_true", help="do not ask")
     s.set_defaults(fn=cmd_flash)
 
-    s = sub.add_parser("repo", help="make and run a repository of apps (init, add, build, release, endorse, verify)")
-    s.add_argument("action", choices=("init", "add", "build", "release", "endorse", "verify"))
+    s = sub.add_parser("repo", help="make and run a repository of apps (init, add, build, release, endorse, move, verify)")
+    s.add_argument("action", choices=("init", "add", "build", "release", "endorse", "move", "verify"))
     s.add_argument("folder", help="the repository folder (for `add`, the folder; for `verify`, a folder or https address)")
     s.add_argument("file", nargs="?", help="for `add`: the package")
     s.add_argument("--name"); s.add_argument("--maintainer"); s.add_argument("--url"); s.add_argument("--description")
     s.add_argument("--title"); s.add_argument("--desc"); s.add_argument("--category"); s.add_argument("--source"); s.add_argument("--perms", help="comma separated")
     s.add_argument("--type", choices=repo.TYPES); s.add_argument("--target", default="flash", choices=repo.TARGETS); s.add_argument("--dest"); s.add_argument("--min-os"); s.add_argument("--version"); s.add_argument("--needs-sd", action="store_true")
     s.add_argument("--layout", default="flat", choices=("flat", "tree")); s.add_argument("--out")
-    s.add_argument("--key", help="for `endorse`: the project key a device trusts (today the boot key)"); s.add_argument("--key-id", type=int, default=1)
+    s.add_argument("--key", help="for `endorse` and `move`: the project key a device trusts (today the boot key)"); s.add_argument("--key-id", type=int, default=1)
+    s.add_argument("--from-url", help="for `move`: the recovery.manifest address the devices ask now"); s.add_argument("--recovery", help="for `move`: the new recovery.manifest address")
+    s.add_argument("--modules", help="for `move`: the new modules.manifest address"); s.add_argument("--seq", type=int, help="for `move`: 1 for the first move, then higher each time")
+    s.add_argument("--message", help="for `move`: what the user is told (printable ASCII, 79 characters)")
     s.set_defaults(fn=cmd_repo)
 
     s = sub.add_parser("emulator", help="open the emulator on the VM image (or one you name)")
