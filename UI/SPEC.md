@@ -71,7 +71,7 @@ or genuinely malformed config *is* treated as critical (`purr_lvgl_report_critic
 falling back to the text shell (section on fallback behavior, `PurrOS/main/main.c`).
 
 **Images live on their own partition, separately from the config that references them** --
-the one part of the original design that did carry over. `ui_assets` (512KB, carved out of
+the one part of the original design that did carry over. `ui_assets` (512KB in the original design; **5 MB, 0x500000, in the partition tables today**, carved out of
 `root`; `PurrOS/partitions/tdeck.csv`/`tdeck_plus.csv`) holds raw RGB565 pixel data, built by
 `purrstrap uiassets build` from a directory of PNGs (a hand-rolled decoder -- 8bpc RGB/RGBA,
 non-interlaced only -- since this project has never taken a Pillow dependency), read

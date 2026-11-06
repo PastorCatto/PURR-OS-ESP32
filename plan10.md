@@ -83,7 +83,7 @@ Follows `Permissions/SPEC.md` as already decided: asked **at first use**, grants
 - `PurrOS/main/purr_power_plat.c`: the real platform: backlight and panel sleep, `esp_pm_configure` +
   `esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP)` for CPU locks, `gpio_wakeup_enable` for keyboard/touch, and the VM stub
   (the QEMU build has no light sleep, so there the policy still runs and the CPU lock is a no-op).
-- `PurrOS/main/purr_perm.c/.h`: grant table and `/home/<user>/permissions.conf`.
+- `PurrOS/components/coreos/src/purr_perm.c` and `include/purr_perm.h`: grant table and `/home/<user>/permissions.conf`.
 - `purr_catrt.c`: `power` catcall, `PURR_APPEV_WAKE`, owner cleanup in `teardown`.
 - Settings: Display > Screen timeout (15 s, 30 s, 1 m, 2 m, 5 m, Never); a Battery page (what is holding the device
   awake, next alarm); Apps > permissions switches. `settings` command keys: `power.screen_timeout`, `power.lightsleep`.

@@ -12,7 +12,7 @@ panel, running on the T-Deck Plus, driven by the PURR app runtime, and usable by
 
 ## What the reference project is (read from a shallow clone, 2025-06-05 commit `c62690f`)
 
-- **LVGL 9.2** (`lvgl/lvgl@^9.2`). PURR OS is on **LVGL 8.3.11** (`~8.3.0` in `PurrOS/main/idf_component.yml`).
+- **LVGL 9.2** (`lvgl/lvgl@^9.2`). PURR OS **started on LVGL 8.3.11** and has since moved to **LVGL 9.2.2** (see the status table; the pin is in `PurrOS/main/idf_component.yml`).
 - **Generated UI.** `src/ui/ui.c` (1659 lines) and `ui_common.c` (642 lines) are a SquareLine Studio export plus
   a small helper layer (`cm_*`: `cm_start_tile`, `cm_app_list`, `cm_settings_list`, `cm_create_switch`, ...).
   `squareline/W10M.spj` is the editable project.
