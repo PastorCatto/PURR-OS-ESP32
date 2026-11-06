@@ -458,14 +458,14 @@ static lv_obj_t *make_conv_row(win_t *w, const char *name, const char *snippet, 
     lv_obj_t *a = lv_label_create(r);
     lv_label_set_text(a, name);
     lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(a, mid_w);
+    lv_obj_set_size(a, mid_w, 18);                                          /* a fixed height, so a long name ends in "..." instead of wrapping */
     lv_obj_set_style_text_font(a, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(a, lv_color_hex(c_name), 0);
     lv_obj_align(a, LV_ALIGN_TOP_LEFT, 46, 4);
     lv_obj_t *d = lv_label_create(r);
     lv_label_set_text(d, snippet);
     lv_label_set_long_mode(d, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(d, mid_w);
+    lv_obj_set_size(d, mid_w, 15);
     lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(d, lv_color_hex(c_sub), 0);
     lv_obj_align(d, LV_ALIGN_TOP_LEFT, 46, 24);
