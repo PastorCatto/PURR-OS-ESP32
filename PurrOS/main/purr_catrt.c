@@ -107,6 +107,7 @@ static int q_post(rtdev_t *d, const app_msg_t *m)
 }
 static EXT_RAM_BSS_ATTR purr_rt_t s_rt;
 static const void *s_files_table;
+static const void *s_messaging_table, *s_contacts_table;
 static const void *s_devices_table;
 static const void *s_store_table;
 static const void *s_ui_table, *s_storage_table;       /* registered by purr_catrt_ui.c / purr_catrt_storage.c */
@@ -934,6 +935,9 @@ void purr_catrt_set_storage(const void *table, void (*release)(int slot))
     s_storage_release = release;
 }
 
+void purr_catrt_set_messaging(const void *table) { s_messaging_table = table; }
+void purr_catrt_set_contacts(const void *table) { s_contacts_table = table; }
+
 void purr_catrt_set_files(const void *table)
 {
     s_files_table = table;
@@ -1136,6 +1140,12 @@ static const void *catcall_get(const char *name, uint32_t min_version)
     }
     if (strcmp(name, "files") == 0 && s_files_table != NULL && min_version <= ((const uint32_t *)s_files_table)[0]) {
         return s_files_table;
+    }
+    if (strcmp(name, "messaging") == 0 && s_messaging_table != NULL && min_version <= ((const uint32_t *)s_messaging_table)[0]) {
+        return s_messaging_table;
+    }
+    if (strcmp(name, "contacts") == 0 && s_contacts_table != NULL && min_version <= ((const uint32_t *)s_contacts_table)[0]) {
+        return s_contacts_table;
     }
     if (strcmp(name, "sched") == 0 && min_version <= s_cc_sched.version) {
         return &s_cc_sched;

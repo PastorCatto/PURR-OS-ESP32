@@ -47,7 +47,7 @@ static win_t s_win[PURR_RT_MAX_APPS];
 typedef enum {
     OP_TITLE, OP_ACTION, OP_BACK, OP_CLEAR, OP_LABEL, OP_BUTTON, OP_ROW, OP_TEXTAREA, OP_SPACER,
     OP_SET_TEXT, OP_GET_TEXT, OP_FOCUS, OP_REMOVE,
-    OP_GRID, OP_GRID_BUTTON, OP_INPUT_LINE, OP_PROGRESS, OP_SLIDER, OP_SET_VALUE, OP_GET_VALUE, OP_IMAGE, OP_SET_IMAGE,
+    OP_GRID, OP_GRID_BUTTON, OP_INPUT_LINE, OP_PROGRESS, OP_SLIDER, OP_SET_VALUE, OP_GET_VALUE, OP_IMAGE, OP_SET_IMAGE, OP_BUBBLE,
 } op_t;
 
 typedef struct {
@@ -359,6 +359,44 @@ static lv_obj_t *make_progress(win_t *w, int value, int max)
     return b;
 }
 
+/* A speech bubble for a message: `side` 0 sits on the left (received, light grey), 1 on the right (sent, light orange); `meta` is the small line under the text (time and state). */
+static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *meta)
+{
+    lv_obj_t *row = lv_obj_create(w->body);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, side ? LV_FLEX_ALIGN_END : LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_t *b = lv_obj_create(row);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_bg_color(b, lv_color_hex(side ? 0xFFE3B0 : 0xE4E4E4), 0);
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(b, 8, 0);
+    lv_obj_set_style_pad_all(b, 5, 0);
+    lv_obj_set_style_pad_row(b, 1, 0);
+    int32_t maxw = (w10m_disp_w() * 72) / 100;
+    lv_obj_t *t = lv_label_create(b);
+    lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(t, safe(text, PURR_CC_UI_MAX_TEXT));
+    lv_obj_set_width(t, LV_SIZE_CONTENT);
+    lv_obj_set_style_max_width(t, maxw, 0);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(0x000000), 0);
+    if (meta != NULL && meta[0] != '\0') {
+        lv_obj_t *m = lv_label_create(b);
+        lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(m, safe(meta, 96));
+        lv_obj_set_width(m, LV_SIZE_CONTENT);
+        lv_obj_set_style_max_width(m, maxw, 0);
+        lv_obj_set_style_text_font(m, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(m, lv_color_hex(0x6B5A3A), 0);
+    }
+    return row;
+}
+
 static lv_obj_t *make_slider(win_t *w, int min, int max, int value)
 {
     lv_obj_t *sl = lv_slider_create(w->body);
@@ -557,6 +595,9 @@ static void *exec(void *arg)
     case OP_INPUT_LINE:
         o = make_input_line(w, r->i1, r->s1);
         break;
+    case OP_BUBBLE:
+        o = make_bubble(w, r->s1, r->i1, r->s2);
+        break;
     case OP_PROGRESS:
         o = make_progress(w, r->i1, r->i2);
         break;
@@ -675,6 +716,7 @@ static int cc_progress(int value, int max) { req_t r = {.op = OP_PROGRESS, .i1 =
 static int cc_slider(int min, int max, int value) { req_t r = {.op = OP_SLIDER, .i1 = min, .i2 = max, .i3 = value}; return call(&r); }
 static void cc_set_value(int h, int v) { req_t r = {.op = OP_SET_VALUE, .i1 = h, .i2 = v}; call(&r); }
 static int cc_get_value(int h) { req_t r = {.op = OP_GET_VALUE, .i1 = h}; return call(&r); }
+static int cc_bubble(const char *text, int side, const char *meta) { req_t r = {.op = OP_BUBBLE, .s1 = text, .i1 = side, .s2 = meta}; return call(&r); }
 static int cc_image(int height) { req_t r = {.op = OP_IMAGE, .i1 = height}; return call(&r); }
 
 #define IMG_FILE_MAX    (2u * 1024 * 1024)
@@ -747,12 +789,12 @@ static int cc_set_image(int h, const char *path)
 }
 
 static const purr_cc_ui_t s_cc_ui = {
-    .version = 3, .win_title = cc_win_title, .win_action = cc_win_action, .win_back = cc_win_back,
+    .version = 4, .win_title = cc_win_title, .win_action = cc_win_action, .win_back = cc_win_back,
     .clear = cc_clear, .label = cc_label, .button = cc_button, .row = cc_row, .textarea = cc_textarea,
     .spacer = cc_spacer, .set_text = cc_set_text, .get_text = cc_get_text, .focus = cc_focus,
     .remove = cc_remove, .status = cc_status,
     .grid = cc_grid, .grid_button = cc_grid_button, .input_line = cc_input_line, .progress = cc_progress, .slider = cc_slider,
-    .set_value = cc_set_value, .get_value = cc_get_value, .image = cc_image, .set_image = cc_set_image,
+    .set_value = cc_set_value, .get_value = cc_get_value, .image = cc_image, .set_image = cc_set_image, .bubble = cc_bubble,
 };
 
 /* ---------------------------------------------------------------- lifecycle and layout */

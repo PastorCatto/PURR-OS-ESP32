@@ -42,6 +42,7 @@
 #include "purr_catrt.h"
 #include "purr_catrt_storage.h"
 #include "purr_catrt_files.h"
+#include "purr_catrt_msg.h"
 #include "purr_catrt_devices.h"
 #include "purr_store.h"
 
@@ -5550,6 +5551,9 @@ void purr_catrt_setup(purr_cli_t *cli)
     purr_fs_mkdir(&s_fs, "/apps");
     purr_catrt_storage_init();
     purr_catrt_files_init();
+#if CONFIG_PURR_PROFILE_FULL
+    purr_catrt_msg_init();
+#endif
     purr_catrt_devices_init();
     STORE_INIT();
     purr_catrt_power_init();

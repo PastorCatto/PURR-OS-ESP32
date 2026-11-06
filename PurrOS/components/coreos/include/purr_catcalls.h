@@ -161,7 +161,7 @@ typedef struct {
 #define PURR_CC_UI_MAX_TEXT    2048  /* bytes in one text area */
 
 typedef struct {
-    uint32_t version;                                   /* 1 */
+    uint32_t version;                                   /* 1 (the table says 4 now; the version you ask for with catcall_get is the newest field you use) */
     /* The window header: a title, and one optional action button on the right (PURR_UI_ACT_*). */
     void (*win_title)(const char *title);
     void (*win_action)(int action);
@@ -203,6 +203,9 @@ typedef struct {
      * PURR_UI_IMG_TOO_BIG (more than about a megapixel or 2 MB), PURR_UI_IMG_UNSUPPORTED, or a PURR_FILES_* code. */
     int  (*image)(int height);
     int  (*set_image)(int h, const char *path);
+    /* Version 4 (OS 1.0.27; ask for it with catcall_get("ui", 4)). A speech bubble for a message: side 0 on the left (received), 1 on the right (sent); `text` is the message and
+     * `meta` the small line under it (time and state; NULL for none). It wraps, and takes at most about three quarters of the width. Returns the handle, or < 0. */
+    int  (*bubble)(const char *text, int side, const char *meta);
 } purr_cc_ui_t;
 #define PURR_UI_IMG_TOO_BIG      -4
 #define PURR_UI_IMG_UNSUPPORTED  -5
@@ -402,6 +405,122 @@ typedef struct {
     uint64_t (*ticks_us)(void);                         /* microseconds since boot */
     void     (*quit)(void);                             /* close this game */
 } purr_cc_game_t;
+
+
+/* ---------------------------------------------------------------- messaging */
+/* The shared message layer (Messaging/SPEC.md). Two kinds of caller use one table: a messaging SERVICE app (Meshtastic, Reticulum, MeshCore...) that carries messages, and a FRONT END
+ * (the Messages app) that shows them. The OS keeps the messages, one thread per service and peer, in the user's folder (up to a limit, 1 MB by default). Every call needs the
+ * "messaging" permission: it answers PURR_MSGCC_ASK until the user decides, then the app gets PURR_APPEV_PERM and calls again.
+ * Events the OS posts to an app (PURR_APPEV_USER): to a service, "msg.out" (a message is waiting: fetch it with next_outgoing); to a subscribed front end, "msg.changed"
+ * (arg = the thread that changed; 0 = the list of services) and "msg.open" (arg = a thread to show). */
+#define PURR_MSGCC_OK        0
+#define PURR_MSGCC_BAD      -1
+#define PURR_MSGCC_DENIED   -2
+#define PURR_MSGCC_ASK      -3
+#define PURR_MSGCC_FULL     -4      /* the message limit is used up: raise it, or export and trim */
+#define PURR_MSGCC_NOSERVICE -5     /* no such service, or it has gone */
+
+#define PURR_MSGCC_IN   0
+#define PURR_MSGCC_OUT  1
+#define PURR_MSGCC_QUEUED    0
+#define PURR_MSGCC_SENDING   1
+#define PURR_MSGCC_SENT      2
+#define PURR_MSGCC_DELIVERED 3
+#define PURR_MSGCC_FAILED    4
+#define PURR_MSGCC_RECEIVED  5
+
+#define PURR_MSGCC_TEXT   241     /* the size of purr_cc_msg_t.text */
+#define PURR_MSGCC_IMG_NONE    0
+#define PURR_MSGCC_IMG_PREVIEW 1
+#define PURR_MSGCC_IMG_FULL    2
+
+typedef struct {
+    int      id;                  /* this run's number for the service */
+    char     key[16];             /* lower case letters and digits: what threads and contacts call it ("meshtastic") */
+    char     name[24];            /* what to show */
+    char     tag[8];              /* up to four letters on rows ("MTS") */
+    uint16_t text_max;            /* bytes in one message */
+    uint8_t  images;              /* PURR_MSGCC_IMG_* */
+    uint8_t  radio;               /* 1 if it needs the radio lease */
+    uint8_t  online;              /* it says it is connected */
+    uint32_t image_max;           /* bytes of picture it can carry */
+} purr_cc_msg_service_t;
+
+typedef struct {
+    uint32_t id;
+    char     service[16];
+    char     peer[40];
+    char     name[24];            /* may be empty: show the peer */
+    uint32_t last_time;
+    uint32_t unread;
+    uint8_t  last_dir, last_state;
+    char     last[48];
+} purr_cc_msg_thread_t;
+
+typedef struct {
+    uint32_t id;
+    uint8_t  dir, state;
+    uint32_t time;                /* seconds since 1970, or 0 if the clock was not set */
+    char     attach[56];          /* path of a picture, or "" */
+    char     text[241];
+} purr_cc_msg_t;
+
+typedef struct {
+    uint32_t version;                                   /* 1 */
+    /* ---- for a messaging service app */
+    /* Announces the service. key: lower case letters and digits; images: PURR_MSGCC_IMG_*. Returns the service id (> 0), or < 0. */
+    int  (*service_register)(const char *key, const char *name, const char *tag, int text_max, int images, uint32_t image_max, int radio);
+    void (*service_online)(int online);
+    /* The oldest message waiting for this service, if any: fills out (and peer); returns 1, or 0 when none. The message is now "sending". */
+    int  (*next_outgoing)(purr_cc_msg_t *out, char *peer, size_t peer_cap);
+    int  (*delivery)(uint32_t msg_id, int state);       /* PURR_MSGCC_SENT, _DELIVERED or _FAILED */
+    /* A message arrived from `peer` (its address on this service; peer_name may be NULL). Stored, the front end is told. */
+    int  (*incoming)(const char *peer, const char *peer_name, const char *text, const char *attach_path);
+    /* ---- for a front end */
+    int  (*services)(int i, purr_cc_msg_service_t *out);        /* 1 if there is a service number i, else 0 */
+    int  (*threads)(int i, purr_cc_msg_thread_t *out);          /* newest first; 1 or 0 */
+    /* Up to max messages of a thread, oldest first, ending `skip` messages before the newest. Returns how many. */
+    int  (*messages)(uint32_t thread, int skip, purr_cc_msg_t *out, int max);
+    /* Queues a message for a service. Returns PURR_MSGCC_OK and the message id, PURR_MSGCC_FULL, or PURR_MSGCC_NOSERVICE. peer_name may be NULL. */
+    int  (*send)(const char *service, const char *peer, const char *peer_name, const char *text, const char *attach_path, uint32_t *msg_id);
+    int  (*mark_read)(uint32_t thread);
+    int  (*remove_thread)(uint32_t thread);
+    int  (*subscribe)(void);                            /* this app is told "msg.changed" and "msg.open" */
+    int  (*usage)(uint32_t *used, uint32_t *limit);
+    int  (*set_limit)(uint32_t bytes);                  /* "use more device space" */
+    int  (*export_all)(const char *path);               /* every message as text into one file (the SD card) */
+    int  (*trim)(uint32_t target_bytes);                /* drops the oldest messages; run after an export */
+    /* Asks the OS to bring Messages to the front on a thread (a Contacts app uses this). Messages asks what it was asked with take_open_request (0 = nothing). */
+    int  (*open_thread)(uint32_t thread);
+    uint32_t (*take_open_request)(void);
+    /* The thread for (service, peer), made if there is none: so a front end can start one. Returns the thread id or < 0. */
+    int  (*thread_for)(const char *service, const char *peer, const char *peer_name);
+} purr_cc_messaging_t;
+
+/* ---------------------------------------------------------------- contacts */
+/* The address book (Messaging/SPEC.md): a person, with an address on each messaging service they use. Needs the "contacts" permission; answers PURR_MSGCC_ASK/DENIED like `messaging`. */
+typedef struct {
+    uint32_t id;
+    char     name[24];
+    uint8_t  fav;
+    uint8_t  naddr;
+    struct { char service[16]; char addr[40]; } a[4];
+} purr_cc_contact_t;
+
+typedef struct {
+    uint32_t version;                                   /* 1 */
+    /* The i-th contact by name (case ignored) whose name contains filter (NULL or "" = all). 1 if there is one, 0 if not, < 0 on a permission answer. */
+    int      (*list)(const char *filter, int i, purr_cc_contact_t *out);
+    int      (*get)(uint32_t id, purr_cc_contact_t *out);
+    int      (*add)(const char *name);                  /* the new id, or < 0 */
+    int      (*rename)(uint32_t id, const char *name);
+    int      (*set_fav)(uint32_t id, int fav);
+    int      (*set_addr)(uint32_t id, const char *service, const char *addr);
+    int      (*remove_addr)(uint32_t id, const char *service);
+    int      (*remove)(uint32_t id);
+    uint32_t (*find)(const char *service, const char *addr);      /* the contact with this address, or 0 */
+    int      (*count)(void);
+} purr_cc_contacts_t;
 
 #ifdef __cplusplus
 }
