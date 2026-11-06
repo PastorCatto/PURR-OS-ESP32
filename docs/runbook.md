@@ -78,7 +78,8 @@ It listens on all interfaces. The emulated device reaches the computer at `10.0.
 3. Package and sign the three images as above, with the same version number.
 4. Regenerate the manifests:
    `python3 purrstrap/purrstrap.py dev recovery --dir out/devrepo --board tdeck_plus --kernel <k.cat> --kittenos <r.kitt> --loader <l.cat>`
-5. **Verify:** fetch every file each manifest names from the live server and compare size and sha256. A short Python loop with `urllib` does it. Do not trust a manifest to prove that the server has everything: it is regenerated from the files in the folder, so it only knows what is there.
+5. **How the files are named (since 1.0.28):** `dev recovery` publishes each image under a name that holds its hash (`kernel-tdeck_plus.<10 hex digits>.cat`), keeps the newest three generations, and writes the manifest last, atomically. Before that, files were replaced in place under fixed names, and an OTA that overlapped a publish failed its size and hash check (it happened on 2026-11-06). The fixed names are still written next to them for tools that look for them.
+6. **Verify:** fetch every file each manifest names from the live server and compare size and sha256. A short Python loop with `urllib` does it. Do not trust a manifest to prove that the server has everything: it is regenerated from the files in the folder, so it only knows what is there.
 
 `dev recovery` regenerates `recovery.manifest` and `modules.manifest` from the files in the folder. The system modules (about, appmgr, apps, fs, login, netinstall, sysinfo, wifi) are not rebuilt each time, so they are passed with `--modules` from the last official release's modules folder. Leave them out and the setup wizard's second stage has nothing to download when the dev server is the source.
 
