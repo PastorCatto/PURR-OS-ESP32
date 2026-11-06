@@ -232,3 +232,6 @@ Emulators and games are PURR application packages (a signed `.cat`, image type A
 - `purrstrap games target` writes a Retro-Go target (`config.h`, `sdkconfig`, `env.py`) from a board file's new `[game]` section (button map, menu GPIO, screen MADCTL; the display, SPI, SD, audio, battery and power pins are read from the existing sections), so a new device is a board file, and registers it in Retro-Go's `config.h` plus one small `rg_input.c` patch. Checked: the generated T-Deck Plus target has the same pins, storage, audio, screen and battery settings as the hand-written one (a test), and its launcher builds to within 16 bytes of the hand-written build.
 - First set of signed packages for the T-Deck Plus: a launcher and four emulator applications (NES/PC Engine/Game & Watch/Lynx/Master System/Game Gear/ColecoVision, Mega Drive, MSX, DOOM), 0.67 to 1.06 MB each.
 - **Not built, needed before any of it runs on a device:** loading an image package (flash slots for app images, a bootloader start-and-return, the trust rule, the Store installing them), and the `game` app kind with the game surface, audio and input interfaces for the portable module payload.
+
+## Continued by Showtime Plan 1 (2026-11-05)
+The SDK is brought up to spec with the standalone emulator inside it in Part A of [showtime1.md](showtime1.md) (owner-approved, waiting for the owner's keyword).
