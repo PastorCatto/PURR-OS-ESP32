@@ -5,6 +5,7 @@
  * minutes typed in. Everything runs while the app is open: a stopped-in-the-background timer that alarms is for a later version (it needs the `power` wake alarm).
  *
  * The time shown is local when the OS offers `system` version 2 (a local-time call, OS 1.0.23); on an older OS it is UTC and says so.
+ * The digits are drawn in the big 40 point face when the OS offers `ui` version 3 (OS 1.0.23); on an older OS they use the title face, as before.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -127,6 +128,7 @@ static const char *const k_mons[12] = {"January", "February", "March", "April", 
 
 /* ---------------------------------------------------------------- pages */
 
+static int s_digit_role = PURR_UI_ROLE_TITLE;    /* PURR_UI_ROLE_BIG with ui version 3 */
 static int h_time, h_date, h_a, h_b, h_c;   /* widget handles of the page on show */
 static char s_last[24];                     /* what the time label shows, so it is only redrawn when it changes */
 
@@ -182,7 +184,7 @@ static void show_home(void)
     ui->win_title("Clock");
     ui->win_back(0);                        /* the back arrow closes the app from here */
     s_last[0] = 0;
-    h_time = ui->label("--:--:--", PURR_UI_ROLE_TITLE);
+    h_time = ui->label("--:--:--", s_digit_role);
     h_date = ui->label("", PURR_UI_ROLE_DIM);
     ui->spacer(8);
     h_a = ui->row("Stopwatch", "count up, with laps");
@@ -241,7 +243,7 @@ static void show_watch(void)
     ui->win_title("Stopwatch");
     ui->win_back(1);
     s_last[0] = 0;
-    h_time = ui->label("00:00.0", PURR_UI_ROLE_TITLE);
+    h_time = ui->label("00:00.0", s_digit_role);
     ui->spacer(6);
     h_a = ui->button(s_sw_run ? "Stop" : "Start");
     h_b = ui->button("Lap");
@@ -360,7 +362,7 @@ static void show_timer_run(uint32_t ms)
     ui->win_title("Timer");
     ui->win_back(1);
     s_last[0] = 0;
-    h_time = ui->label("", PURR_UI_ROLE_TITLE);
+    h_time = ui->label("", s_digit_role);
     ui->spacer(6);
     h_a = ui->button("Pause");
     h_b = ui->button("Reset");
@@ -378,7 +380,12 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
         return -1;
     }
     con = (const purr_cc_console_t *)env->catcall_get("console", 1);
-    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 1);
+    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 3);
+    if (ui != NULL) {
+        s_digit_role = PURR_UI_ROLE_BIG;
+    } else {
+        ui = (const purr_cc_ui_t *)env->catcall_get("ui", 1);
+    }
     sc = (const purr_cc_sched_t *)env->catcall_get("sched", 1);
     sys = (const purr_cc_system_t *)env->catcall_get("system", 1);
     sys2 = (const purr_cc_system_t *)env->catcall_get("system", 2);

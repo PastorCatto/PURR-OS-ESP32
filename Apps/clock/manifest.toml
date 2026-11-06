@@ -1,14 +1,14 @@
 name = "clock"
-version = "0.1.0"
+version = "1.0.0"
 description = "A clock with a stopwatch and a timer"
 class = "unprivileged"
 kind = "ui"
-sdk_version = "0.1.0"
+sdk_version = "1.0.0"
 entry = "clock_entry"
 
 [catcalls]
 console = "1.0"
-ui = "1.0"
+ui = "3.0"
 sched = "1.0"
 system = "1.0"
 app = "1.0"
