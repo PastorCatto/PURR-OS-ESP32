@@ -14,7 +14,7 @@ import hashlib
 import os
 import struct
 
-from . import formats, keybag, p256
+from . import boards, formats, keybag, minitoml, p256, workspace
 
 IMG_NAMES = {1: "operating system", 2: "recovery image", 3: "module", 4: "app"}
 MOD_NAMES = {1: "kernel", 2: "CoreOS", 3: "AppManager", 4: "runtime", 5: "driver", 6: "boot package",
@@ -148,6 +148,45 @@ def _cfg_report(data):
     return rep
 
 
+def _board_layouts():
+    """[(board name, flash size in bytes, layout)] for the board files that carry a flash layout (the kit's boards folder)."""
+    out = []
+    folder = workspace.sdk_path("boards")
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return out
+    for fn in names:
+        if not fn.endswith(".toml"):
+            continue
+        try:
+            b = boards.load(os.path.join(folder, fn))
+        except (OSError, ValueError):
+            continue
+        layout = boards.flash_layout(b)
+        mb = b.get("board", {}).get("flash_mb")
+        if layout and isinstance(mb, int):
+            out.append((b["board"].get("name") or fn[:-5], mb << 20, layout))
+    return out
+
+
+def _layout_check(parts, size):
+    """Compare a flash image's table with the board whose flash is the same size. None when no board layout applies."""
+    found = [{"name": p["name"], "offset": p["offset"], "size": p["size"]} for p in parts]
+    for name, flash, layout in _board_layouts():
+        if flash != size:
+            continue
+        if "ui_assets" in [p["name"] for p in found]:
+            return _check("warn", "Layout", "This image has the older layout (a raw `ui_assets` picture partition). The %s layout of release 1.0.29 has none: `root` "
+                          "starts at 0x%X and runs to the end of the flash, and the picture packs are files in it. An old image needs a full erase and a cable flash "
+                          "to move to the new one." % (name, next(p["offset"] for p in layout if p["name"] == "root")))
+        diff = boards.layout_differences(found, layout)
+        if not diff:
+            return _check("ok", "Layout", "The partition table is the %s layout (flash map v2)." % name)
+        return _check("warn", "Layout", "The partition table is not the %s layout: %s." % (name, "; ".join(diff[:4]) + ("; and more" if len(diff) > 4 else "")))
+    return None
+
+
 def flash_report(data, keys):
     img = formats.image()
     rep = _report("flash-image", "Flash image", "A whole-flash image of %s." % _size(len(data)))
@@ -196,6 +235,9 @@ def flash_report(data, keys):
     if missing:
         rep["checks"].append(_check("info", "Slots", "No system in: %s. A blank slot is normal on a fresh device: "
                                     "the recovery loader fills them from the internet." % ", ".join(missing)))
+    lay = _layout_check(parts, len(data))
+    if lay:
+        rep["checks"].append(lay)
     bad = [p["title"] for p in rep["parts"] if any(c["status"] == "bad" for c in p["checks"])]
     rep["checks"].append(_check("bad" if bad else "ok", "Signatures and hashes",
                                 ("Problems in: " + ", ".join(bad)) if bad else "Every part that is signed checks out."))

@@ -8,7 +8,7 @@ Drag any file onto the window. Studio looks inside it:
 
 - A `.cat` or `.kitt` file: its name, version, chip, and whether the contents are whole (the hash) and signed (the signature). If it was signed with a key I know, I say whose, and whether that role is allowed to sign this kind of file.
 - A **release folder**: every file in its manifests is checked against its size and hash.
-- A **flash image**: a coloured map of the partitions. Click one to see what is in it. Green means signed and checked, red needs a look, grey is erased. The trust block (how strict the device is) is shown in plain words.
+- A **flash image**: a coloured map of the partitions. Click one to see what is in it. Green means signed and checked, red needs a look, grey is erased. The trust block (how strict the device is) is shown in plain words. It also says whether the partition table is the board's layout (flash map v2, see [09-flashing.md](09-flashing.md)).
 - A manifest, or a key.
 
 Under the result are the next steps that make sense for that file.

@@ -15,6 +15,21 @@ The goal for this board is **100 % supported**: every part has a driver you can 
 | SD card | SPI shared, CS 39 | `sd-spi` (host-tested; not yet run on a unit) | written |
 | Speaker | I2S | none yet | template |
 
+## The flash
+
+16 MB. Flash map v2 (release 1.0.29; written into the board file and the tools, not yet run on a device):
+
+| Partition | Offset | Size | What |
+|---|---|---|---|
+| `nvs`, `purrcfg`, `phy_init`, `bootpkg` | 0xB000 to 0x20000 | 16 KB, 8 KB, 4 KB, 56 KB | Wi-Fi data, the trust block, radio calibration, the boot package |
+| `kittenos` | 0x20000 | 1.75 MB | the recovery system |
+| `kernel` | 0x1E0000 | 2.125 MB | the full system |
+| `loader` | 0x400000 | 1.75 MB | the recovery loader |
+| `netrec` | 0x5C0000 | 4 KB | the saved network for recovery |
+| `root` | 0x5C1000 | 0xA3F000 (about 10.2 MiB) | the file system: apps, drivers, settings, picture packs, themes |
+
+Up to 1.0.28 there was also a 5 MB `ui_assets` partition and `root` was about 6 MB. A device with the old table must be flashed with a whole 16 MB image over USB (that rewrites `root`); an update over the air never changes the table.
+
 ## Things to check on the unit
 
 - **LoRa reset.** LilyGO wires the radio's reset to GPIO 17, the same line as the touch controller's reset. The board file leaves it unset (-1) until someone confirms the wiring; sharing it means resetting the radio resets the touch controller too.

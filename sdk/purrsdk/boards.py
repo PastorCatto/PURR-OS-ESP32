@@ -109,7 +109,106 @@ def check(board):
     for pin in b.get("idle_high_pins", []):
         if pin in RESERVED_S3:
             add("bad", "board.idle_high_pins", "GPIO %d is reserved by the chip." % pin)
+    issues += check_layout(board)
     return issues
+
+
+# ESP-IDF partition types and the named subtypes the PURR tables use (the numeric ones, 0x40 and up, are written as numbers in the board file).
+PART_TYPES = {"app": 0, "data": 1}
+PART_SUBTYPES = {("app", "factory"): 0, ("app", "ota_0"): 0x10, ("app", "test"): 0x20, ("data", "nvs"): 2, ("data", "phy"): 1}
+TABLE_AT = 0xA000                      # PURR keeps the table at 0xA000 (the bootloader gets 40 KB); the area up to 0x20000 is the system's own
+FIRST_FREE = 0x20000
+
+
+def _sub(part):
+    """The numeric subtype of a board-file partition, or None when it is not understood."""
+    sub = part.get("subtype", 0)
+    if isinstance(sub, int):
+        return sub
+    if isinstance(sub, str):
+        if (part.get("type"), sub) in PART_SUBTYPES:
+            return PART_SUBTYPES[(part.get("type"), sub)]
+        try:
+            return int(sub, 0)
+        except ValueError:
+            return None
+    return None
+
+
+def flash_layout(board):
+    """The board's flash layout as [{"name", "type", "subtype", "offset", "size"}] with numbers, sorted by offset; [] when the board file has none."""
+    out = []
+    for p in board.get("partition", []):
+        out.append({"name": p.get("name", ""), "type": PART_TYPES.get(p.get("type"), -1), "subtype": _sub(p), "offset": p.get("offset", 0), "size": p.get("size", 0)})
+    return sorted(out, key=lambda p: p["offset"])
+
+
+def check_layout(board):
+    """Mistakes in the flash layout, in the same shape as check(). No layout is not a mistake (a board may leave it to the build)."""
+    issues = []
+
+    def add(level, where, text):
+        issues.append({"level": level, "where": where, "text": text})
+
+    parts = board.get("partition", [])
+    if not parts:
+        return issues
+    flash = board.get("board", {}).get("flash_mb")
+    end = flash * 1024 * 1024 if isinstance(flash, int) else None
+    seen = set()
+    last = None
+    for p in sorted(parts, key=lambda q: q.get("offset", 0)):
+        name = p.get("name", "?")
+        where = "partition." + str(name)
+        off, size = p.get("offset"), p.get("size")
+        if not isinstance(off, int) or not isinstance(size, int) or size <= 0:
+            add("bad", where, "A partition needs a numeric `offset` and a `size` above zero.")
+            continue
+        if name in seen or not name or len(name) > 15:
+            add("bad", where, "Names must be unique and at most 15 letters (the table keeps 16 bytes).")
+        seen.add(name)
+        if p.get("type") not in PART_TYPES or _sub(p) is None:
+            add("bad", where, "`type` is app or data, and `subtype` a known name or a number.")
+        if off % 0x1000 or size % 0x1000:
+            add("bad", where, "Offset and size must be multiples of 4 KB (flash sectors).")
+        if p.get("type") == "app" and off % 0x10000:
+            add("bad", where, "An app partition must start on a 64 KB boundary (the flash is mapped in 64 KB pages).")
+        if off < FIRST_FREE and name not in ("nvs", "purrcfg", "phy_init", "bootpkg"):
+            add("bad", where, "Below 0x%X only the system's own areas live (nvs, purrcfg, phy_init, bootpkg)." % FIRST_FREE)
+        if off < TABLE_AT + 0x1000:
+            add("bad", where, "Overlaps the bootloader or the partition table (0x0 to 0x%X)." % (TABLE_AT + 0x1000))
+        if last is not None and off < last["offset"] + last["size"]:
+            add("bad", where, "Overlaps %s." % last["name"])
+        last = {"name": name, "offset": off, "size": size}
+        if end is not None and off + size > end:
+            add("bad", where, "Runs past the end of the %d MB flash." % flash)
+    if end is not None and last is not None:
+        names = [p.get("name") for p in parts]
+        if "root" not in names:
+            add("bad", "partition", "A board needs a `root` partition: the LittleFS file system.")
+        elif last["name"] != "root" or last["offset"] + last["size"] != end:
+            add("warn", "partition.root", "`root` is meant to be the last partition and to run to the end of the flash (flash map v2): everything that is not a slot is a file in it.")
+    if "ui_assets" in [p.get("name") for p in parts]:
+        add("bad", "partition.ui_assets", "The raw picture partition is gone in flash map v2 (1.0.29): the picture packs are files in `root`.")
+    return issues
+
+
+def layout_differences(found, reference):
+    """Compare a flash image's partition table with a board's layout. `found` is [{"name","type","subtype","offset","size"}] (as the inspector reads them),
+    `reference` is flash_layout(). Returns a list of plain sentences; empty when they agree."""
+    ref = {p["name"]: p for p in reference}
+    got = {p["name"]: p for p in found}
+    out = []
+    for name, p in sorted(got.items(), key=lambda kv: kv[1]["offset"]):
+        r = ref.get(name)
+        if r is None:
+            out.append("%s (0x%X, %d KB) is not in the board's layout" % (name, p["offset"], p["size"] // 1024))
+        elif (p["offset"], p["size"]) != (r["offset"], r["size"]):
+            out.append("%s is at 0x%X for 0x%X bytes, the board's layout says 0x%X for 0x%X" % (name, p["offset"], p["size"], r["offset"], r["size"]))
+    for name, r in sorted(ref.items(), key=lambda kv: kv[1]["offset"]):
+        if name not in got:
+            out.append("%s (0x%X) is missing" % (name, r["offset"]))
+    return out
 
 
 def pin_map(board):

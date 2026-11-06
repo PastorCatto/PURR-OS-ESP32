@@ -171,6 +171,73 @@ ws = 5
 dout = 6
 status = "template"
 
+# The flash layout (flash map v2, release 1.0.29; PurrOS/partitions/tdeck_plus.csv is the build's copy and a test keeps the two equal). Only the
+# kernel, the recovery loader and KittenOS have slots of their own, besides what is read without a file system. Everything else (picture packs, themes,
+# shells, apps, drivers, modules) is a file in `root`, which runs to the end of the flash. `purr board check` tests this table; `purr inspect` of a whole
+# flash image compares the image's own table with it. Written for the new layout; not yet run on a device.
+[[partition]]
+name = "nvs"
+type = "data"
+subtype = "nvs"
+offset = 0xB000
+size = 0x4000
+
+[[partition]]
+name = "purrcfg"
+type = "data"
+subtype = "0x40"
+offset = 0xF000
+size = 0x2000
+
+[[partition]]
+name = "phy_init"
+type = "data"
+subtype = "phy"
+offset = 0x11000
+size = 0x1000
+
+[[partition]]
+name = "bootpkg"
+type = "data"
+subtype = "0x40"
+offset = 0x12000
+size = 0xE000
+
+[[partition]]
+name = "kittenos"
+type = "app"
+subtype = "factory"
+offset = 0x20000
+size = 0x1C0000
+
+[[partition]]
+name = "kernel"
+type = "app"
+subtype = "ota_0"
+offset = 0x1E0000
+size = 0x220000
+
+[[partition]]
+name = "loader"
+type = "app"
+subtype = "test"
+offset = 0x400000
+size = 0x1C0000
+
+[[partition]]
+name = "netrec"
+type = "data"
+subtype = "0x41"
+offset = 0x5C0000
+size = 0x1000
+
+[[partition]]
+name = "root"
+type = "data"
+subtype = "0x83"
+offset = 0x5C1000
+size = 0xA3F000
+
 # How the game cores see this board (purrstrap games target): the one thing the rest of the file does not say is which hardware
 # input is which game button. Everything else (display, SD card, audio pins, battery, power pin) is read from the sections above.
 [game]

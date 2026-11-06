@@ -17,6 +17,7 @@ A board is **data**. You write down the pins, the buses and the parts, and the k
 | `[keyboard]`, `[touch]` | the I2C parts: pins, address, speed |
 | `[buttons]` | boot and power buttons, if any |
 | `[[device]]` | everything else, one block each |
+| `[[partition]]` | the flash layout, one block per partition (optional; see below) |
 
 A `[[device]]` has a `name`, a `compatible` (which driver serves it), a `bus` (`adc`, `i2c`, `uart`, `spi`, `gpio`, ...) and its settings. It also has a `status` that says how far it has got on a real unit:
 
@@ -32,7 +33,15 @@ A `[[device]]` has a `name`, a `compatible` (which driver serves it), a `bus` (`
 - a setting name longer than 7 letters, or more than 12 settings on one device;
 - a missing `compatible`, a bad `status`, an id that is not a C name.
 
+A board that carries a flash layout is checked for it too: every partition has a unique name of at most 15 letters, offsets and sizes are multiples of 4 KB, app partitions start on a 64 KB boundary, nothing overlaps another or the bootloader and partition table (0x0 to 0xB000), nothing runs past `flash_mb`, and `root` is the last partition and runs to the end of the flash. The old raw `ui_assets` partition is refused.
+
 Strapping pins (0, 3, 45, 46) get a gentle note: they are fine as inputs once the chip has started, but keep them unpulled at reset.
+
+## The flash layout
+
+A `[[partition]]` block has a `name`, a `type` (`app` or `data`), a `subtype` (a name such as `factory`, `ota_0`, `test`, `nvs`, `phy`, or a number such as `"0x83"`), an `offset` and a `size`. `sdk/boards/tdeck_plus.toml` holds the T-Deck Plus table of **flash map v2 (release 1.0.29)**: `nvs`, `purrcfg`, `phy_init`, `bootpkg`, the three slots (`kittenos` 0x20000, `kernel` 0x1E0000, `loader` 0x400000; each 256 KB larger than up to 1.0.28), `netrec` at 0x5C0000, and `root` (the LittleFS file system, 0x5C1000 for 0xA3F000 bytes, to the end of the 16 MB). There is no picture partition any more: the picture packs, themes, apps and drivers are files in `root`. The build's own copy is `PurrOS/partitions/tdeck_plus.csv`; a test keeps the two equal. This layout is written but has **not yet run on a device**.
+
+The layout is also what `purr inspect` compares a whole flash image against, and what `purr flash` checks before it writes a whole image (see [09-flashing.md](09-flashing.md)).
 
 ## Make your own
 
