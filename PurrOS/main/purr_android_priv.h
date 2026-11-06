@@ -54,6 +54,10 @@ void and_shade_close(void);
 int and_shade_is_open(void);
 void and_shade_add(const char *title, const char *text);
 int and_shade_count(void);
+/* The i-th notification, newest first: its title and text. 0, or -1 if there is none. */
+int and_shade_peek(int i, char *title, size_t tcap, char *text, size_t xcap);
+/* Redraws the notification list on the lock screen (called when the notifications change, and when the lock screen shows). */
+void and_lock_notes_refresh(void);
 
 /* ---- purr_android_lock.c */
 void and_lock_build(void);

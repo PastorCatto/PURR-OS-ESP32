@@ -190,6 +190,26 @@ int and_shade_is_open(void) { return s_open; }
 
 int and_shade_count(void) { return s_notes != NULL ? (int)lv_obj_get_child_count(s_notes) : 0; }
 
+int and_shade_peek(int i, char *title, size_t tcap, char *text, size_t xcap)
+{
+    if (s_notes == NULL || i < 0 || i >= and_shade_count()) {
+        return -1;
+    }
+    lv_obj_t *row = lv_obj_get_child(s_notes, i);
+    int seen = 0;
+    title[0] = text[0] = '\0';
+    for (uint32_t k = 0; row != NULL && k < lv_obj_get_child_count(row); k++) {       /* a row is an icon, then the title label, then the text label */
+        lv_obj_t *c = lv_obj_get_child(row, k);
+        if (lv_obj_check_type(c, &lv_label_class)) {
+            snprintf(seen == 0 ? title : text, seen == 0 ? tcap : xcap, "%s", lv_label_get_text(c));
+            if (++seen == 2) {
+                break;
+            }
+        }
+    }
+    return seen > 0 ? 0 : -1;
+}
+
 static void note_changed(void)
 {
     int n = and_shade_count();
@@ -201,6 +221,7 @@ static void note_changed(void)
         lv_obj_remove_flag(s_clear, LV_OBJ_FLAG_HIDDEN);
     }
     and_status_notes(n);
+    and_lock_notes_refresh();
 }
 
 static void note_clicked(lv_event_t *e)
