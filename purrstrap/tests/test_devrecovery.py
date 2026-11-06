@@ -58,6 +58,15 @@ class RecoveryHosting(unittest.TestCase):
         self.assertNotIn("component=kernel", mods)             # components and modules stay in their own manifests
         self.assertTrue(os.path.exists(os.path.join(rdir, "legal.txt")))
 
+    def test_an_image_bigger_than_its_slot_is_refused(self):
+        big = os.path.join(self.tmp, "kittenos-big.kitt")
+        with open(big, "wb") as fh:
+            fh.write(img("kittenos", "1.2.4", b"x" * (0x180000 + 100), kind=pimg.IMG_RECOVERY))
+        rc, out = self.run_recovery(kittenos=big)
+        self.assertEqual(rc, 1)
+        self.assertIn("too many", out)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "recovery", "kittenos-tdeck_plus.kitt")))
+
     def test_withdraw_marks_the_manifests_and_unwithdraw_takes_it_back(self):
         self.run_recovery()
         rdir = os.path.join(self.repo, "recovery")

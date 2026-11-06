@@ -278,6 +278,11 @@ def build_recovery_manifests(repo):
     return comps, mods
 
 
+# The partitions these images are written into (PurrOS/partitions.csv): an image whose payload is bigger cannot be installed, and the loader's only message is "something went
+# wrong while installing" (2026-11-05, a KittenOS 11 KB over its 1.5 MB slot). Refused here instead.
+SLOT_BYTES = {"kernel": 0x1E0000, "kittenos": 0x180000, "loader": 0x180000, "bootpkg": 0xE000, "bootloader": 0xA000, "uiassets": 0x500000}
+
+
 def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader="", uiassets=""):
     rdir = _recovery_dir(dir)
     os.makedirs(rdir, exist_ok=True)
@@ -290,6 +295,11 @@ def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules,
             head = fh.read(pimg.HEADER_SIZE)
         if not pimg.is_purr_image(head):
             ctx.error("%s: not a PURR image" % src)
+            return 1
+        room = SLOT_BYTES.get(comp)
+        size = pimg.header_fields(pimg.parse_header(head))["payload_size"]
+        if room is not None and size > room:
+            ctx.error("%s: its payload is %d bytes and the %s partition holds %d: %d too many (the loader could not install it)" % (src, size, comp, room, size - room))
             return 1
         shutil.copyfile(src, os.path.join(rdir, "%s-%s%s" % (comp, board, ext)))
         ctx.ok("%s -> recovery/%s-%s%s" % (comp, comp, board, ext))
