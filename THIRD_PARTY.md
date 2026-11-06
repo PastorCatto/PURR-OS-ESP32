@@ -56,3 +56,12 @@ Not used, on purpose: Google application artwork (Gmail, Maps, Market and the li
 maker's skin or icons, which are not under that licence. The shell's wallpapers and layout are
 original.
 
+
+## The emulator in the Developer Kit (QEMU, its libraries, Rust crates)
+
+The kit's `emulator/` folder (`sdk/build-kit.py`, Showtime Plan 1 part A) carries the standalone emulator. The full notice, with versions and sources, is [`sdk/NOTICES-emulator.md`](sdk/NOTICES-emulator.md); it is copied into the kit as `emulator/NOTICES-emulator.md` next to `emulator/licenses/` (the licence texts) and `emulator/SOURCE.txt` (the source offer).
+
+- **QEMU**, Espressif's fork (tag `esp-develop-9.2.2-20260417`, <https://github.com/espressif/qemu>), **GPL-2.0**, with our device models added (the ESP32-S3 SPI, I2C, analog master, ADC, GPIO and a socket bridge to the emulator application). Corresponding source: the base tree at that tag, plus `emulator/source/qemu-patches/` in the kit (also the `qemu/` folder of <https://github.com/PastorCatto/ESP32-Emulator>). The kit includes a written offer for the source (`emulator/SOURCE.txt`, valid three years from the kit's date). QEMU runs as a separate program; nothing in PURR OS links with it.
+- **Libraries bundled with QEMU** (macOS, from MacPorts, unchanged, as separate files in `emulator/vendor/qemu/lib/` so an LGPL library can be replaced): glib 2.88.3, libgcrypt 1.12.4, libgpg-error 1.61, libiconv 1.19 and libintl (gettext 1.0) under **LGPL-2.1-or-later**; pcre2 10.48 and libslirp 4.9.1 (BSD-3-Clause); libffi 3.4.8 and pixman 0.46.0 (MIT); zlib 1.3.2 (zlib licence); zstd 1.5.7 (BSD-3-Clause, used under BSD); bzip2 1.0.8 (bzip2 licence).
+- **The emulator application** (`esp32-emulator`, `headless_tap`) is **MIT OR Apache-2.0**, built with about 190 Rust crates (all MIT, Apache-2.0, BSD, ISC, Zlib, Unlicense, CC0, 0BSD or Unicode-3.0; none copyleft) and the fonts of `epaint_default_fonts` (SIL OFL 1.1, Ubuntu Font Licence 1.0, MIT). The list and the licence texts are generated at kit build time: `emulator/licenses/RUST-CRATES.txt` and `RUST-LICENSES.txt`.
+- **ROM images** (`emulator/vendor/qemu/share/qemu/*.bin`) are the chip ROM images that Espressif's QEMU repository carries in its `pc-bios` folder, loaded unchanged.

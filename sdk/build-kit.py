@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the PURR Developer Kit: one self-contained folder (the kit's root is laid out like the repository, trimmed to what the tools need).
 
-    python3 sdk/build-kit.py [--out ~/Desktop/PURR-SDK] [--images DIR] [--no-python] [--no-toolchain] [--keep-cache]
+    python3 sdk/build-kit.py [--out ~/Desktop/PURR-SDK] [--images DIR] [--no-python] [--no-toolchain] [--no-emulator] [--emulator-src DIR] [--keep-cache]
 
 What goes in (see sdk/DESIGN.md):
     bin/purr, PURR-Studio.command        launchers (use the bundled Python)
@@ -12,9 +12,13 @@ What goes in (see sdk/DESIGN.md):
     PurrOS/components/...                the ABI headers the builders compile against, and the device's built-in public keys
     AppSDK/, Modules/, Drivers/, bootpkg/  starters, reference driver sources, specs, and the boot package source
     images/                              the prebuilt parts of a system (kernel, KittenOS, loader, boot package, bootloader)
+    emulator/                            the standalone emulator: esp32-emulator (window), headless_tap, the patched QEMU with its own libraries
+                                         (re-pointed, so the folder can be moved), boards/, licences/, source/ (the QEMU source offer), run-emulator
     VERSION, SDK-MANIFEST.json, README.txt, LICENSE-TODO
 
 Downloads (cached in out/sdk-cache): the Python build and the `cryptography` wheels. Needs network the first time.
+The emulator is built from a checkout of the emulator project (read only; its build goes to out/sdk-cache/emulator-target) with the
+compiler on THIS computer; the kit's user needs no compiler. The patched QEMU is taken from that checkout's vendor/qemu.
 """
 import argparse
 import glob
@@ -232,6 +236,308 @@ def bundle_toolchain():
     say("  %d MB" % (size >> 20))
 
 
+EMU_SRC_DEFAULT = os.path.expanduser("~/Projects/ESP32-Emulator")
+EMU_TARGET = os.path.join(CACHE, "emulator-target")
+# Only boards for hardware that is public and ours to show go in the kit; a board file the emulator project adds later stays out until it is listed here.
+EMU_BOARDS = ("t-deck-plus", "t-deck-plus-vm", "generic-esp32s3", "cyd-esp32-2432s028r", "cyd-s024c", "cyd-s028r")
+EMU_ROMS = ("esp32s3_rev0_rom.bin", "esp32-v3-rom.bin", "esp32-v3-rom-app.bin")       # the S3 (the kit's chip) and the plain ESP32 (the CYD boards)
+EMU_SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
+# Where each bundled library's licence text comes from: (label, a file in the package manager's doc folder or a member of its source tarball).
+EMU_LIB_LICENSES = (
+    ("glib (glib, gobject, gio, gmodule), LGPL-2.1+", "doc", "glib/COPYING"),
+    ("libgcrypt, LGPL-2.1+", "doc", "libgcrypt/COPYING.LIB"),
+    ("libgpg-error, LGPL-2.1+", "doc", "libgpg-error-*/COPYING.LIB"),
+    ("libiconv, LGPL-2.1+", "dist", ("libiconv/libiconv-*.tar.gz", r"^[^/]+/COPYING\.LIB$")),
+    ("libintl (gettext-runtime), LGPL-2.1+", "dist", ("gettext/gettext-*.tar.xz", r"^[^/]+/gettext-runtime/intl/COPYING\.LIB$")),
+    ("pcre2, BSD-3-Clause", "doc", "pcre2/LICENCE.md"),
+    ("libffi, MIT", "dist", ("libffi/libffi-*.tar.gz", r"^[^/]+/LICENSE$")),
+    ("pixman, MIT", "doc", "libpixman/COPYING"),
+    ("libslirp, BSD-3-Clause", "dist", ("libslirp/libslirp-*.tar.bz2", r"^[^/]+/COPYRIGHT$")),
+    ("zlib, zlib licence", "dist", ("zlib/zlib-*.tar.xz", r"^[^/]+/LICENSE$")),
+    ("zstd, BSD-3-Clause (offered as BSD or GPL-2.0; used under BSD)", "dist", ("zstd/zstd-*.tar.gz", r"^[^/]+/LICENSE$")),
+    ("bzip2, bzip2 licence (BSD-style)", "dist", ("bzip2/bzip2-*.tar.gz", r"^[^/]+/LICENSE$")),
+)
+
+
+def _run(cmd, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, **kw)
+    if r.returncode:
+        raise SystemExit("%s failed:\n%s%s" % (" ".join(cmd[:3]), r.stdout[-2000:], r.stderr[-2000:]))
+    return r.stdout
+
+
+def _macho_deps(path):
+    out = _run(["otool", "-L", path]).splitlines()[1:]
+    return [l.split()[0] for l in out if l.strip()]
+
+
+def _macho_rpaths(path):
+    lines = _run(["otool", "-l", path]).splitlines()
+    return [lines[i + 2].split()[1] for i, l in enumerate(lines) if l.strip() == "cmd LC_RPATH"]
+
+
+def _is_local(dep):
+    """A library that is not part of macOS and not already relative: the kind that has to travel with the program."""
+    return dep.startswith("/") and not dep.startswith(EMU_SYSTEM_PREFIXES)
+
+
+def relocate_qemu(src_bin, dest_root):
+    """Copies the patched QEMU and every non-system library it needs (found recursively with otool), then re-points them with
+    install_name_tool: the program finds its libraries at @executable_path/../lib, the libraries find each other at @loader_path.
+    Returns (prefix the libraries came from, [library file names]). The result runs from any folder and needs no package manager."""
+    bindir, libdir = os.path.join(dest_root, "bin"), os.path.join(dest_root, "lib")
+    os.makedirs(bindir, exist_ok=True)
+    os.makedirs(libdir, exist_ok=True)
+    binary = os.path.join(bindir, os.path.basename(src_bin))
+    shutil.copy2(src_bin, binary)
+    os.chmod(binary, 0o755)
+    copied, queue, prefix = {}, [(binary, src_bin)], None         # install name -> file in the kit
+    while queue:
+        dest, original = queue.pop()
+        for dep in _macho_deps(original):
+            if not _is_local(dep) or dep in copied:
+                continue
+            real = os.path.realpath(dep)
+            if not os.path.isfile(real):
+                raise SystemExit("the emulator's QEMU needs %s, which is not on this computer" % dep)
+            prefix = prefix or os.path.dirname(os.path.dirname(dep))
+            target = os.path.join(libdir, os.path.basename(dep))
+            shutil.copy2(real, target)
+            os.chmod(target, 0o644)
+            copied[dep] = target
+            queue.append((target, real))
+    files = [binary] + sorted(copied.values())
+    for f in files:
+        args = ["install_name_tool"]
+        if f != binary:
+            args += ["-id", "@loader_path/" + os.path.basename(f)]
+        for dep in _macho_deps(f):
+            if dep in copied:
+                new = ("@executable_path/../lib/" if f == binary else "@loader_path/") + os.path.basename(copied[dep])
+                args += ["-change", dep, new]
+        for rp in _macho_rpaths(f):
+            args += ["-delete_rpath", rp]
+        if len(args) > 1:
+            _run(args + [f])
+        _run(["codesign", "--force", "--sign", "-", f])              # the edit invalidated any signature; ad hoc is enough for a local program
+    return prefix, [os.path.basename(f) for f in files[1:]]
+
+
+def check_relocated(dest_root):
+    """Fails unless nothing in dest_root points at an absolute path outside macOS (no package manager, no home folder)."""
+    bad = []
+    for dp, _d, fns in os.walk(dest_root):
+        for fn in fns:
+            f = os.path.join(dp, fn)
+            if not (fn.endswith(".dylib") or os.path.basename(dp) == "bin"):
+                continue
+            bad += [(f, d) for d in _macho_deps(f) if _is_local(d)]
+            bad += [(f, "rpath " + r) for r in _macho_rpaths(f) if r.startswith("/")]
+    if bad:
+        raise SystemExit("the relocated QEMU still points outside the kit:\n" + "\n".join("  %s -> %s" % b for b in bad))
+
+
+def _license_files(directory, depth=2):
+    """Licence-like files in a crate or package folder (top level, and one folder down), as {relative path: bytes}."""
+    import re
+    pat = re.compile(r"^((LICEN[SC]E|COPYING|NOTICE|UNLICENSE|COPYRIGHT|OFL|UFL)([-_. ].*)?|.*licen[sc]e.*\.(txt|md))$", re.I)
+    found = {}
+    for dp, dns, fns in os.walk(directory):
+        if os.path.relpath(dp, directory).count(os.sep) >= depth - 1:
+            dns[:] = []
+        for fn in fns:
+            if pat.match(fn):
+                with open(os.path.join(dp, fn), "rb") as fh:
+                    found[os.path.relpath(os.path.join(dp, fn), directory)] = fh.read()
+    return found
+
+
+def rust_crates(src):
+    """The crates the emulator application is built from (normal and build dependencies for this host), from `cargo metadata`:
+    [(name, version, licence, repository, folder)]. The emulator's own workspace members are left out."""
+    meta = json.loads(_run(["cargo", "metadata", "--offline", "--locked", "--format-version", "1", "--filter-platform", "x86_64-apple-darwin"], cwd=src))
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    pk = {p["id"]: p for p in meta["packages"]}
+    root = next(p["id"] for p in meta["packages"] if p["name"] == "shell")
+    seen, todo = set(), [root]
+    while todo:
+        i = todo.pop()
+        if i in seen:
+            continue
+        seen.add(i)
+        todo += [d["pkg"] for d in nodes[i]["deps"] if any(k["kind"] in (None, "build") for k in d["dep_kinds"])]
+    members = set(meta["workspace_members"])
+    return sorted((pk[i]["name"], pk[i]["version"], pk[i].get("license") or "see its licence file", pk[i].get("repository") or "", os.path.dirname(pk[i]["manifest_path"]))
+                  for i in seen if i not in members)
+
+
+def write_rust_licenses(src, dest):
+    crates = rust_crates(src)
+    os.makedirs(dest, exist_ok=True)
+    index = ["Rust crates compiled into esp32-emulator and headless_tap (%d), with the licence each declares.\n" % len(crates),
+             "Each crate is used under the terms named here; where it offers a choice (\"A OR B\") the choice is the user's.\n",
+             "The licence texts are in RUST-LICENSES.txt.\n\n"]
+    texts = {}                                                    # sha256 -> (text, [crate names])
+    for name, ver, lic, repo, folder in crates:
+        index.append("%-40s %-12s %s%s\n" % (name, ver, lic, ("   " + repo) if repo else ""))
+        for rel, data in _license_files(folder).items():
+            h = hashlib.sha256(data).hexdigest()
+            texts.setdefault(h, (data, []))[1].append("%s %s" % (name, ver))
+    write(os.path.join(dest, "RUST-CRATES.txt"), "".join(index))
+    with open(os.path.join(dest, "RUST-LICENSES.txt"), "wb") as fh:
+        fh.write(b"Licence and notice files shipped by the Rust crates listed in RUST-CRATES.txt. Identical texts are given once, followed by the crates that carry them.\n")
+        for h, (data, who) in sorted(texts.items(), key=lambda kv: kv[1][1][0]):
+            fh.write(b"\n" + b"=" * 78 + b"\nUsed by: " + ", ".join(sorted(set(who))).encode() + b"\n" + b"=" * 78 + b"\n")
+            fh.write(data if data.endswith(b"\n") else data + b"\n")
+    return len(crates), len(texts)
+
+
+def write_library_licenses(prefix, dest):
+    """The licence text of each library that travels with QEMU, taken from the package manager that built them (its doc folder or the source it unpacked)."""
+    import re
+    os.makedirs(dest, exist_ok=True)
+    out, missing = [], []
+    for label, kind, where in EMU_LIB_LICENSES:
+        text = None
+        if kind == "doc":
+            hits = sorted(glob.glob(os.path.join(prefix, "share", "doc", where)))
+            if hits:
+                with open(hits[-1], "rb") as fh:
+                    text = fh.read()
+        else:
+            pattern, member = where
+            for tgz in sorted(glob.glob(os.path.join(prefix, "var", "macports", "distfiles", pattern))):
+                with tarfile.open(tgz) as t:
+                    m = next((m for m in t.getmembers() if re.match(member, m.name)), None)
+                    if m:
+                        text = t.extractfile(m).read()
+                        break
+        if text is None:
+            missing.append(label)
+            continue
+        out.append(("=" * 78 + "\n%s\n" + "=" * 78 + "\n") % label)
+        out.append(text.decode("utf-8", "replace").rstrip() + "\n\n")
+    if missing:
+        say("  WARNING: no licence text found for: " + "; ".join(missing))
+    write(os.path.join(dest, "LIBRARIES.txt"), "Licences of the libraries that travel with QEMU (emulator/vendor/qemu/lib). Versions and sources: NOTICES-emulator.md.\n\n" + "".join(out))
+    return len(out) // 2, missing
+
+
+def _git(src, *args):
+    r = subprocess.run(["git", "-C", src] + list(args), capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+EMU_LAUNCHER = """#!/bin/sh
+# Starts the emulator from the PURR Developer Kit.
+#   run-emulator FLASH-IMAGE BOARD [SD-IMAGE]                      open the window and boot
+#   run-emulator --headless FLASH-IMAGE BOARD [SECONDS] [OUT.png]  no window: a script presses the screen and takes pictures
+# BOARD is a name from boards/ (t-deck-plus-vm, t-deck-plus, ...) or the path of a board .toml file. Nothing outside this folder is used.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+usage() { sed -n '2,5p' "$0" | sed 's/^# \\{0,1\\}//' >&2; echo "boards: $(ls "$HERE/boards" | sed 's/\\.toml$//' | tr '\\n' ' ')" >&2; exit 2; }
+HEADLESS=
+if [ "$1" = "--headless" ]; then HEADLESS=1; shift; fi
+[ $# -ge 2 ] || usage
+FLASH="$1"; BOARD="$2"; shift 2
+[ -f "$FLASH" ] || { echo "run-emulator: no such flash image: $FLASH" >&2; exit 1; }
+if [ -f "$BOARD" ]; then :; elif [ -f "$HERE/boards/$BOARD.toml" ]; then BOARD="$HERE/boards/$BOARD.toml"; else echo "run-emulator: no board '$BOARD'" >&2; usage; fi
+CALLER="$(pwd)"
+abs() { case "$1" in /*) printf '%s' "$1";; *) printf '%s' "$CALLER/$1";; esac; }       # the emulator runs in its own folder: paths you give are made absolute first
+FLASH="$(abs "$FLASH")"; BOARD="$(abs "$BOARD")"
+if [ -z "$HEADLESS" ]; then                                       # an SD card image, or other files, after the board
+    n=$#; while [ "$n" -gt 0 ]; do a="$1"; shift; [ -f "$a" ] && a="$(abs "$a")"; set -- "$@" "$a"; n=$((n - 1)); done
+fi
+export ESP32_EMULATOR_QEMU="$HERE/vendor/qemu/bin/qemu-system-xtensa"
+mkdir -p "$HERE/run" && cd "$HERE/run" || exit 1                 # the emulator keeps its working copy of the image here, so the image you pass is never changed
+if [ -n "$HEADLESS" ]; then
+    export BOARD_TOML="$BOARD"
+    [ -z "$HEADLESS_CMD" ] || export HEADLESS_CMD="$(abs "$HEADLESS_CMD")"
+    OUT="$(abs "${2:-$HERE/run/shot.png}")"
+    mkdir -p "$(dirname "$OUT")"
+    exec "$HERE/headless_tap" "$FLASH" "${1:-120}" "$OUT"
+fi
+exec "$HERE/esp32-emulator" "$FLASH" "$BOARD" "$@" --run
+"""
+
+
+def bundle_emulator(src):
+    say("Emulator...")
+    src = os.path.abspath(os.path.expanduser(src))
+    qemu = os.path.join(src, "vendor", "qemu")
+    if not (os.path.isfile(os.path.join(src, "Cargo.toml")) and os.path.isfile(os.path.join(qemu, "bin", "qemu-system-xtensa"))):
+        raise SystemExit("no emulator checkout with a built vendor/qemu at %s (pass --emulator-src, or --no-emulator)" % src)
+    dst = os.path.join(KIT, "emulator")
+    os.makedirs(dst)
+    # the program: built on this computer, into the cache (the emulator checkout is not touched)
+    home = os.path.expanduser("~")
+    env = dict(os.environ, CARGO_TARGET_DIR=EMU_TARGET, RUSTFLAGS=(os.environ.get("RUSTFLAGS", "") + " --remap-path-prefix=%s=/build" % home).strip())    # no home folder name in the programs' panic messages
+    build = ["cargo", "build", "--release", "--locked", "-p", "shell", "--bin", "esp32-emulator", "--example", "headless_tap"]
+    say("  cargo build (release)...")
+    r = subprocess.run(build + ["--offline"], cwd=src, env=env, capture_output=True, text=True)
+    if r.returncode:
+        say("  (offline build failed; trying with the network)")
+        r = subprocess.run(build, cwd=src, env=env, capture_output=True, text=True)
+        if r.returncode:
+            raise SystemExit("cargo build failed:\n" + r.stderr[-3000:])
+    rel = os.path.join(EMU_TARGET, "release")
+    for sp, dp in ((os.path.join(rel, "esp32-emulator"), "esp32-emulator"), (os.path.join(rel, "examples", "headless_tap"), "headless_tap")):
+        shutil.copy2(sp, os.path.join(dst, dp))
+        os.chmod(os.path.join(dst, dp), 0o755)
+        _run(["codesign", "--force", "--sign", "-", os.path.join(dst, dp)])
+    # QEMU, relocated, and what it loads at run time (the ROM images, found through -L)
+    prefix, libs = relocate_qemu(os.path.join(qemu, "bin", "qemu-system-xtensa"), os.path.join(dst, "vendor", "qemu"))
+    check_relocated(os.path.join(dst, "vendor", "qemu"))
+    rom_dir = os.path.join(dst, "vendor", "qemu", "share", "qemu")
+    os.makedirs(rom_dir)
+    for n in EMU_ROMS:
+        shutil.copy2(os.path.join(qemu, "share", "qemu", n), os.path.join(rom_dir, n))
+    say("  QEMU with %d libraries from %s, ROMs: %s" % (len(libs), os.path.basename(prefix or "?"), ", ".join(EMU_ROMS)))
+    # boards
+    os.makedirs(os.path.join(dst, "boards"))
+    for b in EMU_BOARDS:
+        shutil.copy2(os.path.join(src, "boards", b + ".toml"), os.path.join(dst, "boards", b + ".toml"))
+    # licences and the source offer
+    lic = os.path.join(dst, "licenses")
+    os.makedirs(lic)
+    qsrc = os.path.join(src, "vendor", "src")
+    for n, d in (("COPYING", "QEMU-GPL-2.0.txt"), ("COPYING.LIB", "QEMU-LGPL.txt")):
+        if os.path.isfile(os.path.join(qsrc, n)):
+            shutil.copy2(os.path.join(qsrc, n), os.path.join(lic, d))
+    nlib, missing = write_library_licenses(prefix, lic) if prefix else (0, [])
+    ncrate, ntext = write_rust_licenses(src, lic)
+    say("  licences: %d libraries, %d Rust crates (%d distinct texts)" % (nlib, ncrate, ntext))
+    shutil.copytree(os.path.join(src, "qemu"), os.path.join(dst, "source", "qemu-patches"), ignore=IGNORE)      # the device models and apply.sh: what is ours in the QEMU build
+    shutil.copy2(os.path.join(src, "scripts", "fetch-qemu-src.sh"), os.path.join(dst, "source", "fetch-qemu-src.sh"))
+    qemu_base = _git(qsrc, "rev-parse", "HEAD")
+    qemu_tag = _git(qsrc, "describe", "--tags", "--exact-match")
+    emu_commit = _git(src, "rev-parse", "HEAD")
+    dirty = bool(_git(src, "status", "--porcelain", "--", "qemu"))                    # the QEMU side is what the source offer covers
+    app_dirty = bool(_git(src, "status", "--porcelain", "--", "crates", "boards"))
+    sha = hashlib.sha256(open(os.path.join(dst, "vendor", "qemu", "bin", "qemu-system-xtensa"), "rb").read()).hexdigest()
+    write(os.path.join(dst, "SOURCE.txt"), """The corresponding source of the QEMU in this folder (GPL-2.0), as built here.
+
+Base:     Espressif's QEMU fork, %(tag)s (commit %(base)s)
+          https://github.com/espressif/qemu   (tag %(tag)s)
+Changes:  source/qemu-patches/   our device models (devices/) and apply.sh, the script that grafts them into the base tree and
+          edits its files by anchored insertion; build.sh configures and builds. source/fetch-qemu-src.sh fetches the base tree.
+          The same files are in the emulator project: https://github.com/PastorCatto/ESP32-Emulator (folder qemu/), commit %(emu)s%(dirty)s.
+To rebuild: fetch the base tree into vendor/src, run qemu/build.sh from the emulator project (needs glib, pixman and libslirp).
+The libraries beside the program (vendor/qemu/lib) are used unchanged; their licences are in licenses/LIBRARIES.txt and their sources are named in
+NOTICES-emulator.md.
+
+Written offer: for at least three years from the date of this kit, on request we will give you a complete machine-readable copy of the
+corresponding source of this QEMU build and of the libraries above, for a charge no more than the cost of physically doing so. Ask in the
+issue tracker of the project repository named above.
+
+Program built into this folder: qemu-system-xtensa sha256 %(sha)s
+""" % {"tag": qemu_tag or "see source/fetch-qemu-src.sh", "base": qemu_base or "unknown", "emu": emu_commit or "unknown", "dirty": " plus uncommitted changes" if dirty else "", "sha": sha})
+    shutil.copy2(os.path.join(ROOT, "sdk", "NOTICES-emulator.md"), os.path.join(dst, "NOTICES-emulator.md"))
+    write(os.path.join(dst, "run-emulator"), EMU_LAUNCHER, 0o755)
+    size = sum(os.path.getsize(os.path.join(r, f)) for r, _d, fs in os.walk(dst) for f in fs if not os.path.islink(os.path.join(r, f)))
+    say("  emulator/ %.1f MB" % (size / 1048576.0))
+    return {"qemu_sha256": sha, "emulator_commit": emu_commit, "emulator_uncommitted_changes": app_dirty, "qemu_base": qemu_base}
+
+
 LAUNCHER = """#!/bin/sh
 # The PURR Developer Kit's command. Uses the kit's own Python and compiler; nothing else on this computer is touched.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -277,6 +583,7 @@ IN A TERMINAL
   bin/purr keys new --role developer
   bin/purr serve                   hand builds to a device on your network
   bin/purr --help
+  emulator/run-emulator IMAGE t-deck-plus-vm   open a flash image in the emulator (no device needed; see sdk/docs/12-emulator.md)
 
 READ
   sdk/docs/           the guides (they are also in Studio, under "docs")
@@ -290,6 +597,8 @@ Built %(date)s from PURR OS sources. See LICENSE-TODO.
 LICENSE_TODO = """The licence for the PURR Developer Kit has not been chosen yet.
 This file is a placeholder: until it is replaced, the kit is for the owner's own use.
 Third-party parts keep their own licences: Python (PSF), cryptography (Apache-2.0 / BSD), the Espressif toolchain (GPL with the GCC runtime exception).
+The emulator/ folder holds QEMU (GPL-2.0, with its source offer in emulator/SOURCE.txt), the libraries it needs and the Rust crates the emulator
+application is built from: see emulator/NOTICES-emulator.md and emulator/licenses/.
 """
 
 
@@ -327,6 +636,8 @@ def main():
     ap.add_argument("--images", help="the release folder with the prebuilt parts (default: the newest PURR-OS-release-* on the Desktop, its JumpingJaguar1)")
     ap.add_argument("--no-python", action="store_true")
     ap.add_argument("--no-toolchain", action="store_true")
+    ap.add_argument("--no-emulator", action="store_true", help="leave out the emulator/ folder")
+    ap.add_argument("--emulator-src", default=os.environ.get("PURR_EMULATOR_SRC", EMU_SRC_DEFAULT), help="a checkout of the emulator project with vendor/qemu built (default %s)" % EMU_SRC_DEFAULT)
     a = ap.parse_args()
 
     name = "purr-sdk-%s-%s" % (__version__, HOST)
@@ -340,7 +651,7 @@ def main():
 
     say("Copying the sources...")
     for s, d in (("sdk/purrsdk", "sdk/purrsdk"), ("sdk/studio", "sdk/studio"), ("sdk/boards", "sdk/boards"), ("sdk/data", "sdk/data"), ("sdk/docs", "sdk/docs"),
-                 ("sdk/tests", "sdk/tests"), ("sdk/purr.py", "sdk/purr.py"), ("sdk/DESIGN.md", "sdk/DESIGN.md"),
+                 ("sdk/tests", "sdk/tests"), ("sdk/purr.py", "sdk/purr.py"), ("sdk/DESIGN.md", "sdk/DESIGN.md"), ("sdk/NOTICES-emulator.md", "sdk/NOTICES-emulator.md"),
                  ("purrstrap/lib", "purrstrap/lib"), ("purrstrap/scripts", "purrstrap/scripts"), ("purrstrap/purrstrap.py", "purrstrap/purrstrap.py"),
                  ("purrstrap/freestanding", "purrstrap/freestanding"), ("purrstrap/SPEC.md", "purrstrap/SPEC.md"),
                  ("PurrOS/components/coreos/include", "PurrOS/components/coreos/include"), ("PurrOS/components/kernel/include", "PurrOS/components/kernel/include"),
@@ -385,6 +696,7 @@ def main():
         py_name = bundle_python()
     if not a.no_toolchain:
         bundle_toolchain()
+    emu = None if a.no_emulator else bundle_emulator(a.emulator_src)
 
     write(os.path.join(KIT, "bin", "purr"), LAUNCHER, 0o755)
     write(os.path.join(KIT, "PURR-Studio.command"), STUDIO_COMMAND, 0o755)
@@ -392,7 +704,7 @@ def main():
     write(os.path.join(KIT, "README.txt"), README % {"version": __version__, "host": HOST, "date": time.strftime("%Y-%m-%d")})
     write(os.path.join(KIT, "LICENSE-TODO"), LICENSE_TODO)
     say("Hashing the kit's own files...")
-    m = {"kit": __version__, "host": HOST, "built": time.strftime("%Y-%m-%d %H:%M:%S"), "python": py_name, "files": manifest()}
+    m = {"kit": __version__, "host": HOST, "built": time.strftime("%Y-%m-%d %H:%M:%S"), "python": py_name, "emulator": emu, "files": manifest()}
     with open(os.path.join(KIT, "SDK-MANIFEST.json"), "w") as fh:
         json.dump(m, fh, indent=1)
         fh.write("\n")
