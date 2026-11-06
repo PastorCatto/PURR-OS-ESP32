@@ -196,6 +196,14 @@ lv_obj_t *and_note_row(lv_obj_t *parent, const char *title, const char *text)
     lv_obj_t *r = make_row(parent, title, text, NULL, NULL, NULL);
     lv_obj_remove_flag(r, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_width(r, LV_PCT(100));
+    lv_obj_update_layout(r);
+    int lw = lv_obj_get_width(r) - 31;                 /* the labels were sized for the shade's full width: the lock column is narrower, so the dots must come earlier */
+    for (uint32_t k = 0; lw > 20 && k < lv_obj_get_child_count(r); k++) {
+        lv_obj_t *c = lv_obj_get_child(r, k);
+        if (lv_obj_check_type(c, &lv_label_class)) {
+            lv_obj_set_width(c, lw);
+        }
+    }
     return r;
 }
 
