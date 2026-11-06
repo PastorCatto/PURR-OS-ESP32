@@ -91,14 +91,14 @@ Store's companion works). The manifest names it.
   LongFast and General are the public ones.
 - **Groups and channels in Contacts.** A contact card shows a short message history with that person and small indicators of where they appear: the groups and channels they are in, and the services and threads where you have spoken with them ("seen in LongFast, Ridge crew; talked on Meshtastic and Reticulum"). Each indicator opens that thread or channel.
 - **Failed sends.** A failed message stays "Not sent" and can be tapped to retry. If the person has an address on another service, the app offers a one-tap resend there. Automatic fallback is an
-  option, off by default, because the radio has to switch networks and a slow first attempt can still arrive later as a duplicate.
+  option, **off unless the user turns it on (owner, 2026-11-05)**, because the radio has to switch networks and a slow first attempt can still arrive later as a duplicate.
 
 ## 7. Storage
 
 - Messages live in a folder on the flash file system, under the signed-in user's folder, until together they have used **1 MB**.
 - When a micro SD card is inserted after that, everything stored so far moves to the card, and from then on fresh messages go on flash again.
 - Pictures count toward the 1 MB like any other message data.
-- **When the 1 MB is used and there is no card** the app stops and asks, before anything is lost: "Use more device space" (raise the limit), or "Export everything, then delete the oldest" (the export is tried first and the delete only happens after it has worked), or cancel. Nothing is deleted without the export being offered. Where the export goes (the SD card, a file the user can copy, or a share to another device) is to be decided.
+- **When the 1 MB is used and there is no card** the app stops and asks, before anything is lost: "Use more device space" (raise the limit), or "Export everything, then delete the oldest" (the export is tried first and the delete only happens after it has worked), or cancel. Nothing is deleted without the export being offered. **The export goes to the SD card.** Later, with MTP (USB file transfer) support, the user can copy it to a computer, and it can be shared to another device; neither exists yet.
 
 ## 8. Images and emoji
 

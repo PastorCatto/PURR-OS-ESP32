@@ -144,3 +144,5 @@ A draft with renders of the Froyo-style Messages app was made and shown to the o
 
 **Owner answers, 2026-11-05 (still later):** at 1 MB with no card the app warns and offers "use more device space" or "export everything, then delete the oldest" (the delete only after the export worked); a contact card shows a short history and indicators of the groups and channels the person is in and where you have talked; the radio lease ends when the user chooses to switch, after an orderly shutdown of the current app, one app at a time, and the owner wants a way to keep the radio up across the switch (a radio keeper that holds it initialised) and Reticulum running on Wi-Fi independently so that it uses both links. A **message server node** (a big SD card) with a smaller companion device over Wi-Fi is a separate later plan, recorded in `Messaging/SPEC.md` section 12.
 
+**Owner answers, 2026-11-05 (last):** a message export goes to the SD card; MTP support comes later (copy to a computer, and share to another device); automatic fallback stays off unless the user changes it. What is left open is only the radio keeper and Reticulum over Wi-Fi, both to be measured.
+
