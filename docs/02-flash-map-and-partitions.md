@@ -4,9 +4,10 @@
 
 - The T-Deck Plus has 16 MB of flash. The layout is in one file: [PurrOS/partitions/tdeck_plus.csv](../PurrOS/partitions/tdeck_plus.csv). If any document disagrees with that file, the file is right.
 - The bootloader sits at 0x0 and may use 40 KB. The partition table is at 0xA000 (moved from 0x8000 on 2026-10-25).
-- Three app slots, all fixed size: `kittenos` 0x20000, `kernel` 0x1A0000, `loader` 0x380000. There is no OTA pair and no `otadata`.
+- Three app slots, all fixed size: `kittenos` 0x20000 (1.75 MB), `kernel` 0x1E0000 (2.125 MB), `loader` 0x400000 (1.75 MB). In flash map v2 each is 256 KB larger than it was up to 1.0.28, room to grow into. There is no OTA pair and no `otadata`.
+- **Flash map v2 (release 1.0.29).** Only those three slots, besides what is read without a file system (`nvs`, `purrcfg`, `phy_init`, `bootpkg`, `netrec`), have partitions of their own. Everything else (picture packs, themes, shells, apps, drivers, modules) is a file in `root` (LittleFS), which now runs from 0x5C1000 to the end of the flash: 0xA3F000 bytes, about 10.2 MiB (the three slots took 768 KB of the 5 MB the picture partition freed). The old 5 MB `ui_assets` partition is gone. This is **designed and written into the tables and tools, and has not yet run on a device**; the 1.0.28 and older layout is described under "The old layout" below.
 - The last 4096 bytes of each app slot hold the signature trailer, so an image may be at most the slot size minus 4096.
-- Changing the table means rebuilding every image (the app reads the table at the compiled offset) and erasing `root` on devices flashed with an older layout.
+- Changing the table means rebuilding every image (the app reads the table at the compiled offset) and erasing `root` on devices flashed with an older layout. The table is never replaced by an update (bootloader update is off), so moving to flash map v2 takes a **cable flash and a full erase of `root`** ([plan1.md](../plan1.md)).
 
 ## What it is for
 
@@ -18,10 +19,11 @@ The flash map fixes where each part of the system lives, so that the bootloader,
 |---|---|
 | [PurrOS/partitions/tdeck_plus.csv](../PurrOS/partitions/tdeck_plus.csv) | T-Deck Plus, 16 MB. The layout the OS images are built against |
 | [PurrOS/partitions/tdeck.csv](../PurrOS/partitions/tdeck.csv) | T-Deck (non-Plus). Same layout as the Plus |
-| [PurrOS/partitions/waveshare154.csv](../PurrOS/partitions/waveshare154.csv) | Waveshare e-paper 1.54, 8 MB flash, smaller slots and no `ui_assets` |
+| [PurrOS/partitions/waveshare154.csv](../PurrOS/partitions/waveshare154.csv) | Waveshare e-paper 1.54, 8 MB flash, smaller slots. It keeps its own table (flash map v2 is the T-Deck layout) |
 | [bootloader/partitions.csv](../bootloader/partitions.csv) | The bootloader project's copy of the T-Deck Plus table (identical to the one above, apart from comments) |
 | [bootloader/partitions/waveshare154.csv](../bootloader/partitions/waveshare154.csv) | The bootloader project's copy for the e-paper board |
-| [Kernel/partitions.csv](../Kernel/partitions.csv) | Table for the standalone kernel project. **Out of date**, see below |
+| [Kernel/partitions.csv](../Kernel/partitions.csv) | Table for the standalone kernel project. Same rows as the T-Deck Plus table (flash map v2) |
+| [sdk/boards/tdeck_plus.toml](../sdk/boards/tdeck_plus.toml) | The SDK's board profile, with the same table as `[[partition]]` blocks; a test keeps it equal to the CSVs, `purr inspect` compares a flash image against it |
 | [PurrOS/sdkconfig.board.tdeck_plus](../PurrOS/sdkconfig.board.tdeck_plus) | Selects the table file and the 16 MB flash size |
 | [PurrOS/sdkconfig.defaults](../PurrOS/sdkconfig.defaults) | Sets `CONFIG_PARTITION_TABLE_OFFSET=0xA000` |
 | [PurrOS/components/coreos/include/purr_abi.h](../PurrOS/components/coreos/include/purr_abi.h) | `purrcfg` and handoff layout |
@@ -41,14 +43,17 @@ Addresses are flash offsets. "End" is the first byte after the partition.
 | `purrcfg` | data, 0x40 | 0xF000 | 8 KB | 0x11000 | Two 4 KB copies (A, B) of the boot configuration |
 | `phy_init` | data, phy | 0x11000 | 4 KB | 0x12000 | Radio calibration data |
 | `bootpkg` | data, 0x40 | 0x12000 | 56 KB | 0x20000 | The signed boot package |
-| `kittenos` | app, factory | 0x20000 | 1.5 MB | 0x1A0000 | KittenOS (recovery profile) |
-| `kernel` | app, ota_0 | 0x1A0000 | 0x1E0000 (1,966,080 bytes) | 0x380000 | The full OS image |
-| `loader` | app, test | 0x380000 | 1.5 MB | 0x500000 | The recovery loader (minimal profile) |
-| `netrec` | data, 0x41 | 0x500000 | 4 KB | 0x501000 | Last Wi-Fi network, for recovery |
-| `ui_assets` | data, 0x42 | 0x501000 | 5 MB | 0xA01000 | The picture pack for the shells |
-| `root` | data, 0x83 | 0xA01000 | 0x5FF000 (about 6 MB) | 0x1000000 | LittleFS root filesystem |
+| `kittenos` | app, factory | 0x20000 | 0x1C0000 (1.75 MB) | 0x1E0000 | KittenOS (recovery profile) |
+| `kernel` | app, ota_0 | 0x1E0000 | 0x220000 (2.125 MB, 2,228,224 bytes) | 0x400000 | The full OS image |
+| `loader` | app, test | 0x400000 | 0x1C0000 (1.75 MB) | 0x5C0000 | The recovery loader (minimal profile) |
+| `netrec` | data, 0x41 | 0x5C0000 | 4 KB | 0x5C1000 | Last Wi-Fi network, for recovery |
+| `root` | data, 0x83 | 0x5C1000 | 0xA3F000 (about 10.2 MiB) | 0x1000000 | LittleFS root filesystem: the system, the apps and the picture packs |
 
-The map fills the 16 MB exactly. No bytes are unused between rows.
+The map fills the 16 MB exactly. No bytes are unused between rows. This is the **flash map v2** table of release 1.0.29 (owner's approval, 2026-11-06, [plan1.md](../plan1.md)); it is written into the CSVs and the build and SDK tools but has not yet run on a device.
+
+### The old layout (1.0.28 and older)
+
+Up to 1.0.28 the table had one more row, and `root` was smaller: `ui_assets` (data, 0x42) at 0x501000 for 5 MB (0x500000), a raw partition that held the picture pack and was read in place from flash, and `root` at 0xA01000 for 0x5FF000 bytes (about 6 MB). Up to 1.0.28 the slots were `kittenos` 0x20000 / 0x180000 (1.5 MB), `kernel` 0x1A0000 / 0x1E0000 (1.875 MB), `loader` 0x380000 / 0x180000 (1.5 MB) and `netrec` at 0x500000. Flash map v2 removed `ui_assets`, gave each of the three slots 256 KB more (so `netrec` moved up to 0x5C0000) and gave the rest to `root` (about 6 MB to about 10.2 MiB, +4.25 MB). The pack is now a file in LittleFS, `/ui/<shell>/pack.bin` ([chapter 12](12-picture-pack-and-fonts.md)).
 
 ## How it works
 
@@ -62,9 +67,9 @@ Each of `kernel`, `kittenos` and `loader` is a real ESP-IDF app image starting a
 
 | Slot | Partition size | Largest image |
 |---|---|---|
-| `kittenos` | 1,572,864 | 1,568,768 |
-| `kernel` | 1,966,080 | 1,961,984 |
-| `loader` | 1,572,864 | 1,568,768 |
+| `kittenos` | 1,835,008 | 1,830,912 |
+| `kernel` | 2,228,224 | 2,224,128 |
+| `loader` | 1,835,008 | 1,830,912 |
 
 The builder checks this: `purrstrap coreos slot-image` refuses an image that does not fit ([purrstrap/scripts/coreos.py](../purrstrap/scripts/coreos.py)).
 
@@ -91,7 +96,7 @@ The boot package is not run from flash. The bootloader copies it into the bottom
 
 ### The other boards
 
-The e-paper board has 8 MB of flash, so its slots are smaller: `kittenos` 0x120000, `kernel` 0x140000, `loader` 0x120000, no `ui_assets`, and `root` of 0x45F000. The first four rows (`nvs`, `purrcfg`, `phy_init`, `bootpkg`) are the same as the T-Deck Plus. The original ESP32 board (the CYD 2.4C) appears in [coreos.py](../purrstrap/scripts/coreos.py) and in the bootloader sdkconfig, but [PurrOS/partitions/](../PurrOS/partitions/) has no table for it, so the PurrOS images cannot be built for it today.
+The e-paper board has 8 MB of flash, so its slots are smaller: `kittenos` 0x120000, `kernel` 0x140000, `loader` 0x120000, and `root` of 0x45F000 (it never had a picture partition). The first four rows (`nvs`, `purrcfg`, `phy_init`, `bootpkg`) are the same as the T-Deck Plus. The original ESP32 board (the CYD 2.4C) appears in [coreos.py](../purrstrap/scripts/coreos.py) and in the bootloader sdkconfig, but [PurrOS/partitions/](../PurrOS/partitions/) has no table for it, so the PurrOS images cannot be built for it today.
 
 ## What each partition holds, byte for byte
 
@@ -101,16 +106,15 @@ The partitions are not all written the same way. This matters when you flash by 
 |---|---|---|
 | `kernel`, `kittenos`, `loader` | The payload only (the raw ESP-IDF image) from offset 0, 0xFF fill, and the 173-byte header copy plus 0xFF in the last 4096 bytes | The bootloader, from the trailer |
 | `bootpkg` | The **whole signed container**: header, then payload (a 16-byte preamble, code, data) | The bootloader, as a container, before it copies the code into RAM |
-| `ui_assets` | The picture pack only, with no trailer; it carries its own CRC. The signed container around it was checked before the write | The installer, before it writes |
 | `purrcfg` | Two sectors holding `purr_cfg_t` | CRC, and the trust signature for the trust fields |
 | `netrec` | One small record: magic, network name, password, CRC | The loader |
-| `root` | LittleFS | LittleFS itself; each file by the OS that loads it |
+| `root` | LittleFS, including the picture packs (`/ui/<shell>/pack.bin`, each with its own CRC; the signed container around a pack is checked before the file is written) | LittleFS itself; each file by the OS that loads it |
 
 The password in `netrec` is plain data. Real protection would need flash encryption, which is not used ([SECURITY.md](../SECURITY.md) section 2).
 
 ## Building a whole-flash image
 
-`tools/hw/make_hw_image.sh` assembles a 16 MB image for a blank T-Deck Plus. It starts from a block of 0xFF and writes each part at the offsets in the table above: the bootloader at 0x0 (at most 0xA000 bytes), the partition table at 0xA000, a signed `purrcfg` at 0xF000, the boot package at 0x12000, and the loader slot at 0x380000. With `FULL=1` it also writes the kernel at 0x1A0000, KittenOS at 0x20000 and the picture pack at 0x501000. `MINIMAL=1` writes only the bootloader, table, trust block and loader; the loader then installs the rest from the network. Every `put()` asserts that the data fits its partition, so a layout mistake stops the script and not the device. The script needs the boot key's passphrase in the environment of that one command, to sign the `purrcfg` ([chapter 03](03-trust-and-keys.md), [runbook](runbook.md)).
+`tools/hw/make_hw_image.sh` assembles a 16 MB image for a blank T-Deck Plus. It starts from a block of 0xFF and writes each part at the offsets in the table above: the bootloader at 0x0 (at most 0xA000 bytes), the partition table at 0xA000, a signed `purrcfg` at 0xF000, the boot package at 0x12000, and the loader slot at 0x400000. With `FULL=1` it also writes the kernel at 0x1E0000 and KittenOS at 0x20000. `netrec` and `root` (0x5C0000 to the end) stay blank: the picture pack, the modules and the apps arrive from the setup wizard or a recovery. `MINIMAL=1` writes only the bootloader, table, trust block and loader; the loader then installs the rest from the network. Every `put()` asserts that the data fits its partition, and the script refuses a partition table that is not flash map v2 (so a stale `out/stdfull` cannot put the old layout on a device), so a layout mistake stops the script and not the device. `tools/vm/mkimage_dbg.sh` (the VM test image) writes the build's table into the base image too, and erases everything from 0x20000 up when the base carried another table. The script needs the boot key's passphrase in the environment of that one command, to sign the `purrcfg` ([chapter 03](03-trust-and-keys.md), [runbook](runbook.md)).
 
 Flashing writes over whatever is there, so an older layout's data (a different `root`) stays until erased. When a layout changes, erase the whole chip first.
 
@@ -141,14 +145,15 @@ Host tests do not read the CSV. The check that ties the map to the code is `purr
 | `root` will not mount after a flash | Older layout, `root` moved | Erase `root` and let the OS format it; the data on it is lost |
 | "app partitions too small" warning on a full build | Full image is bigger than `kittenos` or `loader` | Expected: the full image goes in `kernel` only |
 | `slot-image` says the image does not fit | Image plus 4096 trailer is over the slot | Shrink the image, or move the layout (steps above) |
-| Kernel image near its limit | 1,876,112 of 1,966,080 bytes at 1.0.26 | Measure before enabling features that add code ([showtime1.md](../showtime1.md) part D) |
+| Kernel image near its limit | 1,876,112 of 1,966,080 bytes at 1.0.26 (the slot is 2,228,224 bytes in flash map v2) | Measure before enabling features that add code ([showtime1.md](../showtime1.md) part D) |
 | Boot loop after flashing only some slots | Slots from different layouts | Flash the table and all slots together |
+| A device from 1.0.28 or older shows a boot loop or an unformatted `root` after an update of only the kernel | The partition table did not change (an update never replaces it), so the kernel looks for `root` at the new address in an old table | Cable flash of a whole flash map v2 image with the chip erased |
 
 ## What is not finished
 
-- **Plan and code disagree in several places.** [bootloader/SPEC.md](../bootloader/SPEC.md) section 2 still shows `kittenos` and the loader at about 1 MB, and `purrcfg` at 0xD000. The CSV has 1.5 MB slots and `purrcfg` at 0xF000. The spec should be corrected; this chapter follows the CSV.
-- **[Kernel/partitions.csv](../Kernel/partitions.csv) is stale.** It has no `ui_assets` and gives `root` the space from 0x501000. It is used only by the standalone project, but a reader should not trust it.
-- **Comment in the CSV says `ui_assets` is unsigned raw data.** The pack is now delivered as a signed component (`PURR_MOD_UIASSETS`) and installed by KittenOS stage 2; what sits in the partition is the plain pack ([chapter 12](12-picture-pack-and-fonts.md)).
+- **Plan and code disagree in several places.** [bootloader/SPEC.md](../bootloader/SPEC.md) section 2 still shows `kittenos` and the loader at about 1 MB, and `purrcfg` at 0xD000. The CSV has 1.75 MB slots (flash map v2; 1.5 MB up to 1.0.28) and `purrcfg` at 0xF000. The spec should be corrected; this chapter follows the CSV.
+- **Flash map v2 has not run on a device.** The tables, the board profile, `make_hw_image.sh` and `mkimage_dbg.sh` are written to it; the firmware, the pack tools and the Store side are the other halves ([plan1.md](../plan1.md), [plan7.md](../plan7.md)). Until a cable flash has proved it, treat the whole chapter as the design.
+- **The LittleFS lookahead buffer** is small for about 2,600 blocks and is meant to grow with the map ([plan1.md](../plan1.md)); that is firmware, not a table matter.
 - **No tables for other chips yet.** The CYD and the Heltec boards have no PurrOS table ([Boards/SPEC.md](../Boards/SPEC.md)).
 - **Secure Boot and flash encryption are not used**, so nothing protects the partition table or the bootloader against someone with a flash programmer ([SECURITY.md](../SECURITY.md) section 2, [chapter 03](03-trust-and-keys.md)).
 

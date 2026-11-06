@@ -68,13 +68,16 @@ package itself, regardless of which system happened to run the install.
   | `key_id`, `signature[64]` | zero in the packaged file; `keys sign` fills them (P-256 over every byte before the signature) |
   | `flags` low byte | the subtype: `PURR_MOD_KERNEL`, `LOADER`, `BOOTLOADER`, `BOOTPKG`, `UIASSETS` ... |
   | `name[32]`, `version[12]`, `min_boot_version[12]` | `name` is the component; the manifest names the file `<component>-<board>.cat` |
-  | `payload_offset`, `payload_size`, `payload_sha256` | the payload is the bytes that reach the partition (kernel, loader, ui_assets) or the whole file is kept (bootpkg) |
+  | `payload_offset`, `payload_size`, `payload_sha256` | the payload is the bytes that reach the partition (kernel, loader; the picture pack up to 1.0.28) or the whole file is kept (bootpkg) |
 
   Package, sign, then `dev recovery` copies the file in and writes its size and sha256 (and the payload's) into
   `recovery.manifest`; the device checks the file hash, the signature and the subtype's allowed key, writes, and reads
   back the payload hash. A new component therefore needs one subtype, one row of `purr_role_may_sign`, one install
   branch in `commands.c`, and one name in `RECOVERY_COMPONENTS` (`purrstrap/scripts/dev.py`).
-- **`uiassets`** (`PURR_MOD_UIASSETS`, 10): the picture pack for the `ui_assets` data partition, one pack per shell
+- **Flash map v2 (release 1.0.29, designed, not yet run on a device; [plan1.md](../plan1.md)):** there is no `ui_assets` partition, so the component below changes. The
+  picture packs become the release components `ui_w10m` and `ui_android`, written by stage 2 as the files `/ui/w10m/pack.bin` and `/ui/android/pack.bin` in LittleFS
+  (`purr_fs_write_kept`); themes are files under `/ui/themes/<id>/`. `netinstall uiassets` goes away. The paragraph that follows describes the component as it was up to 1.0.28.
+- **`uiassets`** (`PURR_MOD_UIASSETS`, 10; up to 1.0.28): the picture pack for the `ui_assets` data partition, one pack per shell
   (the Windows-style and the Android-style packs differ). Signed by the boot key (a dev server) or the system key (a
   release). Only the used part of the pack is sent, not the padding to the partition's size. Stage 2 (and
   `netinstall uiassets`) writes only that part, skips the write when the partition already holds the same payload, and

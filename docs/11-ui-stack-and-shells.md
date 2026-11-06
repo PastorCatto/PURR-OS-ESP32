@@ -36,7 +36,7 @@ The way that works: an app asks for a widget by **role** ("a button", "a list ro
 | Android shell | [purr_android_shade.c](../PurrOS/main/purr_android_shade.c) | Notification shade |
 | Android shell | [purr_android_lock.c](../PurrOS/main/purr_android_lock.c) | Lock screen and sign-in |
 | Old shells | [purr_card_shell.c](../PurrOS/main/purr_card_shell.c), [purr_ui_config.c](../PurrOS/main/purr_ui_config.c) | The card stack and the text-config "nav" screen; the fallbacks |
-| Art | [purr_ui_assets.c](../PurrOS/main/purr_ui_assets.c) | Maps the picture pack from flash (see [chapter 12](12-picture-pack-and-fonts.md)) |
+| Art | [purr_ui_assets.c](../PurrOS/main/purr_ui_assets.c) | Finds a picture in a pack (a raw flash partition up to 1.0.28; files in LittleFS from 1.0.29, see [chapter 12](12-picture-pack-and-fonts.md)) |
 | Wallpaper | [purr_wallpaper.c](../PurrOS/main/purr_wallpaper.c) | The device-wide `display.wallpaper` choice |
 | Build choice | [Kconfig.projbuild](../PurrOS/main/Kconfig.projbuild) | The `PURR_OFFICIAL_SHELL` choice |
 | Build fragment | [sdkconfig.shell.android](../PurrOS/sdkconfig.shell.android) | Switches the Android shell on |
@@ -105,7 +105,7 @@ The VM and device builds are covered in [chapter 18](18-emulator-and-vm.md) and 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Words instead of icons, poor-looking home | The picture pack is not on the device | `netinstall uiassets`, or a full image; see [chapter 12](12-picture-pack-and-fonts.md) |
+| Words instead of icons, poor-looking home | The picture pack is not on the device | `netinstall uiassets` (1.0.28 and older; from 1.0.29 the pack is a file in `root`, installed by the setup wizard's second stage), or a full image; see [chapter 12](12-picture-pack-and-fonts.md) |
 | Apps will not open after drivers load | Low internal RAM: an app needs a stack plus the reserve | Read the free-RAM line in the task manager; 1.0.22 moved app stacks to PSRAM ([plan7.md](../plan7.md)) |
 | Text cut instead of ending in dots (lock-screen notification) | Labels sized for the full display | Fixed in `and_note_row`, built, not yet published |
 | Emoji draw as empty boxes | No emoji font yet | Part D of [showtime1.md](../showtime1.md) |
@@ -120,7 +120,7 @@ The VM and device builds are covered in [chapter 18](18-emulator-and-vm.md) and 
 - **Android drawer:** text tiles with raw app ids and no icons (found 2026-11-06). Part E of [showtime1.md](../showtime1.md) closes it.
 - **W10M parity** with the Android shell (lock-screen notifications, `bubble`, a side-list sign-in) is Part E, not started.
 - **Shell choice in the SDK and `purrstrap`** (a UI-select button) is not built ([plan7.md](../plan7.md)).
-- **Plan and doc disagree:** [UI/SPEC.md](../UI/SPEC.md) says the `ui_assets` partition is 512 KB and that themes are signed `.kit` packages. The partition table says 5 MB, and the SPEC itself marks the `.kit` idea superseded. Chapter 12 uses the partition table.
+- **Plan and doc disagree:** [UI/SPEC.md](../UI/SPEC.md) used to say the `ui_assets` partition was 512 KB (fixed on 2026-11-06 to describe flash map v2, where there is no such partition and the pack is a file in LittleFS) and that themes are signed `.kit` packages; the SPEC itself marks the `.kit` idea superseded.
 - **Keyboard and trackball focus** on Android home icons: touch only so far.
 - **Not verified on a device:** the Android lock screen, sign-in and wizard skin (built into 1.0.19), and the task manager's behaviour with ten apps (1.0.22).
 - Where the older plan text and the code differ on LVGL: plan7's goal paragraph says the OS is on LVGL 8.3.11, but its Status table records the upgrade to 9.2.2 as done.

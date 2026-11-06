@@ -95,11 +95,11 @@ Each rule says what to do, why it matters here, where the W10M shell does it, an
 
 ### Rule 3: Pre-convert art, map it, do not decode it
 
-**Do.** Ship icons and wallpapers as LVGL-native RGB565 (or RGB565 with a separate alpha plane), packed into the `ui_assets` partition by `purrstrap`, and build an image descriptor over the mapped pixels.
+**Do.** Ship icons and wallpapers as LVGL-native RGB565 (or RGB565 with a separate alpha plane), packed into the picture pack by `purrstrap` (the `ui_assets` partition up to 1.0.28; a file in LittleFS from 1.0.29, flash map v2), and build an image descriptor over the mapped pixels.
 
 **Why.** Decoding a PNG on an ESP32-S3 costs milliseconds and RAM per icon, every time it is drawn unless it is cached. Native pixels read straight from flash through the cache cost nothing extra.
 
-**Where.** `img()` in `purr_w10m.c` looks a name up once, builds the `lv_image_dsc_t` header (`cf`, `w`, `h`, `stride`, `data`) in a PSRAM table of 128 slots, and returns a pointer. `purr_ui_assets.c` maps the partition, checks its CRC in the background, and refuses to hand out more art if the data turns out to be damaged. A missing asset returns NULL and the caller draws without it (a letter tile instead of an icon), which keeps a half-installed system usable.
+**Where.** `img()` in `purr_w10m.c` looks a name up once, builds the `lv_image_dsc_t` header (`cf`, `w`, `h`, `stride`, `data`) in a PSRAM table of 128 slots, and returns a pointer. `purr_ui_assets.c` maps the pack (the partition up to 1.0.28; from 1.0.29 it is a file read from LittleFS), checks its CRC in the background, and refuses to hand out more art if the data turns out to be damaged. A missing asset returns NULL and the caller draws without it (a letter tile instead of an icon), which keeps a half-installed system usable.
 
 **Carry over.** Convert at build time, never on the device. Keep the name-to-descriptor cache. Provide a fallback for every image so a missing file never leaves a hole or an exception. Wallpapers are the biggest assets: choose by name at runtime (see `purr_wallpaper.c`, a device-wide setting that survives a change of shell).
 
@@ -361,7 +361,7 @@ Before a shell is merged:
 | App windows and the `ui` catcall | `PurrOS/main/purr_catrt_ui.c` |
 | Settings pages | `PurrOS/main/purr_w10m_settings.c` |
 | The task manager | `PurrOS/main/purr_w10m_tasks.c` |
-| Art in flash (mapped) | `PurrOS/main/purr_ui_assets.c`; packed by `purrstrap` |
+| Art (mapped from flash up to 1.0.28, a LittleFS file from 1.0.29) | `PurrOS/main/purr_ui_assets.c`; packed by `purrstrap` |
 | Wallpaper (device-wide) | `PurrOS/main/purr_wallpaper.c` |
 | Panel driver | `Modules/drivers/st7789_module.c` (embedded in the kernel in `commands.c`) |
 | Power and the panel sleep | `PurrOS/main/purr_power_plat.c` |

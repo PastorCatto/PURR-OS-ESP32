@@ -2,7 +2,7 @@
 
 Icons for the Android 2.2 (Froyo) style shell, from the Android Open Source Project under the
 Apache License 2.0 (see `NOTICE` here and `THIRD_PARTY.md` at the top of the repository). One file per
-asset; the file name without `.png` is the name the shell looks up in the `ui_assets` partition.
+asset; the file name without `.png` is the name the shell looks up in its picture pack (the `ui_assets` partition up to 1.0.28; `/ui/android/pack.bin` in LittleFS from 1.0.29).
 
 | Prefix | What | Size |
 |---|---|---|

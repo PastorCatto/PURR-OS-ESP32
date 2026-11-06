@@ -70,9 +70,9 @@ All three slots are built from one source tree, [PurrOS/](../PurrOS/), with a pr
 
 | Slot | Profile | What it is |
 |---|---|---|
-| `kernel` (0x1A0000) | `full` | The normal system: kernel, CoreOS, shell, apps runtime, Store |
+| `kernel` (0x1E0000) | `full` | The normal system: kernel, CoreOS, shell, apps runtime, Store |
 | `kittenos` (0x20000) | `recovery` | Recovery: filesystem, Wi-Fi, a small recovery app, no apps. Applies staged updates and installs the system |
-| `loader` (0x380000) | `minimal` | Wi-Fi, TLS, keys, a flash writer, and the setup wizard. No filesystem. Reinstalls KittenOS and the kernel |
+| `loader` (0x400000) | `minimal` | Wi-Fi, TLS, keys, a flash writer, and the setup wizard. No filesystem. Reinstalls KittenOS and the kernel |
 
 The shipped `kernel` slot holds the **whole full-profile image** (`purros.bin`), not a bare kernel. `tools/release/make_release.py` packages `out/stdfull/purros.bin` as the kernel, and [plan7.md](../plan7.md) measures it at 1,876,112 of 1,966,080 bytes at 1.0.26.
 

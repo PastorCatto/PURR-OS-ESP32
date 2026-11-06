@@ -70,13 +70,15 @@ config written against a newer parser should still mostly render on an older bui
 or genuinely malformed config *is* treated as critical (`purr_lvgl_report_critical_error()`),
 falling back to the text shell (section on fallback behavior, `PurrOS/main/main.c`).
 
-**Images live on their own partition, separately from the config that references them** --
-the one part of the original design that did carry over. `ui_assets` (512KB in the original design; **5 MB, 0x500000, in the partition tables today**, carved out of
-`root`; `PurrOS/partitions/tdeck.csv`/`tdeck_plus.csv`) holds raw RGB565 pixel data, built by
+**Images live in a pack, separately from the config that references them** --
+the one part of the original design that did carry over. In the original design this was a raw `ui_assets` partition (512 KB, later **5 MB at 0x501000, up to 1.0.28**).
+**Flash map v2 (release 1.0.29, written but not yet run on a device) removed that partition:** the pack is now a file in LittleFS (`root`, which runs from 0x5C1000 to
+the end of the flash; `PurrOS/partitions/tdeck.csv`/`tdeck_plus.csv`), `/ui/<shell>/pack.bin` for a shell's default pack and `/ui/themes/<id>/pack.bin` for an installed theme
+([plan1.md](plan1.md), [plan7.md](plan7.md)). The pack holds raw RGB565 pixel data, built by
 `purrstrap uiassets build` from a directory of PNGs (a hand-rolled decoder -- 8bpc RGB/RGBA,
 non-interlaced only -- since this project has never taken a Pillow dependency), read
-read-only/memory-mapped straight from flash at boot (`purr_ui_assets.c`, zero-copy, no PSRAM
-cost), validated by a magic number and a CRC32 rather than a signature. A config's `image`
+read-only/memory-mapped straight from flash at boot up to 1.0.28 (`purr_ui_assets.c`, zero-copy, no PSRAM
+cost; from 1.0.29 the file is read from LittleFS), validated by a magic number and a CRC32 rather than a signature. A config's `image`
 widget references one by name (`asset = "icon_name"`); a missing asset is logged and that one
 widget is skipped, not a critical error -- missing art isn't treated the same as a missing
 config.

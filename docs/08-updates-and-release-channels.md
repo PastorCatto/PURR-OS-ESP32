@@ -139,6 +139,6 @@ Host tests: `test_manifest` (162 checks, including withdrawal), `test_swap`, `te
 - **Withdrawal, remaining steps:** words on the device and a lower-version offer; a manifest re-read before the last write; a signed manifest with a release stamp; the companion's hourly check; the Store index flag; a downgrade guard ([OTA/SPEC.md](../OTA/SPEC.md) section 8.1). The official release does not carry withdrawal yet (make_release is not wired).
 - **The system manifest in JSON** (changelog, channels) is open; only the flat text manifests exist.
 - **Not verified on a device:** the whole checked-download path, the relay path, the withdrawal handling, and a published 1.0.27. JumpingJaguar3 does not exist yet.
-- **The official manifest has no `uiassets` entry**, so the picture pack comes from a developer server only ([plan3.md](../plan3.md)).
+- **The official manifest has no `uiassets` entry**, so the picture pack comes from a developer server only ([plan3.md](../plan3.md)). From 1.0.29 the packs are the components `ui_w10m` and `ui_android` ([plan1.md](../plan1.md)).
 
 Plan references: [plan3.md](../plan3.md) (channels, withdrawal, downloads, bootloader OTA), [plan1.md](../plan1.md) (the loader), [plan8.md](../plan8.md) (repositories).

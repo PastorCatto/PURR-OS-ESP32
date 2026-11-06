@@ -68,12 +68,13 @@ The flash is divided into fixed slots. The partition table is [bootloader/partit
 | `purrcfg` | 0xF000 | 8 KB | The trust block, the security mode, the boot failure count, one-shot flags (two copies, so a power cut during a write is survivable) |
 | `phy_init` | 0x11000 | 4 KB | Radio calibration |
 | `bootpkg` | 0x12000 | 56 KB | The boot package: the boot menu and the splash screens |
-| `kittenos` | 0x20000 | 1.5 MB | KittenOS, the recovery system (also the factory slot) |
-| `kernel` | 0x1A0000 | 1.9 MB | The full system |
-| `loader` | 0x380000 | 1.5 MB | The recovery loader, which downloads and installs the others |
-| `netrec` | 0x500000 | 4 KB | The saved network used during recovery |
-| `ui_assets` | 0x501000 | 5 MB | The picture pack for the shell (icons, wallpapers) |
-| `root` | 0xA01000 | about 6 MB | The LittleFS file system: accounts, apps, settings, downloaded drivers |
+| `kittenos` | 0x20000 | 1.75 MB | KittenOS, the recovery system (also the factory slot) |
+| `kernel` | 0x1E0000 | 2.125 MB | The full system |
+| `loader` | 0x400000 | 1.75 MB | The recovery loader, which downloads and installs the others |
+| `netrec` | 0x5C0000 | 4 KB | The saved network used during recovery |
+| `root` | 0x5C1000 | about 10.2 MiB | The LittleFS file system: accounts, apps, settings, downloaded drivers, and the picture packs for the shells (icons, wallpapers) |
+
+This is flash map v2 (release 1.0.29; written into the tables and tools, not yet run on a device). Up to 1.0.28 the picture pack had its own 5 MB partition (`ui_assets`) at 0x501000 and `root` began at 0xA01000, about 6 MB. Moving a device to the new table takes a cable flash and a full erase.
 
 What happens, in order:
 

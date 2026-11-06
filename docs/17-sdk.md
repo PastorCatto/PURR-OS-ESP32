@@ -36,6 +36,7 @@ Anyone should be able to write an app or a driver, or describe a new board, from
 |---|---|
 | [00-start.md](../sdk/docs/00-start.md) | Start here, what is in the kit |
 | [13-first-hour.md](../sdk/docs/13-first-hour.md) | Your first hour: make, build, run, publish |
+| [14-ui-packs-and-themes.md](../sdk/docs/14-ui-packs-and-themes.md) | UI packs and themes: `purr ui pack`, `purr ui check`, `purr new theme` |
 | [01-studio.md](../sdk/docs/01-studio.md) | The tour of Studio |
 | [02-drivers.md](../sdk/docs/02-drivers.md) | Writing a driver |
 | [03-boards.md](../sdk/docs/03-boards.md) | Describing a board |

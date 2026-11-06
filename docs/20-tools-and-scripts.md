@@ -65,7 +65,7 @@ From CLAUDE.md: `purrstrap dev recovery` regenerates `recovery.manifest` and `mo
 
 ### Hardware scripts
 
-`make_hw_image.sh [RELEASE_FOLDER] [OUT]` makes a blank image that starts in the recovery loader once. It has two switches: `MINIMAL=1` writes only the bootloader, the partition table, the trust block and the loader (the loader installs the rest from the server; this is the dev-server route), and `FULL=1` writes the kernel, KittenOS, loader, boot package, trust block and picture pack so the device boots straight into the system. `flash_and_hold.sh` waits for the board's USB port, erases the whole flash, writes the image and keeps the board in download mode until you stop it. Opening the serial port resets the board (a known trap, see the runbook).
+`make_hw_image.sh [RELEASE_FOLDER] [OUT]` makes a blank image that starts in the recovery loader once. It has two switches: `MINIMAL=1` writes only the bootloader, the partition table, the trust block and the loader (the loader installs the rest from the server; this is the dev-server route), and `FULL=1` writes the kernel, KittenOS, loader, boot package and trust block so the device boots straight into the system. Both leave `root` blank (flash map v2: no picture partition; the pack is a file the setup wizard installs), and the script stops when the partition table it is given is not the flash map v2 one. `flash_and_hold.sh` waits for the board's USB port, erases the whole flash, writes the image and keeps the board in download mode until you stop it. Opening the serial port resets the board (a known trap, see the runbook).
 
 ### Preview scripts
 
@@ -99,7 +99,7 @@ The scripts under [purrstrap/scripts/](../purrstrap/scripts/apps.py) provide, be
 | A stale `sdkconfig` in a build dir | An old option stays | Delete the build dir's `sdkconfig` or use a new dir |
 | zsh splits a variable into words | zsh does not word-split like bash | Quote it, or use an array |
 | Serial port opens and the board resets | The port opening toggles reset | Expect it; capture logs knowing that |
-| `tools/hw/make_hw_image.sh` cannot find the ui_assets | It copies from a known-good image under the emulator project by default | Set `UI_ASSETS_FROM` |
+| `make_hw_image.sh` says "is not the flash map v2 table" | `out/stdfull` was built before the 1.0.29 table (it still has `ui_assets`) | Rebuild that build folder, or give `PT_FROM` a new table |
 
 The three runbook traps in this table are written down in [the runbook](runbook.md).
 

@@ -97,7 +97,7 @@ NTP sets the clock (`pool.ntp.org` by default, settings `time.ntp` and `time.ntp
 2. Start the dev server: `python3 purrstrap/purrstrap.py dev serve --dir out/devrepo --port 47801`.
 3. Find it from the computer: `python3 purrstrap/purrstrap.py dev find`.
 4. In the VM the server is reached at `http://10.0.2.2:47801`. The VM itself is [chapter 18](18-emulator-and-vm.md).
-5. On a device with a server set, `netinstall <component>` downloads and installs one component (for example `netinstall uiassets`).
+5. On a device with a server set, `netinstall <component>` downloads and installs one component (for example `netinstall kernel`; the picture packs are the components `ui_w10m` and `ui_android` from 1.0.29, which replace `netinstall uiassets` and are written as files in `root`).
 6. After publishing, fetch every file a manifest names and compare size and SHA-256 (CLAUDE.md).
 
 ## What goes wrong

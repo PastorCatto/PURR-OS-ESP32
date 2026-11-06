@@ -101,7 +101,7 @@ This is the chain a kernel image goes through, with each step's tool. The signin
 1. `ninja -C out/stdfull` produces `out/stdfull/purros.bin` (a raw ESP-IDF application image, not yet a PURR file).
 2. `coreos package-component --component kernel --file out/stdfull/purros.bin --version <x.y.z> --board tdeck_plus --out K.cat` wraps it in the container as an unsigned module with the kernel subtype.
 3. `keys sign` writes the key id and signature into the header. `keys verify` with the public half confirms it.
-4. For a release, `make_release.py` repeats steps 2 and 3 for every image and builds the manifest ([chapter 08](08-updates-and-release-channels.md)). For a cable flash, `coreos slot-image` appends the padding and the trailer, and `esptool` writes the result at 0x1A0000.
+4. For a release, `make_release.py` repeats steps 2 and 3 for every image and builds the manifest ([chapter 08](08-updates-and-release-channels.md)). For a cable flash, `coreos slot-image` appends the padding and the trailer, and `esptool` writes the result at 0x1E0000 (the kernel slot; 0x1A0000 up to 1.0.28).
 5. The device checks the trailer at every start ([chapter 01](01-boot-chain.md)); the recovery loader and `netinstall` check the same header when they install.
 
 The same shape holds for each other image: KittenOS uses `coreos package` (the recovery image type), the boot package uses `bootpkg build`, and a driver or app uses `modules build`. Only the wrapping step differs.

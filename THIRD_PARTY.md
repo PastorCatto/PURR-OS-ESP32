@@ -26,10 +26,10 @@ the unchanged artwork of, **windows-10-mobile-lvgl** by Felix Biego,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 The images in that project (icons, tile art, wallpapers, and the Windows and Lumia imagery among
-them) are packed into the `ui_assets` partition unchanged for now (`purrstrap uiassets
+them) are packed into the picture pack (a raw `ui_assets` partition up to 1.0.28, a file in LittleFS from 1.0.29) unchanged for now (`purrstrap uiassets
 import-lvgl`). Some of that imagery is not Felix Biego's to license (the Windows logo and Lumia art
 are Microsoft's), so **it is placeholder art only and must be replaced before anything is
-shipped**. The packaging is built so the replacement is a drop-in: a new `ui_assets` image.
+shipped**. The packaging is built so the replacement is a drop-in: a new pack.
 
 ## Fonts (Roboto, Noto Emoji)
 

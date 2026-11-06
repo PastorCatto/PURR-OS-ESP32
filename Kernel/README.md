@@ -18,5 +18,5 @@ idf.py -B build_tdeck_plus -D SDKCONFIG=build_tdeck_plus/sdkconfig -D IDF_TARGET
 ```
 
 The app binary is `build_tdeck_plus/purr_kernel.bin`. Flash it alone to the `kernel`
-partition (`0x1a0000` on the T-Deck Plus) -- never the bootloader/partition-table portion of
+partition (`0x1e0000` on the T-Deck Plus) -- never the bootloader/partition-table portion of
 the suggested `flash_args`, which belong to `bootloader/`'s own project, not this one.
