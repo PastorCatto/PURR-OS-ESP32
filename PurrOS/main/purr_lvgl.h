@@ -61,6 +61,10 @@ int purr_lvgl_set_rotation(int degrees);
  * keys. NULL before purr_lvgl_init() has run. */
 struct _lv_indev_t;
 struct _lv_indev_t *purr_lvgl_keypad(void);
+
+/* Called by the UI task before each LVGL pass: checks that the pointer and keypad devices still hold their own read callbacks and, if one was overwritten
+ * (a bug seen only in the emulator so far, plan7.md), logs what it found, repairs it and counts it. Returns how many times that has happened. */
+int purr_lvgl_guard(void);
 int purr_lvgl_get_rotation(void);
 
 /* A swipe up from the bottom edge of the screen (a press in the bottom 18 px that moves up 36 px) calls this on the UI task and cancels the touch, so

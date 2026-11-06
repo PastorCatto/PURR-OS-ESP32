@@ -406,6 +406,92 @@ static lv_color_t tag_color(const char *tag)
     return lv_color_hex(!strcmp(tag, "MTS") ? 0x2E7D4F : !strcmp(tag, "RET") ? 0x3B6EA8 : !strcmp(tag, "MC") ? 0x8A5AB0 : !strcmp(tag, "ECHO") ? 0xB5502F : 0x6B6B6B);
 }
 
+#if !CONFIG_PURR_SHELL_ANDROID
+/* The same row in the Lumia (Windows Phone 8) manner: flat, no dividers, no coloured tags. A square in the accent colour carries the first letter, the name is in light type (in the accent
+ * colour while the row is unread, with a small accent square at the right), the snippet and the time are dim. A press or the trackball's focus tints the row with the accent. */
+static lv_obj_t *make_conv_row_lumia(win_t *w, const char *name, const char *snippet, const char *when, const char *tag, int flags)
+{
+    int unread = (flags & PURR_UI_CONV_UNREAD) != 0, failed = (flags & PURR_UI_CONV_FAILED) != 0;
+    lv_color_t accent = purr_theme_accent_color(), text = purr_theme_text_color(), dim = purr_theme_dim_color();
+    lv_obj_t *r = lv_obj_create(w->body);
+    lv_obj_remove_style_all(r);
+    lv_obj_set_size(r, LV_PCT(100), 50);
+    lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(r, accent, 0);
+    lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(r, LV_OPA_30, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(r, LV_OPA_30, LV_STATE_FOCUSED);
+    lv_obj_add_event_cb(r, widget_event, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *av = lv_obj_create(r);
+    lv_obj_remove_style_all(av);
+    lv_obj_set_size(av, 34, 34);
+    lv_obj_set_style_bg_color(av, accent, 0);
+    lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(av, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(av, LV_ALIGN_LEFT_MID, 8, 0);
+    char letter[2] = {name[0] >= 'a' && name[0] <= 'z' ? (char)(name[0] - 32) : (name[0] ? name[0] : '?'), 0};
+    lv_obj_t *lt = lv_label_create(av);
+    lv_label_set_text(lt, letter);
+    lv_obj_set_style_text_font(lt, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(lt, lv_color_white(), 0);
+    lv_obj_center(lt);
+    int32_t mid_w = w10m_disp_w() - 20 - 8 - 34 - 10 - 58;
+    lv_obj_t *a = lv_label_create(r);
+    lv_label_set_text(a, name);
+    lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(a, mid_w, 20);
+    lv_obj_set_style_text_font(a, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(a, unread ? accent : text, 0);
+    lv_obj_align(a, LV_ALIGN_TOP_LEFT, 52, 5);
+    lv_obj_t *d = lv_label_create(r);
+    lv_label_set_text(d, snippet);
+    lv_label_set_long_mode(d, LV_LABEL_LONG_DOT);
+    lv_obj_set_size(d, mid_w, 15);
+    lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(d, dim, 0);
+    lv_obj_align(d, LV_ALIGN_TOP_LEFT, 52, 28);
+    if (when[0]) {
+        lv_obj_t *t = lv_label_create(r);
+        lv_label_set_text(t, when);
+        lv_obj_set_style_text_font(t, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(t, dim, 0);
+        lv_obj_align(t, LV_ALIGN_TOP_RIGHT, -8, 6);
+    }
+    if (tag[0]) {
+        lv_obj_t *g = lv_label_create(r);
+        lv_label_set_text(g, tag);
+        lv_obj_set_style_text_font(g, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(g, dim, 0);
+        lv_obj_align(g, LV_ALIGN_BOTTOM_RIGHT, -8, -5);
+    }
+    if (unread) {
+        lv_obj_t *u = lv_obj_create(r);
+        lv_obj_remove_style_all(u);
+        lv_obj_set_size(u, 8, 8);
+        lv_obj_set_style_bg_color(u, accent, 0);
+        lv_obj_set_style_bg_opa(u, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(u, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_align(u, LV_ALIGN_TOP_RIGHT, -8 - 8 * (int)strlen(when) - 6, 11);
+    }
+    if (failed) {
+        lv_obj_t *e = lv_obj_create(r);
+        lv_obj_remove_style_all(e);
+        lv_obj_set_size(e, 14, 14);
+        lv_obj_set_style_bg_color(e, lv_color_hex(0xE81123), 0);
+        lv_obj_set_style_bg_opa(e, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(e, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *el = lv_label_create(e);
+        lv_label_set_text(el, "!");
+        lv_obj_set_style_text_font(el, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(el, lv_color_white(), 0);
+        lv_obj_center(el);
+        lv_obj_align(e, LV_ALIGN_TOP_RIGHT, -(8 + 8 * (int)strlen(when) + (unread ? 20 : 6)), 7);
+    }
+    return r;
+}
+#endif
+
 /* A conversation or person row in the Froyo style (version 4): a coloured square with the first letter, the name over a line of text, the time on the right and a small tag
  * under it. An unread row is tinted with an orange bar at its left edge; a failed send gets a red mark. */
 static lv_obj_t *make_conv_row(win_t *w, const char *name, const char *snippet, const char *when, const char *tag, int flags)
@@ -414,17 +500,16 @@ static lv_obj_t *make_conv_row(win_t *w, const char *name, const char *snippet, 
     snippet = safe(snippet, 120);
     when = safe(when, 12);
     tag = safe(tag, 7);
+#if !CONFIG_PURR_SHELL_ANDROID
+    return make_conv_row_lumia(w, name, snippet, when, tag, flags);          /* elsewhere the row is flat and in the accent colour */
+#else
     int unread = (flags & PURR_UI_CONV_UNREAD) != 0, failed = (flags & PURR_UI_CONV_FAILED) != 0;
-#if CONFIG_PURR_SHELL_ANDROID
     int dark = 0;                                                           /* the Android shell draws a conversation list the way Android 2.2 does: a white list, whatever the base */
     if (!w->light) {
         w->light = 1;
         lv_obj_set_style_bg_color(w->sheet, lv_color_white(), 0);
         lv_obj_set_style_bg_opa(w->sheet, LV_OPA_COVER, 0);
     }
-#else
-    int dark = purr_theme_dark();                                           /* elsewhere the widget follows the system's light or dark base: the app says what, the OS says how it looks */
-#endif
     uint32_t c_bg = unread ? (dark ? 0x3A2A10 : 0xFFF1DA) : (dark ? 0x1E1E1E : 0xFFFFFF), c_line = dark ? 0x3A3A3A : 0xD3D3D3, c_name = dark ? 0xFFFFFF : 0x000000,
              c_sub = dark ? 0xB0B0B0 : 0x666666, c_press = dark ? 0x4A3A20 : 0xFFE3B0;
     lv_obj_t *r = lv_obj_create(w->body);
@@ -516,6 +601,7 @@ static lv_obj_t *make_conv_row(win_t *w, const char *name, const char *snippet, 
         lv_obj_align(e, LV_ALIGN_TOP_RIGHT, -(6 + 8 * (int)strlen(when) + 4), 5);
     }
     return r;
+#endif
 }
 
 /* A speech bubble for a message: `side` 0 sits on the left (received, light grey), 1 on the right (sent, light orange); `meta` is the small line under the text (time and state). */
@@ -538,12 +624,17 @@ static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *m
         lv_obj_set_style_bg_color(w->sheet, lv_color_white(), 0);
         lv_obj_set_style_bg_opa(w->sheet, LV_OPA_COVER, 0);
     }
-#else
-    int dark = purr_theme_dark();
 #endif
+#if CONFIG_PURR_SHELL_ANDROID
     lv_obj_set_style_bg_color(b, lv_color_hex(side ? (dark ? 0x7A4E10 : 0xFFE3B0) : (dark ? 0x3A3A3A : 0xE4E4E4)), 0);
-    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(b, 8, 0);
+    lv_color_t c_text = lv_color_hex(dark ? 0xFFFFFF : 0x000000), c_meta = lv_color_hex(dark ? 0xC8B890 : 0x6B5A3A);
+#else
+    lv_obj_set_style_bg_color(b, side ? purr_theme_accent_color() : purr_theme_surface_color(), 0);    /* the Lumia manner: flat, square, a sent message in the accent colour */
+    lv_obj_set_style_radius(b, 0, 0);
+    lv_color_t c_text = side ? lv_color_white() : purr_theme_text_color(), c_meta = side ? lv_color_hex(0xE6E6E6) : purr_theme_dim_color();
+#endif
+    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b, 5, 0);
     lv_obj_set_style_pad_row(b, 1, 0);
     int32_t maxw = (w10m_disp_w() * 72) / 100;
@@ -553,7 +644,7 @@ static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *m
     lv_obj_set_width(t, LV_SIZE_CONTENT);
     lv_obj_set_style_max_width(t, maxw, 0);
     lv_obj_set_style_text_font(t, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(t, lv_color_hex(dark ? 0xFFFFFF : 0x000000), 0);
+    lv_obj_set_style_text_color(t, c_text, 0);
     if (meta != NULL && meta[0] != '\0') {
         lv_obj_t *m = lv_label_create(b);
         lv_label_set_long_mode(m, LV_LABEL_LONG_WRAP);
@@ -561,7 +652,7 @@ static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *m
         lv_obj_set_width(m, LV_SIZE_CONTENT);
         lv_obj_set_style_max_width(m, maxw, 0);
         lv_obj_set_style_text_font(m, &lv_font_montserrat_12, 0);
-        lv_obj_set_style_text_color(m, lv_color_hex(dark ? 0xC8B890 : 0x6B5A3A), 0);
+        lv_obj_set_style_text_color(m, c_meta, 0);
     }
     return row;
 }

@@ -12,6 +12,7 @@
 #include "purr_kernel.h"
 #include "purr_power_plat.h"
 #include "purr_ui_service.h"
+#include "indev/lv_indev_private.h"
 
 static const char *TAG = "lvgl";
 
@@ -426,4 +427,35 @@ void purr_lvgl_report_critical_error(const char *why)
 int purr_lvgl_critical_error_pending(void)
 {
     return s_critical_error;
+}
+
+
+/* The guard against an overwritten read callback. In the emulator the keypad or pointer device's read_cb has been seen holding a code address inside lfs_crc (an
+ * IllegalInstruction right after, plan7.md "Third occurrence"): the struct itself sits in the heap, so something wrote over it, probably a stack that ran past its end.
+ * Until the writer is found this notices the damage before LVGL calls the pointer, writes the log line that names the bad value and the words around it (the next
+ * occurrence then says what was written), puts the right callback back and carries on. One log line per second at most. */
+int purr_lvgl_guard(void)
+{
+    static int s_hits;
+    static int64_t s_last_log_us;
+    struct { lv_indev_t *dev; lv_indev_read_cb_t good; const char *name; } g[2] = {
+        {s_lv_indev, touch_read_cb, "touch"}, {s_lv_kbd, kbd_read_cb, "keyboard"},
+    };
+    for (int i = 0; i < 2; i++) {
+        if (g[i].dev == NULL || g[i].dev->read_cb == g[i].good) {
+            continue;
+        }
+        s_hits++;
+        int64_t now = esp_timer_get_time();
+        if (now - s_last_log_us > 1000000) {
+            s_last_log_us = now;
+            const uint32_t *w = (const uint32_t *)(const void *)g[i].dev;
+            ESP_LOGE(TAG, "the %s device's read callback was overwritten: %p, should be %p (device at %p, hit %d)", g[i].name, (void *)g[i].dev->read_cb,
+                     (void *)g[i].good, (void *)g[i].dev, s_hits);
+            ESP_LOGE(TAG, "words at the device: %08x %08x %08x %08x %08x %08x %08x %08x", (unsigned)w[0], (unsigned)w[1], (unsigned)w[2], (unsigned)w[3],
+                     (unsigned)w[4], (unsigned)w[5], (unsigned)w[6], (unsigned)w[7]);
+        }
+        g[i].dev->read_cb = g[i].good;
+    }
+    return s_hits;
 }

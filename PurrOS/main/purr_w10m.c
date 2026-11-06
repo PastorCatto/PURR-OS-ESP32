@@ -1692,6 +1692,16 @@ static lv_obj_t *s_bfu_wall, *s_bfu_avatar, *s_bfu_title, *s_bfu_user, *s_bfu_pa
 static lv_group_t *s_bfu_group;
 static int s_bfu_busy;
 
+/* The account list, as Windows 10's sign-in screen has it: down the left side (a strip along the bottom of a tall screen), the chosen account in the middle with its
+ * password. The last row is "Other user", which shows the name field. */
+#define BFU_ROW_H   38
+#define BFU_SIDE_W  108
+#define BFU_STRIP_H 56
+static lv_obj_t *s_bfu_panel;
+static lv_obj_t *s_bfu_rows[PURR_USER_MAX + 1];
+static int s_bfu_nrows, s_bfu_sel = -1, s_bfu_other;
+static char s_bfu_name[PURR_USER_NAME_LEN];             /* the chosen account; empty while "Other user" is chosen */
+
 typedef struct {
     char name[PURR_USER_NAME_LEN];
     char pass[64];
@@ -1708,6 +1718,13 @@ static void bfu_set_busy(int busy)
     } else {
         lv_obj_remove_state(s_bfu_user, LV_STATE_DISABLED);
         lv_obj_remove_state(s_bfu_pass, LV_STATE_DISABLED);
+    }
+    for (int i = 0; i < s_bfu_nrows; i++) {
+        if (busy) {
+            lv_obj_add_state(s_bfu_rows[i], LV_STATE_DISABLED);
+        } else {
+            lv_obj_remove_state(s_bfu_rows[i], LV_STATE_DISABLED);
+        }
     }
 }
 
@@ -1737,6 +1754,10 @@ static void *signin_done_cb(void *arg)
         char msg[64];
         snprintf(msg, sizeof(msg), "Signed in as %s.", j->name);
         add_note(PURR_BRAND_PRODUCT, msg);
+        char dn[PURR_USER_NAME_LEN];
+        if (purr_login_default_account(dn, sizeof(dn)) && strcmp(j->name, dn) == 0) {
+            add_note("Change the default password", "This account uses the password MEOW. Change it in Settings > Accounts.");
+        }
     } else if (j->result == PURR_LOGIN_WAIT) {
         char msg[64];
         snprintf(msg, sizeof(msg), "Too many tries. Wait %u s.", (unsigned)j->wait_s);
@@ -1767,7 +1788,7 @@ static void bfu_submit(void)
     if (s_bfu_busy) {
         return;
     }
-    const char *name = lv_textarea_get_text(s_bfu_user);
+    const char *name = s_bfu_sel == s_bfu_other ? lv_textarea_get_text(s_bfu_user) : s_bfu_name;
     const char *pass = lv_textarea_get_text(s_bfu_pass);
     if (name[0] == '\0') {
         lv_group_focus_obj(s_bfu_user);
@@ -1858,6 +1879,161 @@ static lv_obj_t *bfu_field(lv_obj_t *parent, const char *placeholder, int passwo
     return ta;
 }
 
+/* Everything in the middle of the screen: the avatar, the chosen name, the fields. The name field is only there for "Other user". */
+static void bfu_place(void)
+{
+    int w = disp_w();
+    int land = is_landscape();
+    int side = land ? BFU_SIDE_W : 0;
+    int cw = w - side;
+    int cx = side + cw / 2;
+    int av = 72;
+    int fw = cw - 20 < 196 ? cw - 20 : 196;
+    int other = s_bfu_sel == s_bfu_other;
+    int top = land ? 6 : 40;
+    int fy = top + av + 2 + 34;
+    lv_obj_set_size(s_bfu_avatar, av, av);
+    lv_obj_align(s_bfu_avatar, LV_ALIGN_TOP_LEFT, cx - av / 2, top);
+    lv_obj_set_width(s_bfu_title, cw - 16);
+    lv_obj_set_style_text_align(s_bfu_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_bfu_title, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_bfu_title, LV_ALIGN_TOP_LEFT, side + 8, top + av + 2);
+    if (other) {
+        lv_obj_remove_flag(s_bfu_user, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(s_bfu_user, fw, 26);
+        lv_obj_align(s_bfu_user, LV_ALIGN_TOP_LEFT, cx - fw / 2, fy);
+    } else {
+        lv_obj_add_flag(s_bfu_user, LV_OBJ_FLAG_HIDDEN);                 /* hidden objects do not take the keyboard's focus */
+    }
+    int py = other ? fy + 30 : fy;
+    lv_obj_set_size(s_bfu_pass, fw - 26, 26);
+    lv_obj_align(s_bfu_pass, LV_ALIGN_TOP_LEFT, cx - fw / 2, py);
+    lv_obj_set_size(s_bfu_go, 26, 26);
+    lv_obj_align_to(s_bfu_go, s_bfu_pass, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
+    lv_obj_set_width(s_bfu_msg, fw);
+    lv_obj_align(s_bfu_msg, LV_ALIGN_TOP_LEFT, cx - fw / 2, py + 32);
+}
+
+static void bfu_row_paint(int i)
+{
+    lv_obj_t *r = s_bfu_rows[i];
+    int on = i == s_bfu_sel;
+    lv_obj_set_style_bg_opa(r, on ? LV_OPA_30 : LV_OPA_TRANSP, 0);
+    lv_obj_t *bar = lv_obj_get_child(r, 0);
+    if (on) {
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* Chooses an account (or "Other user"). A tap or Enter also moves on to the password; the trackball only moves the choice. */
+static void bfu_select(int i, int move_focus)
+{
+    const purr_user_list_t *ul = purr_login_users();
+    if (i < 0 || i > s_bfu_other) {
+        return;
+    }
+    s_bfu_sel = i;
+    for (int k = 0; k < s_bfu_nrows; k++) {
+        bfu_row_paint(k);
+    }
+    if (i == s_bfu_other || i >= ul->count) {
+        s_bfu_name[0] = '\0';
+        lv_label_set_text(s_bfu_title, "Other user");
+    } else {
+        snprintf(s_bfu_name, sizeof(s_bfu_name), "%s", ul->users[i].name);
+        lv_label_set_text(s_bfu_title, s_bfu_name);
+    }
+    lv_textarea_set_text(s_bfu_pass, "");
+    bfu_place();
+    if (move_focus) {
+        lv_group_focus_obj(i == s_bfu_other ? s_bfu_user : s_bfu_pass);
+    }
+}
+
+static void bfu_row_event(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        bfu_select(i, 1);
+    } else if (i != s_bfu_sel) {
+        bfu_select(i, 0);                                                /* FOCUSED: the trackball moved the choice */
+    }
+}
+
+/* One row per account and a last one for "Other user". Rebuilt whenever the screen is laid out (a rotation changes the shape of the list). */
+static void bfu_rebuild_rows(void)
+{
+    int land = is_landscape();
+    const purr_user_list_t *ul = purr_login_users();
+    int n = ul->count < PURR_USER_MAX ? ul->count : PURR_USER_MAX;
+    lv_obj_clean(s_bfu_panel);
+    s_bfu_nrows = 0;
+    s_bfu_other = n;
+    for (int i = 0; i <= n; i++) {
+        const char *nm = i < n ? ul->users[i].name : "Other user";
+        lv_obj_t *r = lv_obj_create(s_bfu_panel);
+        lv_obj_remove_style_all(r);
+        lv_obj_set_size(r, land ? LV_PCT(100) : 58, land ? BFU_ROW_H : BFU_STRIP_H - 4);
+        lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(r, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_opa(r, LV_OPA_20, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(r, LV_OPA_20, LV_STATE_FOCUSED);
+        lv_obj_t *bar = lv_obj_create(r);                                /* child 0: the accent edge of the chosen row */
+        lv_obj_remove_style_all(bar);
+        lv_obj_set_style_bg_color(bar, purr_theme_accent_color(), 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_t *c = lv_obj_create(r);                                  /* the small round avatar with the first letter */
+        lv_obj_remove_style_all(c);
+        lv_obj_set_size(c, 26, 26);
+        lv_obj_set_style_radius(c, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(c, lv_color_hex(0x6B6B6B), 0);
+        lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(c, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *lt = lv_label_create(c);
+        char ini[2] = {i < n ? (nm[0] >= 'a' && nm[0] <= 'z' ? (char)(nm[0] - 32) : (nm[0] ? nm[0] : '?')) : '+', 0};
+        lv_label_set_text(lt, ini);
+        lv_obj_set_style_text_font(lt, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lt, lv_color_white(), 0);
+        lv_obj_center(lt);
+        lv_obj_t *lb = lv_label_create(r);
+        lv_label_set_text(lb, nm);
+        lv_label_set_long_mode(lb, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(lb, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lb, lv_color_white(), 0);
+        lv_obj_remove_flag(lb, LV_OBJ_FLAG_CLICKABLE);
+        if (land) {
+            lv_obj_set_size(bar, 3, LV_PCT(100));
+            lv_obj_align(bar, LV_ALIGN_LEFT_MID, 0, 0);
+            lv_obj_align(c, LV_ALIGN_LEFT_MID, 8, 0);
+            lv_obj_set_width(lb, BFU_SIDE_W - 46);
+            lv_obj_align(lb, LV_ALIGN_LEFT_MID, 40, 0);
+        } else {
+            lv_obj_set_size(bar, LV_PCT(100), 3);
+            lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+            lv_obj_align(c, LV_ALIGN_TOP_MID, 0, 4);
+            lv_obj_set_width(lb, 54);
+            lv_obj_set_style_text_align(lb, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_align(lb, LV_ALIGN_BOTTOM_MID, 0, -8);
+        }
+        lv_obj_add_event_cb(r, bfu_row_event, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(r, bfu_row_event, LV_EVENT_FOCUSED, (void *)(intptr_t)i);
+        s_bfu_rows[s_bfu_nrows++] = r;
+    }
+    lv_group_remove_obj(s_bfu_user);                                     /* the rows come first in the keyboard's order, then the fields */
+    lv_group_remove_obj(s_bfu_pass);
+    for (int i = 0; i < s_bfu_nrows; i++) {
+        lv_group_add_obj(s_bfu_group, s_bfu_rows[i]);
+    }
+    lv_group_add_obj(s_bfu_group, s_bfu_user);
+    lv_group_add_obj(s_bfu_group, s_bfu_pass);
+}
+
 static void build_bfu(void)
 {
     s_bfu = lv_obj_create(lv_layer_top());
@@ -1884,6 +2060,15 @@ static void build_bfu(void)
     lv_obj_clear_flag(s_bfu_avatar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(s_bfu_avatar, LV_OBJ_FLAG_CLICKABLE);
     bfu_avatar_draw(s_bfu_avatar);
+
+    s_bfu_panel = lv_obj_create(s_bfu);                  /* the account list, filled by bfu_layout */
+    lv_obj_remove_style_all(s_bfu_panel);
+    lv_obj_set_style_bg_color(s_bfu_panel, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_bfu_panel, LV_OPA_40, 0);
+    lv_obj_set_style_pad_row(s_bfu_panel, 2, 0);
+    lv_obj_set_style_pad_column(s_bfu_panel, 2, 0);
+    lv_obj_set_scrollbar_mode(s_bfu_panel, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(s_bfu_panel, LV_OBJ_FLAG_CLICKABLE);
 
     s_bfu_title = lv_label_create(s_bfu);
     lv_label_set_text(s_bfu_title, "Other user");
@@ -1922,8 +2107,12 @@ static void build_bfu(void)
     if (kb != NULL) {
         lv_indev_set_group(kb, s_bfu_group);
     }
-    lv_group_focus_obj(s_bfu_user);
     bfu_layout();
+    lv_group_focus_obj(s_bfu_sel == s_bfu_other ? s_bfu_user : s_bfu_pass);
+    char dn[PURR_USER_NAME_LEN];
+    if (purr_login_default_account(dn, sizeof(dn))) {
+        bfu_say("Default account: MEOW, password MEOW. Change it in Settings.", 0xFFB900);
+    }
 }
 
 static void bfu_layout(void)
@@ -1933,25 +2122,41 @@ static void bfu_layout(void)
     }
     int w = disp_w(), h = disp_h();
     int land = is_landscape();
-    int av = 72;                                        /* the avatar's diameter (the person is drawn for it) */
-    int fw = land ? 190 : 196;                          /* the fields' width */
     lv_obj_set_size(s_bfu, w, h);
     lv_obj_set_pos(s_bfu, 0, 0);
     lv_obj_set_size(s_bfu_wall, w, h);
     lv_obj_align(s_bfu_wall, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_size(s_bfu_avatar, av, av);
-    int top = land ? 6 : 44;
-    lv_obj_align(s_bfu_avatar, LV_ALIGN_TOP_MID, 0, top);
-    lv_obj_align(s_bfu_title, LV_ALIGN_TOP_MID, 0, top + av + 2);
-    int fy = top + av + 2 + 36;
-    lv_obj_set_size(s_bfu_user, fw, 26);
-    lv_obj_align(s_bfu_user, LV_ALIGN_TOP_MID, 0, fy);
-    lv_obj_set_size(s_bfu_pass, fw - 26, 26);
-    lv_obj_align(s_bfu_pass, LV_ALIGN_TOP_MID, -13, fy + 30);
-    lv_obj_set_size(s_bfu_go, 26, 26);
-    lv_obj_align_to(s_bfu_go, s_bfu_pass, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
-    lv_obj_set_width(s_bfu_msg, fw);
-    lv_obj_align(s_bfu_msg, LV_ALIGN_TOP_MID, 0, fy + 62);
+    if (land) {
+        lv_obj_set_size(s_bfu_panel, BFU_SIDE_W, h);
+        lv_obj_set_pos(s_bfu_panel, 0, 0);
+        lv_obj_set_flex_flow(s_bfu_panel, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_scroll_dir(s_bfu_panel, LV_DIR_VER);
+        lv_obj_set_style_pad_top(s_bfu_panel, 12, 0);
+        lv_obj_set_style_pad_left(s_bfu_panel, 0, 0);
+    } else {
+        lv_obj_set_size(s_bfu_panel, w, BFU_STRIP_H);
+        lv_obj_set_pos(s_bfu_panel, 0, h - BFU_STRIP_H);
+        lv_obj_set_flex_flow(s_bfu_panel, LV_FLEX_FLOW_ROW);
+        lv_obj_set_scroll_dir(s_bfu_panel, LV_DIR_HOR);
+        lv_obj_set_style_pad_top(s_bfu_panel, 2, 0);
+        lv_obj_set_style_pad_left(s_bfu_panel, 4, 0);
+    }
+    bfu_rebuild_rows();
+    if (s_bfu_sel < 0 || s_bfu_sel > s_bfu_other) {                      /* the first time: the default account if there is one, else the first */
+        char dn[PURR_USER_NAME_LEN];
+        const purr_user_list_t *ul = purr_login_users();
+        int pick = 0;
+        if (purr_login_default_account(dn, sizeof(dn))) {
+            for (int i = 0; i < ul->count && i < PURR_USER_MAX; i++) {
+                if (strcmp(ul->users[i].name, dn) == 0) {
+                    pick = i;
+                }
+            }
+        }
+        bfu_select(ul->count > 0 ? pick : s_bfu_other, 0);
+    } else {
+        bfu_select(s_bfu_sel, 0);                                        /* the same choice again, repainted for the new shape */
+    }
 }
 
 /* ---------------------------------------------------------------- the start screen */

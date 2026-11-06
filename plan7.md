@@ -320,3 +320,35 @@ The 1.0.27 Android-shell image was booted in the emulator (a copy of the flash i
 - **Fourth occurrence and what the runs show (2026-11-06):** the same scripted flow panicked again, now on the statically linked macOS 12 QEMU build, with the **same PC (`lfs_crc`+4, in the middle of an instruction), the same backtrace and the same stack addresses**. So it is not the emulator build and it is not random: the bad value is the same every time. It comes right after a `ui_service: diag2: replying op=4` line and in the first seconds after the unlock drag. With QEMU's debugger attached (a breakpoint on `panicHandler`) five minutes of the same drag did not panic, so the timing matters. Reading memory after the panic is useless (the chip reboots and the flash cache is unmapped again). What the code says: both indevs are created once and never deleted; `touch_read_cb` calls `purr_kernel_touch_read` (the touch driver) and `purr_power_sys_activity()`, so a tail call through a stale or wrongly relocated driver pointer would leave no frame in the backtrace. Next, in order: (1) log the address `purr_kernel_touch_read` is about to call (and the keyboard's) once per second and at the moment of the first touch, so the next panic shows it in the serial log; (2) check how the planted built-in touch driver is bound and whether its function table can still hold an address from before the driver was relocated; (3) only then think about the I2C side. Not fixed. Planned for 1.0.28.
 - **Second VM panic, and what the emulator's maintainer said (2026-11-06).** A tap right after the panel's idle switch-off ("power: screen off (panel)", about 9 s earlier) made core 0 fault with a load/store address error at the I2C controller's data register, inside the I2C master interrupt handler (`i2c_ll_read_rxfifo`), while the W5500 polling ran on the same core. The emulator's I2C model cannot return a bus error for that read (checked in its code; not reproduced there), and the touch model has no interrupt line, so a firmware cause is likely: the touch or keyboard I2C bus being de-initialised or clock-gated across the screen-off while its interrupt handler stays registered, or a transaction started on a bus that was torn down. The first panic (a touch before the home screen) is likewise probably an unset or stale pointer callback in firmware. **Next:** read the power code's screen-off and wake path (`purr_power*.c`, `purr_catrt_power.c`) and the touch and keyboard I2C setup for a bus that is shut down and not brought back before the next read; if that is clean, ask the emulator's session for a `-d guest_errors,unimp` trace with `VPB_TRACE=i2c,spi`. Not seen on a device.
 
+
+
+## Parity of the Windows 10 Mobile shell with the Android shell, at ui version 5 (2026-11-06; Part E of showtime1.md)
+
+**The version.** The `ui` catcall table in the code is **version 5** (`purr_catrt_ui.c`, `.version = 5`; the comment in `purr_catcalls.h` still says 4): v4 added `bubble`, v5 added `win_style` and `conv_row`. Parity means both shells draw every widget of versions 1 to 5.
+
+**How the two shells are built.** One shell per image, chosen at build time (`CONFIG_PURR_SHELL_ANDROID`, `sdkconfig.shell.android`; the Windows 10 Mobile shell is the default). **Settings, the Developer Portal, the task manager and the permission prompts are shared code** (`purr_w10m_settings.c`, `_devportal.c`, `_tasks.c`, `_perm.c`) that both shells call, so they are at parity by construction. What differs is the shell frame and how some widgets look. Checked by reading `purr_android*.c`, `purr_w10m*.c` and `purr_catrt_ui.c`; nothing here has run on a device.
+
+| Feature | Android shell | Windows 10 Mobile shell | Status |
+|---------|---------------|--------------------------|--------|
+| Lock screen: clock, date, unlock gesture | yes (slide to unlock) | yes (swipe up) | same |
+| Notifications on the lock screen | rows in a panel (`and_lock_notes_refresh`) | lines straight on the wallpaper, a small accent square each (`lock_notes_refresh`, the Lumia manner) | same, each in its own manner |
+| Notification surface | the shade (`purr_android_shade.c`) | the control center with a list (`purr_w10m.c`) | same |
+| Status strip banner for a new notification or an error | yes | yes (`w10m_banner_post`) | same |
+| Sign-in | list of accounts, then password | **was: "Other user" only (a name and a password)**; now the account list down the side, the chosen account in the middle, "Other user" as the last row | **closed in 1.0.28** (built, not yet seen) |
+| Default-account hint (MEOW) and the "change the default password" note | yes | **was: missing**; now both | **closed in 1.0.28** |
+| Lock-out message after too many tries | yes | yes | same |
+| Home | dock, all-apps drawer, wallpaper | tiles and the app list | different by design |
+| App icons in the list | the drawer shows **plain lower-case text tiles**, no icons | the app list has icons | Android gap (Android's own plan: icons in the drawer) |
+| Menu key | a menu popup | none (the control center and the tiles) | different by design |
+| Task view | shared | shared | same |
+| Settings, Developer Portal, permission prompts | shared | shared | same |
+| App title bar | dark grey gradient with the app's icon | the theme's bar | different by design |
+| ui v1 to v3 widgets (labels, buttons, rows, text areas, grid, input line, progress, slider, picture frame) | shared code | shared code | same |
+| v4 `bubble` | Froyo bubbles on a white page | **was: Froyo colours in a rounded bubble; now flat and square: received on the theme's surface, sent in the accent colour** | **closed in 1.0.28** |
+| v5 `conv_row` | Froyo row: white, a tag chip, an orange unread bar | **was: the same Froyo row; now the Lumia row: flat, an accent square with the first letter, the name in the accent colour when unread, no dividers, no coloured tag** | **closed in 1.0.28** |
+| v5 `win_style` | the light list | ignored (it follows the system's light or dark base), as the spec says | same, by design |
+| Rotation | landscape (QWERTY device) | landscape and portrait | different by design |
+
+**Open:** nothing in the table is "missing" except the Android drawer's icons (an Android item). The owner's other wish, a W10M "user screen like Windows 10 with the list on the side", is the sign-in row above.
+
+**Checks still to do:** the sign-in and the v4/v5 widgets are compiled (the W10M build) but not yet seen. A host render (`tools/lvgl_host/`) and a headless VM run on a W10M image are the next two steps; a VM image needs the owner's signing step. Not verified on a device.

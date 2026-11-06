@@ -10,6 +10,7 @@
 #include "lvgl.h"
 
 #include "commands.h"
+#include "purr_lvgl.h"
 #include "purr_net.h"
 #include "purr_ui_assets.h"
 
@@ -1286,6 +1287,7 @@ static void service_task(void *arg)
 {
     (void)arg;
     for (;;) {
+        purr_lvgl_guard();                              /* an overwritten input callback is put back before LVGL calls it (plan7.md) */
         uint32_t next_ms = s_paused ? LVGL_TICK_PERIOD_MS : lv_timer_handler();
         if (next_ms == LV_NO_TIMER_READY || next_ms > LVGL_TICK_PERIOD_MS) {
             next_ms = LVGL_TICK_PERIOD_MS;
