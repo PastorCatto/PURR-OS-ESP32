@@ -17,7 +17,8 @@
 | `purr serve [--dir D] [--port P]` | run the dev server |
 | `purr publish FILE` | put a build in the server's folder |
 | `purr flash IMAGE --port P` | write an image to a board |
-| `purr run IMAGE` | run in the emulator, once one is installed |
+| `purr emulator [IMAGE]` | open the emulator window on the VM image (or one you name); it runs a copy, never the original |
+| `purr run TARGET [--key K] [--window] [--shots DIR]` | build and sign an app (TARGET is a project, or a signed `.cat`), serve it, boot the VM, and put the app on it through the Developer Portal; pictures go to `--shots` (see [12-emulator.md](12-emulator.md)) |
 | `purr config schema`, `purr config check system FILE` | the settings a device knows; check a file |
 
 Projects, keys and builds live in `~/PURR-Projects` (change it with `--workspace` or `PURR_WORKSPACE`). A key's password comes from a prompt, or from `PURRSTRAP_KEY_PASSWORD` for scripts.

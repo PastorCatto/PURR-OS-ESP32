@@ -1,0 +1,365 @@
+"""The emulator inside the kit: where it is, how it is started, and how `purr run` drives it.
+
+The emulator is a separate project (a Rust shell around a patched QEMU for the ESP32-S3). The kit carries a built copy in `emulator/`;
+a developer checkout of the emulator works too. `purr emulator` opens the window. `purr run` starts it without a window, so a script
+can press the screen, take pictures and read the serial log: that is what the `Headless` class talks to (the emulator's `headless_tap`
+program reads one command per line from a file).
+
+Commands the headless program understands (one per line, appended to the command file while it runs):
+    tap X Y            press the screen at X,Y (the screen is 320 x 240)
+    drag X1 Y1 X2 Y2   press, slide and let go
+    shot NAME          write <stem>-NAME.png
+    dump               write <stem>-serial.txt (everything the board printed so far)
+    type TEXT          press keys (the keyboard model, not a text field)
+    quit               stop
+The program does no waiting of its own between commands, so the caller paces them (the emulated board is slower than the clock).
+"""
+
+import os
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+
+from . import workspace
+
+DEFAULT_BOARD = "t-deck-plus-vm"          # the board with the VM hardware: the Ethernet model, so the guest reaches the host at 10.0.2.2
+HOST_ADDRESS = "10.0.2.2"                  # where the guest sees the computer running the emulator (QEMU's user-mode network)
+SCREEN = (320, 240)
+
+_GUI_NAMES = ("run-emulator", "esp32-emulator")          # the launcher first: it takes the board as an argument, the bare app does not read BOARD_TOML
+_HEADLESS_NAMES = ("headless_tap",)
+_SUBDIRS = ("", "bin", "target/release", "target/release/examples", "target/debug", "target/debug/examples")
+
+
+class EmulatorError(Exception):
+    pass
+
+
+def _dev_checkout():
+    p = os.path.join(os.path.expanduser("~"), "Projects", "ESP32-Emulator")
+    return p if os.path.isdir(os.path.join(p, "boards")) else None
+
+
+def _roots():
+    seen = []
+    for r in (os.environ.get("PURR_EMULATOR_DIR"), workspace.kit_path("emulator"), _dev_checkout()):
+        if r and os.path.isdir(r) and r not in seen:
+            seen.append(r)
+    return seen
+
+
+def _find_exe(root, names):
+    for sub in _SUBDIRS:
+        for n in names:
+            p = os.path.join(root, sub, n)
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+    return None
+
+
+def find():
+    """Where the emulator is. Returns {"root", "gui", "headless", "boards"} (a path or None for each part), or None when there is no emulator.
+    Looked for in: $PURR_EMULATOR_DIR, the kit's emulator/ folder, a checkout of the emulator project. $PURR_EMULATOR names a launcher for the window."""
+    launcher = os.environ.get("PURR_EMULATOR")
+    for root in _roots():
+        gui = launcher if launcher and os.path.isfile(launcher) else _find_exe(root, _GUI_NAMES)
+        headless = _find_exe(root, _HEADLESS_NAMES)
+        boards = os.path.join(root, "boards")
+        if gui or headless:
+            return {"root": root, "gui": gui, "headless": headless, "boards": boards if os.path.isdir(boards) else None}
+    if launcher and os.path.isfile(launcher):
+        return {"root": os.path.dirname(launcher), "gui": launcher, "headless": None, "boards": None}
+    return None
+
+
+def vm_image():
+    """The VM flash image to boot: $PURR_VM_IMAGE, or the kit's images/vm-flash.bin. None when there is none."""
+    for p in (os.environ.get("PURR_VM_IMAGE"), workspace.kit_path("images", "vm-flash.bin")):
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
+def board_file(em, board=DEFAULT_BOARD):
+    if os.path.isfile(board):
+        return os.path.abspath(board)
+    if em and em.get("boards"):
+        p = os.path.join(em["boards"], board if board.endswith(".toml") else board + ".toml")
+        if os.path.isfile(p):
+            return p
+    raise EmulatorError("I cannot find the board file %r. The emulator's boards/ folder lists the ones it knows." % board)
+
+
+def _scratch_copy(image, workdir):
+    """The emulator writes to the flash image it boots, so it always gets a copy: the original is never touched."""
+    os.makedirs(workdir, exist_ok=True)
+    dst = os.path.join(workdir, "flash.bin")
+    shutil.copyfile(image, dst)
+    return dst
+
+
+def open_window(image=None, board=DEFAULT_BOARD, workdir=None):
+    """Start the emulator's window on a copy of the image. Returns the child process (the caller decides whether to wait for it)."""
+    em = find()
+    if not em or not em["gui"]:
+        raise EmulatorError("There is no emulator in this kit. A kit built with the emulator has an emulator/ folder; set PURR_EMULATOR_DIR to use another.")
+    image = image or vm_image()
+    if not image or not os.path.isfile(image):
+        raise EmulatorError("I need a flash image to boot: pass one, or put the VM image at images/vm-flash.bin (or set PURR_VM_IMAGE).")
+    work = workdir or tempfile.mkdtemp(prefix="purr-emulator-")
+    flash = _scratch_copy(image, work)
+    board_path = board_file(em, board)
+    env = dict(os.environ, BOARD_TOML=board_path)
+    cmd = [em["gui"], flash, board_path] + (["--run"] if os.path.basename(em["gui"]) == "esp32-emulator" else [])    # the app classifies files like a drop
+    return subprocess.Popen(cmd, cwd=em["root"], env=env)
+
+
+class Headless:
+    """One headless run of the emulator, driven through a command file."""
+
+    def __init__(self, image=None, board=DEFAULT_BOARD, workdir=None, seconds=1800, exe=None, root=None):
+        em = find()
+        self.exe = exe or (em or {}).get("headless")
+        self.root = root or (em or {}).get("root") or os.getcwd()
+        if not self.exe:
+            raise EmulatorError("The emulator's headless runner is not in this kit (no headless_tap). `purr emulator` opens the window instead.")
+        image = image or vm_image()
+        if not image or not os.path.isfile(image):
+            raise EmulatorError("I need a flash image to boot: pass one, or put the VM image at images/vm-flash.bin (or set PURR_VM_IMAGE).")
+        self.image = image
+        self.board = board_file(em, board) if (em or os.path.isfile(board)) else board
+        self.workdir = workdir or tempfile.mkdtemp(prefix="purr-run-")
+        self.seconds = int(seconds)
+        self.proc = None
+        self.cmd_file = os.path.join(self.workdir, "cmd.txt")
+        self.stem = os.path.join(self.workdir, "s")
+        self.log = os.path.join(self.workdir, "run.log")
+
+    # -- lifecycle
+    def start(self):
+        flash = _scratch_copy(self.image, self.workdir)
+        with open(self.cmd_file, "w"):
+            pass
+        env = dict(os.environ, BOARD_TOML=self.board, HEADLESS_CMD=self.cmd_file)
+        with open(self.log, "w") as lg:
+            self.proc = subprocess.Popen([self.exe, flash, str(self.seconds), self.stem + ".png"], cwd=self.root, env=env,
+                                         stdout=lg, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                         start_new_session=True)          # its own process group: QEMU is a child, and stopping must take it too
+        self.pgid = self.proc.pid
+        return self
+
+    def running(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self, grace=15):
+        """Ask it to quit; if it does not, stop the process this object started (never any other)."""
+        if self.proc is None:
+            return
+        if self.running():
+            try:
+                self.send("quit")
+            except OSError:
+                pass
+            end = time.time() + grace
+            while self.running() and time.time() < end:
+                time.sleep(0.2)
+        self._reap_group()
+        self.proc = None
+
+    def _group_alive(self):
+        try:
+            os.killpg(self.pgid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _reap_group(self):
+        """The runner starts QEMU as its child, in the same new process group. If the runner is gone but QEMU is not, the group
+        (only the one this object started, never another) is stopped: first politely, then hard."""
+        pgid = getattr(self, "pgid", None)
+        if pgid and pgid != os.getpgrp():
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                if not self._group_alive():
+                    break
+                try:
+                    os.killpg(pgid, sig)
+                except OSError:
+                    break
+                end = time.time() + 3
+                while time.time() < end and self._group_alive():
+                    time.sleep(0.1)
+        try:
+            self.proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+
+    # -- commands
+    def send(self, command, wait=0.0):
+        with open(self.cmd_file, "a") as fh:
+            fh.write(command.strip() + "\n")
+        if wait:
+            time.sleep(wait)
+
+    def tap(self, x, y, wait=8.0):
+        self.send("tap %d %d" % (x, y), wait)
+
+    def drag(self, x1, y1, x2, y2, wait=8.0):
+        self.send("drag %d %d %d %d" % (x1, y1, x2, y2), wait)
+
+    def _wait_file(self, path, since, timeout):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                if os.path.getmtime(path) >= since and os.path.getsize(path) > 0:
+                    return True
+            except OSError:
+                pass
+            if not self.running():
+                break
+            time.sleep(0.2)
+        return os.path.isfile(path) and os.path.getmtime(path) >= since
+
+    def shot(self, name, timeout=30):
+        """Take a picture of the screen. Returns the path of the PNG, or raises when the emulator did not write one."""
+        path = "%s-%s.png" % (self.stem, name)
+        since = time.time() - 0.5
+        self.send("shot " + name)
+        if not self._wait_file(path, since, timeout):
+            raise EmulatorError("The emulator did not take the picture %r (is it still running? see %s)." % (name, self.log))
+        return path
+
+    def serial(self, timeout=30):
+        """Everything the board has printed so far, as text."""
+        path = self.stem + "-serial.txt"
+        since = time.time() - 0.5
+        self.send("dump")
+        if not self._wait_file(path, since, timeout):
+            return ""
+        with open(path, "r", errors="replace") as fh:
+            return fh.read()
+
+    def wait_serial(self, text, timeout=300, poll=10):
+        """Wait until the board has printed `text`. Returns True when it did, False on timeout or when the emulator stopped."""
+        end = time.time() + timeout
+        while time.time() < end:
+            if text in self.serial():
+                return True
+            if not self.running():
+                return False
+            time.sleep(poll)
+        return False
+
+    def panicked(self):
+        s = self.serial()
+        return "Guru Meditation Error" in s or "Backtrace:" in s
+
+
+def run_steps(session, steps, on_step=None):
+    """Run a list of steps on a Headless session. A step is ("tap", x, y, wait), ("drag", x1, y1, x2, y2, wait), ("shot", name),
+    ("wait_serial", text, timeout) or ("pause", seconds). Returns the list of pictures taken. Stops with EmulatorError on a failed wait or a panic."""
+    pictures = []
+    for st in steps:
+        kind = st[0]
+        if on_step:
+            on_step(st)
+        if kind == "tap":
+            session.tap(st[1], st[2], st[3] if len(st) > 3 else 8.0)
+        elif kind == "drag":
+            session.drag(st[1], st[2], st[3], st[4], st[5] if len(st) > 5 else 8.0)
+        elif kind == "shot":
+            pictures.append(session.shot(st[1]))
+        elif kind == "wait_serial":
+            if not session.wait_serial(st[1], st[2] if len(st) > 2 else 300):
+                raise EmulatorError("The board never printed %r (see %s)." % (st[1], session.log))
+        elif kind == "pause":
+            time.sleep(st[1])
+        else:
+            raise EmulatorError("Unknown step %r." % (kind,))
+        if kind in ("tap", "drag") and session.running() is False:
+            raise EmulatorError("The emulator stopped while I was working (see %s)." % session.log)
+    return pictures
+
+
+# ---------------------------------------------------------------------------------------------------- purr run
+# The steps that put an app from the dev server onto the VM through the Developer Portal, for the Android-style shell image
+# (the coordinates are the 320 x 240 screen; the waits are seconds of real time, because the emulated board is slower than the clock).
+# They were worked out by hand on the 1.0.27 image; `purr run --window` is the way to do it by eye on any other shell.
+BOOT_DONE = "store: the Store and its companion are installed"          # the last line of start-up in the full profile
+ANDROID_START = [
+    ("wait_serial", "android-home:", 300),
+    ("pause", 10),
+    ("shot", "01-home"),
+    ("drag", 287, 207, 287, 50, 24),               # slide the lock handle up
+    ("tap", 160, 184, 12),                         # the apps icon in the dock
+    ("tap", 45, 70, 24),                           # Developer Portal in the drawer
+    ("tap", 100, 191, 14),                         # "Tap to find or enter one": the SDK servers page
+    ("shot", "02-servers"),
+]
+# Worked by hand on the same image, one step at a time; not yet run as a script, because the emulator's touch panel panics when a press arrives
+# right after the screen's idle switch-off (reported to the emulator's maintainer). Keep the steps close together in time.
+ANDROID_PORTAL = [
+    ("tap", 68, 125, 24),                          # Find servers
+    ("tap", 100, 165, 22),                         # the server that was found
+    ("shot", "03-trust"),
+    ("tap", 42, 187, 28),                          # Trust
+    ("shot", "04-apps"),
+]
+
+
+def serve_folder(folder, port=47801):
+    """Start the dev server on a folder (a child process); returns the DevServer. The guest reaches it at 10.0.2.2:PORT."""
+    from . import devserver
+    srv = devserver.DevServer()
+    r = srv.start(folder, port=port, name="purr run")
+    if not r["ok"]:
+        raise EmulatorError(r["text"])
+    return srv
+
+
+def make_repo(cat_file, folder):
+    """A throwaway repository with just this app in it, so it is the only entry in the Portal's list."""
+    from . import runner
+    os.makedirs(folder, exist_ok=True)
+    res = runner.purrstrap(["dev", "publish", "--file", cat_file, "--dir", folder])
+    if res["rc"] != 0:
+        raise EmulatorError("Could not publish %s into the throwaway repository." % os.path.basename(cat_file))
+    return folder
+
+
+def run_app(cat_file, image=None, board=DEFAULT_BOARD, shots=None, port=47801, headless=True, on_line=print, steps=None):
+    """Put a built, signed app on the VM and show it. With headless=True the emulator runs without a window and the pictures go to `shots`;
+    otherwise the window opens and the instructions are printed. Returns {"shots": [...], "ok": bool}."""
+    work = tempfile.mkdtemp(prefix="purr-run-")
+    repo = make_repo(cat_file, os.path.join(work, "repo"))
+    srv = serve_folder(repo, port)
+    try:
+        on_line("Serving your app at http://%s:%d (the emulated device reaches this computer at that address)." % (HOST_ADDRESS, port))
+        if not headless:
+            proc = open_window(image, board, os.path.join(work, "vm"))
+            on_line("The emulator is open. On the device: unlock, open Developer Portal, Find servers, Trust, then Install your app.")
+            on_line("Close the emulator window to finish.")
+            proc.wait()
+            return {"ok": True, "shots": []}
+        out = shots or os.path.join(work, "shots")
+        os.makedirs(out, exist_ok=True)
+        pics = []
+        with Headless(image, board, os.path.join(work, "vm")) as h:
+            pics = run_steps(h, steps if steps is not None else ANDROID_START + ANDROID_PORTAL, on_step=lambda s: on_line("  " + " ".join(str(x) for x in s)))
+            if h.panicked():
+                raise EmulatorError("The board crashed while it ran (see %s)." % h.log)
+            kept = []
+            for p in pics:
+                dst = os.path.join(out, os.path.basename(p))
+                shutil.copyfile(p, dst)
+                kept.append(dst)
+        return {"ok": True, "shots": kept}
+    finally:
+        srv.stop()

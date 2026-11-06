@@ -68,6 +68,16 @@ def run():
                     bad.append(rel + " (changed)")
         checks.append(_c("ok", "Kit files", "All %d files match SDK-MANIFEST." % len(m.get("files", {}))) if not bad else
                       _c("warn", "Kit files", "%d file(s) differ from the manifest, for example %s. Did you edit the kit?" % (len(bad), bad[0])))
+    from . import emulator
+    em = emulator.find()
+    if not em:
+        checks.append(_c("info", "Emulator", "No emulator found. A kit built with the emulator has an emulator/ folder; `purr run` and `purr emulator` need it."))
+    else:
+        what = ", ".join(n for n, k in (("window", "gui"), ("headless runner", "headless"), ("board files", "boards")) if em.get(k)) or "nothing usable"
+        checks.append(_c("ok" if em.get("headless") or em.get("gui") else "warn", "Emulator", "Found in %s (%s)." % (em["root"], what)))
+        img = emulator.vm_image()
+        checks.append(_c("ok", "VM image", "Found %s." % img) if img else
+                      _c("info", "VM image", "No VM image: put one at images/vm-flash.bin (or set PURR_VM_IMAGE) to run apps in the emulator."))
     parts = None
     try:
         from . import release

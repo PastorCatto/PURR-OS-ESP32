@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from . import __version__, boards, brand, configs, doctor, flash, formats, inspector, keys, minitoml, projects, release, repo, runner, workspace
+from . import __version__, boards, brand, configs, doctor, emulator, flash, formats, inspector, keys, minitoml, projects, release, repo, runner, workspace
 
 TTY = sys.stdout.isatty()
 COL = {"ok": "92", "warn": "93", "bad": "91", "info": "96", "dim": "90"}
@@ -285,12 +285,46 @@ def cmd_repo(a):
     return 0
 
 
-def cmd_run(a):
-    exe = os.environ.get("PURR_EMULATOR")
-    if not exe:
-        print("The emulator is not part of the kit yet. When it is installed, set PURR_EMULATOR to its launcher\nand `purr run IMAGE` will start it with your image.")
+def cmd_emulator(a):
+    try:
+        proc = emulator.open_window(a.image, a.board)
+    except emulator.EmulatorError as e:
+        print(paint("Not this time: ", "bad") + str(e))
         return 1
-    return subprocess.call([exe, a.image])
+    print(paint("The emulator is open.", "ok") + " Close its window to finish. (It runs a copy of the image; the original is not changed.)")
+    return proc.wait()
+
+
+def cmd_run(a):
+    """Build and sign an app, serve it, boot the VM, and put the app on it through the Developer Portal."""
+    ws = ws_of(a)
+    target = a.target
+    cat = None
+    if os.path.isfile(target) and target.endswith(".cat"):
+        cat = os.path.abspath(target)
+    else:
+        path = target if os.path.isdir(target) else os.path.join(ws.projects, target)
+        key = resolve_key(ws, a.key)
+        pw = password(a) if key else None
+        try:
+            r = projects.build(ws, path, board=a.board, key=key, key_id=a.key_id, password=pw, on_line=lambda l: print("  " + l))
+        except projects.ProjectError as e:
+            print(paint("Not this time: ", "bad") + str(e))
+            return 1
+        if not r["ok"] or not r["artifacts"]:
+            print(paint("The build did not work, so there is nothing to run. The lines above say why.", "bad"))
+            return 1
+        cat = r["artifacts"][-1]
+        for n in r["notes"]:
+            line("info", "", n)
+    try:
+        res = emulator.run_app(cat, a.image, a.emulator_board, a.shots, a.port, headless=not a.window, on_line=print)
+    except emulator.EmulatorError as e:
+        print(paint("Not this time: ", "bad") + str(e))
+        return 1
+    for p in res["shots"]:
+        print("   picture: " + p)
+    return 0 if res["ok"] else 1
 
 
 def cmd_config(a):
@@ -409,8 +443,21 @@ def build_parser():
     s.add_argument("--key", help="for `endorse`: the project key a device trusts (today the boot key)"); s.add_argument("--key-id", type=int, default=1)
     s.set_defaults(fn=cmd_repo)
 
-    s = sub.add_parser("run", help="run an image in the emulator (when one is installed)")
-    s.add_argument("image")
+    s = sub.add_parser("emulator", help="open the emulator on the VM image (or one you name)")
+    s.add_argument("image", nargs="?", help="a flash image (default: the kit's VM image)")
+    s.add_argument("--board", default=emulator.DEFAULT_BOARD, help="the emulator's board file name (default %s)" % emulator.DEFAULT_BOARD)
+    s.set_defaults(fn=cmd_emulator)
+
+    s = sub.add_parser("run", help="build an app, put it on the emulated device and show it")
+    s.add_argument("target", help="a project folder or name, or a signed .cat file")
+    s.add_argument("--key", help="the key to sign with (a name in your workspace's keys, or a path)")
+    s.add_argument("--key-id", type=int, default=2, help="the key's id on the device (2 = developer)")
+    s.add_argument("--board", default="tdeck_plus", help="the PURR board the app is built for")
+    s.add_argument("--emulator-board", default=emulator.DEFAULT_BOARD, help="the emulator's board file (default %s)" % emulator.DEFAULT_BOARD)
+    s.add_argument("--image", help="a VM flash image (default: the kit's)")
+    s.add_argument("--shots", help="where the pictures go (default: a temporary folder)")
+    s.add_argument("--port", type=int, default=47801)
+    s.add_argument("--window", action="store_true", help="open the emulator window and let you drive it, instead of the headless run")
     s.set_defaults(fn=cmd_run)
 
     s = sub.add_parser("config", help="the settings a device knows, or check a system.conf / apps.conf")
