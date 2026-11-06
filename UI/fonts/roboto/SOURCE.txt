@@ -1,0 +1,46 @@
+Roboto 3.016 (static Regular and Bold), subset for PURR OS
+==========================================================
+
+Upstream:   https://github.com/googlefonts/roboto-3-classic (tag v3.016)
+Release:    https://github.com/googlefonts/roboto-3-classic/releases/download/v3.016/Roboto_v3.016.zip
+            sha256 of the zip: 1653dbe12f248da8fb0b9920db7b9496cd677ed3981154f6f15285c8bd4e334f
+Originals:  android/static/Roboto-Regular.ttf (355,956 bytes)
+              sha256 e688a215e0841b6e4edb1207c93f88f4c609f82e870884349a7257e449eb9355
+            android/static/Roboto-Bold.ttf
+              sha256 9aa793ad5e12c3b2486464ec6f047f16ac6d30bb06c8b4d162ba313459794968
+Licence:    SIL Open Font License 1.1, no Reserved Font Name. OFL.txt and AUTHORS.txt are copied unchanged
+            from the same tag of the upstream repository (raw.githubusercontent.com/googlefonts/roboto-3-classic/v3.016/).
+Copyright:  Copyright 2011 The Roboto Project Authors (https://github.com/googlefonts/roboto-classic)
+Downloaded: 2026-11-06
+
+Subset (fonttools 4.60.2, run once per weight; W is Regular or Bold):
+
+  python3 -m fontTools.subset Roboto-W.ttf \
+    --unicodes="U+0020-007E,U+00A0-024F,U+02C6,U+02DC,U+0370-03FF,U+0400-04FF,U+1E00-1EFF,U+2013-2014,U+2018-201A,U+201C-201E,U+2020-2022,U+2026,U+2030,U+2032-2033,U+2039-203A,U+20AC,U+20B9,U+2116,U+2122,U+2212,U+221A,U+221E,U+2248,U+2260,U+2264-2265,U+25A0,U+25CB,U+25CF" \
+    --layout-features= --no-hinting --desubroutinize --name-IDs='*' --notdef-outline \
+    --drop-tables+=GSUB,GPOS,GDEF,STAT,gasp,DSIG --output-file=Roboto-W-ui.ttf
+
+What is kept and why (1,193 code points):
+  U+0020-007E   ASCII
+  U+00A0-024F   Latin-1 Supplement, Latin Extended-A and -B (European languages, currency, signs)
+  U+1E00-1EFF   Latin Extended Additional (Vietnamese)
+  U+0370-03FF   Greek; U+0400-04FF Cyrillic
+  U+2013-2026 and the other U+20xx entries   dashes, quotes, bullet, ellipsis, per mille, euro, rupee
+  U+2116, 2122, 2212, 221A, 221E, 2248, 2260, 2264-2265, 25A0, 25CB, 25CF   numero, trade mark, minus, root, infinity,
+                                                                              not equal, comparisons, square, circles
+Not in Roboto (so not in this subset): the plain arrows U+2190-2193, check marks U+2713/2714/2717, triangles
+U+25B6/25C0/25B2/25BC, star, heart, note. The Noto Emoji subset has the heavy arrows (U+2B05-2B07, U+27A1, U+2194-2199),
+U+2714, U+25B6, U+25C0 and U+2665; the plain arrows, U+2713, U+2605, U+266A, U+25B2 and U+25BC are in neither
+subset (Noto Sans was checked and lacks them too). Where a shell needs them it keeps using the symbol glyphs
+that LVGL's built-in Montserrat carries, which is the last link of the fallback chain.
+
+What was dropped: hinting (Tiny TTF's stb_truetype ignores it), layout tables (GSUB, GPOS, GDEF; no shaping), and the
+variable-font tables (none: these are the static instances).
+
+The subset keeps the font names and the copyright and licence strings in the `name` table.
+The subset files are modified versions of the Software under OFL 1.1 section 2; no Reserved Font Name is declared, so
+the name is kept.
+
+Subset files (as stored here):
+  Roboto-Regular-ui.ttf  85,124 bytes  sha256 2f3f077dbd2c494797644014b71877ee05cf8191c471befb9b45c0c1311156ce
+  Roboto-Bold-ui.ttf     85,804 bytes  sha256 d9319ebce9ea5dd5def91ebf1e5e923ec5eec12df38197aa0971d50bd091e2a0

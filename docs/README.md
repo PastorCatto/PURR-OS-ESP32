@@ -2,7 +2,7 @@
 
 ## Short version
 
-- Twenty chapters, one per area, plus a start-here page, a runbook and a glossary. Every chapter opens with a short version.
+- Twenty-one chapters, one per area, plus a start-here page, a runbook and a glossary. Every chapter opens with a short version.
 - New here? Read [start-here.md](start-here.md). Carrying on the work? Read the [runbook](runbook.md). A word you do not know? [glossary.md](glossary.md).
 - The plans in the repository root (`plan1.md` to `plan10.md`, and `plan11.md` and `showtime1.md` by the owner's override) say what is done and what is not. When a chapter and a plan disagree, the plan is the source of truth and the chapter is the bug.
 - Every chapter says what was **not verified on a device**. Nothing here is claimed to work unless the code or a test shows it.
@@ -40,6 +40,7 @@
 | 18 | [The emulator and the VM](18-emulator-and-vm.md) | running the system without a device | 1,154 |
 | 19 | [Boards](19-boards.md) | board files and device profiles | 1,166 |
 | 20 | [Tools and scripts](20-tools-and-scripts.md) | what each script in the repository does | 999 |
+| 21 | [Fonts](21-fonts.md) | the UI font, the emoji fonts and how fonts are loaded (designed; the kernel side is not built) | 1,130 |
 
 Also here: [start-here.md](start-here.md), [runbook.md](runbook.md), [glossary.md](glossary.md).
 
@@ -52,7 +53,7 @@ Also here: [start-here.md](start-here.md), [runbook.md](runbook.md), [glossary.m
 | [purrstrap/](../purrstrap/) | the build, packaging and signing tool and the dev server | [09](09-purrstrap.md) |
 | [Apps/](../Apps/), [Modules/](../Modules/) | the sources of apps, system modules and drivers | [16](16-apps.md), [07](07-drivers.md) |
 | [sdk/](../sdk/) | the developer kit | [17](17-sdk.md) |
-| [UI/](../UI/) | the interface specification and artwork | [11](11-ui-stack-and-shells.md), [12](12-picture-pack-and-fonts.md) |
+| [UI/](../UI/) | the interface specification, artwork and fonts | [11](11-ui-stack-and-shells.md), [12](12-picture-pack-and-fonts.md), [21](21-fonts.md) |
 | [tools/](../tools/) | release, hardware, VM and documentation scripts | [20](20-tools-and-scripts.md) |
 | [Boards/](../Boards/) | board descriptions | [19](19-boards.md) |
 | [Keys/](../Keys/), [Permissions/](../Permissions/), [Users/](../Users/) | specifications for keys, permissions and accounts | [03](03-trust-and-keys.md), [06](06-app-runtime.md) |

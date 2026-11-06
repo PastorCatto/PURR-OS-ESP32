@@ -20,5 +20,8 @@
 | `purr emulator [IMAGE]` | open the emulator window on the VM image (or one you name); it runs a copy, never the original |
 | `purr run TARGET [--key K] [--window] [--shots DIR]` | build and sign an app (TARGET is a project, or a signed `.cat`), serve it, boot the VM, and put the app on it through the Developer Portal; pictures go to `--shots` (see [12-emulator.md](12-emulator.md)) |
 | `purr config schema`, `purr config check system FILE` | the settings a device knows; check a file |
+| `purr font check FILE.ttf [--max-size BYTES] [--json]` | check a TrueType font the way the OS means to before it uses it: size cap (default 1 MB), table directory, required tables, glyph count, code point coverage, colour or bitmap tables (which the renderer does not support), and the copyright and licence strings; exits 1 with a plain message if the file fails |
+
+`purr font check` reads the file itself, with no other tools, and warns (does not fail) for a colour font, a variable font, or a missing licence string. It checks the file's structure, not each glyph's outline, so a pass is not a proof that the file is safe to draw. A `pack` or `add` step for fonts is not written. It is a gate for the device side that is designed but not built: [docs/21-fonts.md](../../docs/21-fonts.md) in the repository.
 
 Projects, keys and builds live in `~/PURR-Projects` (change it with `--workspace` or `PURR_WORKSPACE`). A key's password comes from a prompt, or from `PURRSTRAP_KEY_PASSWORD` for scripts.

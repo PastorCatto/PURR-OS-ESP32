@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-from . import __version__, boards, brand, configs, doctor, emulator, flash, formats, inspector, keys, minitoml, projects, release, repo, runner, workspace
+from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, inspector, keys, minitoml, projects, release, repo, runner, workspace
 
 TTY = sys.stdout.isatty()
 COL = {"ok": "92", "warn": "93", "bad": "91", "info": "96", "dim": "90"}
@@ -327,6 +327,18 @@ def cmd_run(a):
     return 0 if res["ok"] else 1
 
 
+def cmd_font(a):
+    rep = font.check_file(a.file, a.max_size)
+    if a.json:
+        print(json.dumps(rep, indent=1))
+    else:
+        print("%s\n" % a.file)
+        for c in rep["checks"]:
+            line(c["status"], c["name"], c["text"])
+        print("\n" + ("This font passes the checks." if rep["ok"] else "This font fails the checks: see the lines marked ✗."))
+    return 0 if rep["ok"] else 1
+
+
 def cmd_config(a):
     if a.action == "schema":
         for s in configs.settings_schema():
@@ -465,6 +477,13 @@ def build_parser():
     s.add_argument("kind", nargs="?", choices=("system", "apps"), default="system")
     s.add_argument("file", nargs="?")
     s.set_defaults(fn=cmd_config)
+
+    s = sub.add_parser("font", help="check a TrueType font file the way the OS will before it uses it")
+    s.add_argument("action", choices=("check",))
+    s.add_argument("file")
+    s.add_argument("--max-size", type=int, default=font.DEFAULT_MAX_BYTES, help="the size cap in bytes (default %d, 1 MB)" % font.DEFAULT_MAX_BYTES)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_font)
 
     sub.add_parser("version", help="print the kit's version").set_defaults(fn=lambda a: print("PURR Developer Kit", __version__) or 0)
     return p

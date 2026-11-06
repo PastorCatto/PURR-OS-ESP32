@@ -31,6 +31,15 @@ import-lvgl`). Some of that imagery is not Felix Biego's to license (the Windows
 are Microsoft's), so **it is placeholder art only and must be replaced before anything is
 shipped**. The packaging is built so the replacement is a drop-in: a new `ui_assets` image.
 
+## Fonts (Roboto, Noto Emoji)
+
+Two fonts are stored for the "fonts from files" work (showtime1.md Part D, `docs/21-fonts.md`). They are subsets (about 85 KB each for Roboto Regular and Bold, 192 KB for the emoji) and live in [`UI/fonts/`](UI/fonts/). They are **not built into the kernel**; the loader that would read them from files is designed, not built. Each folder holds the licence text and a `SOURCE.txt` with the upstream address, version, SHA-256 of the original and the exact subset command.
+
+- **Roboto** 3.016 (Regular and Bold, Latin, Greek, Cyrillic, Vietnamese subset), copyright 2011 The Roboto Project Authors, <https://github.com/googlefonts/roboto-3-classic>, **SIL Open Font License 1.1**. The UI text font. Folder: [`UI/fonts/roboto/`](UI/fonts/roboto/SOURCE.txt).
+- **Noto Emoji** 3.002 (monochrome outline emoji, core set of 414 code points), copyright 2013 Google LLC, from the Google Fonts repository, <https://github.com/google/fonts/tree/main/ofl/notoemoji>, **SIL Open Font License 1.1**. The emoji font, tinted by the text colour. Folder: [`UI/fonts/noto-emoji/`](UI/fonts/noto-emoji/SOURCE.txt).
+
+Both are modified versions (subset, hinting removed; Noto Emoji fixed to its regular weight) under section 2 of the OFL; neither declares a Reserved Font Name, so the names are kept. A colour emoji set is only studied so far: [`UI/fonts/COLOUR-EMOJI.md`](UI/fonts/COLOUR-EMOJI.md).
+
 ## LVGL
 
 LVGL (MIT) is used as a managed component, version 9.2.x, <https://lvgl.io>.

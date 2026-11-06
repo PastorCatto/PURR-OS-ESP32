@@ -1,0 +1,23 @@
+# Code points kept from Noto Emoji for the OS "core set" (pyftsubset --unicodes-file syntax, one group per line).
+# Faces and cat faces, people gestures (the whole Emoticons block)
+U+1F600-1F64F
+# More faces, skull, ghost, alien, poo
+U+1F910-1F925,U+1F927-1F92F,U+1F970-1F97A,U+1F9D0,U+1F480,U+1F47B,U+1F47D,U+1F4A9
+# Hearts, kiss, love letter, anger, bomb, zzz and the other comic symbols
+U+2764,U+1F48B,U+1F493-1F49F,U+1F4A2-1F4AF,U+1F5A4,U+1F90D-1F90E,U+1F9E1,U+1F498,U+1F48C
+# Hands, pointing, eyes, ears, nose, mouth, muscle, nails
+U+261D,U+270A-270D,U+1F446-1F450,U+1F44A-1F44F,U+1F590,U+1F595-1F596,U+1F918-1F91F,U+1F932-1F933,U+1F485,U+1F4AA,U+1F440-1F445
+# Animals: cat, dog, a few faces, paws
+U+1F408,U+1F415,U+1F42D-1F43E,U+1F98A,U+1F981,U+1F984
+# Nature and weather: flowers, moon, sun, clouds, snow, fire, water, rainbow, globes
+U+1F338-1F33F,U+1F340,U+1F319,U+1F31B,U+1F31E-1F320,U+2600-2604,U+2614,U+26C4-26C5,U+26A1,U+2744,U+1F525,U+1F4A7,U+1F30A,U+1F308,U+1F30D-1F30F
+# Food and drink
+U+2615,U+1F354-1F357,U+1F355,U+1F370,U+1F382,U+1F36A,U+1F37A-1F37B,U+1F34E,U+1F34C,U+1F353
+# Objects the shells and apps talk about: phone, laptop, mail, camera, folders, files, locks, battery, bell, speakers, music, clock, tools, gift, trophy, games
+U+1F4A1,U+1F4BB,U+1F4F1,U+1F4DE,U+1F4E7,U+1F4F7,U+1F4C1-1F4C2,U+1F4C4,U+1F4DD,U+1F4CC,U+1F4CE,U+1F510-1F513,U+1F50B-1F50C,U+1F50D-1F50E,U+1F514-1F515,U+1F507-1F50A,U+1F3A7,U+1F3A4,U+1F3B5-1F3B6,U+23F0,U+231A-231B,U+23F3,U+1F4F6,U+1F4E1,U+1F527-1F528,U+2699,U+1F381,U+1F388-1F38A,U+1F3C6,U+1F451,U+1F48E,U+1F4B0,U+1F4BE,U+1F4BF,U+1F4C5,U+1F4CA,U+1F4E2,U+1F4EC-1F4ED,U+1F5D1,U+1F5BC,U+1F5C2,U+1F3AE,U+1F3AF
+# Symbols: ticks, crosses, question and exclamation, warning, stars, arrows, media controls, refresh, coloured circles and squares, sparkles, plus and minus, suits, NEW/OK/UP buttons
+U+2705,U+274C,U+274E,U+2714,U+2716,U+2753-2755,U+2757,U+26A0,U+2B50,U+2B55,U+1F6AB,U+1F6D1,U+2139,U+2194-2199,U+21A9-21AA,U+27A1,U+2B05-2B07,U+25B6,U+25C0,U+23E9-23EF,U+23F8-23FA,U+1F500-1F504,U+1F519-1F51D,U+1F7E0-1F7EB,U+2728,U+2733-2734,U+2795-2797,U+267B,U+203C,U+2049,U+2B1B-2B1C,U+25FB-25FE,U+2660,U+2663,U+2665-2666,U+1F195-1F19A
+# Places, travel, sport, media
+U+1F3E0-1F3E1,U+1F697,U+1F680,U+2708,U+1F6B2,U+1F3C3,U+26BD,U+1F3C0,U+1F3AC,U+1F4F0,U+1F4F4,U+1F4F5
+# Joiner and emoji variation selector (kept so sequences do not show a box; Tiny TTF does not shape them)
+U+200D,U+FE0F
