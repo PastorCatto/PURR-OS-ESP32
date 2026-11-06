@@ -17,8 +17,12 @@ extern "C" {
 #endif
 
 /* Loads both files. Missing files are not an error: both lists come back empty, which
- * means "no accounts yet" (first-time setup). Returns 0 on success (files read or
- * legitimately absent), -1 if the filesystem itself is not usable. */
+ * means "no accounts yet" (first-time setup). A file that is there but cannot be read (after retries) is tried again as its .bak copy (every save keeps one).
+ * Returns 0 on success (files read or legitimately absent), PURR_USERSTORE_FROM_BACKUP if a .bak copy had to be used, -1 if the filesystem itself is not usable,
+ * PURR_USERSTORE_READ_ERROR if a file exists and neither it nor its backup could be read (the lists are empty then, which must NOT be taken as "no accounts yet":
+ * nothing may be created or saved over what could not be read). */
+#define PURR_USERSTORE_FROM_BACKUP 1
+#define PURR_USERSTORE_READ_ERROR  (-2)
 int purr_userstore_load(purr_fs_t *fs, purr_user_list_t *users, purr_shadow_list_t *shadow);
 
 /* Writes both files. Returns 0 on success. */

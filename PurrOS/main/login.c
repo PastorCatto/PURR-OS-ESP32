@@ -44,8 +44,33 @@ void purr_login_random_salt(uint8_t salt[PURR_SALT_LEN])
     esp_fill_random(salt, PURR_SALT_LEN);
 }
 
+/* The account list could not be read (a file is there and it and its backup both failed): it is never "no accounts yet", and nothing is saved while this is set. */
+static int s_store_unreadable;
+int purr_login_store_unreadable(void) { return s_store_unreadable; }
+
+static void load_store(void)
+{
+    int rc = PURR_USERSTORE_READ_ERROR;
+    for (int i = 0; i < 4 && rc == PURR_USERSTORE_READ_ERROR; i++) {
+        rc = purr_userstore_load(purr_login_fs(), &s_users, &s_shadow);
+        if (rc == PURR_USERSTORE_READ_ERROR) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+    }
+    s_store_unreadable = (rc == PURR_USERSTORE_READ_ERROR);
+    if (s_store_unreadable) {
+        ESP_LOGE("login", "the account list could not be read: nothing will be created or saved over it");
+    } else if (rc == PURR_USERSTORE_FROM_BACKUP) {
+        ESP_LOGW("login", "the account list was read from its backup copy");
+    }
+}
+
 int purr_login_persist(void)
 {
+    if (s_store_unreadable) {
+        ESP_LOGE("login", "not saving: the account list could not be read, and saving would overwrite it");
+        return -1;
+    }
     return purr_userstore_save(purr_login_fs(), &s_users, &s_shadow);
 }
 
@@ -248,7 +273,7 @@ static uint8_t s_lock_armed[PURR_USER_MAX];
 static void ensure_loaded(void)
 {
     if (!s_store_loaded) {
-        purr_userstore_load(purr_login_fs(), &s_users, &s_shadow);
+        load_store();
         s_store_loaded = 1;
     }
 }
@@ -307,7 +332,12 @@ purr_login_result_t purr_login_try(const char *name, const char *password, uint3
 void purr_login_run(void)
 {
     s_store_loaded = 1;
-    purr_userstore_load(purr_login_fs(), &s_users, &s_shadow);
+    load_store();
+    while (s_store_unreadable) {                      /* never "no accounts yet" (and so never the default account) over a list that could not be read */
+        put_str("The account list could not be read. Your files are safe and nothing was changed. Trying again...\n");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        load_store();
+    }
     if (s_users.count == 0) {
         first_time_setup();
     } else {
@@ -317,7 +347,7 @@ void purr_login_run(void)
 
 void purr_login_skip(const char *name, purr_user_role_t role)
 {
-    purr_userstore_load(purr_login_fs(), &s_users, &s_shadow);
+    load_store();
     memset(&s_current, 0, sizeof(s_current));
     strncpy(s_current.name, name, sizeof(s_current.name) - 1);
     s_current.role = role;

@@ -31,36 +31,26 @@ static volatile uint8_t s_retry_now;    /* it dropped: retry as soon as the task
 
 /* ---------------------------------------------------------------- the save file */
 
-typedef struct {
-    char *buf;
-    size_t cap;
-    size_t len;
-} accum_t;
-
-static int accumulate(void *ctx, const void *data, uint32_t len)
-{
-    accum_t *a = ctx;
-    if (a->len + len > a->cap) {
-        return -1;
-    }
-    memcpy(a->buf + a->len, data, len);
-    a->len += len;
-    return 0;
-}
-
 #define SAVE_BUF_LEN (PURR_WIFI_MAX_SAVED * (PURR_WIFI_SSID_LEN + PURR_WIFI_PASS_LEN + 2))
+
+static int s_saved_bad;                 /* the file exists but could not be read: the list is not saved over it */
 
 static void load_saved(void)
 {
     purr_wifi_list_init(&s_saved);
+    s_saved_bad = 0;
     if (s_fs == NULL || !purr_fs_mounted(s_fs)) {
         return;
     }
-    static char buf[SAVE_BUF_LEN];
-    accum_t a = {buf, sizeof(buf), 0};
-    if (purr_fs_read(s_fs, WIFI_ETC_PATH, accumulate, &a) == 0) {
-        purr_wifi_list_parse(&s_saved, buf, a.len);
+    static char buf[SAVE_BUF_LEN + 1];
+    uint32_t n = 0;
+    int r = purr_fs_slurp(s_fs, WIFI_ETC_PATH, buf, sizeof(buf), &n);
+    if (r == 0) {
+        purr_wifi_list_parse(&s_saved, buf, n);
         ESP_LOGI(TAG, "%d saved network(s)", s_saved.count);
+    } else if (r < 0) {
+        s_saved_bad = 1;
+        ESP_LOGE(TAG, "the saved networks could not be read: not saving over them");
     }
 }
 
@@ -69,13 +59,17 @@ static void save_list(void)
     if (s_fs == NULL || !purr_fs_mounted(s_fs)) {
         return;
     }
+    if (s_saved_bad) {
+        ESP_LOGW(TAG, "not saving the network list: the saved file could not be read, and saving would overwrite it");
+        return;
+    }
     static char buf[SAVE_BUF_LEN];
     int n = purr_wifi_list_format(&s_saved, buf, sizeof(buf));
     if (n < 0) {
         return;                                    /* should not happen: the list is bounded */
     }
     purr_fs_mkdir(s_fs, "/etc");                    /* ignored if it already exists */
-    purr_fs_write(s_fs, WIFI_ETC_PATH, buf, (uint32_t)n);
+    purr_fs_write_kept(s_fs, WIFI_ETC_PATH, buf, (uint32_t)n);
 }
 
 /* ---------------------------------------------------------------- the radio */

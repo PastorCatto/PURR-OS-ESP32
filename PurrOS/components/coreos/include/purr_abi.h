@@ -144,6 +144,11 @@ PURR_STATIC_ASSERT(sizeof(purr_image_header_t) == 173, "image header layout chan
 #define PURR_CFGF_FAST_START       (1u << 13)
 /* One-shot: SHOW_MENU ("Restart to the boot menu" in Settings). The next start shows the boot menu; the bootloader clears the flag when it reads it. */
 #define PURR_CFGF_SHOW_MENU        (1u << 14)
+/* Persistent flag: DATA_RESET. Set by whatever wiped or reformatted the data partition (KittenOS's automatic format of a damaged file system, a reinstall that
+ * erases, the wipe that comes with weakening security), BEFORE the wipe, so the reason survives it; the details are in the netrec record (purr_netrec.h). The OS
+ * shows the reason on the sign-in screen, as a notification and in Settings > About until the owner dismisses it, which clears the flag. The bootloader (0.4.0)
+ * leaves flags it does not know alone, so this needs no new bootloader; a later one, or the boot package, may show it too. */
+#define PURR_CFGF_DATA_RESET       (1u << 15)
 
 /* flags: one-shot unless noted, cleared by the bootloader before handoff */
 #define PURR_CFGF_IGNORE_ONCE      (1u << 0)

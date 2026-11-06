@@ -92,6 +92,8 @@ def main(argv):
     # dependency -- matching/pin-ownership logic tested here with fake drivers and a fake
     # board, the real drivers' own ESP-IDF-coupled internals untouched by any of it.
     src.append(os.path.join(KERNEL, "src", "purr_driver.c"))
+    # The account store (accounts and their backup copy) is plain C over purr_fs: tested with read failures injected.
+    src.append(os.path.join(KERNEL, "src", "purr_userstore.c"))
     common = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
               "-I", os.path.join(CORE, "include"), "-I", os.path.join(KERNEL, "include"),
               "-I", LFS, "-I", HERE, "-I", uecc]

@@ -88,18 +88,26 @@ static int rd_cb(void *ctx, const void *data, uint32_t len)
 static char s_conf[CONF_MAX];           /* "key=value\n" lines */
 static SemaphoreHandle_t s_lock;
 
+static int s_conf_bad;                  /* the file exists but could not be read: nothing is saved over it */
+
 static void conf_load(void)
 {
     purr_fs_t *fs = purr_login_fs();
     s_conf[0] = '\0';
+    s_conf_bad = 0;
     if (fs == NULL || !purr_fs_mounted(fs)) {
         return;
     }
-    rd_t r = {s_conf, sizeof(s_conf) - 1, 0};
-    if (purr_fs_read(fs, CONF_PATH, rd_cb, &r) < 0) {
-        r.len = 0;                       /* none yet: the defaults stand */
+    uint32_t n = 0;
+    int r = purr_fs_slurp(fs, CONF_PATH, s_conf, sizeof(s_conf), &n);
+    if (r == 1) {
+        return;                          /* none yet: the defaults stand */
     }
-    s_conf[r.len] = '\0';
+    if (r < 0) {                         /* there but unreadable: the defaults stand for now, and a later change must not overwrite the real file */
+        s_conf[0] = '\0';
+        s_conf_bad = 1;
+        ESP_LOGE(TAG, "%s could not be read: settings are not saved until it can be", CONF_PATH);
+    }
 }
 
 /* Finds "key=" at the start of a line; returns the line start, or NULL. */
@@ -150,6 +158,13 @@ int purr_settings_kv_set(const char *key, const char *value)
         return -1;
     }
     if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_conf_bad) {
+        conf_load();                    /* try again: a transient failure may have passed */
+        if (s_conf_bad) {
+            if (s_lock) xSemaphoreGive(s_lock);
+            return -1;                  /* saving now would overwrite the file that could not be read */
+        }
+    }
     char *p = conf_find(key);
     if (p != NULL) {                    /* drop the old line */
         char *nl = strchr(p, '\n');
@@ -163,7 +178,7 @@ int purr_settings_kv_set(const char *key, const char *value)
         purr_fs_t *fs = purr_login_fs();
         if (fs != NULL && purr_fs_mounted(fs)) {
             purr_fs_mkdir(fs, "/etc");
-            if (purr_fs_write(fs, CONF_PATH, s_conf, (uint32_t)strlen(s_conf)) < 0) {
+            if (purr_fs_write_kept(fs, CONF_PATH, s_conf, (uint32_t)strlen(s_conf)) < 0) {
                 ESP_LOGW(TAG, "could not save %s", CONF_PATH);
                 rc = -1;
             }

@@ -39,6 +39,10 @@ void purr_login_set_root(int is_root);
 
 /* Whether any account exists (loads the account files the first time it is asked). */
 int purr_login_has_accounts(void);
+
+/* 1 if the account list exists but could not be read (even from its backup): there are accounts, they are just not available. The sign-in screens say so, and
+ * nothing is created or saved while it holds. */
+int purr_login_store_unreadable(void);
 /* 1 (and the account's name in `name`) while the default administrator, MEOW with the password MEOW, is still in force; 0 once its password has been changed or it has been removed. */
 int purr_login_default_account(char *name, size_t cap);
 

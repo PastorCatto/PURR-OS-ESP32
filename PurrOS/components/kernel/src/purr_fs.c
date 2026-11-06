@@ -1,13 +1,26 @@
 #include "purr_fs.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---------------------------------------------------------------- block device glue */
 
+/* A read is tried three times below littlefs, so a transient failure never reaches it. One that persists is reported as an I/O error and marks the file system
+ * "poisoned": littlefs records a block as cached BEFORE it reads it and does not undo that when the read fails, so its next lookups parse stale bytes, and a file
+ * that exists is reported as "no such file" (found by a host test with an injected read failure, plan7.md: that is how an account list, the saved Wi-Fi and the
+ * settings were each taken for "nothing saved yet" and replaced by defaults). fs_ready() remounts a poisoned file system before the next operation, which clears
+ * every cache. */
 static int bd_read(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, void *buf, lfs_size_t size)
 {
     purr_fs_t *fs = c->context;
-    return fs->bd.read(fs->bd.ctx, block, off, buf, size) == 0 ? LFS_ERR_OK : LFS_ERR_IO;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (fs->bd.read(fs->bd.ctx, block, off, buf, size) == 0) {
+            return LFS_ERR_OK;
+        }
+    }
+    fs->poisoned = 1;
+    return LFS_ERR_IO;
 }
 
 static int bd_prog(const struct lfs_config *c, lfs_block_t block, lfs_off_t off, const void *buf, lfs_size_t size)
@@ -85,8 +98,11 @@ int purr_fs_format(purr_fs_t *fs, const purr_bd_t *bd)
 void purr_fs_unmount(purr_fs_t *fs)
 {
     if (fs->mounted) {
-        lfs_unmount(&fs->lfs);
+        if (fs->poisoned != 2) {                  /* 2: already unmounted, waiting for a mount that did not work yet */
+            lfs_unmount(&fs->lfs);
+        }
         fs->mounted = 0;
+        fs->poisoned = 0;
     }
 }
 
@@ -95,7 +111,26 @@ int purr_fs_mounted(const purr_fs_t *fs)
     return fs->mounted;
 }
 
-#define NEED_MOUNT(fs) do { if (!(fs)->mounted) return LFS_ERR_INVAL; } while (0)
+static int fs_ready(purr_fs_t *fs)
+{
+    if (!fs->mounted) {
+        return LFS_ERR_INVAL;
+    }
+    if (fs->poisoned) {
+        if (fs->poisoned == 1) {                  /* 1: littlefs is mounted with stale caches. 2: it has been unmounted and the mount did not work yet */
+            lfs_unmount(&fs->lfs);
+            fs->poisoned = 2;
+        }
+        int e = lfs_mount(&fs->lfs, &fs->cfg);
+        if (e != 0) {
+            return e;                             /* still unreadable: stays "mounted" for the caller and tries the mount again at the next operation */
+        }
+        fs->poisoned = 0;
+    }
+    return 0;
+}
+
+#define NEED_MOUNT(fs) do { int rdy_ = fs_ready(fs); if (rdy_ != 0) return rdy_; } while (0)
 
 /* ---------------------------------------------------------------- operations */
 
@@ -347,4 +382,65 @@ const char *purr_fs_strerror(int err)
     case PURR_FS_ERR_DENIED:  return "permission denied";
     default:                  return "filesystem error";
     }
+}
+
+
+typedef struct {
+    uint8_t *buf;
+    uint32_t cap, len;
+} slurp_t;
+
+static int slurp_cb(void *ctx, const void *data, uint32_t len)
+{
+    slurp_t *s = ctx;
+    if (s->len + len > s->cap) {
+        return -1;
+    }
+    memcpy(s->buf + s->len, data, len);
+    s->len += len;
+    return 0;
+}
+
+int purr_fs_slurp(purr_fs_t *fs, const char *path, void *buf, uint32_t cap, uint32_t *len)
+{
+    if (len != NULL) {
+        *len = 0;
+    }
+    if (fs == NULL || !fs->mounted || buf == NULL || cap == 0) {
+        return -1;
+    }
+    for (int attempt = 0; attempt < 3; attempt++) {
+        slurp_t s = {buf, cap - 1, 0};
+        int e = purr_fs_read(fs, path, slurp_cb, &s);
+        if (e == 0) {
+            ((uint8_t *)buf)[s.len] = '\0';
+            if (len != NULL) {
+                *len = s.len;
+            }
+            return 0;
+        }
+        if (e == LFS_ERR_NOENT) {
+            return 1;
+        }
+    }
+    return -1;
+}
+
+int purr_fs_write_kept(purr_fs_t *fs, const char *path, const void *data, uint32_t len)
+{
+    char bak[96];
+    int is_dir = 0;
+    uint32_t size = 0;
+    if (strlen(path) + 5 <= sizeof(bak) && purr_fs_stat(fs, path, &is_dir, &size) == 0 && !is_dir && size > 0 && size <= 8192) {
+        uint8_t *old = malloc((size_t)size + 1);
+        if (old != NULL) {
+            uint32_t n = 0;
+            if (purr_fs_slurp(fs, path, old, size + 1, &n) == 0 && n > 0) {
+                snprintf(bak, sizeof(bak), "%s.bak", path);
+                purr_fs_write(fs, bak, old, n);                   /* best effort: the new file is written either way */
+            }
+            free(old);
+        }
+    }
+    return purr_fs_write(fs, path, data, len);
 }

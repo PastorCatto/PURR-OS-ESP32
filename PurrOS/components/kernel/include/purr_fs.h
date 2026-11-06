@@ -38,6 +38,7 @@ typedef struct {
     uint8_t look_buf[32];
     uint8_t file_buf[PURR_FS_CACHE];      /* one file open at a time */
     int mounted;
+    int poisoned;                         /* a read failed for good: the next operation remounts first (see purr_fs.c, bd_read); 2 = unmounted, mount pending */
 } purr_fs_t;
 
 /* Mount an existing filesystem. Fails on a blank or damaged device: it never formats. */
@@ -58,6 +59,17 @@ int purr_fs_list(purr_fs_t *fs, const char *path, purr_fs_list_fn cb, void *ctx)
 /* Stream a file to `cb` in pieces. If cb returns nonzero, reading stops with that value. */
 typedef int (*purr_fs_read_fn)(void *ctx, const void *data, uint32_t len);
 int purr_fs_read(purr_fs_t *fs, const char *path, purr_fs_read_fn cb, void *ctx);
+
+/* A whole small file into buf (NUL-terminated; cap includes the NUL), trying up to three times, so one transient failure is absorbed. Returns:
+ *   0   read; *len is the length
+ *   1   the file does not exist (the only case that means "nothing saved yet")
+ *   -1  it exists, or the file system is not usable, but it could not be read (an I/O error, or it does not fit in buf)
+ * A caller that treats -1 as "empty" and later saves destroys the real file (an account list, the Wi-Fi networks and the settings were once lost that way,
+ * plan7.md): on -1, keep what you have, change nothing and say so. */
+int purr_fs_slurp(purr_fs_t *fs, const char *path, void *buf, uint32_t cap, uint32_t *len);
+
+/* Like purr_fs_write(), but what was in the file (when it reads cleanly and is under 8 KB) is first kept as path.bak. */
+int purr_fs_write_kept(purr_fs_t *fs, const char *path, const void *data, uint32_t len);
 
 /* Create or replace a file. The old contents stay until the new file is closed. */
 int purr_fs_write(purr_fs_t *fs, const char *path, const void *data, uint32_t len);
