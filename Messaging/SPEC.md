@@ -66,6 +66,12 @@ The three mesh services use the one LoRa radio with incompatible settings, so on
 4. Switching takes a few seconds and messages that arrive on the other network meanwhile are missed; the services screen says so.
 5. A message goes out on the service of its thread. It is never moved to another network on its own.
 
+**Owner's answer, 2026-11-05:** a switch happens when the user decides to switch (it is the user's preference, not the system's). That is when the lease ends: the holder is told, shuts down in an orderly way (stops sending, finishes what is queued, saves its state) and only then hands the radio to the other app. One app at a time keeps the radio from being pulled two ways.
+
+**Wanted: keep the radio up while the app changes.** The radio hardware should not have to be powered down and started again for each switch. Idea to work out: a small **radio keeper** in the system holds the radio initialised and the lease is a handover of its settings (frequency, bandwidth, spreading factor, sync word), so the new owner only has to reconfigure it. How much faster that is than a cold start has not been measured.
+
+**Reticulum over Wi-Fi as well.** Reticulum can use more than one link. If its service runs on Wi-Fi independently of the LoRa radio, it keeps working while another app owns the radio, and takes the radio too whenever it is free, so it uses both. Whether the ESP32 port of Reticulum can run several links at once is to be checked.
+
 Holding or asking for a lease needs the `radio` permission (`../Permissions/SPEC.md`). How an app reaches the radio itself (the driver exists, an app-facing call may not) is to be checked.
 
 ## 5. Companion drivers and system services
@@ -83,6 +89,7 @@ Store's companion works). The manifest names it.
 - **Channels are not private messages.** Messages opens on the list of private threads. The **Menu key** (or the options button) shows a menu with **Channels** (LongFast, General and any others the
   service offers), New message, Contacts, Services and Settings, following the shell's navigation. Channels are a separate list, because everyone on the channel sees every message.
   LongFast and General are the public ones.
+- **Groups and channels in Contacts.** A contact card shows a short message history with that person and small indicators of where they appear: the groups and channels they are in, and the services and threads where you have spoken with them ("seen in LongFast, Ridge crew; talked on Meshtastic and Reticulum"). Each indicator opens that thread or channel.
 - **Failed sends.** A failed message stays "Not sent" and can be tapped to retry. If the person has an address on another service, the app offers a one-tap resend there. Automatic fallback is an
   option, off by default, because the radio has to switch networks and a slow first attempt can still arrive later as a duplicate.
 
@@ -91,7 +98,7 @@ Store's companion works). The manifest names it.
 - Messages live in a folder on the flash file system, under the signed-in user's folder, until together they have used **1 MB**.
 - When a micro SD card is inserted after that, everything stored so far moves to the card, and from then on fresh messages go on flash again.
 - Pictures count toward the 1 MB like any other message data.
-- **Open:** what happens at 1 MB with no card (the proposal is to warn once and then delete the oldest messages first), and whether the user can choose a different limit.
+- **When the 1 MB is used and there is no card** the app stops and asks, before anything is lost: "Use more device space" (raise the limit), or "Export everything, then delete the oldest" (the export is tried first and the delete only happens after it has worked), or cancel. Nothing is deleted without the export being offered. Where the export goes (the SD card, a file the user can copy, or a share to another device) is to be decided.
 
 ## 8. Images and emoji
 
@@ -124,3 +131,8 @@ Store's companion works). The manifest names it.
 5. Where each network's keys live and how they are backed up.
 6. How a Meshtastic channel or group appears in Contacts.
 7. The radio lease: the yield time, and what an app sees when it loses the radio.
+
+## 12. A later plan (owner, 2026-11-05; not designed yet)
+
+A separate **node used as a message server**: a device with a large micro SD card that keeps the messages (gigabytes), and a smaller **companion device** that talks to it over Wi-Fi. This is a separate plan for later and is only recorded here. It touches the storage rule above (the 1 MB on flash and the SD hand-over are the single-device case), the radio (the server could own the radio), and the services (a service that runs on the server and a front end that runs on the companion).
+
