@@ -137,7 +137,7 @@ module ABI) and a project pins the kit version it builds with, so an old project
 | 5 | Flavors: `brand.toml` -> boot package (names, wordmark, colours) and the system's visible names/first accent | boot package rebuilt with a flavor and checked in the binary; the shell, loader and KittenOS use `PURR_BRAND_*` (compile-checked in all three profiles; **not run**, default values are the stock strings) |
 | 6 | Kit builder (`sdk/build-kit.py`): bundled Python 3.12 + cryptography + esptool, trimmed xtensa toolchain, headers, purrstrap, prebuilt parts, manifest | done; kit at `~/Desktop/PURR-SDK/purr-sdk-0.1.0-macos-x86_64` (about 330 MB) works with the system Python; bundled Python 3.12 verified on this Mac after the stall cleared; the 74 SDK tests pass under it |
 | 7 | Firmware consumers: `gps`, `radio`, `modem` shell commands; the T-Deck Plus board lists its GPS and radio | built in all three profiles; **not flashed** |
-| 8 | Emulator hook (`purr run`, PURR_EMULATOR) | hook only, as asked |
+| 8 | Emulator in the kit (Showtime Part A, 2026-11-06) | the kit builder bundles a relocated QEMU, the window, the headless runner and board files (`emulator/`, +39 MB, kit 364 MB); `purr emulator` and `purr run` drive it; the kit built end to end and `purr doctor` finds it. **Run end to end only as far as the Developer Portal's server page**: the Find servers tap hit an emulator panic (see showtime1.md). No VM image ships in the kit yet |
 | 9 | Phase D of plan6 (app lifecycle in the SDK) | not started |
 
 ## Session log
@@ -235,3 +235,15 @@ Emulators and games are PURR application packages (a signed `.cat`, image type A
 
 ## Continued by Showtime Plan 1 (2026-11-05)
 The SDK is brought up to spec with the standalone emulator inside it in Part A of [showtime1.md](showtime1.md) (owner-approved, waiting for the owner's keyword).
+
+## Inventory, 2026-11-06 (Showtime Part A, step 1: checked, not remembered)
+| Claim | Checked |
+|---|---|
+| SDK tests | 111 pass (was 74/96; two were stale: the driver `Device` struct's `defer` byte, the board profile's keyboard devices; both fixed) |
+| purrstrap tests | 128 pass, 4 skipped |
+| C host tests (`coreos/test/host`) | all pass (34 programs) |
+| Kit version | 1.1.0 in `purrsdk/__init__.py`; a 1.1.0 kit was built into scratch only (not placed on the Desktop) |
+| Emulator in the kit | built and relocated; QEMU runs from a copy with its original library folder hidden; one 75 s headless boot of the secure VM image checked |
+| `purr run` | works up to the Portal's server page on the 1.0.27 Android image; the rest (find, trust, install, launch) is written as steps and was done by hand, not scripted end to end |
+| Published test key, and a VM image that trusts it (problem 6 above) | **not delivered.** A kit VM image needs a trust block signed with the boot key, so the owner has to make it (passphrase); until then `purr run` works with an image you supply and an app signed with a key that image trusts |
+| Flavors, drivers on a board, Studio drag-and-drop | as in the table above: not run on a device / not exercised |
