@@ -57,6 +57,9 @@ typedef struct {
 /* The CRC over several MB of flash takes seconds. Done before the shell was drawn it left a white screen for all that time, so it runs
  * after, in small steps. The directory's bounds are checked up front (nothing can read outside the partition); the CRC only guards the
  * pixels themselves, so a bad one just means the pictures stop being offered. */
+/* 4 KB, was 3 KB (1.0.28, plan7.md): measured in the emulator, the task used about 2 KB at its deepest, so 3 KB was enough there; the extra KB is margin, freed again when the task ends.
+ * The line it logs at the end says how much of the stack was never used. */
+#define CRC_TASK_STACK 4096
 static void crc_task(void *arg)
 {
     crc_job_t j = *(crc_job_t *)arg;
@@ -74,6 +77,7 @@ static void crc_task(void *arg)
     } else {
         ESP_LOGI(TAG, "image data checked");
     }
+    ESP_LOGI(TAG, "assets-crc: %u of %u stack bytes were never used", (unsigned)uxTaskGetStackHighWaterMark(NULL), CRC_TASK_STACK);
     vTaskDelete(NULL);
 }
 
@@ -137,7 +141,7 @@ esp_err_t purr_ui_assets_init(void)
         job->pixels = pixel_region;
         job->used = used;
         job->want = hdr->crc32;
-        check = xTaskCreate(crc_task, "assets-crc", 3072, job, 1, NULL) == pdPASS;
+        check = xTaskCreate(crc_task, "assets-crc", CRC_TASK_STACK, job, 1, NULL) == pdPASS;
         if (!check) {
             free(job);
         }

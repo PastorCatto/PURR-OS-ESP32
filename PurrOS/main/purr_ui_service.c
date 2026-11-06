@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -1288,6 +1289,14 @@ static void service_task(void *arg)
     (void)arg;
     for (;;) {
         purr_lvgl_guard();                              /* an overwritten input callback is put back before LVGL calls it (plan7.md) */
+        {
+            static int64_t s_hwm_log_us;
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - s_hwm_log_us > 30000000) {         /* the least stack this task has ever had left, every 30 seconds (1.0.28: about 5.6 KB of the 12 KB had been used at the deepest, so this is not what overwrote the input device, plan7.md) */
+                s_hwm_log_us = now_us;
+                ESP_LOGI(TAG, "stack: at least %u bytes have never been used", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+            }
+        }
         uint32_t next_ms = s_paused ? LVGL_TICK_PERIOD_MS : lv_timer_handler();
         if (next_ms == LV_NO_TIMER_READY || next_ms > LVGL_TICK_PERIOD_MS) {
             next_ms = LVGL_TICK_PERIOD_MS;

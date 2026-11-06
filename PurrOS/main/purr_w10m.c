@@ -1695,7 +1695,7 @@ static int s_bfu_busy;
 /* The account list, as Windows 10's sign-in screen has it: down the left side (a strip along the bottom of a tall screen), the chosen account in the middle with its
  * password. The last row is "Other user", which shows the name field. */
 #define BFU_ROW_H   38
-#define BFU_SIDE_W  108
+#define BFU_SIDE_W  116
 #define BFU_STRIP_H 56
 static lv_obj_t *s_bfu_panel;
 static lv_obj_t *s_bfu_rows[PURR_USER_MAX + 1];
@@ -2011,7 +2011,7 @@ static void bfu_rebuild_rows(void)
             lv_obj_set_size(bar, 3, LV_PCT(100));
             lv_obj_align(bar, LV_ALIGN_LEFT_MID, 0, 0);
             lv_obj_align(c, LV_ALIGN_LEFT_MID, 8, 0);
-            lv_obj_set_width(lb, BFU_SIDE_W - 46);
+            lv_obj_set_size(lb, BFU_SIDE_W - 46, 16);                    /* a fixed height, so a long name ends in dots instead of wrapping */
             lv_obj_align(lb, LV_ALIGN_LEFT_MID, 40, 0);
         } else {
             lv_obj_set_size(bar, LV_PCT(100), 3);

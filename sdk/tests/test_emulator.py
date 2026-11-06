@@ -159,6 +159,22 @@ class Session(Base):
         with self.assertRaises(OSError):
             os.kill(kid, 0)
 
+    def test_each_session_has_its_own_temp_folder_and_its_guest_flash(self):
+        h1 = emulator.Headless(self.image, workdir=os.path.join(self.tmp, "w11"), seconds=30).start()
+        h2 = emulator.Headless(self.image, workdir=os.path.join(self.tmp, "w12"), seconds=30).start()
+        try:
+            self.assertNotEqual(h1.tmpdir, h2.tmpdir)
+            self.assertIsNone(h1.guest_flash())
+            run_copy = os.path.join(h1.tmpdir, "esp32-emulator-headless-tap")
+            os.makedirs(run_copy)
+            with open(os.path.join(run_copy, "flash.bin"), "wb") as fh:
+                fh.write(b"guest")
+            self.assertEqual(h1.guest_flash(), os.path.join(run_copy, "flash.bin"))
+            self.assertIsNone(h2.guest_flash())
+        finally:
+            h1.stop(grace=5)
+            h2.stop(grace=5)
+
     def test_no_image_is_a_clear_error(self):
         with self.assertRaises(emulator.EmulatorError) as cm:
             emulator.Headless(None, workdir=os.path.join(self.tmp, "w5"))

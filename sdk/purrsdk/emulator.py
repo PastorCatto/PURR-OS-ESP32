@@ -143,7 +143,11 @@ class Headless:
         flash = _scratch_copy(self.image, self.workdir)
         with open(self.cmd_file, "w"):
             pass
-        env = dict(os.environ, BOARD_TOML=self.board, HEADLESS_CMD=self.cmd_file)
+        # The runner works on its own copy of the flash image in $TMPDIR/esp32-emulator-headless-tap/, one for the whole computer: a second run overwrites the first's.
+        # Each session gets a temp folder of its own, so two can run side by side, and the guest's writes stay readable after the run (self.guest_flash()).
+        self.tmpdir = os.path.join(self.workdir, "tmp")
+        os.makedirs(self.tmpdir, exist_ok=True)
+        env = dict(os.environ, BOARD_TOML=self.board, HEADLESS_CMD=self.cmd_file, TMPDIR=self.tmpdir)
         with open(self.log, "w") as lg:
             self.proc = subprocess.Popen([self.exe, flash, str(self.seconds), self.stem + ".png"], cwd=self.root, env=env,
                                          stdout=lg, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -153,6 +157,11 @@ class Headless:
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
+
+    def guest_flash(self):
+        """The flash image as the guest has changed it (accounts, settings, installed apps): the runner's working copy in this session's temp folder, or None."""
+        p = os.path.join(getattr(self, "tmpdir", ""), "esp32-emulator-headless-tap", "flash.bin")
+        return p if os.path.isfile(p) else None
 
     def stop(self, grace=15):
         """Ask it to quit; if it does not, stop the process this object started (never any other)."""
