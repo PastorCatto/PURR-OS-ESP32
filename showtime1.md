@@ -10,7 +10,7 @@
 | B | Document the whole repository (not `archive/`): at least 100 pages, with hyperlinks to everything | not started; follows Part A |
 | C | The front README, opening with a quote from the owner | a first version is written (uncommitted); the quote slot is open |
 | D | Custom fonts loaded from TTF files, and fonts as Store assets | designed here; follows Part A |
-| E | The Windows 10 Mobile shell at `ui` version 4, and a Windows 10 style user screen with the list at the side | written down; render first |
+| E | The Windows 10 Mobile shell at feature parity with the Android shell (Lumia and Windows Phone 8 design language), with a Windows 10 style user screen and the list at the side | written down; parity table first |
 
 Order: A, then B, then C. C needs only the owner's words, so it can be done at any point once they are given.
 
@@ -102,15 +102,18 @@ Area by area in the order above. For each: read the plan, read the code, build t
 
 **Done when:** a TTF placed on the device (or installed from the Store) can be chosen in Settings and is used by the shell and by apps; replacing the emoji font file changes the emoji with no rebuild; a damaged font file is refused and the shell keeps working; the kernel still fits its slot with the option on; the measured cost is written in the plan.
 
-## Part E: the Windows 10 Mobile shell brought up to version 4, and a Windows 10 style user screen (added by the owner, 2026-11-05)
+## Part E: the Windows 10 Mobile shell brought to feature parity with the Android shell, in the Lumia and Windows Phone 8 design language (added by the owner, 2026-11-05)
 
-**What the owner asked for, in the words used:** "update the Windows 10 Mobile UI to version 4 and add a user screen like Windows 10 that has the list on the side." Written down as understood; the first step is to confirm the reading with the owner.
+**What the owner asked for:** the Windows 10 Mobile shell should have the same features as the Android shell, designed in the language Microsoft used on Lumia and Windows Phone 8 (flat tiles, big light type, the accent colour, tilt and slide motion), and "a user screen like Windows 10 that has the list on the side". The first line of the request said "version 4" (the `ui` catcall version 4, added with the Messages work). The standing art rule applies: the design language is recreated, with original art; no Microsoft imagery or icons are added.
 
-1. **The shell at `ui` version 4.** The Messages work added version 4 of the `ui` catcall (the `bubble` widget) in `purr_catrt_ui.c`, shared by both shells. In the VM, which runs the Windows 10 Mobile shell, the apps already run, but the bubble uses fixed light colours made for the Froyo look. To do: draw the version 4 widgets in the Windows 10 Mobile style (the theme's accent, the dark or light setting, flat tiles, no gradients), and check every widget of versions 1 to 4 in that shell against its own render. If "version 4" meant the shell's own revision number, say so and rename it in the plan.
-2. **A Windows 10 style user screen.** The Windows 10 sign-in screen shows the picture and name of the chosen account in the middle and **the list of accounts down the side** (bottom left on a PC), so another account is one tap away. The Windows 10 Mobile shell has its own sign-in screen (`purr_w10m.c`) today; the new screen keeps that screen's rules (an account list, a password, lock-out after repeated failures, the default account note from the MEOW change) and lays them out as a side list with the chosen account's panel beside it. The Froyo shell keeps its own sign-in.
-3. **Checked the way the rest of the UI is:** a render first (the host LVGL renderer, `tools/lvgl_host/`), shown to the owner, then built; the VM runs the shell, so it can be tested there headless.
+**Where the two shells differ today (to be checked and completed in the first step, from the code):** the Android shell has notifications on the lock screen and a notification shade with a list, Messages and Contacts looks drawn for it, the Froyo icon set, and its sign-in screen; the Windows 10 Mobile shell has tiles, the sign-in screen of `purr_w10m.c`, its own Settings pages and the app list.
 
-**Done when:** each version 4 widget looks right in the Windows 10 Mobile style, and the user screen with the list at the side has been shown as a render, built, and seen working in the VM with at least two accounts.
+1. **A parity table** of every feature of the Android shell against the Windows 10 Mobile shell, built by reading `purr_android*.c` and `purr_w10m*.c`: lock screen, notifications (lock screen and shade), sign-in and user switching, the app list and pinning, the task switcher, the status area, the `ui` widgets of versions 1 to 4, permission prompts, and the Settings pages. Each row says present, missing or different.
+2. **Close the gaps in the Lumia style:** notifications on the lock screen (a short list under the clock, as Windows Phone 8 shows them), the version 4 `bubble` drawn flat in the accent colour with the theme's light or dark setting, and whatever else the table shows missing.
+3. **The user screen.** Windows 10's sign-in screen shows the chosen account in the middle and the **list of accounts down the side**, so another account is one tap away. The Windows 10 Mobile shell gets that layout, keeping its rules (an account list, a password, lock-out after repeated failures, the default account note from the MEOW change). The Android shell keeps its own sign-in.
+4. **Each piece is checked as the rest of the UI is:** a render first (the host LVGL renderer in `tools/lvgl_host/`), shown to the owner, then built. The VM runs the Windows 10 Mobile shell, so it is tested there headless, with screenshots.
+
+**Done when:** the parity table has no "missing" row that the owner wants kept, the lock-screen notifications and the version 4 widgets look right in the Lumia style, and the side-list user screen has been shown as a render, built, and seen working in the VM with at least two accounts.
 
 ## The apps repository (the owner is creating it)
 
