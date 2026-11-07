@@ -5435,6 +5435,45 @@ static purr_load_result_t load_relocatable_file(const char *path, const char *lo
 #define PURR_SHELL_LOAD_MAX_PAGES 8
 #define PURR_SHELL_READ_CAP (1024 * 1024)
 
+/* A shell file is large (hundreds of KB with its pictures) and the root file system has no lock: another task using it during a long read can leave wrong bytes in what
+ * this read returns, without any error. So the payload hash is checked as soon as the bytes are in memory, and a file that does not match is read again (up to three
+ * times) before it is called damaged. A retry is logged: seeing it means something else was using the file system. Returns the buffer (len set), or NULL. */
+static int shell_payload_hash_ok(const uint8_t *rb, size_t len)
+{
+    purr_image_header_t hdr;
+    uint8_t d[PURR_SHA256_LEN];
+    if (len < sizeof(hdr)) {
+        return 0;
+    }
+    memcpy(&hdr, rb, sizeof(hdr));
+    if ((uint64_t)hdr.payload_offset + hdr.payload_size > len) {
+        return 0;
+    }
+    purr_sha256(rb + hdr.payload_offset, hdr.payload_size, d);
+    return memcmp(d, hdr.payload_sha256, PURR_SHA256_LEN) == 0;
+}
+
+static uint8_t *read_shell_file(const char *path, uint32_t cap, size_t *len)
+{
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        uint8_t *rb = malloc(cap);
+        if (rb == NULL) {
+            return NULL;
+        }
+        appinstall_read_ctx_t rc = {rb, cap, 0};
+        if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) >= 0 && shell_payload_hash_ok(rb, rc.len)) {
+            if (attempt > 1) {
+                ESP_LOGW("shell", "%s: the first %d read(s) did not match the file's own hash; read again (something else was using the file system)", path, attempt - 1);
+            }
+            *len = rc.len;
+            return rb;
+        }
+        free(rb);
+        vTaskDelay(pdMS_TO_TICKS(50));                  /* let whatever else is using the file system finish */
+    }
+    return NULL;
+}
+
 /* The picture pack the loaded shell carries inside itself, if it has one: 0 and its address and size, else -1. Valid for the rest of the boot. */
 int purr_shell_module_pack(const uint8_t **pack, uint32_t *size)
 {
@@ -5482,14 +5521,15 @@ int purr_shell_module_check(const char *id, char *built_for, size_t cap)
     if (purr_fs_stat(&s_fs, path, &is_dir, &file_size) != 0 || is_dir || file_size == 0 || file_size > PURR_SHELL_READ_CAP) {
         return PURR_SHELL_CHECK_BAD;
     }
-    uint8_t *rb = malloc(file_size);
+    size_t flen = 0;
+    uint8_t *rb = read_shell_file(path, file_size, &flen);
     if (rb == NULL) {
         return PURR_SHELL_CHECK_BAD;
     }
-    appinstall_read_ctx_t rc = {rb, file_size, 0};
+    appinstall_read_ctx_t rc = {rb, file_size, (uint32_t)flen};
     int res = PURR_SHELL_CHECK_BAD;
     purr_image_header_t hdr;
-    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) >= 0 && rc.len >= sizeof(hdr) && shell_image_trusted(rb, rc.len)) {
+    if (rc.len >= sizeof(hdr) && shell_image_trusted(rb, rc.len)) {
         memcpy(&hdr, rb, sizeof(hdr));
         purr_module_layout_t layout;
         if (hdr.image_type == PURR_IMG_MODULE && PURR_FLAGS_SUBTYPE(hdr.flags) == PURR_MOD_SHELL && (uint64_t)hdr.payload_offset + hdr.payload_size <= rc.len &&
@@ -5524,16 +5564,19 @@ const purr_shell_ops_t *purr_shell_module_load(const char *id)
 {
     char path[64];
     snprintf(path, sizeof(path), "/ui/shells/%s/shell.cat", id);
-    uint8_t *rb = malloc(PURR_SHELL_READ_CAP);
+    int is_dir = 0;
+    uint32_t file_size = 0;
+    if (purr_fs_stat(&s_fs, path, &is_dir, &file_size) != 0 || is_dir || file_size == 0 || file_size > PURR_SHELL_READ_CAP) {
+        ESP_LOGW("shell", "%s: missing or not a usable size", path);
+        return NULL;
+    }
+    size_t flen = 0;
+    uint8_t *rb = read_shell_file(path, file_size, &flen);
     if (rb == NULL) {
+        ESP_LOGW("shell", "%s: could not be read, or does not match its own hash", path);
         return NULL;
     }
-    appinstall_read_ctx_t rc = {rb, PURR_SHELL_READ_CAP, 0};
-    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
-        ESP_LOGW("shell", "%s: could not be read", path);
-        free(rb);
-        return NULL;
-    }
+    appinstall_read_ctx_t rc = {rb, file_size, (uint32_t)flen};
     uint8_t *databuf;
     void *exec_ptr;
     uint32_t entry_offset;

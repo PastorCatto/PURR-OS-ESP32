@@ -24,15 +24,21 @@ OUT=${3:-$ROOT/out/vm-debug-flash.bin}
 W=$ROOT/out/secdbg
 PY=$HOME/.espressif/python_env/idf5.3_py3.9_env/bin/python
 ps() { $PY purrstrap/purrstrap.py "$@"; }
+# The slots (boot package, kernel, loader, KittenOS) are signed with SLOT_KEY (default: the boot key). The trust block is always signed with the compiled-in boot key
+# (signing_keys/boot.key), because the bootloader checks it against the compiled-in keys only. During a key rotation (plan3.md) SLOT_KEY is the new boot key
+# (SLOT_KEY=signing_keys/new/boot.key SLOT_KEY_ID=3 PURRSTRAP_SLOT_PASSWORD=<its passphrase>) and ADD_KEYS puts the new public keys in the trust block
+# (ADD_KEYS=3:boot:signing_keys/new/boot.pub,4:developer:...,5:system:...). PURRSTRAP_KEY_PASSWORD stays the old boot key's.
+SLOT_KEY=${SLOT_KEY:-signing_keys/boot.key}; SLOT_KEY_ID=${SLOT_KEY_ID:-1}; SLOT_PUB=${SLOT_KEY%.key}.pub
+sign_slot() { PURRSTRAP_KEY_PASSWORD=${PURRSTRAP_SLOT_PASSWORD:-$PURRSTRAP_KEY_PASSWORD} ps keys sign --key $SLOT_KEY --key-id $SLOT_KEY_ID "$@"; }
 [[ -f $BUILD/purros.bin ]] || { echo "no $BUILD/purros.bin: build the vmdbg kernel first"; exit 1; }
 [[ -f $BASE ]] || { echo "no base image $BASE"; exit 1; }
 PT=${PT_FROM:-$BUILD/partition_table/partition-table.bin}
 [[ -f $PT ]] || { echo "no partition table $PT: build the vmdbg kernel (it writes the flash map v2 table), or give PT_FROM"; exit 1; }
 mkdir -p $W ${OUT:h}
 ps bootpkg build --board tdeck_plus >/dev/null
-ps keys sign --key signing_keys/boot.key --image bootpkg/build/tdeck_plus/bootpkg.bin --out $W/bootpkg.signed --key-id 1 >/dev/null
+sign_slot --image bootpkg/build/tdeck_plus/bootpkg.bin --out $W/bootpkg.signed >/dev/null
 ps coreos package-component --component kernel --file $BUILD/purros.bin --version 1.0.0 --board tdeck_plus --out $W/kernel.cat >/dev/null
-ps keys sign --key signing_keys/boot.key --image $W/kernel.cat --key-id 1 >/dev/null
+sign_slot --image $W/kernel.cat >/dev/null
 ps coreos slot-image --file $W/kernel.cat --board tdeck_plus --slot kernel --out $W/kernel_slot.bin >/dev/null
 # SCENARIO=normal (default): boots the OS. recover: the recovery loader starts once (as if asked), the system untouched.
 # first: a blank device (FRESH on, kernel and KittenOS erased) that starts in the loader: the "first time?" path.
@@ -44,13 +50,14 @@ tb=(--key signing_keys/boot.key --mode enforce)
 [[ $SCENARIO == auto ]] && tb+=(--auto-reinstall)                    # auto: the loader installs unattended (a blank device)
 [[ $SCENARIO == kitten ]] && tb+=(--force-recovery)                  # kitten: KittenOS starts once
 [[ $SCENARIO == normal || $SCENARIO == kitten ]] || tb+=(--force-loader)
+[[ -z $ADD_KEYS ]] || tb+=(--add-keys $ADD_KEYS)
 [[ -z $DEV_RECOVERY ]] || tb+=(--dev-recovery)          # DEV_RECOVERY=1: recovery may pull from a dev server (the extra setup page)
 ps keys trust-block $tb --out $W/purrcfg.bin >/dev/null
 # The recovery loader and KittenOS slots are rebuilt too when their builds exist (out/vmmin, out/vmrec).
 LOADER=$ROOT/out/vmmin/purros.bin; KITTEN=$ROOT/out/vmrec/purros.bin
 if [[ -f $LOADER && -f $KITTEN ]]; then
   ps coreos package-component --component loader --file $LOADER --version 1.0.0 --board tdeck_plus --out $W/loader.cat >/dev/null
-  ps keys sign --key signing_keys/boot.key --image $W/loader.cat --key-id 1 >/dev/null
+  sign_slot --image $W/loader.cat >/dev/null
   ps coreos slot-image --file $W/loader.cat --board tdeck_plus --slot loader --out $W/loader_slot.bin >/dev/null
   $PY - "$W" "$KITTEN" <<'PYEOF'
 import sys
@@ -59,10 +66,10 @@ from coreos import pimg, CHIP_IDS, BOARDS, PACKAGE_KIND
 t,name=PACKAGE_KIND["recovery"]
 open(sys.argv[1]+"/kittenos.kitt","wb").write(pimg.make_image(name,"1.0.0",t,0,open(sys.argv[2],"rb").read(),CHIP_IDS[BOARDS["tdeck_plus"]]))
 PYEOF
-  ps keys sign --key signing_keys/boot.key --image $W/kittenos.kitt --key-id 1 >/dev/null
+  sign_slot --image $W/kittenos.kitt >/dev/null
   ps coreos slot-image --file $W/kittenos.kitt --board tdeck_plus --slot kittenos --out $W/kittenos_slot.bin >/dev/null
 fi
-ps keys verify --key signing_keys/boot.pub --image $W/kernel.cat | tail -1 | cut -c1-90
+ps keys verify --key $SLOT_PUB --image $W/kernel.cat | tail -1 | cut -c1-90
 BOOTLOADER=${BOOTLOADER:-$ROOT/out/boot_tdeck_plus/bootloader/bootloader.bin}      # built from bootloader/, see README
 $PY - "$BASE" "$OUT" "$W" "$BOOTLOADER" "$SCENARIO" "$PT" <<'PYEOF'
 import os, struct, sys
