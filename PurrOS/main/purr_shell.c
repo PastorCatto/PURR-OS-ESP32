@@ -28,16 +28,20 @@
 #define MODE_PATH   "/ui/mode.conf"
 #define TRY_PATH    "/ui/shell-try.conf"
 #define FAILED_PATH "/ui/shell-failed.conf"
+#define COMPAT_PATH "/ui/shell-compat.conf"             /* the shell that was given up this start because it no longer fits this system (so it is told once, not every start) */
 #define MAX_TRIES   2                                   /* starts that may fail to show the shell before the built-in one takes over */
 
 #include "sdkconfig.h"
 #if CONFIG_PURR_PROFILE_FULL
 const purr_shell_ops_t *purr_shell_module_load(const char *id);          /* commands.c: verify, load, relocate, patch, call the entry point */
+/* purr_shell_module_check() is in purr_shell_abi.h */
 #else
 #define purr_shell_module_load(id) ((const purr_shell_ops_t *)NULL)       /* only the full profile has shells to load (the recovery loader has no screen shell at all) */
+#define purr_shell_module_check(id, bf, cap) PURR_SHELL_CHECK_BAD
 #endif
 
 static const purr_shell_ops_t *s_mod;                   /* the loaded shell module, NULL while the built-in shell runs */
+static int s_compat_notice;                             /* a chosen shell was given up this start because it does not fit: say so once, when the built-in shell is up */
 static char s_mod_id[24];
 
 static int id_ok(const char *id)
@@ -122,6 +126,20 @@ void purr_shell_select(void)
     if (id[0] == '\0' || strcmp(id, "builtin") == 0 || !id_ok(id)) {
         return;
     }
+    int chk = purr_shell_module_check(id, NULL, 0);
+    if (chk == PURR_SHELL_CHECK_INCOMPATIBLE) {         /* not a failure: the shell (or the system, after an update) is out of step. The built-in shell runs, the choice stays, so an update of either brings it back */
+        ESP_LOGW(TAG, "shell %s does not fit this system; using the built-in shell for now", id);
+        char seen[24];
+        word_of(COMPAT_PATH, seen, sizeof(seen));
+        if (strcmp(seen, id) != 0) {
+            put_line(COMPAT_PATH, id);
+            s_compat_notice = 1;
+        }
+        char gp[64];
+        snprintf(gp, sizeof(gp), "/ui/shells/%s/good.conf", id);
+        purr_fs_remove(purr_login_fs(), gp);            /* no longer known good */
+        return;
+    }
     word_of(TRY_PATH, tries_s, sizeof(tries_s));
     int tries = atoi(tries_s);
     if (tries >= MAX_TRIES) {                           /* the last starts never got as far as showing the shell: the built-in one takes over, and the choice is undone */
@@ -152,6 +170,17 @@ void purr_shell_started(void)
 {
     if (s_mod != NULL) {
         put_line(TRY_PATH, "0");
+        char gp[64], v[8] = "1";
+        snprintf(gp, sizeof(gp), "/ui/shells/%s/good.conf", s_mod_id);
+        put_line(gp, v);                                /* it fits and it came up: the system marks it good */
+        purr_fs_remove(purr_login_fs(), COMPAT_PATH);   /* it fits again (after an update): a later mismatch is worth a new notice */
+    }
+    if (s_compat_notice) {
+        char text[160], chosen[24];
+        word_of(ACTIVE_PATH, chosen, sizeof(chosen));
+        snprintf(text, sizeof(text), "The %s shell needs an update for this system, so the built-in shell is in use. It stays chosen.", chosen);
+        purr_shell_notify("Shell", text);
+        s_compat_notice = 0;
     }
     char failed[24];
     word_of(FAILED_PATH, failed, sizeof(failed));
@@ -199,6 +228,10 @@ static void list_cb(void *ctx, const char *name, int is_dir, uint32_t size)
     conf_key(path, "author", s->author, sizeof(s->author));
     conf_key(path, "version", s->version, sizeof(s->version));
     s->skin = conf_key(path, "skin", skin, sizeof(skin)) && strcmp(skin, "android") == 0 ? PURR_SHELL_SKIN_ANDROID : PURR_SHELL_SKIN_W10M;
+    int chk = purr_shell_module_check(name, s->built_for, sizeof(s->built_for));
+    snprintf(path, sizeof(path), "/ui/shells/%s/good.conf", name);
+    s->state = chk == PURR_SHELL_CHECK_INCOMPATIBLE ? PURR_SHELL_STATE_NEEDS_UPDATE : chk == PURR_SHELL_CHECK_BAD ? PURR_SHELL_STATE_BAD :
+               purr_fs_stat(purr_login_fs(), path, &is_d, &sz) == 0 ? PURR_SHELL_STATE_GOOD : PURR_SHELL_STATE_UNTESTED;
 }
 
 int purr_shell_list(purr_shell_info_t *out, int max)

@@ -1,0 +1,27 @@
+/*
+ * purr_shell_layout.def - what a loadable shell was compiled against besides the names it calls (plan7.md, "Shells as installable items").
+ *
+ * A shell is compiled with the kernel's own headers, so it contains the sizes of the structures it handles by value, the offsets of the fields it reads, and the values
+ * of the constants it uses. This list is the fingerprint of that: one line per fact, `SHELL_LAYOUT(NAME, value)`. The kernel and the shell each compute every value from
+ * their own copy of the headers; the loader compares them id by id. A shell whose value differs from the kernel's for any id it carries is NOT loaded ("needs an
+ * update"): reading a structure at the wrong offset corrupts memory silently, and the start counter only catches a shell that does not come up.
+ *
+ *   - ids are the position in this file: only ever append;
+ *   - a kernel may know more ids than a shell carries, never fewer than the shell carries (a shell with an id the kernel lacks is refused);
+ *   - REV is for what a size cannot show: bump it by hand when a constant, an enum value or the meaning of a field that a shell uses changes.
+ *   - the values are computed in the kernel (purr_shell_abi.c) and in the shell's entry file (the files in shell_modules), both with this file.
+ */
+SHELL_LAYOUT(LVGL_VERSION, ((LVGL_VERSION_MAJOR << 16) | (LVGL_VERSION_MINOR << 8) | LVGL_VERSION_PATCH))
+SHELL_LAYOUT(REV, 1)
+SHELL_LAYOUT(SIZEOF_LV_ANIM, sizeof(lv_anim_t))
+SHELL_LAYOUT(SIZEOF_LV_IMAGE_DSC, sizeof(lv_image_dsc_t))
+SHELL_LAYOUT(SIZEOF_LV_POINT, sizeof(lv_point_t))
+SHELL_LAYOUT(SIZEOF_LV_COLOR, sizeof(lv_color_t))
+SHELL_LAYOUT(SIZEOF_LV_STYLE, sizeof(lv_style_t))
+SHELL_LAYOUT(SIZEOF_PURR_ASSET, sizeof(purr_asset_t))
+SHELL_LAYOUT(SIZEOF_PURR_USER_LIST, sizeof(purr_user_list_t))
+SHELL_LAYOUT(SIZEOF_PURR_APP_ENTRY, sizeof(purr_app_entry_t))
+SHELL_LAYOUT(SIZEOF_PURR_APP_REGISTRY, sizeof(purr_app_registry_t))
+SHELL_LAYOUT(SIZEOF_PURR_SETTING, sizeof(purr_setting_t))
+SHELL_LAYOUT(SIZEOF_PURR_DISPLAY_V2, sizeof(purr_display_v2_t))
+SHELL_LAYOUT(SIZEOF_SHELL_OPS, sizeof(purr_shell_ops_t))

@@ -473,10 +473,11 @@ static void page_system(void)
     cm_space(s_body, 6);
     cm_title(s_body, "Interface");
     s_shell_n = purr_shell_list(s_shells, SHELL_MAX);
-    char names[SHELL_MAX * 40 + 80] = "Android 2.2 (built in)";
+    char names[SHELL_MAX * 64 + 80] = "Android 2.2 (built in)";
     for (int i = 0; i < s_shell_n; i++) {
         size_t n = strlen(names);
-        snprintf(names + n, sizeof(names) - n, "\n%s", s_shells[i].name);
+        snprintf(names + n, sizeof(names) - n, "\n%s%s", s_shells[i].name,
+                 s_shells[i].state == PURR_SHELL_STATE_NEEDS_UPDATE ? " (needs an update)" : s_shells[i].state == PURR_SHELL_STATE_BAD ? " (damaged)" : "");
     }
     size_t nn = strlen(names);
     snprintf(names + nn, sizeof(names) - nn, "\nNavigation\nCard stack");

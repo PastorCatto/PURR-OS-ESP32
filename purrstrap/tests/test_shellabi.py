@@ -42,20 +42,36 @@ class LinkerScriptTests(unittest.TestCase):
 
 
 class HeaderTests(unittest.TestCase):
-    def test_the_header_round_trips_and_has_a_size_that_depends_only_on_the_export_count(self):
-        h = shellabi.build_header(1, 183, 0x1200, [(16, 3), (20, 0)])
-        self.assertEqual(len(h), shellabi.header_size(183))
-        self.assertEqual(len(shellabi.build_header(1, 183, 0, [])), len(h))
+    ENTRIES = shellabi.parse_def("SHELL_FN(lv_obj_create)\nSHELL_FN(snprintf)\nSHELL_DATA(lv_font_t, lv_font_montserrat_16)\n")
+
+    def test_the_header_round_trips_with_names_and_layout(self):
+        caps = shellabi.capacities(self.ENTRIES)
+        h = shellabi.build_header(1, "1.0.32", 0x1200, [(100, "snprintf"), (104, "lv_obj_create"), (108, "snprintf")], [(0, 0x90200), (1, 1)], caps)
+        self.assertEqual(len(h), shellabi.header_size(caps))
         p = shellabi.parse_header(h + b"CODE")
-        self.assertEqual((p["abi_version"], p["export_count"], p["bss_size"], p["imports"]), (1, 183, 0x1200, [(16, 3), (20, 0)]))
+        self.assertEqual((p["abi_version"], p["built_for"], p["bss_size"]), (1, "1.0.32", 0x1200))
+        self.assertEqual(p["imports"], [(100, "snprintf"), (104, "lv_obj_create"), (108, "snprintf")])
+        self.assertEqual(p["layout"], [(0, 0x90200), (1, 1)])
+
+    def test_the_size_depends_only_on_the_lists(self):
+        caps = shellabi.capacities(self.ENTRIES)
+        self.assertEqual(len(shellabi.build_header(1, "x", 0, [], [], caps)), len(shellabi.build_header(1, "y", 9, [(1, "snprintf")], [(0, 1)], caps)))
+
+    def test_what_does_not_fit_is_refused(self):
+        caps = shellabi.capacities(self.ENTRIES)
+        with self.assertRaises(shellabi.ShellAbiError):
+            shellabi.build_header(1, "x", 0, [(i * 4, "snprintf") for i in range(4)], [], caps)        # 4 import sites, room for 3
+        with self.assertRaises(shellabi.ShellAbiError):
+            shellabi.build_header(1, "x", 0, [(0, "not_exported_and_long_enough_to_overflow_the_names_block")], [], caps)
+        with self.assertRaises(shellabi.ShellAbiError):
+            shellabi.build_header(1, "x", 0, [], [(i, i) for i in range(shellabi.LAYOUT_CAP + 1)], caps)
 
     def test_a_wrong_or_short_header_is_refused(self):
         with self.assertRaises(shellabi.ShellAbiError):
-            shellabi.parse_header(b"\0" * 40)
+            shellabi.parse_header(b"\0" * 100)
+        caps = shellabi.capacities(self.ENTRIES)
         with self.assertRaises(shellabi.ShellAbiError):
-            shellabi.parse_header(shellabi.build_header(1, 4, 0, [(0, 0)])[:30])
-        with self.assertRaises(shellabi.ShellAbiError):
-            shellabi.build_header(1, 1, 0, [(0, 0), (4, 0)])
+            shellabi.parse_header(shellabi.build_header(1, "x", 0, [], [], caps)[:70])
 
 
 class ImportTests(unittest.TestCase):

@@ -4,13 +4,20 @@
  * Built by `purrstrap shells build` together with purr_w10m.c (the same source the kernel compiles when the shell is built in); NOT part of the kernel's
  * source list. The loader calls purr_shell_module_main() once and gets the ops table the kernel's shell dispatch (purr_shell.c) forwards to.
  */
+#include "purr_shell_headers.h"
 #include "purr_shell_abi.h"
 
-#include "purr_notify.h"
 #include "purr_w10m.h"
-#include "purr_w10m_priv.h"
+
+#define SHELL_LAYOUT(name, expr) {PURR_SHELL_LAYOUT_##name, (uint32_t)(expr)},
+__attribute__((section(".shelldata"), used)) const purr_shell_layout_t purr_shell_layout[] = {          /* read by purrstrap into the shell's header, compared with the kernel's by the loader */
+#include "purr_shell_layout.def"
+};
+#undef SHELL_LAYOUT
+__attribute__((section(".shelldata"), used)) const size_t purr_shell_layout_count = sizeof(purr_shell_layout) / sizeof(purr_shell_layout[0]);
 
 static const purr_shell_ops_t s_ops = {
+    .size = sizeof(purr_shell_ops_t),
     .abi_version = PURR_SHELL_ABI_VERSION,
     .skin = PURR_SHELL_SKIN_W10M,
     .id = "w10m",

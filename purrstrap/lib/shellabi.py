@@ -92,44 +92,72 @@ def patch_imports(blob, imports, addresses):
 # ---------------------------------------------------------------- the header inside a shell module's code
 #
 # A shell is a plain module (PURR_IMG_MODULE, subtype MOD_SHELL) whose payload is the ordinary module layout (entry offset, data relocations, code relocations,
-# code blob: modules.pack_payload), so the kernel's one module loader loads it. What a shell needs on top of that is a fixed-size header that sits at the START
-# of the code blob (the linker script puts the section `.shellhdr` first): the loader reads it from the loaded copy.
+# code blob: modules.pack_payload), so the kernel's one module loader loads it. What a shell needs on top of that is a header at the START of the code blob (the
+# linker script puts the section `.shellhdr` first). The layout is the one described in PurrOS/components/coreos/include/purr_shellhdr.h:
 #
-#   word 0   HEADER_MAGIC ("PSHL")
-#   word 1   the ABI version the module was built against
-#   word 2   the number of exports it was linked against
-#   word 3   the bss size: the loader maps that much zeroed memory after the code blob
-#   word 4   the number of import sites
-#   word 5   reserved (0)
-#   then     `export count` pairs (offset into the blob, export index); the first `import sites` pairs are used, the rest are zero.
+#   word 0 magic, 1 ABI version, 2 bss size, 3 import count, 4 layout count, 5 names size, 6 layout capacity, 7 import capacity, 8 names capacity,
+#   bytes 36..51 the kernel version the shell was built against, 3 reserved words; then layout pairs (id, value), import pairs (offset of the word in the code,
+#   offset of the name in the names block), then the names block.
 #
-# The size depends only on the export count, so the two link results of the link-twice method have the same layout, and the header is written into both
-# after they are linked (it is the same bytes in both, so it is never mistaken for a relocation).
+# A shell finds the OS names it uses BY NAME (the kernel resolves them against its own export list), and carries the layout facts it was compiled against
+# (purr_shell_layout.def); the loader refuses it if one differs. The capacities depend only on the export list and the layout list, so the two link results of
+# the link-twice method have the same size, and the header is written into both after they are linked (the same bytes in both, so never mistaken for a relocation).
 
 HEADER_MAGIC = 0x4C485350                # "PSHL"
-_HEAD_WORDS = 6
+FIXED = 64
+LAYOUT_CAP = 32                          # layout facts a shell may carry (the kernel's list is shorter; the loader refuses a shell with an id it does not know)
 
 
-def header_size(export_count):
-    return 4 * _HEAD_WORDS + 8 * export_count
+def capacities(entries):
+    """(layout capacity, import capacity, names capacity in bytes) for a list of exports: room for every export to be used."""
+    return LAYOUT_CAP, len(entries), sum(len(name) + 1 for _k, name, _t in entries)
 
 
-def build_header(abi_version, export_count, bss_size, imports):
-    if len(imports) > export_count:
-        raise ShellAbiError("%d import sites but room for %d" % (len(imports), export_count))
-    head = struct.pack("<6I", HEADER_MAGIC, abi_version, export_count, bss_size, len(imports), 0)
-    pairs = b"".join(struct.pack("<II", off, idx) for off, idx in imports)
-    return head + pairs + b"\0" * (8 * (export_count - len(imports)))
+def header_size(caps):
+    lcap, icap, ncap = caps
+    return FIXED + 8 * lcap + 8 * icap + ((ncap + 3) & ~3)
+
+
+def build_header(abi_version, built_for, bss_size, imports, layout, caps):
+    """imports: [(offset in the code, name)]; layout: [(id, value)]. Raises ShellAbiError if something does not fit the capacities."""
+    lcap, icap, ncap = caps
+    if len(imports) > icap:
+        raise ShellAbiError("%d import sites but room for %d" % (len(imports), icap))
+    if len(layout) > lcap:
+        raise ShellAbiError("%d layout facts but room for %d" % (len(layout), lcap))
+    names, name_off = b"", {}
+    for _off, name in imports:
+        if name not in name_off:
+            name_off[name] = len(names)
+            names += name.encode("ascii") + b"\0"
+    if len(names) > ncap:
+        raise ShellAbiError("the names need %d bytes but room for %d" % (len(names), ncap))
+    bf = built_for.encode("ascii")[:16].ljust(16, b"\0")
+    head = struct.pack("<9I", HEADER_MAGIC, abi_version, bss_size, len(imports), len(layout), len(names), lcap, icap, ncap) + bf + b"\0" * 12
+    lay = b"".join(struct.pack("<II", i, v) for i, v in layout) + b"\0" * (8 * (lcap - len(layout)))
+    imp = b"".join(struct.pack("<II", off, name_off[name]) for off, name in imports) + b"\0" * (8 * (icap - len(imports)))
+    blob = head + lay + imp + names + b"\0" * (((ncap + 3) & ~3) - len(names))
+    assert len(blob) == header_size(caps)
+    return blob
 
 
 def parse_header(blob):
-    """The inverse of build_header: a dict with abi_version, export_count, bss_size, imports (a list of (offset, index))."""
-    if len(blob) < 4 * _HEAD_WORDS:
+    """The inverse of build_header: a dict with abi_version, built_for, bss_size, imports [(offset, name)], layout [(id, value)] and size."""
+    if len(blob) < FIXED:
         raise ShellAbiError("the code is shorter than a shell header")
-    magic, abi, count, bss, nimp, _res = struct.unpack_from("<6I", blob, 0)
+    magic, abi, bss, nimp, nlay, nnames, lcap, icap, ncap = struct.unpack_from("<9I", blob, 0)
     if magic != HEADER_MAGIC:
         raise ShellAbiError("not a shell (header magic %08X)" % magic)
-    if nimp > count or len(blob) < header_size(count):
+    if nimp > icap or nlay > lcap or nnames > ncap or len(blob) < header_size((lcap, icap, ncap)):
         raise ShellAbiError("the shell header is damaged")
-    imports = [struct.unpack_from("<II", blob, 4 * _HEAD_WORDS + 8 * i) for i in range(nimp)]
-    return {"abi_version": abi, "export_count": count, "bss_size": bss, "imports": imports}
+    built_for = blob[36:52].split(b"\0")[0].decode("ascii")
+    lay_at = FIXED
+    imp_at = lay_at + 8 * lcap
+    names_at = imp_at + 8 * icap
+    names = blob[names_at:names_at + nnames]
+    layout = [struct.unpack_from("<II", blob, lay_at + 8 * i) for i in range(nlay)]
+    imports = []
+    for i in range(nimp):
+        off, noff = struct.unpack_from("<II", blob, imp_at + 8 * i)
+        imports.append((off, names[noff:names.index(b"\0", noff)].decode("ascii")))
+    return {"abi_version": abi, "built_for": built_for, "bss_size": bss, "imports": imports, "layout": layout, "size": header_size((lcap, icap, ncap))}

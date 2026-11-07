@@ -51,9 +51,14 @@ void purr_shell_started(void);
 int purr_shell_is_android(void);
 
 /* The installed shells (a folder /ui/shells/<id>/ with shell.cat in it; shell.conf gives name, author, version, skin). Returns how many were put in out. */
+#define PURR_SHELL_STATE_UNTESTED      0                /* compatible with this system, never started on it */
+#define PURR_SHELL_STATE_GOOD          1                /* compatible, and has started here before (the system marked it good) */
+#define PURR_SHELL_STATE_NEEDS_UPDATE  2                /* uses something this system does not have or lays things out differently: the built-in shell runs instead until the shell or the system is updated */
+#define PURR_SHELL_STATE_BAD           3                /* unreadable or not a shell */
 typedef struct {
-    char id[24], name[32], author[32], version[16];
+    char id[24], name[32], author[32], version[16], built_for[17];
     int skin;                                           /* PURR_SHELL_SKIN_W10M or PURR_SHELL_SKIN_ANDROID (purr_shell_abi.h) */
+    int state;                                          /* PURR_SHELL_STATE_*: the shell's own header against this kernel, now (a system update can change it) */
 } purr_shell_info_t;
 int purr_shell_list(purr_shell_info_t *out, int max);
 

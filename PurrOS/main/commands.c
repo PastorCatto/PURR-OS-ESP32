@@ -5292,9 +5292,14 @@ static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, con
 #if CONFIG_PURR_PROFILE_FULL
     purr_shellhdr_t sh = {0};
     if (expected_subtype == PURR_MOD_SHELL) {
-        purr_shellhdr_result_t hr = purr_shellhdr_parse(payload + layout.code_offset, layout.code_size, PURR_SHELL_ABI_VERSION, (uint32_t)purr_shell_export_count, &sh);
+        const char *problem = NULL;
+        purr_shellhdr_result_t hr = purr_shellhdr_parse(payload + layout.code_offset, layout.code_size, PURR_SHELL_ABI_VERSION, &sh);
+        if (hr == PURR_SHELLHDR_OK) {
+            hr = purr_shellhdr_check(payload + layout.code_offset, layout.code_size, &sh, purr_shell_export_names, (uint32_t)purr_shell_export_count,
+                                     (const purr_shellhdr_pair_t *)purr_shell_layout, (uint32_t)purr_shell_layout_count, &problem);
+        }
         if (hr != PURR_SHELLHDR_OK) {
-            ESP_LOGW(log_tag, "%s: %s", path, purr_shellhdr_result_name(hr));
+            ESP_LOGW(log_tag, "%s: %s%s%s", path, purr_shellhdr_result_name(hr), problem != NULL ? ": " : "", problem != NULL ? problem : "");
             free(data_offsets);
             free(code_offsets);
             free(rb);
@@ -5368,7 +5373,7 @@ static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, con
     }
 #if CONFIG_PURR_PROFILE_FULL
     if (expected_subtype == PURR_MOD_SHELL) {                               /* the real address of every OS name the shell uses, over the placeholders the linker left */
-        purr_shellhdr_result_t hr = purr_shellhdr_patch(databuf, layout.code_size, &sh, purr_shell_exports, (uint32_t)purr_shell_export_count);
+        purr_shellhdr_result_t hr = purr_shellhdr_patch(databuf, layout.code_size, &sh, purr_shell_export_names, (uint32_t)purr_shell_export_count, purr_shell_exports);
         if (hr != PURR_SHELLHDR_OK) {
             ESP_LOGW(log_tag, "%s: %s", path, purr_shellhdr_result_name(hr));
             esp_mmu_unmap(exec_ptr);
@@ -5420,6 +5425,57 @@ static purr_load_result_t load_relocatable_file(const char *path, const char *lo
 #define PURR_SHELL_LOAD_MAX_PAGES 8
 #define PURR_SHELL_READ_CAP (1024 * 1024)
 
+/* Is the installed shell /ui/shells/<id>/shell.cat compatible with this kernel? Reads the file and reads its header: every OS name it uses must exist here, and every
+ * layout fact it carries must match (purr_shell_layout.def). It does NOT verify the signature: that is purr_shell_module_load()'s job, which repeats this check. Returns
+ * PURR_SHELL_CHECK_OK, PURR_SHELL_CHECK_INCOMPATIBLE (a newer kernel or an updated shell would fix it) or PURR_SHELL_CHECK_BAD (missing, unreadable, not a shell, damaged).
+ * built_for (when not NULL) gets the kernel version the shell was built for. */
+int purr_shell_module_check(const char *id, char *built_for, size_t cap)
+{
+    if (built_for != NULL && cap > 0) {
+        built_for[0] = '\0';
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "/ui/shells/%s/shell.cat", id);
+    int is_dir = 0;
+    uint32_t file_size = 0;
+    if (purr_fs_stat(&s_fs, path, &is_dir, &file_size) != 0 || is_dir || file_size == 0 || file_size > PURR_SHELL_READ_CAP) {
+        return PURR_SHELL_CHECK_BAD;
+    }
+    uint8_t *rb = malloc(file_size);
+    if (rb == NULL) {
+        return PURR_SHELL_CHECK_BAD;
+    }
+    appinstall_read_ctx_t rc = {rb, file_size, 0};
+    int res = PURR_SHELL_CHECK_BAD;
+    purr_image_header_t hdr;
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) >= 0 && rc.len >= sizeof(hdr)) {
+        memcpy(&hdr, rb, sizeof(hdr));
+        purr_module_layout_t layout;
+        if (hdr.image_type == PURR_IMG_MODULE && PURR_FLAGS_SUBTYPE(hdr.flags) == PURR_MOD_SHELL && (uint64_t)hdr.payload_offset + hdr.payload_size <= rc.len &&
+            purr_module_parse_layout(rb + hdr.payload_offset, hdr.payload_size, &layout) == PURR_MOD_LAYOUT_OK) {
+            const uint8_t *code = rb + hdr.payload_offset + layout.code_offset;
+            purr_shellhdr_t sh;
+            const char *problem = NULL;
+            purr_shellhdr_result_t hr = purr_shellhdr_parse(code, layout.code_size, PURR_SHELL_ABI_VERSION, &sh);
+            if (hr == PURR_SHELLHDR_OK) {
+                if (built_for != NULL) {
+                    snprintf(built_for, cap, "%s", sh.built_for);
+                }
+                hr = purr_shellhdr_check(code, layout.code_size, &sh, purr_shell_export_names, (uint32_t)purr_shell_export_count,
+                                         (const purr_shellhdr_pair_t *)purr_shell_layout, (uint32_t)purr_shell_layout_count, &problem);
+            }
+            if (hr == PURR_SHELLHDR_OK) {
+                res = PURR_SHELL_CHECK_OK;
+            } else if (hr == PURR_SHELLHDR_NEEDS_NEWER || hr == PURR_SHELLHDR_LAYOUT_MISMATCH || hr == PURR_SHELLHDR_BAD_ABI) {
+                ESP_LOGW("shell", "%s: %s%s%s", path, purr_shellhdr_result_name(hr), problem != NULL ? ": " : "", problem != NULL ? problem : "");
+                res = PURR_SHELL_CHECK_INCOMPATIBLE;
+            }
+        }
+    }
+    free(rb);
+    return res;
+}
+
 /* Loads /ui/shells/<id>/shell.cat: verifies it (a trusted key whose role may sign a shell, the shell subtype, a header for this ABI), relocates it, writes the real
  * addresses of the OS names over its placeholders, maps it executable and calls its entry point. Returns its ops table, or NULL (and says why in the log). A shell stays
  * loaded for the life of the boot: there is no unloading, a different choice takes effect at the next start. */
@@ -5445,7 +5501,7 @@ const purr_shell_ops_t *purr_shell_module_load(const char *id)
     }
     purr_shell_module_main_t entry = (purr_shell_module_main_t)((uint8_t *)exec_ptr + entry_offset);
     const purr_shell_ops_t *ops = entry();
-    if (ops == NULL || ops->abi_version != PURR_SHELL_ABI_VERSION || ops->start == NULL || ops->id == NULL) {
+    if (ops == NULL || ops->size < sizeof(purr_shell_ops_t) || ops->abi_version != PURR_SHELL_ABI_VERSION || ops->start == NULL || ops->id == NULL) {
         ESP_LOGW("shell", "%s: the entry point gave no usable ops table", path);
         esp_mmu_unmap(exec_ptr);
         free(databuf);
