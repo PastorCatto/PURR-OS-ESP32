@@ -6,17 +6,13 @@
 #define PURR_W10M_PRIV_H
 
 #include "lvgl.h"
+#include "purr_w10m_theme.h"
 #include "sdkconfig.h"
 
 /* What the shell reserves at the top (the status strip) and the bottom (the Android shell's key strip: Menu, Home, Back). Every sheet and
  * window sizes itself between them. */
-#if CONFIG_PURR_SHELL_ANDROID
-#define W10M_STATUS_H 19
-#define W10M_NAV_H    28
-#else
-#define W10M_STATUS_H 18
-#define W10M_NAV_H    0
-#endif
+#define W10M_STATUS_H (purr_theme_skin() == PURR_SKIN_ANDROID ? 19 : 18)
+#define W10M_NAV_H    (purr_theme_skin() == PURR_SKIN_ANDROID ? 28 : 0)
 
 const lv_image_dsc_t *w10m_img(const char *name);   /* NULL when the asset is missing */
 int w10m_disp_w(void);

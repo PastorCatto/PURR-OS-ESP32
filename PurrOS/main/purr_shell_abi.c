@@ -34,6 +34,7 @@
 #include "purr_power_plat.h"
 #include "purr_ui_service.h"
 #include "purr_notify.h"
+#include "purr_shell.h"
 #include "purr_w10m_priv.h"
 #include "purr_wallpaper.h"
 #include "purr_resetnote_os.h"

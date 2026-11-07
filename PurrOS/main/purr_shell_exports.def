@@ -206,3 +206,8 @@ SHELL_FN(w10m_settings_layout)
 SHELL_FN(w10m_settings_open)
 SHELL_FN(w10m_tasks_close)
 SHELL_FN(w10m_tasks_open)
+
+/* Added after the first list (appending keeps ABI 1): what the shell needs now that the shared screens ask for the skin at run time and the Interface setting is shared */
+SHELL_FN(purr_theme_skin)
+SHELL_FN(purr_shell_mode_get)
+SHELL_FN(purr_shell_mode_set)

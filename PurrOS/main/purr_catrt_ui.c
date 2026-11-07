@@ -26,9 +26,8 @@
 #include "purr_ui_service.h"
 #include "purr_w10m_priv.h"
 #include "purr_w10m_theme.h"
-#if CONFIG_PURR_SHELL_ANDROID
-#include "purr_android_priv.h"
-#endif
+#include "purr_android_priv.h"                     /* both official shells are in every image: and_app_icon() */
+#include "purr_shell.h"
 
 #define TAG "ui-cc"
 #define HEAD_H 30
@@ -146,22 +145,22 @@ static void win_create(int slot, const char *name)
     purr_theme_apply(w->title, PURR_TH_TEXT);
     lv_obj_align(w->title, LV_ALIGN_LEFT_MID, 34, 0);
     purr_theme_title_bar(w->head, arrow, w->title);
-#if CONFIG_PURR_SHELL_ANDROID
-    lv_obj_set_style_bg_opa(w->head, LV_OPA_COVER, 0);                       /* the Android 2.2 title bar: a dark grey gradient, the app's own icon, white text */
-    lv_obj_set_style_bg_color(w->head, lv_color_hex(0x505050), 0);
-    lv_obj_set_style_bg_grad_color(w->head, lv_color_hex(0x2A2A2A), 0);
-    lv_obj_set_style_bg_grad_dir(w->head, LV_GRAD_DIR_VER, 0);
-    const lv_image_dsc_t *ic = and_app_icon(name);
-    if (ic != NULL) {
-        lv_obj_t *im = lv_image_create(w->head);
-        lv_image_set_src(im, ic);
-        lv_image_set_scale(im, 128);                                         /* the 48 pixel launcher icon at half size */
-        lv_obj_set_size(im, 24, 24);
-        lv_obj_remove_flag(im, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_align(im, LV_ALIGN_LEFT_MID, 4, 0);
-        lv_obj_align(w->title, LV_ALIGN_LEFT_MID, 32, 0);
+    if (purr_shell_is_android()) {
+        lv_obj_set_style_bg_opa(w->head, LV_OPA_COVER, 0);                       /* the Android 2.2 title bar: a dark grey gradient, the app's own icon, white text */
+        lv_obj_set_style_bg_color(w->head, lv_color_hex(0x505050), 0);
+        lv_obj_set_style_bg_grad_color(w->head, lv_color_hex(0x2A2A2A), 0);
+        lv_obj_set_style_bg_grad_dir(w->head, LV_GRAD_DIR_VER, 0);
+        const lv_image_dsc_t *ic = and_app_icon(name);
+        if (ic != NULL) {
+            lv_obj_t *im = lv_image_create(w->head);
+            lv_image_set_src(im, ic);
+            lv_image_set_scale(im, 128);                                         /* the 48 pixel launcher icon at half size */
+            lv_obj_set_size(im, 24, 24);
+            lv_obj_remove_flag(im, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_align(im, LV_ALIGN_LEFT_MID, 4, 0);
+            lv_obj_align(w->title, LV_ALIGN_LEFT_MID, 32, 0);
+        }
     }
-#endif
 
     w->act = lv_label_create(w->sheet);                 /* above the header, so it has its own tap area */
     lv_obj_set_style_text_font(w->act, &lv_font_montserrat_16, 0);
@@ -406,7 +405,6 @@ static lv_color_t tag_color(const char *tag)
     return lv_color_hex(!strcmp(tag, "MTS") ? 0x2E7D4F : !strcmp(tag, "RET") ? 0x3B6EA8 : !strcmp(tag, "MC") ? 0x8A5AB0 : !strcmp(tag, "ECHO") ? 0xB5502F : 0x6B6B6B);
 }
 
-#if !CONFIG_PURR_SHELL_ANDROID
 /* The same row in the Lumia (Windows Phone 8) manner: flat, no dividers, no coloured tags. A square in the accent colour carries the first letter, the name is in light type (in the accent
  * colour while the row is unread, with a small accent square at the right), the snippet and the time are dim. A press or the trackball's focus tints the row with the accent. */
 static lv_obj_t *make_conv_row_lumia(win_t *w, const char *name, const char *snippet, const char *when, const char *tag, int flags)
@@ -490,7 +488,6 @@ static lv_obj_t *make_conv_row_lumia(win_t *w, const char *name, const char *sni
     }
     return r;
 }
-#endif
 
 /* A conversation or person row in the Froyo style (version 4): a coloured square with the first letter, the name over a line of text, the time on the right and a small tag
  * under it. An unread row is tinted with an orange bar at its left edge; a failed send gets a red mark. */
@@ -500,9 +497,9 @@ static lv_obj_t *make_conv_row(win_t *w, const char *name, const char *snippet, 
     snippet = safe(snippet, 120);
     when = safe(when, 12);
     tag = safe(tag, 7);
-#if !CONFIG_PURR_SHELL_ANDROID
-    return make_conv_row_lumia(w, name, snippet, when, tag, flags);          /* elsewhere the row is flat and in the accent colour */
-#else
+    if (!purr_shell_is_android()) {
+        return make_conv_row_lumia(w, name, snippet, when, tag, flags);      /* elsewhere the row is flat and in the accent colour */
+    }
     int unread = (flags & PURR_UI_CONV_UNREAD) != 0, failed = (flags & PURR_UI_CONV_FAILED) != 0;
     int dark = 0;                                                           /* the Android shell draws a conversation list the way Android 2.2 does: a white list, whatever the base */
     if (!w->light) {
@@ -601,7 +598,6 @@ static lv_obj_t *make_conv_row(win_t *w, const char *name, const char *snippet, 
         lv_obj_align(e, LV_ALIGN_TOP_RIGHT, -(6 + 8 * (int)strlen(when) + 4), 5);
     }
     return r;
-#endif
 }
 
 /* A speech bubble for a message: `side` 0 sits on the left (received, light grey), 1 on the right (sent, light orange); `meta` is the small line under the text (time and state). */
@@ -617,23 +613,25 @@ static lv_obj_t *make_bubble(win_t *w, const char *text, int side, const char *m
     lv_obj_remove_style_all(b);
     lv_obj_set_size(b, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
-#if CONFIG_PURR_SHELL_ANDROID
+    int android = purr_shell_is_android();
     int dark = 0;
-    if (!w->light) {                                                        /* a message thread is a white page in the Android shell too */
+    if (android && !w->light) {                                             /* a message thread is a white page in the Android shell too */
         w->light = 1;
         lv_obj_set_style_bg_color(w->sheet, lv_color_white(), 0);
         lv_obj_set_style_bg_opa(w->sheet, LV_OPA_COVER, 0);
     }
-#endif
-#if CONFIG_PURR_SHELL_ANDROID
-    lv_obj_set_style_bg_color(b, lv_color_hex(side ? (dark ? 0x7A4E10 : 0xFFE3B0) : (dark ? 0x3A3A3A : 0xE4E4E4)), 0);
-    lv_obj_set_style_radius(b, 8, 0);
-    lv_color_t c_text = lv_color_hex(dark ? 0xFFFFFF : 0x000000), c_meta = lv_color_hex(dark ? 0xC8B890 : 0x6B5A3A);
-#else
-    lv_obj_set_style_bg_color(b, side ? purr_theme_accent_color() : purr_theme_surface_color(), 0);    /* the Lumia manner: flat, square, a sent message in the accent colour */
-    lv_obj_set_style_radius(b, 0, 0);
-    lv_color_t c_text = side ? lv_color_white() : purr_theme_text_color(), c_meta = side ? lv_color_hex(0xE6E6E6) : purr_theme_dim_color();
-#endif
+    lv_color_t c_text, c_meta;
+    if (android) {
+        lv_obj_set_style_bg_color(b, lv_color_hex(side ? (dark ? 0x7A4E10 : 0xFFE3B0) : (dark ? 0x3A3A3A : 0xE4E4E4)), 0);
+        lv_obj_set_style_radius(b, 8, 0);
+        c_text = lv_color_hex(dark ? 0xFFFFFF : 0x000000);
+        c_meta = lv_color_hex(dark ? 0xC8B890 : 0x6B5A3A);
+    } else {
+        lv_obj_set_style_bg_color(b, side ? purr_theme_accent_color() : purr_theme_surface_color(), 0);    /* the Lumia manner: flat, square, a sent message in the accent colour */
+        lv_obj_set_style_radius(b, 0, 0);
+        c_text = side ? lv_color_white() : purr_theme_text_color();
+        c_meta = side ? lv_color_hex(0xE6E6E6) : purr_theme_dim_color();
+    }
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b, 5, 0);
     lv_obj_set_style_pad_row(b, 1, 0);
@@ -878,10 +876,10 @@ static void *exec(void *arg)
         o = make_conv_row(w, r->s1, r->s2, r->s3, r->s4, r->i1);
         break;
     case OP_WIN_STYLE:
-#if !CONFIG_PURR_SHELL_ANDROID
-        r->rc = 0;                                  /* a light list is the Android shell's way; the other shell keeps following the system's light or dark base */
-        break;
-#endif
+        if (!purr_shell_is_android()) {
+            r->rc = 0;                              /* a light list is the Android shell's way; the other shell keeps following the system's light or dark base */
+            break;
+        }
         w->light = r->i1 == PURR_UI_STYLE_LIGHT;
         if (w->light) {
             lv_obj_set_style_bg_color(w->sheet, lv_color_white(), 0);

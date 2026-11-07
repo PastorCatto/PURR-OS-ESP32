@@ -41,6 +41,7 @@
 #include "purr_power_plat.h"
 #include "purr_ui_service.h"
 #include "purr_notify.h"
+#include "purr_shell.h"
 #include "purr_w10m_priv.h"
 #include "purr_wallpaper.h"
 #include "purr_resetnote_os.h"
@@ -2436,32 +2437,18 @@ static int rot_set(const char *v, char *e, size_t c)
 
 static int shell_get(char *o, size_t c)
 {
-    purr_ui_mode_t m = purr_ui_mode_get();
-    snprintf(o, c, "%s", m == PURR_UI_MODE_W10M ? "w10m" : m == PURR_UI_MODE_NAV ? "nav" : "card_shell");
-    return 0;
+    return purr_shell_mode_get(o, c);
 }
 
 static int shell_set(const char *v, char *e, size_t c)
 {
-    if (strcmp(v, "w10m") != 0 && strcmp(v, "nav") != 0 && strcmp(v, "card_shell") != 0) {
-        snprintf(e, c, "expected w10m, nav or card_shell");
-        return -1;
-    }
-    purr_fs_t *fs = purr_login_fs();
-    char line[24];
-    snprintf(line, sizeof(line), "%s\n", v);
-    purr_fs_mkdir(fs, "/ui");
-    if (purr_fs_write(fs, "/ui/mode.conf", line, (uint32_t)strlen(line)) < 0) {
-        snprintf(e, c, "could not save");
-        return -1;
-    }
-    return 0;                                       /* takes effect at the next boot */
+    return purr_shell_mode_set(v, e, c);                /* takes effect at the next start */
 }
 
 static const purr_setting_t s_w10m_keys[] = {
     {"display.brightness", "backlight", "1-255", 0, bright_get, bright_set},
     {"display.rotation", "screen orientation in degrees", "0|90|180|270", 0, rot_get, rot_set},
-    {"ui.shell", "which shell starts (next boot)", "w10m|nav|card_shell", 1, shell_get, shell_set},
+    {"ui.shell", "which shell starts (next boot)", "builtin|<id>|nav|card_shell", 1, shell_get, shell_set},
 };
 
 void w10m_place_sheet(lv_obj_t *sheet)

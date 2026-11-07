@@ -59,6 +59,7 @@
 #include "purr_recovery_src.h"
 #include "purr_repo.h"
 #include "purr_trust_os.h"
+#include "purr_shell.h"
 #include "purr_wallpaper.h"
 #include "purr_ui_service.h"
 #include "purr_w10m_priv.h"
@@ -388,14 +389,27 @@ static void rotation_cb(lv_event_t *e)
     w10m_apply_orientation((int)lv_dropdown_get_selected(lv_event_get_target(e)) * 90);
 }
 
+/* The Interface dropdown: the built-in shell, every installed shell (/ui/shells/<id>/), Navigation and Card stack. s_shell_ids[i] is what entry i chooses. */
+#define SHELL_MAX 6
+static purr_shell_info_t s_shells[SHELL_MAX];
+static int s_shell_n;
+
 static void shell_cb(lv_event_t *e)
 {
-    static const char *const modes[] = {"w10m", "nav", "card_shell"};
     int sel = (int)lv_dropdown_get_selected(lv_event_get_target(e));
     const purr_setting_t *s = purr_settings_find("ui.shell");
-    const char *mode = sel == 0 && purr_theme_skin() == PURR_SKIN_ANDROID ? "android" : (sel >= 0 && sel < 3 ? modes[sel] : "");
+    const char *mode = NULL;
+    if (sel == 0) {
+        mode = "builtin";
+    } else if (sel >= 1 && sel <= s_shell_n) {
+        mode = s_shells[sel - 1].id;
+    } else if (sel == s_shell_n + 1) {
+        mode = "nav";
+    } else if (sel == s_shell_n + 2) {
+        mode = "card_shell";
+    }
     char err[64] = "";
-    if (s != NULL && sel >= 0 && sel < 3 && s->set(mode, err, sizeof(err)) == 0) {
+    if (s != NULL && mode != NULL && s->set(mode, err, sizeof(err)) == 0) {
         say("Saved. It takes effect after a restart.", 1);
     } else {
         say(err[0] ? err : "Could not save.", 0);
@@ -457,15 +471,31 @@ static void page_system(void)
     cm_dropdown(s_body, "0\xC2\xB0\n90\xC2\xB0\n180\xC2\xB0\n270\xC2\xB0", purr_lvgl_get_rotation() / 90, 120, rotation_cb);
 
     cm_space(s_body, 6);
-    cm_title(s_body, purr_theme_skin() == PURR_SKIN_ANDROID ? "Interface" : "Start screen");
-    char cur[24] = "w10m";
-    const purr_setting_t *s = purr_settings_find("ui.shell");
-    if (s != NULL) {
-        s->get(cur, sizeof(cur));
+    cm_title(s_body, "Interface");
+    s_shell_n = purr_shell_list(s_shells, SHELL_MAX);
+    char names[SHELL_MAX * 40 + 80] = "Android 2.2 (built in)";
+    for (int i = 0; i < s_shell_n; i++) {
+        size_t n = strlen(names);
+        snprintf(names + n, sizeof(names) - n, "\n%s", s_shells[i].name);
     }
-    int sel = strcmp(cur, "nav") == 0 ? 1 : strcmp(cur, "card_shell") == 0 ? 2 : 0;
-    lv_obj_t *dd = cm_dropdown(s_body, purr_theme_skin() == PURR_SKIN_ANDROID ? "Android 2.2\nNavigation\nCard stack"
-                                                                                : "Windows 10 Mobile\nNavigation\nCard stack", sel, 170, shell_cb);
+    size_t nn = strlen(names);
+    snprintf(names + nn, sizeof(names) - nn, "\nNavigation\nCard stack");
+    char cur[24] = "builtin";
+    purr_shell_mode_get(cur, sizeof(cur));
+    int sel = strcmp(cur, "nav") == 0 ? s_shell_n + 1 : strcmp(cur, "card_shell") == 0 ? s_shell_n + 2 : 0;
+    for (int i = 0; i < s_shell_n; i++) {
+        if (strcmp(s_shells[i].id, cur) == 0) {
+            sel = i + 1;
+        }
+    }
+    char chosen[24];
+    purr_shell_chosen(chosen, sizeof(chosen));
+    for (int i = 0; i < s_shell_n; i++) {                                          /* what is chosen shows, even before the restart that makes it the running one */
+        if (strcmp(cur, "nav") != 0 && strcmp(cur, "card_shell") != 0 && strcmp(s_shells[i].id, chosen) == 0) {
+            sel = i + 1;
+        }
+    }
+    lv_obj_t *dd = cm_dropdown(s_body, names, sel, 170, shell_cb);
     if (!acting_admin()) {
         lv_obj_add_state(dd, LV_STATE_DISABLED);
         cm_dim(s_body, "Only an administrator can change this.");

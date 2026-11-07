@@ -11,6 +11,9 @@
  * Notifications come from purr_shell_notify, w10m_note_post and the shell itself; a new one also ticks across the status strip for five
  * seconds (w10m_banner) and leaves a small icon on the strip until it is dismissed. At most eight are kept; the oldest goes first.
  */
+/* the shared shell interface this file implements gets its own names (purr_shell_names.h): purr_shell.c defines the real ones */
+#define PURR_SHELL_IMPL_ANDROID
+#include "purr_shell_names.h"
 #include "purr_android.h"
 
 #include <stdio.h>

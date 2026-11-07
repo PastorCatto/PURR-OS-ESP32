@@ -34,13 +34,10 @@ static const purr_accent_t s_accents[] = {
 /* ---------------------------------------------------------------- the settings */
 
 #define ACCENT_AMBER 13                                 /* index in s_accents; the Froyo orange highlight is closest to it */
-#if CONFIG_PURR_SHELL_ANDROID
-#define SKIN_ANDROID 1
-#else
-#define SKIN_ANDROID 0
-#endif
+static int s_android = 1;                               /* the skin: the built-in shell is the Android style one; purr_shell_select() changes it when a loaded shell says otherwise */
+#define SKIN_ANDROID (s_android)
 
-static int s_accent = SKIN_ANDROID ? ACCENT_AMBER : PURR_BRAND_ACCENT_INDEX;     /* Cobalt unless the flavor says otherwise; Amber in the Android skin */
+static int s_accent = ACCENT_AMBER;                     /* Amber in the Android skin, which is the default; Cobalt unless the flavor says otherwise in the Windows skin (purr_theme_set_skin) */
 static int s_dark = 1;
 static int s_transparency = 0;          /* solid by default: see-through sheets cost a blend per pixel */
 static int s_tile_opa = 255;
@@ -334,6 +331,12 @@ static void fill_styles(void)
 }
 
 purr_skin_t purr_theme_skin(void) { return SKIN_ANDROID ? PURR_SKIN_ANDROID : PURR_SKIN_W10M; }
+
+void purr_theme_set_skin(purr_skin_t skin)
+{
+    s_android = skin == PURR_SKIN_ANDROID;
+    s_accent = s_android ? ACCENT_AMBER : PURR_BRAND_ACCENT_INDEX;             /* the default accent of the skin; a saved choice (load_file in purr_theme_init) overrides it */
+}
 
 void purr_theme_title_bar(lv_obj_t *head, lv_obj_t *arrow, lv_obj_t *title)
 {

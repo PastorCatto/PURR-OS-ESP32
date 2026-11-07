@@ -1,5 +1,6 @@
 #include "esp_attr.h"
 #include "purr_ui_assets.h"
+#include "purr_w10m_theme.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -205,11 +206,8 @@ static esp_err_t load_pack(pack_t *p, const char *path)
     return ESP_OK;
 }
 
-#if CONFIG_PURR_SHELL_ANDROID
-#define SHELL_ID "android"
-#else
-#define SHELL_ID "w10m"
-#endif
+/* The shell whose pack is wanted: both official shells are in every image, so it is the skin that was chosen at start-up (purr_shell_select()). */
+#define SHELL_ID (purr_theme_skin() == PURR_SKIN_ANDROID ? "android" : "w10m")
 
 static int id_ok(const char *id)
 {
@@ -259,7 +257,7 @@ static int conf_get(const char *path, const char *key, char *out, size_t cap)
 esp_err_t purr_ui_assets_init(void)
 {
     s_theme_id[0] = s_theme_failed[0] = '\0';
-    esp_err_t e = load_pack(&s_default, "/ui/" SHELL_ID "/pack.bin");
+    esp_err_t e = load_pack(&s_default, purr_theme_skin() == PURR_SKIN_ANDROID ? "/ui/android/pack.bin" : "/ui/w10m/pack.bin");
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "no default pack for this shell (%s): pictures are missing until one is installed", esp_err_to_name(e));
     }

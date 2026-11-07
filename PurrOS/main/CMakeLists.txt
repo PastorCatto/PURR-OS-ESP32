@@ -23,12 +23,9 @@ if(CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS)
         # shared by every official shell: Settings, Developer Portal, task manager, permission prompt, the ui catcall windows
         list(APPEND main_srcs "purr_shell.c" "purr_shell_abi.c" "purr_w10m_settings.c" "purr_repo_dev.c"
                               "purr_w10m_devportal.c" "purr_catrt_ui.c" "purr_w10m_perm.c" "purr_w10m_tasks.c" "purr_systasks.c" "purr_catrt_game.c")
-        # exactly one official shell per image (Kconfig choice PURR_OFFICIAL_SHELL)
-        if(CONFIG_PURR_SHELL_ANDROID)
-            list(APPEND main_srcs "purr_android.c" "purr_android_home.c" "purr_android_shade.c" "purr_android_lock.c")
-        else()
-            list(APPEND main_srcs "purr_w10m.c")
-        endif()
+        # The Android style shell is built into every image: it is the one that always works. Any other shell (the Windows 10 Mobile one, purr_w10m.c) is a loadable
+        # module built by `purrstrap shells build` from its own source and installed under /ui/shells/ (plan7.md); it is not part of the kernel.
+        list(APPEND main_srcs "purr_android.c" "purr_android_home.c" "purr_android_shade.c" "purr_android_lock.c")
     endif()
     list(APPEND main_reqs lvgl)
 endif()

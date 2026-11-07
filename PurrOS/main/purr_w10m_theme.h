@@ -63,6 +63,9 @@ typedef enum {
 /* Which skin this image was built with. */
 purr_skin_t purr_theme_skin(void);
 
+/* Chooses the skin (and so the shell whose pictures and layout are used). Call once at start-up, before purr_theme_init(): purr_shell_select() does. */
+void purr_theme_set_skin(purr_skin_t skin);
+
 /* Dresses a window or sheet header made of a container, a back arrow and a title: the title bar role on the
  * container, and in the Android skin the arrow is hidden (Back is a key there) and the title moves to the left edge.
  * The container stays clickable and goes back when tapped, in both skins. */

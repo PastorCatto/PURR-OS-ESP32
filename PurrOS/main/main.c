@@ -238,6 +238,7 @@ void app_main(void)
      * switches shell later plants the new one's config on its next boot. */
 #if !CONFIG_PURR_PROFILE_RECOVERY           /* KittenOS shows the recovery app, not a shell: no card stack or nav config */
     purr_ui_mode_setup(&boot_cli);
+    purr_shell_select();                /* the shell the user chose (a loadable one, if installed and trusted) or the built-in one: before the theme and the pictures are set up */
     switch (purr_ui_mode_get()) {
     case PURR_UI_MODE_NAV:
         purr_ui_config_setup(&boot_cli);
@@ -371,7 +372,9 @@ void app_main(void)
 #if CONFIG_PURR_PROFILE_RECOVERY
                 purr_card_shell_start();
 #else
-                purr_shell_start();
+                if (purr_shell_start() == ESP_OK) {
+                    purr_shell_started();       /* on screen: clears the count of failed starts of a chosen shell */
+                }
 #endif
             } else {
                 purr_card_shell_start();

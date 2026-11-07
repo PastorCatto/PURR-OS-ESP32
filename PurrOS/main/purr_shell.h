@@ -1,15 +1,17 @@
 /*
- * purr_shell.h - the official shell, whichever one this image was built with (plan7.md).
+ * purr_shell.h - the official shell that is running (plan7.md).
  *
- * One official shell is compiled per image (Kconfig choice PURR_OFFICIAL_SHELL): the Windows 10 Mobile
- * style shell (purr_w10m.c) or the Android style shell (purr_android.c). Everything outside the shell
- * calls these functions and never the shell's own. Apps never see a shell at all: they use the ui,
+ * The Android style shell is built into every image (the one that always works); any other shell is a loadable
+ * module installed under /ui/shells/<id>/ and chosen in Settings (purr_shell_select(), purr_shell_choose()).
+ * Everything outside the shell calls these functions and never the shell's own. Apps never see a shell at all: they use the ui,
  * tile, system and permission catcalls and the OS draws the result.
  *
  * All of them run on the UI service task or hop onto it, so they are safe from any task.
  */
 #ifndef PURR_SHELL_H
 #define PURR_SHELL_H
+
+#include <stddef.h>
 
 #include "esp_err.h"
 
@@ -33,8 +35,37 @@ esp_err_t purr_shell_notify(const char *title, const char *text);
 /* Re-reads the signed-in user's installed apps and rebuilds the shell's app views. */
 esp_err_t purr_shell_refresh_apps(void);
 
-/* The compiled shell's short name: "w10m" or "android". */
+/* The running shell's id: "android" for the built-in one, the module's id otherwise. */
 const char *purr_shell_name(void);
+
+/* Reads /ui/active-shell.conf and, if it names an installed shell, loads it (verifying its signature) and makes its skin the theme's. Call once at start-up,
+ * after the file system is up and before the theme and the pictures are set up. If the shell cannot be loaded, or the last starts did not get as far as showing
+ * it, the built-in shell is used and the choice is undone. */
+void purr_shell_select(void);
+
+/* Call after purr_shell_start() returned: the chosen shell is on screen, so the count of failed starts is cleared, and a notification says why the
+ * built-in shell is in use if a chosen one had to be given up. */
+void purr_shell_started(void);
+
+/* 1 when the shared screens (Settings, windows) are drawn in the Android skin: the built-in shell, or a module that says so. */
+int purr_shell_is_android(void);
+
+/* The installed shells (a folder /ui/shells/<id>/ with shell.cat in it; shell.conf gives name, author, version, skin). Returns how many were put in out. */
+typedef struct {
+    char id[24], name[32], author[32], version[16];
+    int skin;                                           /* PURR_SHELL_SKIN_W10M or PURR_SHELL_SKIN_ANDROID (purr_shell_abi.h) */
+} purr_shell_info_t;
+int purr_shell_list(purr_shell_info_t *out, int max);
+
+/* The chosen shell's id, "builtin" for the compiled-in one. */
+void purr_shell_chosen(char *id, size_t cap);
+
+/* Chooses a shell for the next start: "builtin" or the id of an installed one. Saved; takes effect at the next restart. 0 on success, -1 if it is not installed. */
+int purr_shell_choose(const char *id);
+
+/* The `ui.shell` setting for every shell: "builtin" (also "android"), an installed id, "nav" or "card_shell". get gives what is chosen. */
+int purr_shell_mode_get(char *out, size_t cap);
+int purr_shell_mode_set(const char *v, char *err, size_t cap);
 
 #ifdef __cplusplus
 }

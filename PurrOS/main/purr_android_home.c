@@ -18,6 +18,9 @@
  * Objects are kept few (UI/SHELL-OPTIMIZATION.md): an icon is three objects, the pages hold only the pinned apps, and the drawer is built
  * when it opens and deleted when it closes.
  */
+/* the shared shell interface this file implements gets its own names (purr_shell_names.h): purr_shell.c defines the real ones */
+#define PURR_SHELL_IMPL_ANDROID
+#include "purr_shell_names.h"
 #include "purr_android.h"
 
 #include <ctype.h>

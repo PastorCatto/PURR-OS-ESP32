@@ -13,6 +13,9 @@
  * Both sit on the top layer beneath the status strip; the lock screen hides the key strip (and_keys_visible), so it has the whole screen and the slider is how it unlocks. A portrait
  * screen gets a centred clock and a horizontal slider.
  */
+/* the shared shell interface this file implements gets its own names (purr_shell_names.h): purr_shell.c defines the real ones */
+#define PURR_SHELL_IMPL_ANDROID
+#include "purr_shell_names.h"
 #include "purr_android.h"
 
 #include <stdio.h>

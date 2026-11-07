@@ -16,6 +16,9 @@
  * Keys: Menu, Home and Back are three touch keys under the screen. Home is also a hold of the trackball's button (0.6 s; a setting
  * later), Back is also Esc. Menu opens the options menu on the home screen and unlocks a locked screen, as Froyo's Menu key did.
  */
+/* the shared shell interface this file implements gets its own names (purr_shell_names.h): purr_shell.c defines the real ones */
+#define PURR_SHELL_IMPL_ANDROID
+#include "purr_shell_names.h"
 #include "purr_brand.h"
 #include "esp_attr.h"
 #include "purr_android.h"
@@ -34,6 +37,7 @@
 
 #include "commands.h"
 #include "login.h"
+#include "purr_shell.h"
 #include "purr_android_priv.h"
 #include "purr_appmgr.h"
 #include "purr_battery.h"
@@ -697,32 +701,18 @@ static int rot_set(const char *v, char *e, size_t c)
 
 static int shell_get(char *o, size_t c)
 {
-    purr_ui_mode_t m = purr_ui_mode_get();
-    snprintf(o, c, "%s", m == PURR_UI_MODE_W10M ? "android" : m == PURR_UI_MODE_NAV ? "nav" : "card_shell");
-    return 0;
+    return purr_shell_mode_get(o, c);
 }
 
 static int shell_set(const char *v, char *e, size_t c)
 {
-    if (strcmp(v, "android") != 0 && strcmp(v, "nav") != 0 && strcmp(v, "card_shell") != 0) {
-        snprintf(e, c, "expected android, nav or card_shell");
-        return -1;
-    }
-    purr_fs_t *fs = purr_login_fs();
-    char line[24];
-    snprintf(line, sizeof(line), "%s\n", v);
-    purr_fs_mkdir(fs, "/ui");
-    if (purr_fs_write(fs, "/ui/mode.conf", line, (uint32_t)strlen(line)) < 0) {
-        snprintf(e, c, "could not save");
-        return -1;
-    }
-    return 0;                                           /* takes effect at the next boot */
+    return purr_shell_mode_set(v, e, c);                /* takes effect at the next start */
 }
 
 static const purr_setting_t s_keys_table[] = {
     {"display.brightness", "backlight", "1-255", 0, bright_get, bright_set},
     {"display.rotation", "screen orientation in degrees", "0|90|180|270", 0, rot_get, rot_set},
-    {"ui.shell", "which shell starts (next boot)", "android|nav|card_shell", 1, shell_get, shell_set},
+    {"ui.shell", "which shell starts (next boot)", "builtin|<id>|nav|card_shell", 1, shell_get, shell_set},
 };
 
 /* ---------------------------------------------------------------- sheets, the wallpaper, apps */
