@@ -1042,14 +1042,10 @@ static int run_job(void)
     if (strcmp(w, "refresh") == 0) {
         return refresh(s_job.a);
     }
-    if (strcmp(w, "install") == 0) {
-        return install_item(s_job.a, s_job.b);
-    }
-    if (strcmp(w, "update-all") == 0) {
-        return update_all();
-    }
-    if (strcmp(w, "remove") == 0) {
-        return remove_item(s_job.a, s_job.b);
+    if (strcmp(w, "install") == 0 || strcmp(w, "update-all") == 0 || strcmp(w, "remove") == 0) {
+        int rc = strcmp(w, "install") == 0 ? install_item(s_job.a, s_job.b) : strcmp(w, "remove") == 0 ? remove_item(s_job.a, s_job.b) : update_all();
+        w10m_apps_changed_post();                 /* the shell's tiles and app list follow: an app (or a shell, or a theme) came or went, even if the job failed half way */
+        return rc;
     }
     if (strcmp(w, "check") == 0) {
         return check_updates();

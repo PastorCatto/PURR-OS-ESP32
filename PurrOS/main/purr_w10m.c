@@ -279,7 +279,7 @@ static void open_task(void *arg)
 {
     open_job_t *j = arg;
     char line[PURR_APP_NAME_LEN + 8], out[160];
-    snprintf(line, sizeof(line), "open %s", j->name);
+    snprintf(line, sizeof(line), "%s %s", purr_catrt_slot_of(j->name) >= 0 ? "focus" : "open", j->name);     /* a running app comes to the front: a second tap must not start a second copy */
     out[0] = '\0';
     int rc = purr_catrt_dispatch(line, out, sizeof(out));
     if (rc != 0) {
