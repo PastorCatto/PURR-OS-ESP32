@@ -65,6 +65,7 @@
 #include "purr_hwscan_plat.h"
 #include "purr_drvcmds.h"
 #include "purr_hwsetup.h"
+#include "purr_notify.h"
 #include "purr_recovery_src.h"
 #include "purr_catrt_power.h"
 #include "purr_runtime.h"
@@ -2098,6 +2099,7 @@ void purr_swap_setup(purr_cli_t *cli)
 
     cfg.update.state = PURR_UPD_UNCONFIRMED;
     cfg.update.attempts = 0;
+    cfg.boot_fail_count = 0;                         /* a restart that follows an update is not a failed start (the loader does the same after a flash): it must not make the next start set the downloaded drivers aside */
     purr_cfg_store(&fl, &cfg);
     purr_cli_printf(cli, "swap: %s installed, restarting to confirm it\n", name);
     purr_console_flush();
@@ -6211,8 +6213,97 @@ static int builtin_driver_file(const char *file)
     return 0;
 }
 
+/* Drivers that stopped the device are listed in /boot/drivers.bad (one file name per line): the automatic put-back after sign-in (recover_drivers_task) never tries those
+ * again by itself; Device Manager > Drivers still offers them. /boot/drivers.retrying names the driver the put-back is trying right now: if the device dies while it is
+ * there, the next start knows who to blame, sets it aside and lists it as bad, so the put-back can never loop on one driver. */
+#define DRIVER_BAD_FILE   "/boot/drivers.bad"
+#define DRIVER_RETRY_FILE "/boot/drivers.retrying"
+
+static int driver_is_bad(const char *file)
+{
+    uint8_t *buf = NULL;
+    uint32_t len = 0;
+    if (bl_read_file(DRIVER_BAD_FILE, &buf, &len) != 0) {
+        return 0;
+    }
+    size_t fl = strlen(file);
+    int hit = 0;
+    for (uint32_t i = 0; i < len;) {
+        uint32_t j = i;
+        while (j < len && buf[j] != '\n') {
+            j++;
+        }
+        if (j - i == fl && memcmp(buf + i, file, fl) == 0) {
+            hit = 1;
+        }
+        i = j + 1;
+    }
+    free(buf);
+    return hit;
+}
+
+static void driver_mark_bad(const char *file)
+{
+    if (driver_is_bad(file)) {
+        return;
+    }
+    uint8_t *old = NULL;
+    uint32_t len = 0;
+    if (bl_read_file(DRIVER_BAD_FILE, &old, &len) != 0) {
+        old = NULL;
+        len = 0;
+    }
+    if (len > 1024) {                                   /* a list this long is not a real one: start it again */
+        free(old);
+        old = NULL;
+        len = 0;
+    }
+    size_t fl = strlen(file);
+    uint8_t *nb = malloc(len + fl + 2);
+    if (nb != NULL) {
+        if (len > 0) {
+            memcpy(nb, old, len);
+        }
+        memcpy(nb + len, file, fl);
+        nb[len + fl] = '\n';
+        purr_fs_write(&s_fs, DRIVER_BAD_FILE, nb, (uint32_t)(len + fl + 1));
+        free(nb);
+    }
+    free(old);
+}
+
+/* The device stopped while the automatic put-back was trying a driver: that driver is set aside again and listed as bad. */
+static void blame_retried_driver(purr_cli_t *cli, const char *dir)
+{
+    uint8_t *buf = NULL;
+    uint32_t len = 0;
+    if (bl_read_file(DRIVER_RETRY_FILE, &buf, &len) != 0) {
+        return;
+    }
+    char file[48];
+    size_t n = len < sizeof(file) - 1 ? len : sizeof(file) - 1;
+    memcpy(file, buf, n);
+    file[n] = '\0';
+    free(buf);
+    file[strcspn(file, "\r\n")] = '\0';
+    purr_fs_remove(&s_fs, DRIVER_RETRY_FILE);
+    if (file[0] == '\0' || strchr(file, '/') != NULL || strstr(file, "..") != NULL || builtin_driver_file(file)) {
+        return;
+    }
+    char from[96], to[96];
+    snprintf(from, sizeof(from), "%s/%s", dir, file);
+    purr_fs_mkdir(&s_fs, DRIVER_CRASHED_DIR);
+    snprintf(to, sizeof(to), "%s/%s", DRIVER_CRASHED_DIR, file);
+    purr_fs_remove(&s_fs, to);
+    purr_fs_rename(&s_fs, from, to);
+    driver_mark_bad(file);
+    ESP_LOGW("drivers", "%s was being put back when the device stopped: set aside again, and not tried again by itself", file);
+    purr_cli_printf(cli, "drivers: %s stopped the device when it was put back; set aside (Device Manager > Drivers)\n", file);
+}
+
 static void quarantine_crashed_driver(purr_cli_t *cli, const char *dir)
 {
+    blame_retried_driver(cli, dir);
     uint8_t *buf = NULL;
     uint32_t len = 0;
     if (bl_read_file(DRIVER_TRY_FILE, &buf, &len) != 0) {
@@ -6234,6 +6325,7 @@ static void quarantine_crashed_driver(purr_cli_t *cli, const char *dir)
     snprintf(to, sizeof(to), "%s/%s", DRIVER_CRASHED_DIR, file);
     purr_fs_remove(&s_fs, to);
     if (purr_fs_rename(&s_fs, from, to) == 0) {
+        driver_mark_bad(file);
         ESP_LOGW("drivers", "%s was starting when the device stopped last time: set aside in " DRIVER_CRASHED_DIR, file);
         purr_cli_printf(cli, "drivers: %s stopped the device last time; set aside (Device Manager > Drivers)\n", file);
     }
@@ -6478,6 +6570,80 @@ static void settle_task(void *arg)
 
 static void late_quiet_put(void *ctx, char c) { (void)ctx; (void)c; }
 
+/* After sign-in, once the device has run settled (the 30 s window of settle_task), the drivers that were set aside only because a start did not settle are put back one at
+ * a time, with no restart: move the file back, load and bind it, then give the device 20 s before the next. A driver that stops the device is found by DRIVER_RETRY_FILE
+ * at the next start and stays set aside. Drivers already listed as bad are left alone. */
+#define PUTBACK_SETTLE_MS 20000
+
+static void recover_drivers_task(void *arg)
+{
+    (void)arg;
+    static purr_cli_t cli;
+    purr_cli_init(&cli, NULL, 0, late_quiet_put, NULL, "");
+    for (int i = 0; i < 60; i++) {                       /* wait for the start-up settle window to close (it does after 30 s of running) */
+        int isdir = 0;
+        uint32_t sz = 0;
+        if (purr_fs_stat(&s_fs, DRIVER_SETTLE_FILE, &isdir, &sz) != 0) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    module_listing_t l = {.count = 0};
+    if (purr_fs_list(&s_fs, DRIVER_CRASHED_DIR, collect_module_row, &l) != 0 || l.count == 0) {
+        vTaskDelete(NULL);
+        return;
+    }
+    int candidates = 0;
+    for (int i = 0; i < l.count; i++) {
+        size_t n = strlen(l.names[i]);
+        if (!l.is_dir[i] && n >= 4 && strcmp(l.names[i] + n - 4, ".cat") == 0 && !driver_is_bad(l.names[i]) && !builtin_driver_file(l.names[i])) {
+            candidates++;
+        }
+    }
+    if (candidates == 0) {
+        vTaskDelete(NULL);
+        return;
+    }
+    purr_notify_add("System", "The system is still setting itself up in the background.");
+    int back = 0, stay = 0;
+    for (int i = 0; i < l.count; i++) {
+        size_t n = strlen(l.names[i]);
+        if (l.is_dir[i] || n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0 || builtin_driver_file(l.names[i])) {
+            continue;
+        }
+        if (driver_is_bad(l.names[i])) {
+            stay++;
+            continue;
+        }
+        char from[96], to[96];
+        snprintf(from, sizeof(from), "%s/%s", DRIVER_CRASHED_DIR, l.names[i]);
+        snprintf(to, sizeof(to), "%s/%s", PURR_DRIVERS_DIR, l.names[i]);
+        purr_fs_write(&s_fs, DRIVER_RETRY_FILE, l.names[i], (uint32_t)strlen(l.names[i]));      /* before anything can go wrong */
+        if (purr_fs_rename(&s_fs, from, to) != 0) {
+            purr_fs_remove(&s_fs, DRIVER_RETRY_FILE);
+            stay++;
+            continue;
+        }
+        if (purr_driver_load_file(to) != 0) {            /* does not verify or relocate: it is not a good file, so it goes back and is not tried again */
+            purr_fs_remove(&s_fs, from);
+            purr_fs_rename(&s_fs, to, from);
+            driver_mark_bad(l.names[i]);
+            purr_fs_remove(&s_fs, DRIVER_RETRY_FILE);
+            stay++;
+            continue;
+        }
+        purr_hwsetup_boot(&cli);                          /* bind the device it is for */
+        vTaskDelay(pdMS_TO_TICKS(PUTBACK_SETTLE_MS));
+        purr_fs_remove(&s_fs, DRIVER_RETRY_FILE);         /* the device ran on: this one is fine */
+        back++;
+    }
+    char msg[120];
+    snprintf(msg, sizeof(msg), "Setup finished: %d driver(s) are back%s.", back, stay ? ", the others stay set aside (Device Manager > Drivers)" : "");
+    purr_notify_add("System", msg);
+    vTaskDelete(NULL);
+}
+
+
 static void late_drivers_task(void *arg)
 {
     (void)arg;
@@ -6492,6 +6658,7 @@ static void late_drivers_task(void *arg)
     if (xTaskCreate(settle_task, "drv-settle", 4096, NULL, 3, NULL) != pdPASS) {
         purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);
     }
+    xTaskCreate(recover_drivers_task, "drv-back", 12288, NULL, 3, NULL);     /* puts back what was set aside only because a start did not settle */
     vTaskDelete(NULL);
 }
 
