@@ -28,9 +28,10 @@ extern "C" {
 #define PURR_REPO_FORMAT       1
 #define PURR_REPO_FORMAT_STORE 2        /* the signed index of a store repository (Repositories/SPEC.md) */
 
-/* The official repository: the release JumpingJaguar3 of the project's repository. A PLACEHOLDER until that release is published (JumpingJaguar1 holds the
- * recovery images and JumpingJaguar2 the drivers and modules). Its layout is flat: repo.json, index.json, their .sig files and the packages are all assets. */
-#define PURR_REPO_OFFICIAL_URL "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar3"
+/* The official repository: the one repository of the hub (https://github.com/PastorCatto/PURR-OS-HUB), read through GitHub's raw address of its main branch. Its layout
+ * is flat: repo.json, index.json, their .sig files and the packages are all in that folder. The hub key signs it and endorses itself (endorsement by key 5), which
+ * is what makes it "official"; a fork of the hub has another key and is a community repository. A device knows a repository by its key, so there is exactly one. */
+#define PURR_REPO_OFFICIAL_URL "https://raw.githubusercontent.com/PastorCatto/PURR-OS-HUB/main/repos/official"
 #define PURR_REPO_MAX_APPS     32
 #define PURR_REPO_NAME_LEN     32       /* app name, as in the app manager */
 #define PURR_REPO_VERSION_LEN  16

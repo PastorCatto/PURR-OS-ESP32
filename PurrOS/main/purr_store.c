@@ -962,10 +962,23 @@ static int check_updates(void)
     return 0;
 }
 
+/* Whether the list already holds the official repository (by address; its key was checked when it was added). */
+static int has_official(void)
+{
+    char base[96];
+    tidy_base(PURR_REPO_OFFICIAL_URL, base, sizeof(base));
+    for (int i = 0; i < s_repos.count; i++) {
+        if (strcmp(s_repos.e[i].url, base) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int purr_store_bootstrap(char *msg, size_t cap)
 {
     repos_load();
-    if (purr_repos_find(&s_repos, "") == NULL && s_repos.count == 0) {
+    if (!has_official()) {                                      /* also on a device that already has other repositories (a developer's server, say) */
         if (repo_add_fetch(PURR_REPO_OFFICIAL_URL) != 0) {
             snprintf(msg, cap, "%s", s_job.msg);
             return -1;
@@ -992,7 +1005,7 @@ int purr_store_bootstrap(char *msg, size_t cap)
             }
         }
     }
-    snprintf(msg, cap, ok ? "The Store is installed." : "The Store is already installed, or the repository does not have it yet.");
+    snprintf(msg, cap, ok ? "The Store is installed." : "The official repository is set up.");
     return 0;
 }
 

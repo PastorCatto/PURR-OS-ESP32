@@ -328,7 +328,7 @@ NO_OPT static void show_detail(int idx)
     }
     begin_page(PG_DETAIL, s_item.title);
     char t[96];
-    put(t, s_item.type == 0 ? "App " : s_item.type == 1 ? "Asset " : "Extra ", sizeof(t));
+    put(t, s_item.type == 0 ? "App " : s_item.type == 1 ? "Asset " : s_item.type == 3 ? "Theme " : s_item.type == 4 ? "Shell " : "Extra ", sizeof(t));
     append(t, s_item.version, sizeof(t));
     ui->label(t, PURR_UI_ROLE_TITLE);
     if (s_item.desc[0]) {
