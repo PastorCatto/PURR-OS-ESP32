@@ -1022,20 +1022,50 @@ static int self_update(void)
 
 static void job_task(void *arg);
 
+/* The Store's own check is part of the background updates: it runs only while "store.auto_update" is on, as often as "store.check_hours", and not at all while the
+ * companion is running (the companion does the same and more). With the switch off the task ends at once and holds nothing. */
+static volatile int s_self_task;
+
+static int background_updates_on(void)
+{
+    return purr_settings_kv_int("store.auto_update", 0) != 0;
+}
+
 static void self_update_task(void *arg)
 {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(60000));                  /* the home screen, the network and the late drivers first */
-    if (!s_job.busy && net_up() && user_name()[0] != '\0') {
-        s_job.busy = 1;
-        s_job.slot = -1;
-        snprintf(s_job.what, sizeof(s_job.what), "self-update");
-        s_job.a[0] = s_job.b[0] = '\0';
-        if (purr_task_create_ext(job_task, "store-job", 14336, NULL, 3, NULL) != pdPASS) {
-            s_job.busy = 0;
+    while (background_updates_on()) {
+        if (!s_job.busy && purr_catrt_slot_of("storesvc") < 0 && net_up() && user_name()[0] != '\0') {
+            s_job.busy = 1;
+            s_job.slot = -1;
+            snprintf(s_job.what, sizeof(s_job.what), "self-update");
+            s_job.a[0] = s_job.b[0] = '\0';
+            if (purr_task_create_ext(job_task, "store-job", 14336, NULL, 3, NULL) != pdPASS) {
+                s_job.busy = 0;
+            }
+        }
+        int hours = purr_settings_kv_int("store.check_hours", 12);
+        if (hours < 1 || hours > 168) {
+            hours = 12;
+        }
+        for (int minute = 0; minute < hours * 60 && background_updates_on(); minute++) {
+            vTaskDelay(pdMS_TO_TICKS(60000));
         }
     }
+    s_self_task = 0;
     purr_task_exit();
+}
+
+/* Starts the task when the background updates are on (at sign-in, and when the switch is turned on). */
+static void self_update_start(void)
+{
+    if (!s_self_task && background_updates_on()) {
+        s_self_task = 1;
+        if (purr_task_create_ext(self_update_task, "store-self", 4096, NULL, 3, NULL) != pdPASS) {
+            s_self_task = 0;
+        }
+    }
 }
 
 int purr_store_bootstrap(char *msg, size_t cap)
@@ -1300,7 +1330,12 @@ static int auto_set(const char *v, char *e, size_t c)
         snprintf(e, c, "expected on|off");
         return -1;
     }
-    return purr_settings_kv_set("store.auto_update", on ? "1" : "0") == 0 ? 0 : (snprintf(e, c, "could not save"), -1);
+    if (purr_settings_kv_set("store.auto_update", on ? "1" : "0") != 0) {
+        snprintf(e, c, "could not save");
+        return -1;
+    }
+    self_update_start();                                /* switched on: the Store's own check starts now; switched off: the task ends by itself */
+    return 0;
 }
 
 static int hours_get(char *o, size_t c)
@@ -1612,10 +1647,7 @@ void purr_store_session_started(void)
     if (purr_builtin_apps_count > 0 && purr_task_create_ext(seed_task, "store-seed", 12288, NULL, 3, NULL) != pdPASS) {
         ESP_LOGW(TAG, "could not start the Store seeding task");
     }
-    static int self_update_started;                     /* once per start: a later sign-in does not ask the network again */
-    if (!self_update_started && purr_task_create_ext(self_update_task, "store-self", 4096, NULL, 3, NULL) == pdPASS) {
-        self_update_started = 1;
-    }
+    self_update_start();                                /* only if the background updates are on */
 }
 
 /* ------------------------------------------------------------------ the shell command */
