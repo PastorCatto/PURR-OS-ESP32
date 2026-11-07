@@ -34,7 +34,7 @@ static int s_sel;                                    /* the item on the detail p
 static char s_repo_id[20], s_repo_name[40];          /* the repository on the repository page */
 static purr_store_item_t s_item;
 
-static int s_pair_btn[MAX_PAIRS], s_pair_msg[MAX_PAIRS], s_npair;
+static int s_pair_btn[MAX_PAIRS], s_pair_msg[MAX_PAIRS], s_npair, s_ui3;
 static int s_row[PAGE_ROWS + 4], s_row_val[PAGE_ROWS + 4], s_nrow;
 static int h_home[6], h_check, h_set_up, h_act, h_remove, h_all, h_add, h_addr, h_go, h_trust, h_cancel, h_repo_remove;
 
@@ -117,6 +117,29 @@ NO_OPT static int action(const char *text)
         s_npair++;
     }
     return b;
+}
+
+/* Two or more buttons side by side (ui version 3: a grid) with one message line under them; on an older system they are stacked as before. */
+NO_OPT static void actions(const char *a, const char *b, int *ha, int *hb)
+{
+    *ha = *hb = 0;
+    if (!s_ui3 || b == NULL) {
+        *ha = action(a);
+        if (b != NULL) {
+            *hb = action(b);
+        }
+        return;
+    }
+    int g = ui->grid(2, 32);
+    *ha = ui->grid_button(g, a);
+    *hb = ui->grid_button(g, b);
+    int m = ui->label("", PURR_UI_ROLE_DIM);
+    if (s_npair + 2 <= MAX_PAIRS) {
+        s_pair_btn[s_npair] = *ha;
+        s_pair_msg[s_npair++] = m;
+        s_pair_btn[s_npair] = *hb;
+        s_pair_msg[s_npair++] = m;
+    }
 }
 
 NO_OPT static void mark_pressed(int h)
@@ -359,8 +382,8 @@ NO_OPT static void show_detail(int idx)
         append(t, s_item.installed, sizeof(t));
         ui->label(t, PURR_UI_ROLE_DIM);
     }
-    h_act = action(s_item.state == PURR_STORE_UPDATE ? "Update" : s_item.state == PURR_STORE_INSTALLED ? "Install again" : "Install");
-    h_remove = s_item.installed[0] ? action("Remove") : 0;
+    actions(s_item.state == PURR_STORE_UPDATE ? "Update" : s_item.state == PURR_STORE_INSTALLED ? "Install again" : "Install",
+            s_item.installed[0] ? "Remove" : NULL, &h_act, &h_remove);
 }
 
 NO_OPT static void show_repos(void)
@@ -581,7 +604,11 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
     if (env == NULL || env->catcall_get == NULL) {
         return -1;
     }
-    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 1);
+    ui = (const purr_cc_ui_t *)env->catcall_get("ui", 3);
+    s_ui3 = ui != NULL;
+    if (ui == NULL) {
+        ui = (const purr_cc_ui_t *)env->catcall_get("ui", 1);
+    }
     st = (const purr_cc_store_t *)env->catcall_get("store", 1);
     app = (const purr_cc_app_t *)env->catcall_get("app", 1);
     if (ui == NULL || st == NULL || app == NULL) {
