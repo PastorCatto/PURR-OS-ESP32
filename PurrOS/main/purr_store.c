@@ -29,6 +29,8 @@
 #include "login.h"
 #include "purr_brand.h"
 #include "purr_sd.h"
+#include "purr_shell.h"
+#include "purr_shell_abi.h"
 #include "purr_ui_assets.h"
 #include "purr_catcalls.h"
 #include "purr_catrt.h"
@@ -513,11 +515,11 @@ static void asset_version(const purr_repo_app_t *a, char *out, size_t cap)
     char path[160];
     uint8_t v[24];
     out[0] = '\0';
-    const char *roots[4] = {NULL, "/sd/purr", "/ui/themes", "/sd/ui/themes"};         /* the last two are where a theme goes */
+    const char *roots[5] = {NULL, "/sd/purr", "/ui/themes", "/sd/ui/themes", "/ui/shells"};         /* the last three are where a theme and a shell go */
     char ar[64];
     assets_root(ar, sizeof(ar));
     roots[0] = ar;
-    for (int r = 0; r < 4; r++) {
+    for (int r = 0; r < 5; r++) {
         snprintf(path, sizeof(path), "%s/%s/.version", roots[r], a->name);
         if (read_file(path, v, sizeof(v), NULL) > 0) {
             snprintf(out, cap, "%s", (const char *)v);
@@ -658,6 +660,10 @@ static int asset_dest(const purr_repo_app_t *a, char *out, size_t cap, char *why
         snprintf(out, cap, a->target == PURR_REPO_TARGET_SD ? "/sd/ui/themes/%s" : "/ui/themes/%s", a->name);
         return 0;
     }
+    if (a->type == PURR_REPO_ITEM_SHELL) {                       /* /ui/shells/<name> in LittleFS: code that runs in the kernel never goes on the SD card */
+        snprintf(out, cap, "/ui/shells/%s", a->name);
+        return 0;
+    }
     int use_sd = a->target == PURR_REPO_TARGET_SD || (a->target == PURR_REPO_TARGET_ANY && sd && a->needs_sd);
     if (a->needs_sd && !sd) {
         snprintf(why, whycap, "%s needs an SD card, and there is none.", a->title);
@@ -746,6 +752,17 @@ static int install_item(const char *name, const char *repo_id)
             setmsg("Three themes are installed. Remove one in Settings first, or put this one on the SD card.");
             goto done;
         }
+        if (a->type == PURR_REPO_ITEM_SHELL) {
+            purr_shell_info_t have[8];
+            int nh = purr_shell_list(have, 8), already = 0;
+            for (int i = 0; i < nh; i++) {
+                already |= strcmp(have[i].id, a->name) == 0;
+            }
+            if (!already && nh >= 6) {
+                setmsg("Six shells are installed. Remove one in Settings or the Store first.");
+                goto done;
+            }
+        }
         if (strncmp(dest, "/sd/", 4) != 0) {                   /* flash: leave room (never past 90 % full) */
             uint32_t used = 0, total = 0;
             if (purr_fs_usage(fs(), &used, &total) == 0 && total > 0 && ((uint64_t)used * 4096 + a->size) * 100 > (uint64_t)total * 4096 * 90) {
@@ -815,7 +832,29 @@ static int install_item(const char *name, const char *repo_id)
         char vfile[200];
         snprintf(vfile, sizeof(vfile), "%s/.version", dest);
         x_write(vfile, a->version, (uint32_t)strlen(a->version));
+        if (a->type == PURR_REPO_ITEM_SHELL) {                  /* what Settings lists: the index entry's title, the repository, the skin; then the shell is checked the way the loader will */
+            char conf[220], title[64], who[40];
+            snprintf(title, sizeof(title), "%s", a->title);
+            snprintf(who, sizeof(who), "%s", e->name);
+            for (char *c = title; *c; c++) { if ((unsigned char)*c < 32) *c = ' '; }
+            for (char *c = who; *c; c++) { if ((unsigned char)*c < 32) *c = ' '; }
+            snprintf(conf, sizeof(conf), "name=%s\nauthor=%s\nversion=%s\nskin=%s\n", title, who, a->version, strcmp(a->category, "android") == 0 ? "android" : "w10m");
+            char cf[200];
+            snprintf(cf, sizeof(cf), "%s/shell.conf", dest);
+            x_write(cf, conf, (uint32_t)strlen(conf));
+            int chk = purr_shell_module_check(a->name, NULL, 0);
+            if (chk == PURR_SHELL_CHECK_OK) {
+                setmsg("Installed %s %s. Choose it in Settings, Interface; it starts after a restart.", a->title, a->version);
+            } else if (chk == PURR_SHELL_CHECK_INCOMPATIBLE) {
+                setmsg("Installed %s %s, but it needs an update to work with this system, so it will not start yet.", a->title, a->version);
+            } else {
+                setmsg("Installed %s %s, but this device does not trust its signature, so it will not start.", a->title, a->version);
+            }
+            goto shell_done;
+        }
         setmsg("Saved %s %s.", a->title, a->version);
+shell_done:
+        ;
     }
     rc = 0;
 done:
@@ -836,6 +875,15 @@ static int remove_item(const char *name, const char *repo_id)
                     setmsg("%s is not installed.", name);
                     return -1;
                 }
+            } else if (s_items[i].type == PURR_REPO_ITEM_SHELL) {
+                char chosen[24], dir[96];
+                purr_shell_chosen(chosen, sizeof(chosen));
+                if (strcmp(chosen, name) == 0) {
+                    purr_shell_choose("builtin");                  /* the next start uses the built-in shell */
+                }
+                snprintf(dir, sizeof(dir), "/ui/shells/%s", name);
+                rm_tree(dir, 0);
+                purr_fs_remove(fs(), dir);
             } else if (s_items[i].type == PURR_REPO_ITEM_THEME) {
                 purr_ui_theme_remove(name);
                 char sdir[120];
@@ -1517,7 +1565,7 @@ int purr_store_cmd(purr_cli_t *cli, int argc, char **argv)
         for (int i = 0; i < s_nitems; i++) {
             const purr_store_item_t *it = &s_items[i];
             purr_cli_printf(cli, "%-16s %-8s %-10s %s%s%s  [%s %s]\n", it->name, it->version, it->tier, it->installed[0] ? "installed " : "", it->installed[0] ? it->installed : "",
-                            it->state == PURR_STORE_UPDATE ? "  UPDATE" : "", it->type == 0 ? "app" : it->type == 1 ? "asset" : it->type == 2 ? "extra" : "theme", it->repo);
+                            it->state == PURR_STORE_UPDATE ? "  UPDATE" : "", it->type == 0 ? "app" : it->type == 1 ? "asset" : it->type == 2 ? "extra" : it->type == 3 ? "theme" : "shell", it->repo);
         }
         if (s_nitems == 0) {
             purr_cli_printf(cli, "nothing offered yet: store refresh\n");
