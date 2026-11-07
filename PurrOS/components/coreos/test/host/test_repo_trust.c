@@ -247,6 +247,36 @@ static void test_theme_items(void)
     CHECK(purr_repo_index_find(&idx, "asset") == NULL);
 }
 
+static void test_shell_items(void)
+{
+    purr_repo_index_t idx;
+    char err[96];
+    purr_repo_kind_t store = PURR_REPO_STORE;
+    const char *z = "\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"";
+    char doc[2048];
+    snprintf(doc, sizeof(doc),
+        "{\"format\":2,\"repo\":{\"id\":\"x\",\"name\":\"n\",\"kind\":\"store\"},\"apps\":["
+        "{\"name\":\"w10m\",\"title\":\"Windows 10 Mobile\",\"version\":\"1.0.32\",\"type\":\"shell\",\"category\":\"w10m\",\"size\":440000,%s,\"url\":\"w10m.cat\",\"dest\":\"shell.cat\"},"
+        "{\"name\":\"toobig\",\"version\":\"1.0\",\"type\":\"shell\",\"size\":2000000,%s,\"url\":\"t.cat\",\"dest\":\"shell.cat\"},"
+        "{\"name\":\"nodest\",\"version\":\"1.0\",\"type\":\"shell\",\"size\":10,%s,\"url\":\"n.cat\"},"
+        "{\"name\":\"othername\",\"version\":\"1.0\",\"type\":\"shell\",\"size\":10,%s,\"url\":\"o.cat\",\"dest\":\"pack.bin\"},"
+        "{\"name\":\"climb\",\"version\":\"1.0\",\"type\":\"shell\",\"size\":10,%s,\"url\":\"c.cat\",\"dest\":\"../shell.cat\"},"
+        "{\"name\":\"asset\",\"version\":\"1.0\",\"type\":\"asset\",\"size\":800000,%s,\"url\":\"a.bin\",\"dest\":\"x.bin\"}"
+        "]}", z, z, z, z, z, z);
+    CHECK_EQ(purr_repo_index_parse(doc, strlen(doc), &idx, &store, err, sizeof(err)), 0);
+    CHECK_EQ(idx.count, 1);                                   /* a shell up to 1 MB with dest shell.cat; nothing else gets through */
+    const purr_repo_app_t *t = purr_repo_index_find(&idx, "w10m");
+    CHECK(t != NULL);
+    CHECK_EQ(t->type, PURR_REPO_ITEM_SHELL);
+    CHECK(strcmp(t->category, "w10m") == 0);
+    CHECK(strcmp(t->dest, "shell.cat") == 0);
+    CHECK(purr_repo_index_find(&idx, "toobig") == NULL);
+    CHECK(purr_repo_index_find(&idx, "nodest") == NULL);
+    CHECK(purr_repo_index_find(&idx, "othername") == NULL);
+    CHECK(purr_repo_index_find(&idx, "climb") == NULL);
+    CHECK(purr_repo_index_find(&idx, "asset") == NULL);       /* an ordinary asset keeps the 512 KB limit */
+}
+
 static void test_format2_index_rules(void)
 {
     purr_repo_index_t idx;
@@ -287,5 +317,6 @@ int main(void)
     test_the_official_address_is_allowed();
     test_format2_index_rules();
     test_theme_items();
+    test_shell_items();
     TK_DONE("test_repo_trust");
 }

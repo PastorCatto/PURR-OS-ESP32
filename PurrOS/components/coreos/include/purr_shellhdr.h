@@ -13,7 +13,8 @@
  *
  * Layout in the code (word = 4 bytes, little endian), purrstrap reserves the capacities and fills what is used:
  *   word 0 magic "PSHL", 1 ABI version, 2 bss size, 3 import count, 4 layout count, 5 names size, 6 layout capacity, 7 import capacity, 8 names capacity,
- *   bytes 36..51 the kernel version the shell was built against (text), then 3 reserved words (header bytes 0..63);
+ *   bytes 36..51 the kernel version the shell was built against (text), word 13 the offset in the code of the shell's own picture pack, word 14 its size (0 = none),
+ *   one reserved word (header bytes 0..63);
  *   then layout pairs (id, value) x layout capacity, import pairs (offset of the word in the code, offset of the name in the names block) x import capacity,
  *   then the names block (NUL-terminated strings), names capacity bytes rounded up to a word.
  */
@@ -55,6 +56,8 @@ typedef struct {
     uint32_t imports_offset;
     uint32_t names_offset;
     uint32_t header_size;
+    uint32_t pack_offset;           /* into the code: the shell's own picture pack (a plain pack file), pack_size 0 if it has none */
+    uint32_t pack_size;
     char built_for[17];             /* the kernel version the shell was built against, for display */
 } purr_shellhdr_t;
 

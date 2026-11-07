@@ -41,6 +41,7 @@ extern "C" {
 #define PURR_REPO_ID_LEN       24
 #define PURR_REPO_MAX_PACKAGE  (512u * 1024u)   /* the app manager's scratch buffer */
 #define PURR_REPO_MAX_THEME    (4u * 1024u * 1024u)   /* a theme is a picture pack: it is downloaded into PSRAM and written as a file, not run */
+#define PURR_REPO_MAX_SHELL    (1u * 1024u * 1024u)   /* a shell is one signed module that carries its own pictures (the loader reads at most 1 MB) */
 #define PURR_REPO_MAX_INDEX    (24u * 1024u)    /* an index larger than this is refused */
 
 typedef enum {
@@ -76,6 +77,7 @@ typedef struct {
 #define PURR_REPO_ITEM_ASSET  1
 #define PURR_REPO_ITEM_EXTRA  2
 #define PURR_REPO_ITEM_THEME  3     /* a UI theme (plan7.md): one pack.bin; category says the shell (w10m, android or any); installed as /ui/themes/<name>/pack.bin */
+#define PURR_REPO_ITEM_SHELL  4     /* a loadable shell (plan7.md): one shell.cat that carries its own pictures; category says the skin (w10m or android); installed as /ui/shells/<name>/shell.cat */
 #define PURR_REPO_TARGET_FLASH 0
 #define PURR_REPO_TARGET_SD    1
 #define PURR_REPO_TARGET_ANY   2

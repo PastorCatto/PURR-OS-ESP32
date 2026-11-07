@@ -29,6 +29,32 @@ static void test_parse_reads_what_the_build_tool_wrote(void)
     CHECK_EQ(h.layout_count, 3u);
     CHECK_EQ(h.header_size, (uint32_t)FIXTURE_HEAD);
     CHECK(strcmp(h.built_for, "1.0.32") == 0);
+    CHECK_EQ(h.pack_offset, (uint32_t)FIXTURE_PACK_OFF);
+    CHECK_EQ(h.pack_size, (uint32_t)FIXTURE_PACK_SIZE);
+    CHECK_EQ(memcmp(shell_fixture + h.pack_offset, "PACKPACKPACK", 12), 0);
+}
+
+static void test_a_pack_that_leaves_the_code_or_enters_the_header_is_damaged(void)
+{
+    uint8_t bad[sizeof(shell_fixture)];
+    purr_shellhdr_t h;
+    uint32_t v;
+    memcpy(bad, shell_fixture, sizeof(bad));
+    v = (uint32_t)sizeof(bad);                                  /* offset past the end */
+    memcpy(bad + 52, &v, 4);
+    CHECK_EQ(purr_shellhdr_parse(bad, sizeof(bad), FIXTURE_ABI, &h), PURR_SHELLHDR_DAMAGED);
+    memcpy(bad, shell_fixture, sizeof(bad));
+    v = 8;                                                      /* inside the header */
+    memcpy(bad + 52, &v, 4);
+    CHECK_EQ(purr_shellhdr_parse(bad, sizeof(bad), FIXTURE_ABI, &h), PURR_SHELLHDR_DAMAGED);
+    memcpy(bad, shell_fixture, sizeof(bad));
+    v = FIXTURE_PACK_OFF + 2;                                   /* not word aligned */
+    memcpy(bad + 52, &v, 4);
+    CHECK_EQ(purr_shellhdr_parse(bad, sizeof(bad), FIXTURE_ABI, &h), PURR_SHELLHDR_DAMAGED);
+    memcpy(bad, shell_fixture, sizeof(bad));
+    v = 1000;                                                   /* runs past the end */
+    memcpy(bad + 56, &v, 4);
+    CHECK_EQ(purr_shellhdr_parse(bad, sizeof(bad), FIXTURE_ABI, &h), PURR_SHELLHDR_DAMAGED);
 }
 
 static void test_a_kernel_with_other_exports_and_a_newer_layout_list_accepts_the_shell(void)
@@ -131,5 +157,6 @@ int main(void)
     test_a_layout_difference_is_refused();
     test_another_abi_or_not_a_shell_or_a_short_file_is_refused();
     test_a_bad_import_site_or_name_writes_nothing();
+    test_a_pack_that_leaves_the_code_or_enters_the_header_is_damaged();
     TK_DONE("test_shellhdr");
 }

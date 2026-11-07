@@ -12,6 +12,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+#if CONFIG_PURR_PROFILE_FULL
+#include "purr_shell_abi.h"
+#endif
 
 #include "commands.h"
 #include "purr_fs.h"
@@ -106,6 +109,8 @@ static int read_cb(void *ctx, const void *data, uint32_t len)
     return 0;
 }
 
+static esp_err_t index_pack(pack_t *p, uint8_t *buf, uint32_t size, int owned, const char *path);
+
 /* Reads the pack file at `path` into PSRAM and indexes it. 0, or an esp_err_t-style negative code; `p` is left empty on failure. */
 static esp_err_t load_pack(pack_t *p, const char *path)
 {
@@ -134,21 +139,28 @@ static esp_err_t load_pack(pack_t *p, const char *path)
         free(buf);
         return ESP_FAIL;
     }
+    return index_pack(p, buf, size, 1, path);
+}
+
+/* Indexes a pack that is already in memory: `buf` is `size` bytes; with `owned` it is freed again on failure (a pack read from a file), otherwise it belongs to
+ * someone else (the shell module that carries its own pack) and is only borrowed. */
+static esp_err_t index_pack(pack_t *p, uint8_t *buf, uint32_t size, int owned, const char *path)
+{
     const header_t *hdr = (const header_t *)buf;
     if (hdr->magic != MAGIC) {
         ESP_LOGW(TAG, "%s: unrecognized (magic %08x)", path, (unsigned)hdr->magic);
-        free(buf);
+        if (owned) free(buf);
         return ESP_ERR_INVALID_CRC;
     }
     if (hdr->count > MAX_ASSETS) {
         ESP_LOGW(TAG, "%s: %u assets, more than the %d this build can index", path, (unsigned)hdr->count, MAX_ASSETS);
-        free(buf);
+        if (owned) free(buf);
         return ESP_ERR_INVALID_SIZE;
     }
     size_t dir_bytes = (size_t)hdr->count * sizeof(dir_entry_t);
     if (sizeof(header_t) + dir_bytes > size) {
         ESP_LOGW(TAG, "%s: the directory runs past the end of the file", path);
-        free(buf);
+        if (owned) free(buf);
         return ESP_ERR_INVALID_SIZE;
     }
     const dir_entry_t *dir = (const dir_entry_t *)(buf + sizeof(header_t));
@@ -188,7 +200,7 @@ static esp_err_t load_pack(pack_t *p, const char *path)
         if (crc != hdr->crc32) {
             ESP_LOGW(TAG, "%s: CRC mismatch (corrupt or partial write)", path);
             p->data = NULL;
-            free(buf);
+            if (owned) free(buf);
             return ESP_ERR_INVALID_CRC;
         }
     }
@@ -257,7 +269,18 @@ static int conf_get(const char *path, const char *key, char *out, size_t cap)
 esp_err_t purr_ui_assets_init(void)
 {
     s_theme_id[0] = s_theme_failed[0] = '\0';
-    esp_err_t e = load_pack(&s_default, purr_theme_skin() == PURR_SKIN_ANDROID ? "/ui/android/pack.bin" : "/ui/w10m/pack.bin");
+    esp_err_t e = ESP_ERR_NOT_FOUND;
+#if CONFIG_PURR_PROFILE_FULL
+    const uint8_t *mp = NULL;
+    uint32_t mn = 0;
+    if (purr_shell_module_pack(&mp, &mn) == 0 && mn >= sizeof(header_t)) {                 /* a loaded shell brings its own pictures: no file to find, nothing to copy */
+        memset(&s_default, 0, sizeof(s_default));
+        e = index_pack(&s_default, (uint8_t *)mp, mn, 0, "the shell's own pack");
+    } else
+#endif
+    {
+        e = load_pack(&s_default, purr_theme_skin() == PURR_SKIN_ANDROID ? "/ui/android/pack.bin" : "/ui/w10m/pack.bin");
+    }
     if (e != ESP_OK) {
         ESP_LOGW(TAG, "no default pack for this shell (%s): pictures are missing until one is installed", esp_err_to_name(e));
     }

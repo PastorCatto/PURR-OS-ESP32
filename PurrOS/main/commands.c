@@ -5136,6 +5136,10 @@ typedef enum {
  * The caller owns cleanup on every path (esp_mmu_unmap + free) once it has these three values;
  * this function only cleans up its own intermediate allocations and, on failure, everything.
  */
+#if CONFIG_PURR_PROFILE_FULL
+static const uint8_t *s_shell_pack;                     /* the picture pack a loaded shell carries inside itself (purr_shell_module_pack) */
+static uint32_t s_shell_pack_size;
+#endif
 typedef enum {
     PURR_LOAD_OK = 0,
     PURR_LOAD_TRANSIENT,    /* OOM, mmu-map failure: not the file's fault, retry next boot */
@@ -5395,6 +5399,12 @@ static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, con
         return PURR_LOAD_TRANSIENT;
     }
 
+#if CONFIG_PURR_PROFILE_FULL
+    if (expected_subtype == PURR_MOD_SHELL) {
+        s_shell_pack = sh.pack_size != 0 ? databuf + sh.pack_offset : NULL;     /* readable through the data alias, and it stays: a shell is never unloaded */
+        s_shell_pack_size = sh.pack_size;
+    }
+#endif
     *out_databuf = databuf;
     *out_exec_ptr = exec_ptr;
     *out_entry_offset = layout.entry_offset;
@@ -5425,9 +5435,40 @@ static purr_load_result_t load_relocatable_file(const char *path, const char *lo
 #define PURR_SHELL_LOAD_MAX_PAGES 8
 #define PURR_SHELL_READ_CAP (1024 * 1024)
 
+/* The picture pack the loaded shell carries inside itself, if it has one: 0 and its address and size, else -1. Valid for the rest of the boot. */
+int purr_shell_module_pack(const uint8_t **pack, uint32_t *size)
+{
+    if (s_shell_pack == NULL || s_shell_pack_size == 0) {
+        return -1;
+    }
+    *pack = s_shell_pack;
+    *size = s_shell_pack_size;
+    return 0;
+}
+
+/* Is this shell file signed by a key this device trusts for shells? The same verification the loader does (key bag, role, revoked keys), nothing more: a shell has no
+ * unsigned or "vouched by a repository" way in, whatever the settings say (it is native code that owns the screen). */
+static int shell_image_trusted(const uint8_t *rb, size_t len)
+{
+    purr_cfg_t cfg;
+    purr_flash_t fl;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {.chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls};
+    purr_mem_read_ctx_t mrc = {(uint8_t *)rb, len};
+    purr_image_header_t hdr;
+    return purr_image_verify(&env, purr_mem_read, &mrc, len, &hdr) == PURR_V_OK && hdr.image_type == PURR_IMG_MODULE && PURR_FLAGS_SUBTYPE(hdr.flags) == PURR_MOD_SHELL;
+}
+
 /* Is the installed shell /ui/shells/<id>/shell.cat compatible with this kernel? Reads the file and reads its header: every OS name it uses must exist here, and every
- * layout fact it carries must match (purr_shell_layout.def). It does NOT verify the signature: that is purr_shell_module_load()'s job, which repeats this check. Returns
- * PURR_SHELL_CHECK_OK, PURR_SHELL_CHECK_INCOMPATIBLE (a newer kernel or an updated shell would fix it) or PURR_SHELL_CHECK_BAD (missing, unreadable, not a shell, damaged).
+ * layout fact it carries must match (purr_shell_layout.def). purr_shell_module_load() repeats all of it. Returns
+ * PURR_SHELL_CHECK_OK, PURR_SHELL_CHECK_INCOMPATIBLE (a newer kernel or an updated shell would fix it) or PURR_SHELL_CHECK_BAD (missing, unreadable, not a shell, damaged,
+ * or not signed by a key this device trusts for shells: the signature is checked here too, so Settings and the Store can say so before the shell is chosen).
  * built_for (when not NULL) gets the kernel version the shell was built for. */
 int purr_shell_module_check(const char *id, char *built_for, size_t cap)
 {
@@ -5448,7 +5489,7 @@ int purr_shell_module_check(const char *id, char *built_for, size_t cap)
     appinstall_read_ctx_t rc = {rb, file_size, 0};
     int res = PURR_SHELL_CHECK_BAD;
     purr_image_header_t hdr;
-    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) >= 0 && rc.len >= sizeof(hdr)) {
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) >= 0 && rc.len >= sizeof(hdr) && shell_image_trusted(rb, rc.len)) {
         memcpy(&hdr, rb, sizeof(hdr));
         purr_module_layout_t layout;
         if (hdr.image_type == PURR_IMG_MODULE && PURR_FLAGS_SUBTYPE(hdr.flags) == PURR_MOD_SHELL && (uint64_t)hdr.payload_offset + hdr.payload_size <= rc.len &&

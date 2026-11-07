@@ -92,6 +92,8 @@ typedef const purr_shell_ops_t *(*purr_shell_module_main_t)(void);
 #define PURR_SHELL_CHECK_INCOMPATIBLE  1        /* uses an OS name this kernel lacks, a layout fact differs, or another ABI: a newer kernel or an updated shell fixes it */
 #define PURR_SHELL_CHECK_BAD           2        /* missing, unreadable, not a shell, damaged */
 int purr_shell_module_check(const char *id, char *built_for, size_t cap);
+/* The picture pack the loaded shell carries inside itself: 0 and its address and size (valid for the rest of the boot), or -1 if there is none. */
+int purr_shell_module_pack(const uint8_t **pack, uint32_t *size);
 
 /* The kernel's table: the real address of every name in purr_shell_exports.def, in the file's order. The loader writes
  * purr_shell_exports[i] over every word of the module that holds PURR_SHELL_IMPORT_BASE + 4 * i. */

@@ -38,6 +38,11 @@ purr_shellhdr_result_t purr_shellhdr_parse(const uint8_t *code, uint32_t code_si
     out->imports_offset = PURR_SHELLHDR_FIXED + 8 * lcap;
     out->names_offset = PURR_SHELLHDR_FIXED + 8 * lcap + 8 * icap;
     out->header_size = (uint32_t)size;
+    out->pack_offset = rd32(code + 52);
+    out->pack_size = rd32(code + 56);
+    if (out->pack_size != 0 && ((out->pack_offset & 3u) != 0 || out->pack_offset < out->header_size || (uint64_t)out->pack_offset + out->pack_size > code_size)) {
+        return PURR_SHELLHDR_DAMAGED;                           /* the pack must lie inside the code, after the header, word aligned */
+    }
     memcpy(out->built_for, code + 36, 16);
     out->built_for[16] = '\0';
     return PURR_SHELLHDR_OK;
