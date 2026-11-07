@@ -22,7 +22,10 @@ from . import formats, keybag, minitoml, p256
 
 FORMAT = 2
 ENDORSE_PREFIX = b"PURRREPO\0"
-TYPES = ("app", "asset", "extra", "theme")
+TYPES = ("app", "asset", "extra", "theme", "shell")
+MOD_SHELL = 11                     # the module subtype of a loadable shell (PURR_MOD_SHELL in purr_abi.h)
+MAX_SHELL = 1024 * 1024            # PURR_REPO_MAX_SHELL: the loader reads at most 1 MB
+MAX_THEME = 4 * 1024 * 1024        # PURR_REPO_MAX_THEME
 TARGETS = ("flash", "sd", "any")
 
 
@@ -109,7 +112,8 @@ def package_info(path):
         f = img.header_fields(img.parse_header(data))
         chip = {9: "esp32s3", 0: "esp32", 0xFFFF: "any"}.get(f["chip_id"], "any")
         return {"type": "app" if f["image_type"] == img.IMG_APP else "module", "name": f["name"], "version": f["version"], "chip": chip,
-                "key_id": f["key_id"], "signed": f["signature"] not in (b"\0" * 64, b"\xff" * 64)}
+                "key_id": f["key_id"], "signed": f["signature"] not in (b"\0" * 64, b"\xff" * 64),
+                "subtype": f["flags"] & 0xFF if f["image_type"] != img.IMG_APP else 0}
     return {}
 
 
@@ -121,7 +125,17 @@ def add(folder, file, title="", desc="", category="", source="", perms=None, typ
     kind = type_ or ("app" if info.get("type") == "app" else "asset")
     if kind not in TYPES:
         raise RepoError("type is one of: %s." % ", ".join(TYPES))
-    if info.get("type") == "module":
+    if kind == "shell":
+        if info.get("type") != "module" or info.get("subtype") != MOD_SHELL:
+            raise RepoError("%s is not a loadable shell (a module of the shell subtype, built with `purrstrap shells build`)." % os.path.basename(file))
+        if not info.get("signed"):
+            raise RepoError("%s is not signed. Sign it first (purrstrap keys sign): a device only loads a shell signed by a key it trusts for shells." % os.path.basename(file))
+        if os.path.getsize(file) > MAX_SHELL:
+            raise RepoError("%s is over 1 MB, which is the most a device loads as a shell." % os.path.basename(file))
+        if dest not in ("", "shell.cat"):
+            raise RepoError("A shell's destination is always shell.cat.")
+        dest = "shell.cat"
+    elif info.get("type") == "module":
         raise RepoError("%s is a module or a driver. Repositories carry apps, assets and extras; drivers have their own path." % os.path.basename(file))
     if target not in TARGETS:
         raise RepoError("target is one of: %s." % ", ".join(TARGETS))
@@ -192,7 +206,7 @@ def build(folder, out, password, layout="flat", now=None):
         name = item.get("name") or info.get("name") or fname
         version = item.get("version") or info.get("version") or "0"
         kind = item.get("type") or ("app" if info.get("type") == "app" else "asset")
-        rel = fname if layout == "flat" else "%s/%s/%s/%s" % ({"app": "apps", "asset": "assets", "extra": "extras"}[kind], name, version, "package.cat" if kind == "app" else os.path.basename(item.get("dest") or fname))
+        rel = fname if layout == "flat" else "%s/%s/%s/%s" % ({"app": "apps", "asset": "assets", "extra": "extras", "theme": "themes", "shell": "shells"}[kind], name, version, "package.cat" if kind == "app" else os.path.basename(item.get("dest") or fname))
         entry = {"name": name, "title": item.get("title") or name, "version": version, "type": kind, "target": item.get("target", "flash"), "size": len(data),
                  "sha256": hashlib.sha256(data).hexdigest(), "chip": item.get("chip") or info.get("chip", "any"), "signed": bool(info.get("signed")), "key_id": info.get("key_id", 0),
                  "desc": item.get("desc", ""), "url": rel, "updated": now}
@@ -345,5 +359,9 @@ def verify(base, key_dirs=()):
             problems.append("%s %s: %s does not match the size and hash in the index." % (a.get("name"), a.get("version"), rel))
         if a.get("type", "app") != "app" and not a.get("dest"):
             problems.append("%s: an asset or extra with no dest." % a.get("name"))
+        if a.get("type") == "shell" and (a.get("dest") != "shell.cat" or len(data) > MAX_SHELL):
+            problems.append("%s: a shell has dest shell.cat and is at most 1 MB." % a.get("name"))
+        if a.get("type") == "theme" and (a.get("dest") != "pack.bin" or len(data) > MAX_THEME):
+            problems.append("%s: a theme has dest pack.bin and is at most 4 MB." % a.get("name"))
     return {"ok": not problems, "tier": "untrusted" if problems else tier, "id": rid, "name": repo.get("name", ""), "problems": problems, "notes": notes,
             "apps": len(index.get("apps", [])), "layout": "tree" if prefix else "flat"}

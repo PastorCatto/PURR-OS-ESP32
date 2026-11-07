@@ -73,7 +73,7 @@ The v1 format of `purr_repo.h`, with these changes: `"format": 2`, `"repo.kind":
 
 | Field | Meaning |
 |---|---|
-| `type` | `"app"` (default), `"asset"` or `"extra"` |
+| `type` | `"app"` (default), `"asset"`, `"extra"`, `"theme"` (one `pack.bin`, up to 4 MB, installed as `/ui/themes/<name>/`) or `"shell"` (one signed `shell.cat`, up to 1 MB, `dest` fixed to `shell.cat`, installed as `/ui/shells/<name>/`; `category` is the skin, `w10m` or `android`; it carries its own pictures) |
 | `target` | where it may live: `"flash"`, `"sd"` or `"any"` (default `"flash"`) |
 | `dest` | for an asset or extra: the path it is written to, under the user's or the system's asset folder (section 6). No `..`, no absolute path |
 | `needs_sd` | `1` if it cannot work without an SD card |

@@ -84,6 +84,37 @@ class Repository(unittest.TestCase):
         self.assertFalse(v2["ok"])
         self.assertIn("endorsement", " ".join(v2["problems"]))
 
+    def test_a_signed_shell_is_an_item_and_nothing_else_is(self):
+        d, folder, _ = self.make()
+        k = helpers.Key()
+        shell = os.path.join(d, "w10m.cat")
+        with open(shell, "wb") as fh:
+            fh.write(k.sign_image(helpers.make(name="w10m", version="1.0.32", image_type=3, subtype=repo.MOD_SHELL), 1))
+        item = repo.add(folder, shell, type_="shell", title="Windows 10 Mobile", category="w10m", target="flash")
+        self.assertEqual((item["type"], item["dest"]), ("shell", "shell.cat"))            # the destination is fixed
+        out = os.path.join(d, "tree")
+        repo.build(folder, out, "secretpw", "tree")
+        self.assertTrue(os.path.isfile(os.path.join(out, "purr", "v1", "shells", "w10m", "1.0.32", "shell.cat")))
+        v = repo.verify(out)
+        self.assertTrue(v["ok"], v["problems"])
+        idx = json.load(open(os.path.join(out, "purr", "v1", "index.json")))
+        w = next(a for a in idx["apps"] if a["name"] == "w10m")
+        self.assertEqual((w["type"], w["dest"], w["category"]), ("shell", "shell.cat", "w10m"))
+        unsigned = os.path.join(d, "u.cat")
+        with open(unsigned, "wb") as fh:
+            fh.write(helpers.make(name="u", version="1", image_type=3, subtype=repo.MOD_SHELL))
+        with self.assertRaises(repo.RepoError):
+            repo.add(folder, unsigned, type_="shell")                                       # a device would never load it
+        driver = os.path.join(d, "drv.cat")
+        with open(driver, "wb") as fh:
+            fh.write(k.sign_image(helpers.make(name="drv", version="1", image_type=3, subtype=5), 1))
+        with self.assertRaises(repo.RepoError):
+            repo.add(folder, driver, type_="shell")                                         # a driver is not a shell
+        with self.assertRaises(repo.RepoError):
+            repo.add(folder, shell, type_="shell", dest="somewhere/else.cat", name="w2", version="1")
+        with self.assertRaises(repo.RepoError):
+            repo.add(folder, driver)                                                        # and a module still cannot be added as an ordinary item
+
     def test_bad_input_is_explained(self):
         d, folder, _ = self.make()
         with self.assertRaises(repo.RepoError):

@@ -89,4 +89,4 @@ For the release, `purrstrap uiassets package --name ui_w10m|ui_android --file pa
 - The device reading these files, the Settings list of themes, the restart choice and the Store's `theme` item type: designed in [plan7.md](../../plan7.md), being written by the project lead, not run on a device.
 - A theme's `accent` and `dark` taking effect.
 - Wallpapers larger than a slot on the SD card, and sounds: open questions in plan7.md.
-- A whole custom shell as a signed package: designed, not built.
+- A whole custom shell as a signed package: **built for the project\'s own tree** (`purrstrap shells build`, `purr repo add --type shell`, a device lists it in Settings, Interface, and runs it after a restart), see [plan7.md](../../plan7.md). Building one needs a kernel build tree to take the headers and settings from, which the kit does not carry yet, so for now only the project builds shells; a third party can sign and publish one it has built.

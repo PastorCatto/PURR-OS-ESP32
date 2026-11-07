@@ -91,7 +91,7 @@ The Store and companion ride inside the kernel image, which the boot key checks,
 
 ### Assets and extras
 
-An index entry has a `type` (`app`, `asset`, `extra`), a `target` (`flash`, `sd`, `any`), a `dest` (no `..`, no absolute path), `needs_sd`, `source`, `perms`, `category`, `min_os`, and `removed`. Flash targets go to `/home/<user>/assets/<name>/<dest>`; SD targets to `/sd/purr/<name>/<dest>`. A download is refused if it would take the file system past 90 percent. Fonts are listed in the spec as assets, which is how Part D plans to deliver them ([chapter 12](12-picture-pack-and-fonts.md)).
+An index entry has a `type` (`app`, `asset`, `extra`, `theme`, `shell`: a theme is one `pack.bin` up to 4 MB under `/ui/themes/<name>/`; a shell is one signed `shell.cat` up to 1 MB under `/ui/shells/<name>/` that carries its own pictures and is chosen in Settings, Interface), a `target` (`flash`, `sd`, `any`), a `dest` (no `..`, no absolute path), `needs_sd`, `source`, `perms`, `category`, `min_os`, and `removed`. Flash targets go to `/home/<user>/assets/<name>/<dest>`; SD targets to `/sd/purr/<name>/<dest>`. A download is refused if it would take the file system past 90 percent. Fonts are listed in the spec as assets, which is how Part D plans to deliver them ([chapter 12](12-picture-pack-and-fonts.md)).
 
 ### The SD card
 

@@ -53,6 +53,11 @@ class HeaderTests(unittest.TestCase):
         self.assertEqual(p["imports"], [(100, "snprintf"), (104, "lv_obj_create"), (108, "snprintf")])
         self.assertEqual(p["layout"], [(0, 0x90200), (1, 1)])
 
+    def test_the_pack_range_round_trips_and_defaults_to_none(self):
+        caps = shellabi.capacities(self.ENTRIES)
+        self.assertEqual(shellabi.parse_header(shellabi.build_header(1, "x", 0, [], [], caps))["pack"], (0, 0))
+        self.assertEqual(shellabi.parse_header(shellabi.build_header(1, "x", 0, [], [], caps, pack=(4000, 123456)))["pack"], (4000, 123456))
+
     def test_the_size_depends_only_on_the_lists(self):
         caps = shellabi.capacities(self.ENTRIES)
         self.assertEqual(len(shellabi.build_header(1, "x", 0, [], [], caps)), len(shellabi.build_header(1, "y", 9, [(1, "snprintf")], [(0, 1)], caps)))
@@ -89,6 +94,11 @@ class ImportTests(unittest.TestCase):
         a, b = self.blobs([0x0F000004], [0x0F100004])
         with self.assertRaises(shellabi.ShellAbiError):
             shellabi.find_imports(a, b, 4)
+
+    def test_the_pack_range_is_not_scanned(self):
+        a, b = self.blobs([0x0F000004, 0x0F000008, 0x0F000000], [0x0F000004, 0x0F000008, 0x0F000000])
+        self.assertEqual(shellabi.find_imports(a, b, 4, skip=(4, 8)), [(0, 1), (8, 0)])
+        self.assertEqual(shellabi.find_imports(a, b, 4, skip=(0, 12)), [])
 
     def test_a_word_in_range_but_not_a_placeholder_is_ignored(self):
         a, b = self.blobs([0x0F000003, 0x0F000100], [0x0F000003, 0x0F000100])
