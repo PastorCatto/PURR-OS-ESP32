@@ -58,6 +58,9 @@ __pycache__/
 Thumbs.db
 .claude/
 signing_keys/
+# a private key or certificate anywhere else by mistake (tracked third-party test data under archive/ is not affected)
+*.key
+*.pem
 
 # parser fuzzer output (PurrOS/components/coreos/test/host/fuzz)
 PurrOS/components/coreos/test/host/fuzz/build/
