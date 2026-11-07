@@ -1,5 +1,5 @@
 name = "store"
-version = "1.0.1"
+version = "1.0.2"
 description = "The Store: apps, assets and extras from the repositories you trust, with updates"
 class = "unprivileged"
 kind = "ui"
@@ -8,7 +8,7 @@ entry = "store_entry"
 
 [catcalls]
 console = "1.0"
-ui = "2.0"
+ui = "3.0"
 app = "1.0"
 store = "1.0"
 
