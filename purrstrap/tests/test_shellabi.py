@@ -41,18 +41,21 @@ class LinkerScriptTests(unittest.TestCase):
         self.assertIn("PURR_SHELL_IMPORT_BASE   0x%08Xu" % shellabi.IMPORT_BASE, h)
 
 
-class PayloadTests(unittest.TestCase):
-    def test_the_payload_round_trips(self):
-        blob = shellabi.pack_payload(1, 183, 0x40, 0x1200, [4, 8], [12], [(16, 3), (20, 0)], b"CODE")
-        p = shellabi.parse_payload(blob)
-        self.assertEqual((p["abi_version"], p["export_count"], p["entry_offset"], p["bss_size"]), (1, 183, 0x40, 0x1200))
-        self.assertEqual((p["data_relocs"], p["code_relocs"], p["imports"], p["code"]), ([4, 8], [12], [(16, 3), (20, 0)], b"CODE"))
+class HeaderTests(unittest.TestCase):
+    def test_the_header_round_trips_and_has_a_size_that_depends_only_on_the_export_count(self):
+        h = shellabi.build_header(1, 183, 0x1200, [(16, 3), (20, 0)])
+        self.assertEqual(len(h), shellabi.header_size(183))
+        self.assertEqual(len(shellabi.build_header(1, 183, 0, [])), len(h))
+        p = shellabi.parse_header(h + b"CODE")
+        self.assertEqual((p["abi_version"], p["export_count"], p["bss_size"], p["imports"]), (1, 183, 0x1200, [(16, 3), (20, 0)]))
 
-    def test_a_wrong_or_short_payload_is_refused(self):
+    def test_a_wrong_or_short_header_is_refused(self):
         with self.assertRaises(shellabi.ShellAbiError):
-            shellabi.parse_payload(b"\0" * 40)
+            shellabi.parse_header(b"\0" * 40)
         with self.assertRaises(shellabi.ShellAbiError):
-            shellabi.parse_payload(shellabi.pack_payload(1, 1, 0, 0, [4, 8, 12], [], [], b"")[:36])
+            shellabi.parse_header(shellabi.build_header(1, 4, 0, [(0, 0)])[:30])
+        with self.assertRaises(shellabi.ShellAbiError):
+            shellabi.build_header(1, 1, 0, [(0, 0), (4, 0)])
 
 
 class ImportTests(unittest.TestCase):
@@ -88,10 +91,10 @@ _spec.loader.exec_module(shells)
 class ShellBuildTests(unittest.TestCase):
     def test_the_kernels_include_paths_and_defines_are_taken_and_its_optimisation_is_not(self):
         cmd = ("xtensa-esp32s3-elf-gcc -DESP_PLATFORM -DFOO=1 -I/a/inc -I /b/inc -isystem /c/sys -include /d/sdkconfig.h -mlongcalls -Og -ggdb "
-               "-fstrict-volatile-bitfields -mdisable-hardware-atomics -std=gnu17 -o x.obj -c /p/main/purr_w10m.c")
+               "-fstrict-volatile-bitfields -mdisable-hardware-atomics -std=gnu17 -o x.obj -c /p/main/purr_shell_abi.c")
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "compile_commands.json")
-            json.dump([{"file": "/p/main/other.c", "command": "gcc -I/no"}, {"file": "/p/main/purr_w10m.c", "command": cmd, "directory": d}], open(path, "w"))
+            json.dump([{"file": "/p/main/other.c", "command": "gcc -I/no"}, {"file": "/p/main/purr_shell_abi.c", "command": cmd, "directory": d}], open(path, "w"))
             got = shells.kernel_flags(path)
         self.assertEqual(got, ["-DESP_PLATFORM", "-DFOO=1", "-I/a/inc", "-I", "/b/inc", "-isystem", "/c/sys", "-include", "/d/sdkconfig.h",
                                "-fstrict-volatile-bitfields", "-mdisable-hardware-atomics"])

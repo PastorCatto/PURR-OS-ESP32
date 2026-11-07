@@ -51,7 +51,7 @@ purrstrap is the one place where a build output becomes something a device accep
 | `keys` | `generate`, `export-public`, `sign`, `verify`, `inspect` | Key pairs per role, signing, checking |
 | | `trust-block` | Builds a signed `purrcfg` image: mode, `DEV_LOCKED`, revocations, extra keys, flags |
 | `bootpkg` | `build` | Compiles, links and wraps the boot package for a board; `--brand` takes a brand header |
-| `shells` | `build` | Builds a loadable shell (plan7): the kernel's own headers and defines, linked against the placeholder addresses of `PurrOS/main/purr_shell_exports.def`, relocated like a module, packed as subtype `MOD_SHELL` with the import sites the loader patches; a name the shell uses that is not exported is a link error that lists it. Run it with `--kernel-build <build dir of a kernel with the shell built in>` |
+| `shells` | `build` | Builds a loadable shell (plan7): the kernel's own headers and defines, linked against the placeholder addresses of `PurrOS/main/purr_shell_exports.def`, relocated like a module, packed as subtype `MOD_SHELL` with the import sites the loader patches; a name the shell uses that is not exported is a link error that lists it. Run it with `--kernel-build <build dir of a kernel built from this tree>` |
 | `modules` | `build` | Compiles a module twice at two base addresses, finds relocations, packs it (`--kind driver\|appmanager\|runtime\|devbundle\|coreos\|app`) |
 | | `index` | Writes `modules.manifest` from already-signed files |
 | `apps` | `new`, `build` | Scaffold and build an app project |

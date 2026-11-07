@@ -89,37 +89,47 @@ def patch_imports(blob, imports, addresses):
     return bytes(out)
 
 
-# ---------------------------------------------------------------- the payload of a shell module (PURR_IMG_MODULE, subtype MOD_SHELL)
+# ---------------------------------------------------------------- the header inside a shell module's code
+#
+# A shell is a plain module (PURR_IMG_MODULE, subtype MOD_SHELL) whose payload is the ordinary module layout (entry offset, data relocations, code relocations,
+# code blob: modules.pack_payload), so the kernel's one module loader loads it. What a shell needs on top of that is a fixed-size header that sits at the START
+# of the code blob (the linker script puts the section `.shellhdr` first): the loader reads it from the loaded copy.
+#
+#   word 0   HEADER_MAGIC ("PSHL")
+#   word 1   the ABI version the module was built against
+#   word 2   the number of exports it was linked against
+#   word 3   the bss size: the loader maps that much zeroed memory after the code blob
+#   word 4   the number of import sites
+#   word 5   reserved (0)
+#   then     `export count` pairs (offset into the blob, export index); the first `import sites` pairs are used, the rest are zero.
+#
+# The size depends only on the export count, so the two link results of the link-twice method have the same layout, and the header is written into both
+# after they are linked (it is the same bytes in both, so it is never mistaken for a relocation).
 
-PAYLOAD_MAGIC = 0x4C485350              # "PSHL"
-_PAYLOAD_HEAD = "<8I"                   # magic, abi version, export count, entry offset, bss size, data relocs, code relocs, imports
+HEADER_MAGIC = 0x4C485350                # "PSHL"
+_HEAD_WORDS = 6
 
 
-def pack_payload(abi_version, export_count, entry_offset, bss_size, data_relocs, code_relocs, imports, code):
-    """magic, abi version, the number of exports the module was linked against, the entry offset, the bss size, then three lists (data relocations, code
-    relocations, imports as offset and index pairs), then the code. Relocations are as in a plain module (modules.pack_payload): the loader adds the data
-    or code load address to the word at each offset. The loader writes the real address of export `index` over each import word."""
-    body = struct.pack(_PAYLOAD_HEAD, PAYLOAD_MAGIC, abi_version, export_count, entry_offset, bss_size, len(data_relocs), len(code_relocs), len(imports))
-    body += b"".join(struct.pack("<I", r) for r in data_relocs)
-    body += b"".join(struct.pack("<I", r) for r in code_relocs)
-    body += b"".join(struct.pack("<II", off, idx) for off, idx in imports)
-    return body + code
+def header_size(export_count):
+    return 4 * _HEAD_WORDS + 8 * export_count
 
 
-def parse_payload(blob):
-    """The inverse of pack_payload: a dict with abi_version, export_count, entry_offset, bss_size, data_relocs, code_relocs, imports, code."""
-    head = struct.calcsize(_PAYLOAD_HEAD)
-    if len(blob) < head:
-        raise ShellAbiError("the payload is shorter than its header")
-    magic, abi, count, entry, bss, nd, nc, ni = struct.unpack_from(_PAYLOAD_HEAD, blob, 0)
-    if magic != PAYLOAD_MAGIC:
-        raise ShellAbiError("not a shell payload (magic %08X)" % magic)
-    need = head + 4 * nd + 4 * nc + 8 * ni
-    if len(blob) < need:
-        raise ShellAbiError("the payload is shorter than its lists")
-    pos = head
-    data = list(struct.unpack_from("<%dI" % nd, blob, pos)); pos += 4 * nd
-    code = list(struct.unpack_from("<%dI" % nc, blob, pos)); pos += 4 * nc
-    imports = [struct.unpack_from("<II", blob, pos + 8 * i) for i in range(ni)]; pos += 8 * ni
-    return {"abi_version": abi, "export_count": count, "entry_offset": entry, "bss_size": bss,
-            "data_relocs": data, "code_relocs": code, "imports": imports, "code": blob[pos:]}
+def build_header(abi_version, export_count, bss_size, imports):
+    if len(imports) > export_count:
+        raise ShellAbiError("%d import sites but room for %d" % (len(imports), export_count))
+    head = struct.pack("<6I", HEADER_MAGIC, abi_version, export_count, bss_size, len(imports), 0)
+    pairs = b"".join(struct.pack("<II", off, idx) for off, idx in imports)
+    return head + pairs + b"\0" * (8 * (export_count - len(imports)))
+
+
+def parse_header(blob):
+    """The inverse of build_header: a dict with abi_version, export_count, bss_size, imports (a list of (offset, index))."""
+    if len(blob) < 4 * _HEAD_WORDS:
+        raise ShellAbiError("the code is shorter than a shell header")
+    magic, abi, count, bss, nimp, _res = struct.unpack_from("<6I", blob, 0)
+    if magic != HEADER_MAGIC:
+        raise ShellAbiError("not a shell (header magic %08X)" % magic)
+    if nimp > count or len(blob) < header_size(count):
+        raise ShellAbiError("the shell header is damaged")
+    imports = [struct.unpack_from("<II", blob, 4 * _HEAD_WORDS + 8 * i) for i in range(nimp)]
+    return {"abi_version": abi, "export_count": count, "bss_size": bss, "imports": imports}
