@@ -21,7 +21,7 @@ if(CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS)
     # profile: KittenOS's slot is 1.5 MB and the recovery build had no room for it.
     if(NOT CONFIG_PURR_PROFILE_RECOVERY)
         # shared by every official shell: Settings, Developer Portal, task manager, permission prompt, the ui catcall windows
-        list(APPEND main_srcs "purr_shell.c" "purr_w10m_settings.c" "purr_repo_dev.c"
+        list(APPEND main_srcs "purr_shell.c" "purr_shell_abi.c" "purr_w10m_settings.c" "purr_repo_dev.c"
                               "purr_w10m_devportal.c" "purr_catrt_ui.c" "purr_w10m_perm.c" "purr_w10m_tasks.c" "purr_systasks.c" "purr_catrt_game.c")
         # exactly one official shell per image (Kconfig choice PURR_OFFICIAL_SHELL)
         if(CONFIG_PURR_SHELL_ANDROID)
