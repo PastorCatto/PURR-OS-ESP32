@@ -30,6 +30,10 @@
 #include "purr_module.h"
 #include "purr_module_abi.h"
 #include "purr_relocate.h"
+#include "purr_shellhdr.h"
+#if CONFIG_PURR_PROFILE_FULL
+#include "purr_shell_abi.h"
+#endif
 #include "purr_cfgstore.h"
 #include "purr_swap.h"
 #include "purr_bootimg.h"
@@ -5163,10 +5167,26 @@ static int path_in_boot_drivers(const char *path)
 /* Everything after the bytes are in memory: verify the signature, lay the module out, relocate it, map it executable. Takes
  * ownership of rb (malloc'd, len bytes) and frees it. The file version below reads the module from the filesystem; the recovery
  * loader, which has no filesystem, hands in the baked-in driver modules directly (purr_loader_load_drivers). */
+static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, const char *path, const char *log_tag,
+                                                    uint32_t max_pages, uint8_t expected_image_type, int expected_subtype,
+                                                    uint8_t **out_databuf, void **out_exec_ptr,
+                                                    uint32_t *out_entry_offset);
+
 static purr_load_result_t load_relocatable_image(uint8_t *rb, size_t len, const char *path, const char *log_tag,
                                                  uint32_t max_pages, uint8_t expected_image_type,
                                                  uint8_t **out_databuf, void **out_exec_ptr,
                                                  uint32_t *out_entry_offset)
+{
+    return load_relocatable_image_ex(rb, len, path, log_tag, max_pages, expected_image_type, -1, out_databuf, out_exec_ptr, out_entry_offset);
+}
+
+/* `expected_subtype` is -1 for "any" (every module and app today) or a PURR_MOD_* the file must carry: a shell is the only caller that sets it, so a driver or any other
+ * module signed by a trusted key can never be loaded as a shell. For PURR_MOD_SHELL the shell header at the start of the code is checked before anything is
+ * mapped (ABI version, export count) and its bss size is added to the mapped block (zeroed memory after the code, where the linker put .bss). */
+static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, const char *path, const char *log_tag,
+                                                    uint32_t max_pages, uint8_t expected_image_type, int expected_subtype,
+                                                    uint8_t **out_databuf, void **out_exec_ptr,
+                                                    uint32_t *out_entry_offset)
 {
     purr_cfg_t cfg;
     purr_flash_t fl;
@@ -5215,7 +5235,8 @@ static purr_load_result_t load_relocatable_image(uint8_t *rb, size_t len, const 
             vr = PURR_V_OK;
         }
     }
-    if (vr != PURR_V_OK || hdr.image_type != expected_image_type) {
+    if (vr != PURR_V_OK || hdr.image_type != expected_image_type ||
+        (expected_subtype >= 0 && PURR_FLAGS_SUBTYPE(hdr.flags) != (unsigned)expected_subtype)) {
         ESP_LOGW(log_tag, "%s: %s", path, vr != PURR_V_OK ? purr_verify_name(vr) : "wrong image type");
         free(rb);
         return PURR_LOAD_UNTRUSTED;
@@ -5267,10 +5288,25 @@ static purr_load_result_t load_relocatable_image(uint8_t *rb, size_t len, const 
         purr_module_read_code_relocs(payload, &layout, code_offsets);
     }
 
+    uint32_t extra = 0;                                                     /* zeroed memory after the code (a shell's bss) */
+#if CONFIG_PURR_PROFILE_FULL
+    purr_shellhdr_t sh = {0};
+    if (expected_subtype == PURR_MOD_SHELL) {
+        purr_shellhdr_result_t hr = purr_shellhdr_parse(payload + layout.code_offset, layout.code_size, PURR_SHELL_ABI_VERSION, (uint32_t)purr_shell_export_count, &sh);
+        if (hr != PURR_SHELLHDR_OK) {
+            ESP_LOGW(log_tag, "%s: %s", path, purr_shellhdr_result_name(hr));
+            free(data_offsets);
+            free(code_offsets);
+            free(rb);
+            return PURR_LOAD_UNTRUSTED;
+        }
+        extra = sh.bss_size;
+    }
+#endif
     /* Round up to a whole number of pages -- esp_mmu_map needs a page-aligned length, and this
      * is also where "too big" gets decided, against the caller's own budget rather than a
      * single hardcoded page. */
-    uint32_t want = ((layout.code_size + CONFIG_MMU_PAGE_SIZE - 1) / CONFIG_MMU_PAGE_SIZE) *
+    uint32_t want = ((layout.code_size + extra + CONFIG_MMU_PAGE_SIZE - 1) / CONFIG_MMU_PAGE_SIZE) *
                     CONFIG_MMU_PAGE_SIZE;
     if (want > (uint64_t)max_pages * CONFIG_MMU_PAGE_SIZE) {
         ESP_LOGW(log_tag, "%s: too big (%u bytes, room for %u page(s))", path,
@@ -5330,6 +5366,17 @@ static purr_load_result_t load_relocatable_image(uint8_t *rb, size_t len, const 
         free(databuf);
         return PURR_LOAD_UNTRUSTED;
     }
+#if CONFIG_PURR_PROFILE_FULL
+    if (expected_subtype == PURR_MOD_SHELL) {                               /* the real address of every OS name the shell uses, over the placeholders the linker left */
+        purr_shellhdr_result_t hr = purr_shellhdr_patch(databuf, layout.code_size, &sh, purr_shell_exports, (uint32_t)purr_shell_export_count);
+        if (hr != PURR_SHELLHDR_OK) {
+            ESP_LOGW(log_tag, "%s: %s", path, purr_shellhdr_result_name(hr));
+            esp_mmu_unmap(exec_ptr);
+            free(databuf);
+            return PURR_LOAD_UNTRUSTED;
+        }
+    }
+#endif
 
     ee = esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
     if (ee == ESP_OK) {
@@ -5367,6 +5414,46 @@ static purr_load_result_t load_relocatable_file(const char *path, const char *lo
     return load_relocatable_image(rb, rc.len, path, log_tag, max_pages, expected_image_type, out_databuf,
                                   out_exec_ptr, out_entry_offset);
 }
+
+#if CONFIG_PURR_PROFILE_FULL
+/* A shell's own budget, apart from the modules': eight 64 KB pages and a 1 MB read buffer (plan7.md). The Windows 10 Mobile shell is about 37 KB with its bss. */
+#define PURR_SHELL_LOAD_MAX_PAGES 8
+#define PURR_SHELL_READ_CAP (1024 * 1024)
+
+/* Loads /ui/shells/<id>/shell.cat: verifies it (a trusted key whose role may sign a shell, the shell subtype, a header for this ABI), relocates it, writes the real
+ * addresses of the OS names over its placeholders, maps it executable and calls its entry point. Returns its ops table, or NULL (and says why in the log). A shell stays
+ * loaded for the life of the boot: there is no unloading, a different choice takes effect at the next start. */
+const purr_shell_ops_t *purr_shell_module_load(const char *id)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/ui/shells/%s/shell.cat", id);
+    uint8_t *rb = malloc(PURR_SHELL_READ_CAP);
+    if (rb == NULL) {
+        return NULL;
+    }
+    appinstall_read_ctx_t rc = {rb, PURR_SHELL_READ_CAP, 0};
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
+        ESP_LOGW("shell", "%s: could not be read", path);
+        free(rb);
+        return NULL;
+    }
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    if (load_relocatable_image_ex(rb, rc.len, path, "shell", PURR_SHELL_LOAD_MAX_PAGES, PURR_IMG_MODULE, PURR_MOD_SHELL, &databuf, &exec_ptr, &entry_offset) != PURR_LOAD_OK) {
+        return NULL;
+    }
+    purr_shell_module_main_t entry = (purr_shell_module_main_t)((uint8_t *)exec_ptr + entry_offset);
+    const purr_shell_ops_t *ops = entry();
+    if (ops == NULL || ops->abi_version != PURR_SHELL_ABI_VERSION || ops->start == NULL || ops->id == NULL) {
+        ESP_LOGW("shell", "%s: the entry point gave no usable ops table", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return NULL;
+    }
+    return ops;
+}
+#endif
 
 /* One page each, same as before this function was pulled out of load_one_module_file()/
  * load_one_kernelmod_file() -- a future CoreOS loader (PurrOS/SPEC.md section 6) is the reason
