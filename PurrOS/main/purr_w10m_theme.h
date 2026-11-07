@@ -11,7 +11,7 @@
  *
  * Everything here runs on the UI service task, the only place LVGL may be called from.
  *
- * There are two skins over the same roles, chosen at build time (Kconfig PURR_OFFICIAL_SHELL): the Windows 10 Mobile
+ * There are two skins over the same roles, chosen at start-up by the shell that runs (purr_theme_set_skin(): the built-in Android shell, or a loaded shell's own skin): the Windows 10 Mobile
  * look (flat, square, accent fills) and the Android 2.2 look (grey bevelled buttons with small corners, black list rows
  * with a divider, orange when pressed or selected, a gradient title bar). Callers name the role (a button, a list row, a
  * title bar) and the skin decides how it looks, so shared code, apps' windows included, runs in either.
