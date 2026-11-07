@@ -975,6 +975,69 @@ static int has_official(void)
     return 0;
 }
 
+/* The Store keeps itself current from the OFFICIAL repository only (the project's own key): a newer "store" (and its companion "storesvc") there replaces the copy the
+ * kernel seeded or an older update. An app that is running is left alone until the next sign-in (its files are in use). Started by self_update_task, not by an app. */
+static int self_update(void)
+{
+    repos_load();
+    char base[96];
+    tidy_base(PURR_REPO_OFFICIAL_URL, base, sizeof(base));
+    char rid[20] = "";
+    for (int i = 0; i < s_repos.count; i++) {
+        if (strcmp(s_repos.e[i].url, base) == 0 && s_repos.e[i].tier == PURR_TIER_OFFICIAL) {
+            snprintf(rid, sizeof(rid), "%s", s_repos.e[i].id);
+        }
+    }
+    if (rid[0] == '\0') {
+        setmsg("The official repository is not set up.");
+        return -1;
+    }
+    if (refresh(rid) != 0) {
+        return -1;
+    }
+    static const char *const mine[] = {"store", "storesvc"};
+    int done = 0;
+    for (size_t k = 0; k < sizeof(mine) / sizeof(mine[0]); k++) {
+        rebuild_items();
+        int want = 0;
+        for (int i = 0; i < s_nitems; i++) {
+            if (strcmp(s_items[i].name, mine[k]) == 0 && strcmp(s_items[i].repo_id, rid) == 0 && s_items[i].type == PURR_REPO_ITEM_APP &&
+                s_items[i].state == PURR_STORE_UPDATE) {
+                want = 1;
+            }
+        }
+        if (!want || purr_catrt_slot_of(mine[k]) >= 0) {
+            continue;
+        }
+        if (install_item(mine[k], rid) == 0) {
+            done++;
+        }
+    }
+    setmsg(done ? "The Store was updated." : "The Store is up to date.");
+    if (done) {
+        w10m_note_post("Store", "The Store was updated.");
+    }
+    return 0;
+}
+
+static void job_task(void *arg);
+
+static void self_update_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(60000));                  /* the home screen, the network and the late drivers first */
+    if (!s_job.busy && net_up() && user_name()[0] != '\0') {
+        s_job.busy = 1;
+        s_job.slot = -1;
+        snprintf(s_job.what, sizeof(s_job.what), "self-update");
+        s_job.a[0] = s_job.b[0] = '\0';
+        if (purr_task_create_ext(job_task, "store-job", 14336, NULL, 3, NULL) != pdPASS) {
+            s_job.busy = 0;
+        }
+    }
+    purr_task_exit();
+}
+
 int purr_store_bootstrap(char *msg, size_t cap)
 {
     repos_load();
@@ -1053,6 +1116,9 @@ static int run_job(void)
     if (strcmp(w, "bootstrap") == 0) {
         return purr_store_bootstrap(s_job.msg, sizeof(s_job.msg));
     }
+    if (strcmp(w, "self-update") == 0) {
+        return self_update();
+    }
     setmsg("I do not know that job.");
     return -1;
 }
@@ -1071,7 +1137,9 @@ static void job_task(void *arg)
     snprintf(s_last, sizeof(s_last), "%s", s_job.msg);
     int slot = s_job.slot;
     s_job.busy = 0;
-    purr_catrt_post_ui(slot, s_job.rc < 0 ? 1 : s_job.rc == 2 ? 2 : 0, "job");
+    if (slot >= 0) {                                      /* a job the system started itself (the Store's own update) has no app to tell */
+        purr_catrt_post_ui(slot, s_job.rc < 0 ? 1 : s_job.rc == 2 ? 2 : 0, "job");
+    }
     purr_task_exit();
 }
 
@@ -1543,6 +1611,10 @@ void purr_store_session_started(void)
 {
     if (purr_builtin_apps_count > 0 && purr_task_create_ext(seed_task, "store-seed", 12288, NULL, 3, NULL) != pdPASS) {
         ESP_LOGW(TAG, "could not start the Store seeding task");
+    }
+    static int self_update_started;                     /* once per start: a later sign-in does not ask the network again */
+    if (!self_update_started && purr_task_create_ext(self_update_task, "store-self", 4096, NULL, 3, NULL) == pdPASS) {
+        self_update_started = 1;
     }
 }
 
