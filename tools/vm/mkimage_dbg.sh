@@ -28,6 +28,9 @@ ps() { $PY purrstrap/purrstrap.py "$@"; }
 # (signing_keys/boot.key), because the bootloader checks it against the compiled-in keys only. During a key rotation (plan3.md) SLOT_KEY is the new boot key
 # (SLOT_KEY=signing_keys/new/boot.key SLOT_KEY_ID=3 PURRSTRAP_SLOT_PASSWORD=<its passphrase>) and ADD_KEYS puts the new public keys in the trust block
 # (ADD_KEYS=3:boot:signing_keys/new/boot.pub,4:developer:...,5:system:...). PURRSTRAP_KEY_PASSWORD stays the old boot key's.
+# TRUST_KEY (default: the compiled-in boot key signing_keys/boot.key) signs the trust block with another boot key once a bootloader and a kernel that carry that key are
+# in the image (bootloader 0.5.0 and later carry the new boot key, id 3): TRUST_KEY=signing_keys/new/boot.key PURRSTRAP_TRUST_PASSWORD=<its passphrase>.
+TRUST_KEY=${TRUST_KEY:-signing_keys/boot.key}
 SLOT_KEY=${SLOT_KEY:-signing_keys/boot.key}; SLOT_KEY_ID=${SLOT_KEY_ID:-1}; SLOT_PUB=${SLOT_KEY%.key}.pub
 sign_slot() { PURRSTRAP_KEY_PASSWORD=${PURRSTRAP_SLOT_PASSWORD:-$PURRSTRAP_KEY_PASSWORD} ps keys sign --key $SLOT_KEY --key-id $SLOT_KEY_ID "$@"; }
 [[ -f $BUILD/purros.bin ]] || { echo "no $BUILD/purros.bin: build the vmdbg kernel first"; exit 1; }
@@ -44,7 +47,7 @@ ps coreos slot-image --file $W/kernel.cat --board tdeck_plus --slot kernel --out
 # first: a blank device (FRESH on, kernel and KittenOS erased) that starts in the loader: the "first time?" path.
 SCENARIO=${SCENARIO:-normal}
 # Developer mode is OFF unless DEV_MODE=1 (the debug kernel's automatic sign-in and the dev-server recovery page need it).
-tb=(--key signing_keys/boot.key --mode enforce)
+tb=(--key $TRUST_KEY --mode enforce)
 [[ -z $DEV_MODE ]] || tb+=(--dev-mode)
 [[ $SCENARIO == first || $SCENARIO == auto ]] || tb+=(--installed)
 [[ $SCENARIO == auto ]] && tb+=(--auto-reinstall)                    # auto: the loader installs unattended (a blank device)
@@ -52,7 +55,7 @@ tb=(--key signing_keys/boot.key --mode enforce)
 [[ $SCENARIO == normal || $SCENARIO == kitten ]] || tb+=(--force-loader)
 [[ -z $ADD_KEYS ]] || tb+=(--add-keys $ADD_KEYS)
 [[ -z $DEV_RECOVERY ]] || tb+=(--dev-recovery)          # DEV_RECOVERY=1: recovery may pull from a dev server (the extra setup page)
-ps keys trust-block $tb --out $W/purrcfg.bin >/dev/null
+PURRSTRAP_KEY_PASSWORD=${PURRSTRAP_TRUST_PASSWORD:-$PURRSTRAP_KEY_PASSWORD} ps keys trust-block $tb --out $W/purrcfg.bin >/dev/null
 # The recovery loader and KittenOS slots are rebuilt too when their builds exist (out/vmmin, out/vmrec).
 LOADER=$ROOT/out/vmmin/purros.bin; KITTEN=$ROOT/out/vmrec/purros.bin
 if [[ -f $LOADER && -f $KITTEN ]]; then
