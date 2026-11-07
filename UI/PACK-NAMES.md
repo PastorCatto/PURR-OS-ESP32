@@ -39,7 +39,7 @@ The shell asks through `img()` in `purr_w10m.c` and `w10m_img()` in `purr_w10m_s
 | `hotspot_ic` | 16 px | R | quick action "Hotspot" |
 | `vpn_ic` | 16 px | R | quick action "VPN" |
 | `location_ic` | 16 px | R | quick action "Location" |
-| `img0` to `img9` | 320 x 569 | F | the ten wallpapers (see below) |
+| `img0` to `img9` | 320 x 569 | F | the wallpapers: the official packs carry only `img0` (see below) |
 
 For a quick action whose picture is missing the tile shows a list or refresh symbol instead of its own icon (`purr_w10m.c`), which is why those ten are required. "Rotate" and "Tasks" have no picture by design.
 
@@ -76,12 +76,12 @@ Names in today's Froyo pack that the code does **not** ask for yet: `fr_dock_pho
 
 ## Shared by both shells
 
-- **Wallpapers `img0` to `img9`** (320 x 569, opaque): both shells call `purr_wallpaper_asset()` (`purr_wallpaper.c`). Choice 0 ("Default") uses `img0` on the start screen, `img1` on the lock screen and `img3` on the sign-in screen; choices 1 to 10 use `img0` to `img9` on all three. They are drawn centred and cropped to the screen, never scaled. Today's Froyo pack has none (the Android shell shows its gradient); the Windows pack from `tools/ui/w10m_pack.py` has all ten (3.6 MB of the 5 MB cap). The ten pictures are placeholder art (`THIRD_PARTY.md`).
+- **Wallpapers `img0` to `img9`** (since 1.0.29 the packs carry one: a surface whose picture is not in the pack, or the theme, draws `img0`, and the menus list only the pictures present, `purr_wallpaper_count()`; a theme or second pack adds `img1` onward) (320 x 569, opaque): both shells call `purr_wallpaper_asset()` (`purr_wallpaper.c`). Choice 0 ("Default") uses `img0` on the start screen, `img1` on the lock screen and `img3` on the sign-in screen; choices 1 to 10 use `img0` to `img9` on all three. They are drawn centred and cropped to the screen, never scaled. Today's Froyo pack has none (the Android shell shows its gradient); the Windows pack from `tools/ui/w10m_pack.py` has `img0` only (405 KB; `--wallpapers all` adds the other nine, 3.7 MB). The picture is placeholder art (`THIRD_PARTY.md`).
 - No other name is shared. `st_*` and `kb_*` belong to the Android shell only.
 
 ## What the converted Windows pack provides
 
-`tools/ui/w10m_pack.py` takes the upstream project's pictures (`UI/w10m-assets/NOTICE` has the commit and the list): **all 21 required Windows names are provided** (12 from upstream PNGs, 9 from the upstream SquareLine arrays: `wp_devices`, `wp_network`, `wp_personalization`, `wp_apps`, `wp_account`, `wp_time`, `wp_privacy`, `wp_about`, `wifi_icon`), and all ten wallpapers. Nothing is missing. Upstream has more pictures the shell does not ask for (`wp_back`, `wp_next`, `wp_search`, `wp_logo`, `windows_logo`, `padlock`, tile art, app icons such as `phone_ic`); they are not converted.
+`tools/ui/w10m_pack.py` takes the upstream project's pictures (`UI/w10m-assets/NOTICE` has the commit and the list): **all 21 required Windows names are provided** (12 from upstream PNGs, 9 from the upstream SquareLine arrays: `wp_devices`, `wp_network`, `wp_personalization`, `wp_apps`, `wp_account`, `wp_time`, `wp_privacy`, `wp_about`, `wifi_icon`), and one wallpaper (`img0`). Nothing is missing. Upstream has more pictures the shell does not ask for (`wp_back`, `wp_next`, `wp_search`, `wp_logo`, `windows_logo`, `padlock`, tile art, app icons such as `phone_ic`); they are not converted.
 
 The Android pack from `tools/ui/froyo_pack.py` provides all 31 required names, `fr_dock_apps` and the 3 `kb_*` (no wallpapers).
 

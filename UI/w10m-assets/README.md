@@ -7,9 +7,9 @@ The pictures of the Windows 10 Mobile style shell, from **windows-10-mobile-lvgl
 | `wp_settings`, `wp_system`, `wp_devices`, `wp_network`, `wp_personalization`, `wp_apps`, `wp_account`, `wp_time`, `wp_privacy`, `wp_about` | the Settings tile and the nine Settings sections | 32 px |
 | `wifi_icon` | the status bar's network icon | 24 px |
 | `wifi_ic`, `brightness_ic`, `settings_ic`, `airplane_ic`, `cellular_ic`, `bluetooth_ic`, `battery_ic`, `hotspot_ic`, `vpn_ic`, `location_ic` | the quick actions | 16 px |
-| `img0` to `img9` | the ten wallpapers (also used by the Android shell) | 320 x 569 |
+| `img0` | the one wallpaper (every surface; the shell asks for `img0` to `img9`, and a picture the pack lacks is replaced by `img0`; a theme or a second pack can add `img1` onward) | 320 x 569 |
 
-Made with `tools/ui/w10m_pack.py`, which fetches upstream into a temporary folder, copies or converts the pictures and packs them with purrstrap's packer into `out/ui/pack-w10m.bin` (3.7 MB with the wallpapers, 21 required names, no required name missing). Pack the folder again without fetching:
+Made with `tools/ui/w10m_pack.py`, which fetches upstream into a temporary folder, copies or converts the pictures and packs them with purrstrap's packer into `out/ui/pack-w10m.bin` (405 KB with the one wallpaper, `--wallpapers all` adds the other nine and makes it 3.7 MB; 21 required names, no required name missing). Pack the folder again without fetching:
 
     python3 -I tools/ui/w10m_pack.py --no-fetch
 

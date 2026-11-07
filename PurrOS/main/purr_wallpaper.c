@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "purr_settings.h"
+#include "purr_ui_assets.h"
 
 #define KEY "display.wallpaper"
 
@@ -40,10 +41,21 @@ const char *purr_wallpaper_asset(purr_wp_surface_t surface)
 {
     static const char *const k_pic[PURR_WALLPAPER_BUILTIN] = {"img0", "img1", "img2", "img3", "img4", "img5", "img6", "img7", "img8", "img9"};
     int c = purr_wallpaper_get();
-    if (c == 0) {
-        return k_default[surface >= PURR_WP_START && surface <= PURR_WP_SIGNIN ? surface : PURR_WP_START];
+    const char *name = c == 0 ? k_default[surface >= PURR_WP_START && surface <= PURR_WP_SIGNIN ? surface : PURR_WP_START] : k_pic[c - 1];
+    if (purr_ui_assets_find(name) == NULL && purr_ui_assets_find(k_pic[0]) != NULL) {
+        return k_pic[0];                               /* the packs carry one picture: it serves every surface and every choice */
     }
-    return k_pic[c - 1];
+    return name;
+}
+
+int purr_wallpaper_count(void)
+{
+    static const char *const k_pic[PURR_WALLPAPER_BUILTIN] = {"img0", "img1", "img2", "img3", "img4", "img5", "img6", "img7", "img8", "img9"};
+    int n = 0;
+    while (n < PURR_WALLPAPER_BUILTIN && purr_ui_assets_find(k_pic[n]) != NULL) {
+        n++;
+    }
+    return n + 1;
 }
 
 const char *purr_wallpaper_name(int choice)

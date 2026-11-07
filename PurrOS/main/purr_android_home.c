@@ -605,7 +605,7 @@ static void menu_clicked(lv_event_t *e)
     and_menu_close();
     switch (act) {
     case 0: {
-        int next = (purr_wallpaper_get() + 1) % (PURR_WALLPAPER_BUILTIN + 1);
+        int next = (purr_wallpaper_get() + 1) % purr_wallpaper_count();
         if (purr_wallpaper_set(next) == 0) {
             w10m_banner(purr_wallpaper_name(next), 0);
         }

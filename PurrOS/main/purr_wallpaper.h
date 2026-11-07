@@ -5,7 +5,10 @@
  * choice changes.
  *
  *   0         the default: the start screen, lock screen and sign-in screen each keep the picture they were designed with
- *   1 .. 10   one of the built-in pictures, on every surface
+ *   1 .. 10   one of the pictures (img0 .. img9) the shell's picture pack, or a theme layered over it, carries, on every surface
+ *
+ * The official packs carry one picture (img0). A picture that is not in the packs is replaced by img0, and the menus list only the pictures there are
+ * (purr_wallpaper_count()), so a theme or a second pack can add img1, img2 ... and the choices grow with them.
  */
 #ifndef PURR_WALLPAPER_H
 #define PURR_WALLPAPER_H
@@ -30,6 +33,9 @@ int purr_wallpaper_set(int choice);
 
 /* The ui_assets name to draw on a surface for the current choice. */
 const char *purr_wallpaper_asset(purr_wp_surface_t surface);
+
+/* How many choices a menu offers: 1 (the default) plus the pictures present, counted from img0 without a gap. At least 1. */
+int purr_wallpaper_count(void);
 
 /* The name of choice n for a menu: "Default", "Picture 1" ... */
 const char *purr_wallpaper_name(int choice);

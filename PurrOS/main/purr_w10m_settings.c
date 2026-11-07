@@ -932,11 +932,11 @@ static void page_personal(void)
     cm_title(s_body, "Wallpaper");
     {
         char names[256] = "";
-        for (int i = 0; i <= PURR_WALLPAPER_BUILTIN; i++) {
+        for (int i = 0; i < purr_wallpaper_count(); i++) {
             size_t n = strlen(names);
             snprintf(names + n, sizeof(names) - n, "%s%s", i ? "\n" : "", purr_wallpaper_name(i));
         }
-        cm_dropdown(s_body, names, purr_wallpaper_get(), 150, wallpaper_cb);
+        cm_dropdown(s_body, names, purr_wallpaper_get() < purr_wallpaper_count() ? purr_wallpaper_get() : 0, 150, wallpaper_cb);
     }
     cm_dim(s_body, "On the start, lock and sign-in screens. It stays when you switch the shell.");
     theme_section();

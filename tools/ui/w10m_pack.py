@@ -194,13 +194,13 @@ def main():
     ap.add_argument("--pack", default=PACK, help="the pack file (default out/ui/pack-w10m.bin)")
     ap.add_argument("--src", help="use this checkout of the upstream project instead of cloning")
     ap.add_argument("--no-fetch", action="store_true", help="do not fetch or convert: pack the PNGs already in --out-dir")
-    ap.add_argument("--wallpapers", choices=("all", "defaults", "none"), default="all",
-                    help="which wallpapers go in the pack: all ten (about 3.6 MB), the three the default choice uses (img0, img1, img3), or none")
+    ap.add_argument("--wallpapers", choices=("one", "all", "defaults", "none"), default="one",
+                    help="which wallpapers go in the pack: one (img0, the default), all ten (about 3.6 MB), the three the default choice uses (img0, img1, img3), or none")
     a = ap.parse_args()
 
     skip = set()
     if a.wallpapers != "all":
-        keep = {"img0", "img1", "img3"} if a.wallpapers == "defaults" else set()
+        keep = {"one": {"img0"}, "defaults": {"img0", "img1", "img3"}}.get(a.wallpapers, set())
         skip = {"img%d" % i for i in range(10)} - keep
 
     missing = []
@@ -220,7 +220,7 @@ def main():
             if "MIT License" not in licence[:200] or "Felix Biego" not in licence[:300]:
                 print("error: the upstream LICENSE is not the MIT licence of Felix Biego; not converting", file=sys.stderr)
                 return 1
-            rows, missing = convert(src, a.out_dir, NAMES)
+            rows, missing = convert(src, a.out_dir, {n: v for n, v in NAMES.items() if n not in skip})
             write_notice(a.out_dir, commit, rows, licence)
             print("%d picture(s) converted into %s" % (len(rows), a.out_dir))
         finally:
