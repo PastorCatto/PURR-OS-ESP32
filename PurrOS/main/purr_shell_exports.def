@@ -4,7 +4,7 @@
  * One line per name, in a fixed order: the position in this list is the number the shell is linked against (purrstrap gives each name the placeholder address
  * PURR_SHELL_IMPORT_BASE + 4 * position, the loader replaces every such address in the module with the real one from purr_shell_exports[]). So
  *   - a name is only ever ADDED at the end of its list (adding keeps ABI 1; removing or moving one is a new ABI number, PURR_SHELL_ABI_VERSION),
- *   - the file is included by C (purr_shell_abi.c builds the table, which fails to compile if a name does not exist) and read by purrstrap (scripts/shellabi.py).
+ *   - the file is included by C (purr_shell_abi.c builds the table, which fails to compile if a name does not exist) and read by purrstrap (lib/shellabi.py).
  *
  *   SHELL_FN(name)             a function
  *   SHELL_DATA(type, name)     an object whose ADDRESS the shell uses (for example a font)

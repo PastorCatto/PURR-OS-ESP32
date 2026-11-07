@@ -50,6 +50,7 @@ extern "C" {
 #define PURR_MOD_DEVBUNDLE         7
 #define PURR_MOD_LOADER            8     /* recovery loader */
 #define PURR_MOD_UIASSETS          10    /* a UI icon/picture pack for the ui_assets partition (data, not code); written by stage 2 or `netinstall uiassets` */
+#define PURR_MOD_SHELL             11    /* a loadable shell (plan7.md, purr_shell_abi.h): relocatable code that is linked against the shell export list, not the module table; signed by the hub key (or a key the device trusts for shells) */
 #define PURR_MOD_BOOTLOADER        9     /* the second-stage bootloader itself (flash 0x0), updated only by KittenOS with a backup (bootloader/SPEC.md 9.2) */
 
 /* Key roles (Keys/SPEC.md section 2) */

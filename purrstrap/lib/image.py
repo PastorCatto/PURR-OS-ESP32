@@ -35,6 +35,7 @@ MOD_DEVBUNDLE = 7
 MOD_LOADER = 8
 MOD_BOOTLOADER = 9
 MOD_UIASSETS = 10
+MOD_SHELL = 11            # a loadable shell (plan7.md): code, linked against purr_shell_exports.def
 
 CHIP_ESP32 = 0
 CHIP_ESP32S3 = 9

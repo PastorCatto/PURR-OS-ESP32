@@ -26,7 +26,7 @@ extern "C" {
 #endif
 
 #define PURR_SHELL_ABI_VERSION   1
-#define PURR_SHELL_IMPORT_BASE   0x7F000000u        /* the placeholder address of export 0; export i is at BASE + 4 * i. Nothing is mapped there on the chip. */
+#define PURR_SHELL_IMPORT_BASE   0x0F000000u        /* the placeholder address of export 0; export i is at BASE + 4 * i. Nothing is mapped there on the chip; it is in the region of the module's link addresses, see purrstrap/lib/shellabi.py. */
 #define PURR_SHELL_MODULE_ENTRY  "purr_shell_module_main"
 
 /* The skin a shell draws the shared screens (Settings, windows) in: purr_theme_skin(). */
