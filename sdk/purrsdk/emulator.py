@@ -63,6 +63,8 @@ def _find_exe(root, names):
 def find():
     """Where the emulator is. Returns {"root", "gui", "headless", "boards"} (a path or None for each part), or None when there is no emulator.
     Looked for in: $PURR_EMULATOR_DIR, the kit's emulator/ folder, a checkout of the emulator project. $PURR_EMULATOR names a launcher for the window."""
+    if os.name == "nt":                                  # the emulator (patched QEMU) is not built for Windows yet; its process-group handling is POSIX only
+        return None
     launcher = os.environ.get("PURR_EMULATOR")
     for root in _roots():
         gui = launcher if launcher and os.path.isfile(launcher) else _find_exe(root, _GUI_NAMES)

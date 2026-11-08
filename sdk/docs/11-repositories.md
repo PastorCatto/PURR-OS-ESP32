@@ -42,3 +42,11 @@ If you ever change the key, it is a different repository: everyone has to add it
 ## Moving the official update address (project only)
 
 `purr repo move OUTFOLDER --from-url <the recovery.manifest devices ask now> --recovery <the new one> --modules <the new modules.manifest> --seq 1 --key <the boot key> [--message "..."]` writes `moved.txt` and `moved.txt.sig`. Put both next to the manifest the devices ask. A device follows it only if the boot key signed it, `from` is the address it asked, `seq` is higher than the last move it followed, and the new addresses are https and end in `/recovery.manifest` and `/modules.manifest`. This needs the boot key, so only the project can do it; it has nothing to do with your own repository. How it works: [docs/08](../../docs/08-updates-and-release-channels.md).
+
+## Items, subfolders and the project's hub
+
+- An item has a type: `app`, `asset`, `extra`, `theme` (a `pack.bin` up to 4 MB) or `shell` (one signed `shell.cat` up to 1 MB). `purr repo add --type theme` and `--type shell` check these rules.
+- The index entry's `url` may be a path with `/` (for instance `apps/clock-1.0.0.cat`) as long as it is at most 95 characters, with no leading `/` or `.`, no `..` and no `//`. A device joins it to the repository's address, so you can keep packages in subfolders; `repo.json`, `index.json` and their signatures stay at the root.
+- A device knows a repository by the fingerprint of its key, so **one key is one repository**: two folders signed with the same key would be the same repository on a device.
+- A device keeps at most 32 items per repository, 48 in the Store and 24 KB of index, and drops a whole entry whose title (31), description (79), category (15) or version (15, no underscore) is too long. `purr repo verify` reports these.
+- The project's own repository is the hub, `PURR-OS-HUB`, built with its own small tool (`tools/hubsign.py` there) that makes the same bytes as `purr repo build`. If you want your own store, fork it, make your key with `hubsign.py keygen`, and delete `endorse_key_id` from `repo.toml`: your repository is then "community", not "official" ([docs/14-store-and-repositories.md](../../docs/14-store-and-repositories.md)).

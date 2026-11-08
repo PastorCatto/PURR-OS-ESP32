@@ -41,6 +41,7 @@
 | 19 | [Boards](19-boards.md) | board files and device profiles | 1,166 |
 | 20 | [Tools and scripts](20-tools-and-scripts.md) | what each script in the repository does | 999 |
 | 21 | [Fonts](21-fonts.md) | the UI font, the emoji fonts and how fonts are loaded (designed; the kernel side is not built) | 1,130 |
+| 22 | [Building on Windows](22-building-on-windows.md) | the first Windows guide: tools, kit, firmware build and flashing (untested on Windows) | 1,000 |
 
 Also here: [start-here.md](start-here.md), [runbook.md](runbook.md), [glossary.md](glossary.md).
 

@@ -30,3 +30,7 @@ Hello! This kit lets you make anything for PURR OS: an app, a driver for a chip,
 ## If something does not work
 
 Run `bin/purr doctor`. It says what is missing in plain words. Studio's **doctor** tile shows the same thing.
+
+## On Windows
+
+There is a Windows build of the kit (without the emulator), written but not yet run on Windows: [15-windows.md](15-windows.md).

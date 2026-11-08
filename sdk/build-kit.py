@@ -39,10 +39,11 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from purrsdk import __version__  # noqa: E402
 
-HOST = "macos-x86_64"
+IS_WIN = sys.platform == "win32"                 # a Windows kit is built on a Windows computer (written 2026-11-08, NOT yet run on Windows)
+HOST = "windows-x86_64" if IS_WIN else "macos-x86_64"
 PBS_API = "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
 PY_MINOR = "cpython-3.12"
-PY_TAG = "x86_64-apple-darwin-install_only.tar.gz"
+PY_TAG = "x86_64-pc-windows-msvc-install_only.tar.gz" if IS_WIN else "x86_64-apple-darwin-install_only.tar.gz"
 CACHE = os.path.join(ROOT, "out", "sdk-cache")
 
 IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", "build", ".state.json", "*.orig")
@@ -102,7 +103,10 @@ def _wheel_ok(filename):
             pyok = True
     if abitag not in ("none", "abi3", "cp312") and not abitag.startswith("abi3"):
         pyok = False
-    platok = plat == "any" or any(p.startswith("macosx_") and (p.endswith("x86_64") or p.endswith("universal2")) for p in plat.split("."))
+    if IS_WIN:
+        platok = plat == "any" or any(p == "win_amd64" for p in plat.split("."))
+    else:
+        platok = plat == "any" or any(p.startswith("macosx_") and (p.endswith("x86_64") or p.endswith("universal2")) for p in plat.split("."))
     return pyok and platok
 
 
@@ -115,8 +119,8 @@ def fetch_wheels(names, dest):
         from pip._vendor.packaging.version import Version
     except ImportError:
         raise SystemExit("this host Python has no pip to borrow a requirement parser from")
-    env = {"python_version": "3.12", "python_full_version": "3.12.0", "sys_platform": "darwin", "platform_system": "Darwin", "os_name": "posix",
-           "platform_machine": "x86_64", "implementation_name": "cpython", "platform_python_implementation": "CPython", "extra": ""}
+    env = {"python_version": "3.12", "python_full_version": "3.12.0", "sys_platform": "win32" if IS_WIN else "darwin", "platform_system": "Windows" if IS_WIN else "Darwin",
+           "os_name": "nt" if IS_WIN else "posix", "platform_machine": "AMD64" if IS_WIN else "x86_64", "implementation_name": "cpython", "platform_python_implementation": "CPython", "extra": ""}
     done, queue, got = set(), list(names), []
 
     def get_json(url):
@@ -174,7 +178,7 @@ def bundle_python():
     # the packages the tools need, as wheels (a wheel is a zip; unzipping it into site-packages is installing it)
     wheels = os.path.join(CACHE, "wheels")
     os.makedirs(wheels, exist_ok=True)
-    site = glob.glob(os.path.join(KIT, "python", "lib", "python3.*", "site-packages"))[0]
+    site = (os.path.join(KIT, "python", "Lib", "site-packages") if IS_WIN else glob.glob(os.path.join(KIT, "python", "lib", "python3.*", "site-packages"))[0])
     for w in fetch_wheels(["cryptography", "esptool"], wheels):
         if w.endswith(".whl"):
             with zipfile.ZipFile(w) as z:
@@ -227,7 +231,7 @@ def bundle_toolchain():
                 drop.add(n)
         return drop
 
-    shutil.copytree(src, dst, symlinks=True, ignore=ignore)
+    shutil.copytree(src, dst, symlinks=not IS_WIN, ignore=ignore)      # (Windows: copying a link needs a privilege)
     for root, _d, files in os.walk(os.path.join(dst, "libexec")):
         for f in files:
             if f == "cc1plus":
@@ -562,6 +566,18 @@ export PATH="$HERE/toolchain/bin:$PATH"
 exec "$PY" "$HERE/sdk/purr.py" "$@"
 """
 
+WIN_LAUNCHER = """@echo off
+rem The PURR Developer Kit launcher for Windows. Written 2026-11-08, not yet run on Windows.
+set "HERE=%~dp0.."
+set "PURR_PYTHON=%HERE%\\python\\python.exe"
+set "PATH=%HERE%\\toolchain\\bin;%PATH%"
+"%PURR_PYTHON%" "%HERE%\\sdk\\purr.py" %*
+"""
+
+WIN_STUDIO = """@echo off
+cd /d "%~dp0" && bin\\purr.cmd studio
+"""
+
 STUDIO_COMMAND = """#!/bin/sh
 cd "$(dirname "$0")" && exec ./bin/purr studio
 """
@@ -696,12 +712,21 @@ def main():
         py_name = bundle_python()
     if not a.no_toolchain:
         bundle_toolchain()
-    emu = None if a.no_emulator else bundle_emulator(a.emulator_src)
+    if IS_WIN and not a.no_emulator:
+        say("The emulator is not part of the Windows kit yet (it needs a Windows build of the patched QEMU).")
+    emu = None if (a.no_emulator or IS_WIN) else bundle_emulator(a.emulator_src)
 
-    write(os.path.join(KIT, "bin", "purr"), LAUNCHER, 0o755)
-    write(os.path.join(KIT, "PURR-Studio.command"), STUDIO_COMMAND, 0o755)
+    if IS_WIN:
+        write(os.path.join(KIT, "bin", "purr.cmd"), WIN_LAUNCHER)
+        write(os.path.join(KIT, "PURR-Studio.cmd"), WIN_STUDIO)
+    else:
+        write(os.path.join(KIT, "bin", "purr"), LAUNCHER, 0o755)
+        write(os.path.join(KIT, "PURR-Studio.command"), STUDIO_COMMAND, 0o755)
     write(os.path.join(KIT, "VERSION"), __version__ + "\n")
-    write(os.path.join(KIT, "README.txt"), README % {"version": __version__, "host": HOST, "date": time.strftime("%Y-%m-%d")})
+    readme = README % {"version": __version__, "host": HOST, "date": time.strftime("%Y-%m-%d")}
+    if IS_WIN:
+        readme = readme.replace("PURR-Studio.command", "PURR-Studio.cmd").replace("bin/purr", "bin\\purr")
+    write(os.path.join(KIT, "README.txt"), readme)
     write(os.path.join(KIT, "LICENSE-TODO"), LICENSE_TODO)
     say("Hashing the kit's own files...")
     m = {"kit": __version__, "host": HOST, "built": time.strftime("%Y-%m-%d %H:%M:%S"), "python": py_name, "emulator": emu, "files": manifest()}

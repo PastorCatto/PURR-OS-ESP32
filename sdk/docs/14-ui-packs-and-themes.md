@@ -6,7 +6,7 @@
 - A **theme** is a folder with a `theme.conf` and a `pack.bin`. It is pictures and settings, never code. A theme can hold just a few pictures; the shell's default pack answers for the rest.
 - Make one: `purr new theme dusk`, put PNGs in `images/`, then `purr ui pack images --out pack.bin` and `purr ui check . --shell w10m`.
 - `purr ui check` is the same test the device applies (size, directory, offsets, CRC) plus the picture names a shell asks for. The list of names is `UI/PACK-NAMES.md` in the repository.
-- **What is built:** the kit side on this page (`purr ui pack`, `purr ui check`, `purr new theme`, `purr build` for a theme) and purrstrap's component names. **What is not finished:** the device side (reading `/ui/<shell>/pack.bin`, choosing a theme in Settings, installing a theme from the Store) is being written and has **not been run on a device** at the time of this note. A theme folder you make here will not do anything on a device until that lands. See [plan7.md](../../plan7.md) and [plan1.md](../../plan1.md).
+- **What is built:** the kit side on this page (`purr ui pack`, `purr ui check`, `purr new theme`, `purr build` for a theme) and purrstrap's component names, and on the device (OS 1.0.29 and later) the shell's default pack at `/ui/<shell>/pack.bin`, installed themes under `/ui/themes/<id>/`, the theme list in Settings > Interface, and the Store's `theme` item type (a theme is one `pack.bin`, at most 4 MB, with the item's `category` saying which shell it is for: `w10m`, `android` or `any`). The install-from-the-Store path of a theme was run on a device. **What is not finished:** `accent` and `dark` in `theme.conf` are accepted by the check but the device does not read them yet; a whole custom *shell* installed over the network from the Store was not run on a device. See [plan7.md](../../plan7.md) and [plan8.md](../../plan8.md).
 
 ## The pack format
 
@@ -71,7 +71,7 @@ A theme folder holds `theme.conf` and either `pack.bin` or an `images/` folder (
 2. Fill in `theme.conf`. Pick `shell=w10m` or `shell=android` if your pictures use one shell's names.
 3. Put PNGs in `images/`, named for what they replace. The names and sizes are in `UI/PACK-NAMES.md`; the wallpapers are `img0` to `img9`, 320 x 569, drawn centred and cropped.
 4. `purr build dusk` writes `build/dusk/theme.conf` and `build/dusk/pack.bin` (or run `purr ui pack images --out pack.bin` yourself), then `purr ui check build/dusk --shell w10m`.
-5. The folder `build/dusk` is the theme. Today you would copy it to `/ui/themes/dusk` on the device; installing from the Store comes with the device side.
+5. The folder `build/dusk` is the theme. Copy it to `/ui/themes/dusk` on the device to try it, or publish it: `purr repo add <repo> build/dusk/pack.bin --type theme --name dusk --version 1.0 --dest pack.bin --category android` (use `w10m` or `any` as the shell it is for), and the Store installs it for everyone who trusts the repository.
 
 Your pictures are yours; say their licence in `theme.conf`. Do not ship art you do not have the right to. Art in the shells' own packs that came from other projects is credited in `THIRD_PARTY.md`.
 

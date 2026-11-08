@@ -50,3 +50,7 @@ When you drop a file, the **Signature** line is one of:
 - *signed by a role that may not sign this kind of file*: the signature is real, but a device would refuse it;
 - *not signed*: a device in enforce mode refuses it;
 - *a key I do not know*: add its public key (`<role>_<id>.pub.bin`) to your keys folder and I will check it.
+
+## The key set since OS 1.0.32
+
+A device built from OS 1.0.32 on carries five keys: **1** (old boot), **2** (old developer), **3** (boot), **4** (developer), **5** (hub, role system). Use `--key-id 4` for apps and drivers you sign with the project's developer key, and `bin/purr keys list` to see what your kit's device knows. The old ids 1 and 2 are removed in a later bootloader (0.6.0). A device older than 1.0.32 knows only ids 1 and 2, so a release you sign for it must use one of those until it has been updated once ([docs/03-trust-and-keys.md](../../docs/03-trust-and-keys.md), "The key rotation"). Keep your own private keys out of any folder you commit, and give the passphrase to one command at a time through `PURRSTRAP_KEY_PASSWORD`.
