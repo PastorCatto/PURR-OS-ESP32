@@ -43,7 +43,7 @@ A key in the key bag has a role. `purr_role_may_sign()` decides which file types
 | **developer** | Drivers and apps |
 | **vendor** | Drivers and apps (a third party's own key; certificate scheme designed, not built) |
 
-Only the boot and developer keys exist as compiled-in defaults today, so system, owner and vendor roles only appear when a signed trust block adds a key with that role. Modules in the module index are signed with the developer key at the moment ([OTA/SPEC.md](../OTA/SPEC.md) section 6.1).
+Since 1.0.32 the compiled-in list holds five keys (boot, developer and, from the rotation, a hub key with the system role; see below), so owner and vendor roles still appear only when a signed trust block adds a key with that role. Modules in the module index are signed with the developer key at the moment ([OTA/SPEC.md](../OTA/SPEC.md) section 6.1).
 
 What each key signs in practice: the boot key signs everything below the OS (bootloader image, boot package, KittenOS, kernel, loader, trust blocks). The developer key signs modules, drivers and apps. The roles exist so that a leaked developer key does not give anyone boot-level trust.
 
@@ -122,6 +122,31 @@ The `keys` subscript needs the `cryptography` package. The system Python on a pl
 
 To set a device's policy before flashing, build a signed purrcfg: `keys trust-block --key <boot-role private key> --mode enforce --out purrcfg.bin`, and flash it to the `purrcfg` partition, or hand the file to the device's `trust apply <file>` command (admin).
 
+## The key rotation (2026-11, in progress)
+
+The first keys were made for development. Five keys are now compiled into the bootloader and the firmware (`purr_default_keys.c`, one list for both):
+
+| Id | Role | What it is |
+|---|---|---|
+| 1 | boot | the old boot key (still accepted until the last step) |
+| 2 | developer | the old developer key (still accepted until the last step) |
+| 3 | boot | the new boot key: signs kernel, KittenOS, loader, boot package, trust blocks |
+| 4 | developer | the new developer key: signs apps, drivers and modules |
+| 5 | system | the hub key: signs the hub's repository index and endorses it, so the hub shows as "official" |
+
+A sixth key (id 6, a nightly role delivered as a signed bundle with an expiry) is designed and not generated. The private keys stay on the owner's computer, in an ignored folder, never in the repository. A passphrase is given to each signing command in its environment and is never written into a file, a script, a commit or a plan.
+
+The order, and where it stands ([plan3.md](../plan3.md)):
+
+1. Make the keys. **Done.**
+2. A bootloader (0.5.0) that carries all five and accepts old and new. **Done**, flashed by cable on the owner's T-Deck Plus, because bootloader updates over the air are switched off (an erase of flash 0x0 aborts in ESP-IDF).
+3. A release that carries the five keys but is still signed by the old boot key (**1.0.32**), so every device learns the new keys. **Done.** From then on a release may be signed by key 3 (1.0.34 and 1.0.35 are).
+4. Sign everything else with the new keys, and sign the trust block with key 3. **Not done.**
+5. Revoke ids 1 and 2 with a signed request, and ship bootloader 0.6.0 without them, again by cable. **Not done**; after it a file signed only by an old key does not boot.
+6. Update the documents. **This page is part of it.**
+
+**The rule that follows:** a device checks a release against the keys *it* has. A device older than 1.0.32, or one just reset (it reinstalls from the official release, which is old), knows only ids 1 and 2, and so does its recovery loader. For such a device the dev server needs a **bridge set** signed by key 1 (1.0.33 was published this way). The loader slot has to be new enough too: an old loader refuses a kernel signed by key 3, and the cure is to write a newer loader to its slot (`0x400000`) by cable.
+
 ## What goes wrong and how to fix it
 
 | Symptom | Cause | Fix |
@@ -136,7 +161,7 @@ To set a device's policy before flashing, build a signed purrcfg: `keys trust-bl
 
 ## What is not finished
 
-- **Key rotation** is planned for 7 November 2026 and nothing has been generated yet. The steps (new ids in unused slots, a new bootloader carrying the new keys, revoke the old ones) are in [plan3.md](../plan3.md). [Keys/SPEC.md](../Keys/SPEC.md) still lists rotation as open. The owner decided that Showtime goes before the rotation.
+- **Key rotation** has reached its third step (see "The key rotation" above); re-signing everything with the new keys and revoking the old ones are not done. The earlier plan said: The steps (new ids in unused slots, a new bootloader carrying the new keys, revoke the old ones) are in [plan3.md](../plan3.md). [Keys/SPEC.md](../Keys/SPEC.md) still lists rotation as open. The owner decided that Showtime goes before the rotation.
 - **No replay protection** for signed blocks, and **version floors are not signed**. Someone with flash access can restore an old block or lower a floor ([SECURITY.md](../SECURITY.md) section 6.1).
 - **Vendor certificates, expiry and `latest_time`** are designed, not built. **eFuse Secure Boot** and **flash encryption** are designed or not planned; both are off.
 - **The developer key becoming developer-mode only, and driver signing being restricted** (owner decision, [plan3.md](../plan3.md)) is not in `purr_role_may_sign()` yet: today a developer key may sign drivers.

@@ -64,6 +64,10 @@ Drivers keep hardware code out of the kernel and let a board be described by dat
 
 Before each `probe()` the kernel calls `purr_driver_guard()`, and the OS writes the driver's file name to `/boot/drivers.trying`; after the probe it removes the file. If the device dies inside a probe, the next start finds the file and moves that driver to `/boot/drivers.crashed` **before loading anything**. The boot log says which, and Device Manager lists it with a way to put it back. The baked-in drivers are exempt: without the display there is nothing to show. The deferred loader also writes `/boot/drivers.settling` while it loads.
 
+### Putting set-aside drivers back (1.0.34)
+
+A driver that stops the device is set aside in `/boot/drivers.crashed`. When the start before this one never settled (the failure count is 2 or more), *every* downloaded driver is set aside as a precaution, which also hit devices after an update. Since 1.0.34 a task puts those back **one at a time, after sign-in, without a restart**: it waits until the 30 s settle window has closed, posts "The system is still setting itself up in the background.", then for each driver writes its name to `/boot/drivers.retrying`, moves the file back, loads it, binds the device it is for, and waits 20 s before the next. If the device dies meanwhile, the next start finds the marker, sets that driver aside again and lists it in `/boot/drivers.bad`; a driver on that list, or one caught by the probe guard above, is never put back by itself (Device Manager > Drivers still offers it). The failure count is also cleared before the restart that follows an update. A driver that fails more than 20 s after it was put back is not blamed. Not run on a device.
+
 ### The bus table
 
 Everything a driver may do is a function pointer in the table, in this order of introduction:

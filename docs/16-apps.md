@@ -49,9 +49,9 @@ A file manager. Home folder for everyone, system files read-only for administrat
 
 Finds hardware, installs drivers one at a time, sets the developer server, shows system versions and offers updates (administrators). Uses `ui` 2.0 and `devices` 1.0; requests `manage-devices`. A driver that stops the device during start is set aside and listed. Status: the app crashed the device on a PSRAM stack in 1.0.22 and was reworked in 1.0.23 ([plan7.md](../plan7.md)); not verified on a device after that.
 
-### Store and Store companion (`Apps/store/` 1.0.1, `Apps/storesvc/` 1.0.0)
+### Store and Store companion (`Apps/store/` 1.0.2, `Apps/storesvc/` 1.0.0)
 
-Covered in [chapter 14](14-store-and-repositories.md). The Store is a `ui` app; `storesvc` is a `daemon` with `sched` and `store` catcalls and no screen. Both request `install-apps`. Built into the firmware. Status: not run on a device.
+Covered in [chapter 14](14-store-and-repositories.md). The Store is a `ui` app; `storesvc` is a `daemon` with `sched` and `store` catcalls and no screen. Both request `install-apps`. Built into the firmware and also a hub item, so it can be updated without a new kernel. Its Install and Remove buttons sit side by side (ui version 3). Status: the Store was bench-tested on a device (it reads the hub); the version 1.0.2 update path has not been run.
 
 ### Calculator (`Apps/calculator/`, 1.0.0)
 

@@ -57,6 +57,10 @@ Instance limits come from `purr_rt_caps_for_psram()`: 8 MB class gets 3 frozen a
 
 Pressure levels: `low` sends `on_low_memory`; `critical` kills victims, in order suspended, background, least recently used, largest first among equals. It never kills a system, `persistent` or foreground app, and it keeps a minimum time between kills. An app that does not answer a callback for three seconds is reported `unresponsive` and can be force-stopped.
 
+### Opening an app that already runs
+
+`open <app>` always starts a new instance. The shells' launchers used to send it on every tap, so three taps on Messages made three copies. Since 1.0.34 both launchers ask `purr_catrt_slot_of()` first and send `focus <app>` when the app runs. The Windows 10 Mobile shell is a loadable module, so its half of the fix arrives when that module is rebuilt and signed again. When the Store installs, updates or removes something it calls `w10m_apps_changed_post()`, so the shell's tiles and app list follow.
+
 ### Stacks and the PSRAM rule
 
 Each app task needs a stack. Since 1.0.22 (2026-11-05, [plan7.md](../plan7.md)) the task, its queue and its semaphores are created **in PSRAM** (12 KB stack), so an open app holds about 1 KB of internal RAM instead of about 10. A task with a PSRAM stack must not touch flash itself, because flash operations switch the cache off. All app file and settings paths therefore end in `purr_io_partition_read/write/erase_range`, which hand the access to a small task with an internal stack and wait. The setting `apps.psram_stacks = 0` returns to 8 KB internal stacks.

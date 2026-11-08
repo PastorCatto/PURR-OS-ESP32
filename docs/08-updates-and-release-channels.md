@@ -92,6 +92,21 @@ It builds the kernel, loader and KittenOS packages from `out/stdfull`, `out/stdm
 
 For testing, `purrstrap dev recovery` copies images into the developer server's `recovery/` folder under the names `<component>-<board>.cat` (note: a dash, where release files use an underscore) and regenerates both manifests **from the files in the folder**, so the system modules must be passed with `--modules`. `dev withdraw --version 1.0.20 --reason "..."` marks a bad version; the list is kept in `recovery/withdrawn.list` and written into both manifests on every later `dev recovery`.
 
+## Releases 1.0.30 to 1.0.35 (what changed, for whoever reads the dev server)
+
+Every release is a set of three signed files (kernel, KittenOS, loader) plus the manifests; the previous set is copied to `out/ota/recovery-<version>-<note>` before it is replaced, and every file the manifests name is fetched back and compared by size and sha256.
+
+| Version | What it was |
+|---|---|
+| 1.0.30 | the Windows pack made small (one wallpaper) |
+| 1.0.31 | the Android build of the kernel |
+| 1.0.32 | five keys compiled in, signed by the old boot key (the hybrid step) |
+| 1.0.33 | the Store's official address is the hub; first Store-on-hub test. It was published twice: signed by key 3, then as a bridge signed by key 1 for a device that had been reset to an old OS |
+| 1.0.34 | the shell's app list follows Store installs; a tap on a running app's icon brings it to the front; set-aside drivers come back after sign-in; signed by key 3 |
+| 1.0.35 | the Store's buttons side by side; the Store updates itself from the hub (when `store.auto_update` is on); signed by key 3 |
+
+A version that has reached a device is never rebuilt under the same number; new work gets a new number. **A full reset** (the data is wiped) reinstalls the system from the *official* release and forgets the developer-server setting, so the device lands on an old system with the old keys and has to be pointed at the dev server again; the data partition is kept, so newer apps then refuse to start until the system is updated.
+
 ## Moving the OTA address (built in 1.0.28)
 
 The recovery addresses used to be constants in every image. Since 1.0.28 a device can be told, by a small signed file, that its updates come from somewhere else (the hub, [plan8.md](../plan8.md)). Read this before you change where the official releases live.

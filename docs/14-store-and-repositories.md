@@ -81,13 +81,36 @@ The store engine runs one job at a time. `start(what, a, b)` returns at once and
 
 The Store app and the companion are two clients, so closing the Store never interrupts an install. Settings keys: `store.companion` (off by default; the companion holds about 10 KB of fast RAM), `store.auto_update` (default off), `store.check_hours` (default 12).
 
+### The hub (`PURR-OS-HUB`)
+
+The official repository is a plain GitHub repository, `PastorCatto/PURR-OS-HUB`, served from its raw address `https://raw.githubusercontent.com/PastorCatto/PURR-OS-HUB/main/repos/official` (`PURR_REPO_OFFICIAL_URL`). There is **one** official repository, because a device knows a repository by the fingerprint of its key and so two folders signed by one key would be the same repository. The layout:
+
+```
+repos/official/
+  repo.json, repo.json.sig, index.json, index.json.sig    signed with the hub key (id 5), at the root
+  repo.toml                                               name, maintainer, url, min_os, endorse_key_id = 5
+  items/<name>.toml                                       what the Store shows: title, desc, category, perms, licence, source, commit
+  apps/  store/  shells/                                  packages; the index entry's url is the path ("apps/clock-1.0.0.cat")
+```
+
+- A package may sit in a subfolder: the device accepts a `/` in an entry's `url` (no leading `/` or `.`, no `..`, no `//`, at most 95 characters) and joins it to the repository address.
+- The index is built and signed offline by the owner with `tools/hubsign.py` (a single file; `keygen`, `check [--strict]`, `build`; building twice changes nothing). `check` also catches an entry whose package has moved. Only the signing key is ignored by git, so anyone can fork the hub and make their own store.
+- The device's limits shape the items: 32 items per repository, 48 in the Store, 24 KB of index; title 31, description 79, category 15 characters; a version of at most 15 characters with no underscore. A too-long field makes the whole entry unusable, so the tool refuses it.
+- A signed index vouches only for ordinary (`unprivileged`) apps. A shell must be signed by a key the device trusts for shells. The licence is a field of each item (the four hub apps GPL-3.0, the Store GPL-2.0, the Windows 10 Mobile style shell MIT); it is not in the signed index yet.
+- Drivers are not Store items. They are read from a `drivers.manifest`, and are planned to get a folder of their own in the same repository.
+- To update an app: `tools/vm/hub_app.sh <app>` builds and signs it with the developer key (id 4) and puts it in the hub; then `hubsign.py build` and a push.
+
+### The Store keeps itself current
+
+The kernel seeds the Store from its baked-in copy once per user and leaves an installed copy alone, so a new kernel never replaced it. Since 1.0.35 the Store is also a hub item (`store/`), and a kernel task installs a newer `store` or `storesvc` from the official repository only, a minute after sign-in and then every `store.check_hours`, but **only while `store.auto_update` is on** (off by default) and not while the companion runs. A running Store is left until the next sign-in. Not run on a device.
+
 ### The companion
 
 `storesvc` is a daemon with no screen. It checks for updates every `store.check_hours` hours (the first check about 90 s after it starts), posts "n updates ready", and installs them if `store.auto_update` is on. Its one permission, `install-apps`, is granted by the Store's own seeding, because a background app cannot be asked. It will become the `[service]` entry of the Store's package when the service runtime exists ([plan5.md](../plan5.md)).
 
 ### Pre-installed
 
-The Store and companion ride inside the kernel image, which the boot key checks, so they carry no signature of their own. At an account's first sign-in they are installed into its apps folder; a marker in the home folder makes removal stick. The official repository is **not** added silently: the Store's first page offers "Set up the Store".
+The Store and companion ride inside the kernel image, which the boot key checks, so they carry no signature of their own. At an account's first sign-in they are installed into its apps folder; a marker in the home folder makes removal stick. The official repository is **not** added silently: the Store's first page offers "Set up the Store", which adds the hub (also on a device that already lists other repositories).
 
 ### Assets and extras
 
@@ -120,8 +143,8 @@ The `sd-spi` driver (class BLOCK) and `purr_sd.c` mount FAT at `/sd`, lazily, wi
 
 ## What is not finished
 
-- **Official repository:** the address is a placeholder; the repository key and its passphrase are the owner's to make; endorsing, revocation, bundles are open ([Repositories/SPEC.md](../Repositories/SPEC.md) section 10).
-- **The apps repository:** the owner decided (2026-11-05) to create a separate repository holding only apps. Until it exists and this session has access, nothing is moved and apps stay on the dev server. The steps are in [showtime1.md](../showtime1.md). Whether the owner has created it is not recorded in the files I read.
+- **Official repository:** it is live at the hub's raw address, signed by the hub key (id 5) and verified from that address (official, 6 items) on 2026-11-07. Not verified: that a T-Deck fetches it over TLS on every network. Revocation and bundles are open ([Repositories/SPEC.md](../Repositories/SPEC.md) section 10).
+- **Drivers in the hub, the details page** (author, licence, longer text, version, size on tapping an item) and a **licence prompt** are not built; the owner decided there is no prompt before installing, only the page.
 - **Companion installs missing drivers by itself** (`store.auto_drivers`): designed on 2026-11-05, not built ([plan8.md](../plan8.md)).
 - **Plan status table is stale:** the table in plan8 lists item 5 (Store backend) as "todo" while the session log records the Store, engine and companion as built. The log is newer.
 - Not verified on a device: the Store app, the companion, community-path installs, the SD card driver.
