@@ -172,7 +172,7 @@ static esp_err_t index_pack(pack_t *p, uint8_t *buf, uint32_t size, int owned, c
         uint64_t end = (uint64_t)dir[i].offset + dir[i].length;
         if (end > region_bytes || (dir[i].offset & 1u) != 0) {
             ESP_LOGW(TAG, "%s: entry %u's pixels run past the end of the file or are not aligned", path, (unsigned)i);
-            free(buf);
+            if (owned) free(buf);
             return ESP_ERR_INVALID_SIZE;
         }
         if (end > used) {
@@ -266,6 +266,11 @@ static int conf_get(const char *path, const char *key, char *out, size_t cap)
     return 0;
 }
 
+#if CONFIG_PURR_PROFILE_FULL
+extern const uint8_t _binary_android_pack_bin_start[];                                      /* the Android shell's pack, embedded by main/CMakeLists.txt */
+extern const uint8_t _binary_android_pack_bin_end[];
+#endif
+
 esp_err_t purr_ui_assets_init(void)
 {
     s_theme_id[0] = s_theme_failed[0] = '\0';
@@ -276,6 +281,10 @@ esp_err_t purr_ui_assets_init(void)
     if (purr_shell_module_pack(&mp, &mn) == 0 && mn >= sizeof(header_t)) {                 /* a loaded shell brings its own pictures: no file to find, nothing to copy */
         memset(&s_default, 0, sizeof(s_default));
         e = index_pack(&s_default, (uint8_t *)mp, mn, 0, "the shell's own pack");
+    } else if (purr_theme_skin() == PURR_SKIN_ANDROID) {                                   /* the Android shell's Froyo pictures are inside the kernel, next to the shell: read in place from flash */
+        memset(&s_default, 0, sizeof(s_default));
+        e = index_pack(&s_default, (uint8_t *)_binary_android_pack_bin_start,
+                       (uint32_t)(_binary_android_pack_bin_end - _binary_android_pack_bin_start), 0, "the pack built into the kernel");
     } else
 #endif
     {

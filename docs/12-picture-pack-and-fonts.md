@@ -2,7 +2,7 @@
 
 ## Short version
 
-- UI pictures live in **pack files in LittleFS**, one default pack per shell: `/ui/w10m/pack.bin` and `/ui/android/pack.bin`. There is no `ui_assets` partition in the new flash map ([chapter 2](02-flash-map-and-partitions.md), [plan1.md](../plan1.md) "Flash map v2"). The UI reads a pack into PSRAM at start.
+- **From 1.0.36 the Android shell's Froyo pack is embedded in the full OS image** (built from `UI/android-assets` by `PurrOS/main/CMakeLists.txt`, read in place from flash), so a kernel always has its pictures and `/ui/android/pack.bin` is no longer read. UI pictures otherwise live in **pack files in LittleFS**, one default pack per shell: `/ui/w10m/pack.bin` (a loaded shell module carries its own) and, before 1.0.36, `/ui/android/pack.bin`. There is no `ui_assets` partition in the new flash map ([chapter 2](02-flash-map-and-partitions.md), [plan1.md](../plan1.md) "Flash map v2"). The UI reads a pack into PSRAM at start.
 - A **theme** is a pack plus a `theme.conf` in `/ui/themes/<id>/` (three at most on the device, more on the SD card). Lookup is layered: the active theme's pack first, then the shell's default pack. The choice is `/ui/active.conf` and applies at the next restart.
 - The picture names each shell asks for, and which are required, are in [UI/PACK-NAMES.md](../UI/PACK-NAMES.md). `purr ui check` ([sdk/docs/14-ui-packs-and-themes.md](../sdk/docs/14-ui-packs-and-themes.md)) checks a pack against them.
 - Build a pack: `python3 purrstrap/purrstrap.py uiassets build --assets-dir <folder of PNGs> --alpha --out pack.bin` (Android) or `python3 -I tools/ui/w10m_pack.py` (Windows, from the upstream project). Wrap it for the release with `uiassets package --name ui_w10m|ui_android`.

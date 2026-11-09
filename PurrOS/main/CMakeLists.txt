@@ -31,3 +31,20 @@ if(CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS)
 endif()
 
 idf_component_register(SRCS ${main_srcs} REQUIRES ${main_reqs})
+
+# The Android shell's own picture pack (UI/android-assets, the Froyo art) is built here and embedded in the full OS image, next to the code that asks for the names, so a
+# kernel always carries the pictures it needs: no separate file to go missing after an update or a reset (plan7.md "The Froyo pictures travel with the kernel").
+# It sits in flash and is read in place (no internal RAM, no copy). A theme's pack still goes first (purr_ui_assets.c).
+if(CONFIG_PURR_PROFILE_FULL AND (CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS))
+    set(android_assets_dir "${CMAKE_CURRENT_LIST_DIR}/../../UI/android-assets")
+    set(android_pack "${CMAKE_CURRENT_BINARY_DIR}/android_pack.bin")
+    file(GLOB android_pngs CONFIGURE_DEPENDS "${android_assets_dir}/*.png")
+    add_custom_command(OUTPUT "${android_pack}"
+        COMMAND ${PYTHON} "${CMAKE_CURRENT_LIST_DIR}/../../purrstrap/purrstrap.py" uiassets build --board tdeck_plus --assets-dir "${android_assets_dir}" --out "${android_pack}" --alpha
+        DEPENDS ${android_pngs} "${CMAKE_CURRENT_LIST_DIR}/../../purrstrap/scripts/uiassets.py"
+        COMMENT "Packing the Android shell's pictures"
+        VERBATIM)
+    add_custom_target(android_pack_target DEPENDS "${android_pack}")
+    add_dependencies(${COMPONENT_LIB} android_pack_target)
+    target_add_binary_data(${COMPONENT_LIB} "${android_pack}" BINARY)
+endif()
