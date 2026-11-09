@@ -272,3 +272,18 @@ textarea { font-family: var(--mono); font-size: 13px; line-height: 1.45; resize:
 .bx-ready { display: flex; flex-wrap: wrap; gap: 32px; align-items: flex-start; }
 .bx-made-row { display: flex; align-items: center; gap: 14px; min-height: 44px; border-bottom: 1px solid var(--line); font-size: 15px; }
 .bx-tick { width: 22px; height: 22px; background: #60a917; color: #000; font-size: 14px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+
+/* build a system (system.js) */
+.bx-sw2 { flex: 0 0 40px; height: 22px; background: #6b6b6b; display: flex; align-items: center; justify-content: flex-start; padding: 0 2px; box-sizing: border-box; cursor: pointer; }
+.bx-sw2 span { width: 18px; height: 18px; background: #fff; display: block; }
+.bx-sw2.on { background: #0050ef; justify-content: flex-end; }
+.bx-row { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 4px 6px; border-bottom: 1px solid var(--line); font-size: 15px; }
+.bx-job { display: flex; align-items: center; gap: 14px; min-height: 56px; border-bottom: 1px solid var(--line); font-size: 16px; }
+.bx-jicon { flex: 0 0 26px; height: 26px; background: var(--panel2); color: var(--fg); font-size: 14px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.bx-jicon.done { background: #60a917; color: #000; } .bx-jicon.run { background: #0050ef; color: #fff; } .bx-jicon.fail { background: #e51400; color: #fff; } .bx-jicon.skip { background: var(--panel2); color: var(--dim); }
+.bx-pw { margin-top: 16px; padding: 16px; background: #0050ef; color: #fff; display: flex; flex-direction: column; gap: 10px; }
+.bx-note { padding: 12px 14px; background: var(--panel2); font-size: 13px; line-height: 1.5; }
+.bx-deliver { min-height: 300px; padding: 20px; color: #fff; display: flex; flex-direction: column; gap: 14px; }
+.bx-dt { font-size: 34px; font-weight: 200; }
+.bx-light { min-height: 52px; background: #fff; border: 0; color: #111; font-size: 17px; font-weight: 600; cursor: pointer; }
+.bx-light:disabled { opacity: .55; }

@@ -46,7 +46,7 @@ function bxGo(a) {
 }
 
 const BX_GROUPS = [
-  ["MAKE", "#0050ef", [["build a UI", BX.P.ui, () => go("uistart")], ["device image", BX.P.image, () => go("image")], ["new app", BX.P.app, () => go("projects", "new")], ["new driver", BX.P.driver, () => go("projects", "new")],
+  ["MAKE", "#0050ef", [["build a UI", BX.P.ui, () => go("uistart")], ["device image", BX.P.image, () => go("system")], ["new app", BX.P.app, () => go("projects", "new")], ["new driver", BX.P.driver, () => go("projects", "new")],
     ["describe a board", BX.P.board, () => go("boards")], ["brand a system", BX.P.brand, () => go("brand")], ["icon packs", BX.P.pack, () => go("icons")]]],
   ["DELIVER", "#60a917", [["flash a board", BX.P.flash, () => go("flash")], ["serve to a device", BX.P.server, () => go("server")], ["try in the emulator", BX.P.play, () => go("run")],
     ["gather a release", BX.P.release, () => go("release")], ["run a repository", BX.P.repo, () => go("repos")]]],

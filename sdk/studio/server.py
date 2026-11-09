@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 from purrsdk import (__version__, activity, boards, brand, configs, devserver, doctor, emulator, flash, image as imagemaker, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
-                     release, uibuilder, uimaker, workspace)
+                     release, system as systemmod, uibuilder, uimaker, workspace)
 
 WEB = os.path.join(HERE, "web")
 MAX_UPLOAD = 64 * 1024 * 1024
@@ -827,6 +827,58 @@ def handle(state, method, route, q, body):
         else:
             subprocess.Popen(["xdg-open", os.path.dirname(path) if os.path.isfile(path) else path])
         return {"ok": True}
+
+    # ---- build a system (device, parts, build, deliver)
+    if route == "systems":
+        ws.ensure()
+        return {"systems": systemmod.list_systems(ws), "boards": list(systemmod.BOARDS)}
+    if route == "system/new":
+        ws.ensure()
+        try:
+            s = systemmod.new_system(ws, (body.get("name") or "").strip(), body.get("board") or "tdeck_plus")
+        except systemmod.SystemError_ as e:
+            raise ValueError(str(e))
+        activity.record(ws, "image", s["name"], "system", s["name"], "started")
+        return s
+    if route == "system":
+        try:
+            return systemmod.overview(ws, q.get("name"))
+        except systemmod.SystemError_ as e:
+            raise ValueError(str(e))
+    if route == "system/save":
+        try:
+            s = systemmod.load(ws, body.get("name"))
+            for k in ("board", "parts", "key", "ui"):
+                if k in body:
+                    s[k] = str(body[k])
+            if "key_id" in body:
+                s["key_id"] = int(body["key_id"])
+            if "drivers" in body:
+                s["drivers"], s["drivers_set"] = [str(x) for x in body["drivers"]], True
+            if "apps" in body:
+                s["apps"] = [str(x) for x in body["apps"]]
+            if s["board"] not in systemmod.BOARDS:
+                raise ValueError("The board is one of %s." % ", ".join(systemmod.BOARDS))
+            systemmod.save(ws, body.get("name"), s)
+        except systemmod.SystemError_ as e:
+            raise ValueError(str(e))
+        activity.record(ws, "image", body.get("name"), "system", body.get("name"), "%d drivers, %d apps" % (len(s["drivers"]), len(s["apps"])))
+        return {"saved": True}
+    if route == "system/build":
+        name, pw = body.get("name"), body.get("password") or None
+        systemmod.load(ws, name)
+
+        def work(say):
+            def step(i, st, note):
+                say("@@step|%s|%s|%s" % (i, st, note))
+            r = systemmod.build(ws, name, pw, on_step=step, on_line=say)
+            if not r["ok"]:
+                return {"ok": False, "steps": r["steps"]}
+            activity.record(ws, "image", name, "system", name, "built, %d MB" % (r["bytes"] >> 20))
+            return {"ok": True, "image": r["image"], "delivery": r["delivery"], "bytes": r["bytes"], "steps": r["steps"], "fit": r["fit"], "versions": r["versions"], "artifacts": [r["image"]]}
+        return {"job": state.jobs.start("Building the system", work)}
+    if route == "system/address":
+        return {"address": systemmod.lan_address(), "port": devserver.DEFAULT_PORT}
 
     # ---- docs
     if route == "docs":
