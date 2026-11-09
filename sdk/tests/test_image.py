@@ -1,5 +1,6 @@
 """The image maker (purrsdk/image.py): the partition table is checked byte for byte against what ESP-IDF's tool wrote, and a whole image is made from synthetic parts."""
 import os
+import shutil
 import unittest
 
 import helpers
@@ -56,6 +57,22 @@ class Whole(unittest.TestCase):
     def test_finds_both_spellings(self):
         found = image.find_parts(self.folder, "tdeck_plus")
         self.assertEqual(sorted(found), ["bootloader", "bootpkg", "kernel", "kittenos", "loader"])
+
+    def test_finds_the_files_a_release_names_even_with_a_hash_in_the_name(self):
+        d = os.path.join(helpers.tmpdir(), "rel")
+        os.makedirs(d)
+        names = {"kernel": "kernel-tdeck.461e04c4de.cat", "kittenos": "kittenos-tdeck.5a0a2f0949.kitt", "loader": "loader-tdeck.16cdfbd517.cat", "bootpkg": "bootpkg-tdeck.389e8dcc72.cat",
+                 "bootloader": "bootloader-tdeck.bdc8f7995a.cat"}
+        stanzas = ["release=1.1+tdeck_plus", ""]
+        for part, fn in names.items():
+            shutil.copyfile(os.path.join(self.folder, "loader-tdeck_plus.cat"), os.path.join(d, fn))
+            stanzas += ["component=%s" % part, "board=tdeck", "file=%s" % fn, ""]
+        stanzas += ["component=kernel", "board=waveshare154", "file=kernel_waveshare154.cat", "", "component=kernel", "board=tdeck_plus", "file=missing.cat", ""]
+        open(os.path.join(d, "recovery.manifest"), "w").write("\n".join(stanzas))
+        found = image.find_parts(d, "tdeck")
+        self.assertEqual({p: os.path.basename(f) for p, f in found.items()}, names)
+        self.assertEqual(image.find_parts(d, "waveshare154"), {})                     # named but not there: not found, not guessed
+        self.assertEqual(image.find_parts(d, "tdeck_plus"), {})
 
     def test_plan_reports_missing_and_too_big(self):
         os.remove(os.path.join(self.folder, "loader-tdeck_plus.cat"))

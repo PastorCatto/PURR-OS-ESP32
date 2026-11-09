@@ -91,11 +91,31 @@ def read_table(data):
 
 # ---------------------------------------------------------------------------------------------------------------- the parts
 
+def _manifest_files(root, board):
+    """{part: path} that the folder's recovery.manifest names for this board (and only files that are really there)."""
+    path = os.path.join(root, "recovery.manifest")
+    out = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            blocks = fh.read().replace("\r\n", "\n").split("\n\n")
+    except OSError:
+        return out
+    wanted = {p for p, _e in PARTS}
+    for b in blocks:
+        kv = dict(line.split("=", 1) for line in b.split("\n") if "=" in line and not line.startswith("#"))
+        if kv.get("component") in wanted and kv.get("board") == board and kv.get("file") and os.path.isfile(os.path.join(root, kv["file"])):
+            out.setdefault(kv["component"], os.path.join(root, kv["file"]))
+    return out
+
+
 def find_parts(folder, board):
     """{part: path} found in a folder (or its recovery/ or JumpingJaguar1/ subfolder), under either naming; parts it cannot find are missing from the result."""
     found = {}
     roots = [folder] + [os.path.join(folder, s) for s in ("recovery", "JumpingJaguar1") if os.path.isdir(os.path.join(folder, s))]
     for root in roots:
+        for part, file in _manifest_files(root, board).items():     # a release names its files (often with a hash in the name): the manifest says which is which
+            if part not in found:
+                found[part] = file
         for part, ext in PARTS:
             for sep in ("-", "_"):
                 p = os.path.join(root, "%s%s%s%s" % (part, sep, board, ext))
