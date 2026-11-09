@@ -83,6 +83,15 @@ def _git(args, cwd=None, on_line=None):
     return p.wait(), "".join(out)
 
 
+def _why(output):
+    """The line of a failed git command that says why: the first `fatal:` or `error:` line, or the last line when there is none."""
+    lines = [l.strip() for l in output.splitlines() if l.strip()]
+    for l in lines:
+        if l.lower().startswith(("fatal:", "error:")):
+            return l.split(":", 1)[1].strip()
+    return lines[-1] if lines else "no reason given"
+
+
 def _http(url, accept=None, timeout=30):
     req = urllib.request.Request(url, headers={"User-Agent": "purr-sdk", **({"Accept": accept} if accept else {})})
     return urllib.request.urlopen(req, timeout=timeout)
@@ -95,7 +104,7 @@ def remote_head(url, ref):
         if rc == 0 and out.split():
             return out.split()[0]
         if rc != 0:
-            raise SourceError("I could not reach %s: %s" % (url, (out.strip().splitlines() or ["no answer"])[-1]))
+            raise SourceError("I could not reach %s: %s" % (url, _why(out)))
         raise SourceError("%s has no branch or tag called %s." % (url, ref))
     g = github(url)
     if not g:
@@ -180,7 +189,7 @@ def _fetch_git(url, ref, dest, on_line):
         shutil.rmtree(dest, ignore_errors=True)
         rc, out = _git(["clone", "--depth", "1", "--branch", ref, url, dest], on_line=on_line)
         if rc != 0:
-            raise SourceError("git could not fetch the source: %s" % (out.strip().splitlines() or ["no reason given"])[-1])
+            raise SourceError("git could not fetch the source: %s" % _why(out))
     shutil.rmtree(os.path.join(dest, ".git"), ignore_errors=True)
 
 
@@ -258,7 +267,7 @@ def install_compiler(on_line=print):
         on_line("Fetching ESP-IDF %s (about 1 GB)..." % IDF_VERSION)
         rc, out = _git(["clone", "--depth", "1", "--branch", "v" + IDF_VERSION, "--recursive", "--shallow-submodules", "https://github.com/espressif/esp-idf.git", home], on_line=on_line)
         if rc != 0:
-            raise SourceError("git could not fetch ESP-IDF: %s" % (out.strip().splitlines() or ["no reason given"])[-1])
+            raise SourceError("git could not fetch ESP-IDF: %s" % _why(out))
     on_line("Installing the ESP32-S3 tools (about 1.5 GB, a few minutes)...")
     r = runner_shell(["bash", os.path.join(home, "install.sh"), "esp32s3"], on_line)
     if r != 0:

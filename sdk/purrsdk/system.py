@@ -16,6 +16,7 @@ A step is reported to the caller as `on_step(id, state, note)` with state one of
 """
 
 import hashlib
+import json
 import os
 import shutil
 import socket
@@ -179,6 +180,54 @@ def overview(ws, name):
 
 
 # ---------------------------------------------------------------------------------------------------------------- the build
+
+def check_delivery(folder):
+    """Every file a manifest in the delivery folder names is there, with the size and the sha256 the manifest gives (what a device checks when it fetches them).
+    Returns {"ok", "checked", "problems": [sentences]}."""
+    problems, checked = [], 0
+    for root, _dirs, files in os.walk(folder):
+        for mf in sorted(f for f in files if f.endswith(".manifest")):
+            with open(os.path.join(root, mf), "r", encoding="utf-8", errors="replace") as fh:
+                blocks = fh.read().replace("\r\n", "\n").split("\n\n")
+            for b in blocks:
+                kv = dict(line.split("=", 1) for line in b.split("\n") if "=" in line)
+                if "file" not in kv or "sha256" not in kv:
+                    continue
+                path = os.path.join(root, kv["file"])
+                rel = os.path.relpath(path, folder)
+                if not os.path.isfile(path):
+                    problems.append("%s names %s, which is not there." % (mf, rel))
+                    continue
+                data = open(path, "rb").read()
+                checked += 1
+                if "size" in kv and kv["size"].isdigit() and int(kv["size"]) != len(data):
+                    problems.append("%s: %s is %d bytes, the manifest says %s." % (mf, rel, len(data), kv["size"]))
+                elif hashlib.sha256(data).hexdigest() != kv["sha256"]:
+                    problems.append("%s: %s does not match its sha256." % (mf, rel))
+    for root, _dirs, files in os.walk(folder):             # the app repository's index: a url, a size and a sha256 for each app
+        if "index.json" in files:
+            try:
+                with open(os.path.join(root, "index.json"), "r", encoding="utf-8") as fh:
+                    idx = json.load(fh)
+            except (OSError, ValueError):
+                problems.append("%s is not readable." % os.path.relpath(os.path.join(root, "index.json"), folder))
+                continue
+            for e in idx.get("apps", []) if isinstance(idx, dict) else []:
+                if not isinstance(e, dict) or "url" not in e or "sha256" not in e:
+                    continue
+                path = os.path.join(root, e["url"])
+                rel = os.path.relpath(path, folder)
+                if not os.path.isfile(path):
+                    problems.append("The app index names %s, which is not there." % rel)
+                    continue
+                data = open(path, "rb").read()
+                checked += 1
+                if e.get("size") is not None and int(e["size"]) != len(data):
+                    problems.append("The app index: %s is %d bytes, it says %s." % (rel, len(data), e["size"]))
+                elif hashlib.sha256(data).hexdigest() != e["sha256"]:
+                    problems.append("The app index: %s does not match its sha256." % rel)
+    return {"ok": not problems and checked > 0, "checked": checked, "problems": problems or ([] if checked else ["No manifest names any file."])}
+
 
 def lan_address():
     """The address of this computer on the local network, for the device to reach; 127.0.0.1 if there is none."""
@@ -369,4 +418,9 @@ def build(ws, name, password=None, on_step=None, on_line=print, boot_password=No
     if ui_out:
         shutil.copytree(ui_out, os.path.join(out, "ui", "themes", os.path.basename(ui_out)), dirs_exist_ok=True)
     step("delivery", "done", out)
+    step("verify", "run", "")
+    chk = check_delivery(out)
+    if not chk["ok"]:
+        return fail("verify", "%d problem(s) in the delivery folder; the first: %s" % (len(chk["problems"]), chk["problems"][0]))
+    step("verify", "done", "%d files match their manifests" % chk["checked"])
     return {"ok": True, "image": img, "delivery": out, "bytes": res["bytes"], "steps": steps, "versions": res.get("versions", {}), "fit": res.get("fit", []), "apps": built_apps}

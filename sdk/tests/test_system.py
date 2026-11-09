@@ -102,7 +102,7 @@ class Road(Setup):
         seen = []
         r = system.build(self.ws, "road", on_step=lambda i, st, n: seen.append((i, st)), on_line=lambda l: None)
         self.assertTrue(r["ok"], r["steps"])
-        self.assertEqual(self.steps_of(r), {"apps": "skip", "ui": "done", "drivers": "done", "parts": "done", "image": "done", "delivery": "done"})
+        self.assertEqual(self.steps_of(r), {"apps": "skip", "ui": "done", "drivers": "done", "parts": "done", "image": "done", "delivery": "done", "verify": "done"})
         self.assertIn(("image", "run"), seen)
         self.assertEqual(os.path.getsize(r["image"]), 16 * 1024 * 1024)
         rec = os.path.join(r["delivery"], "recovery")

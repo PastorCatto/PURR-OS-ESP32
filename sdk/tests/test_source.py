@@ -85,10 +85,18 @@ class Pulling(unittest.TestCase):
     def test_an_unreachable_source_says_so(self):
         c = source.check(self.ws, "file://" + os.path.join(self.tmp, "nowhere"), "main")
         self.assertTrue(c["error"])
+        self.assertNotIn("repository exists", c["error"])             # the line that says why, not git's closing advice
+        self.assertIn("nowhere", c["error"])
         self.assertFalse(c["newer"])
 
 
 class Helpers(unittest.TestCase):
+    def test_the_reason_is_the_fatal_line_not_the_last_one(self):
+        out = "fatal: '/x' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n"
+        self.assertEqual(source._why(out), "'/x' does not appear to be a git repository")
+        self.assertEqual(source._why("something odd\nhappened\n"), "happened")
+        self.assertEqual(source._why(""), "no reason given")
+
     def test_github_addresses(self):
         self.assertEqual(source.github("https://github.com/A/B"), ("A", "B"))
         self.assertEqual(source.github("https://github.com/A/B.git/"), ("A", "B"))
@@ -350,6 +358,40 @@ class Modules(unittest.TestCase):
         self.assertIn("1.1.0", notes[0])
         self.assertIn(("srcapps", "done"), steps)
 
+    def test_the_delivery_check_catches_a_missing_a_short_and_an_altered_file(self):
+        d = os.path.join(helpers.tmpdir(), "out")
+        rec = os.path.join(d, "recovery")
+        os.makedirs(rec)
+        import hashlib
+        files = {"a.cat": b"aaaa", "b.cat": b"bbbbbb", "c.cat": b"c"}
+        stanzas = []
+        for n, data in files.items():
+            open(os.path.join(rec, n), "wb").write(data)
+            stanzas.append("component=%s\nfile=%s\nsize=%d\nsha256=%s\n" % (n[0], n, len(data), hashlib.sha256(data).hexdigest()))
+        open(os.path.join(rec, "recovery.manifest"), "w").write("release=x\n\n" + "\n".join(stanzas))
+        ok = system.check_delivery(d)
+        self.assertEqual((ok["ok"], ok["checked"]), (True, 3))
+        os.remove(os.path.join(rec, "a.cat"))
+        open(os.path.join(rec, "b.cat"), "wb").write(b"bb")
+        open(os.path.join(rec, "c.cat"), "wb").write(b"X")
+        bad = system.check_delivery(d)
+        self.assertFalse(bad["ok"])
+        self.assertEqual(len(bad["problems"]), 3)
+        self.assertIn("not there", bad["problems"][0])
+        self.assertFalse(system.check_delivery(os.path.join(d, "recovery", "nothing"))["ok"])
+        # the app repository's index is checked as well
+        app = os.path.join(d, "purr", "v1", "apps", "x", "1.0", "package.cat")
+        os.makedirs(os.path.dirname(app))
+        open(app, "wb").write(b"appdata")
+        import json
+        idx = os.path.join(d, "purr", "v1", "index.json")
+        json.dump({"apps": [{"name": "x", "url": "apps/x/1.0/package.cat", "size": 7, "sha256": hashlib.sha256(b"appdata").hexdigest()}]}, open(idx, "w"))
+        for n, data in files.items():
+            open(os.path.join(rec, n), "wb").write(data)
+        self.assertEqual(system.check_delivery(d)["checked"], 4)
+        open(app, "wb").write(b"altered")
+        self.assertIn("app index", system.check_delivery(d)["problems"][0])
+
     def test_the_manifest_entry_matches_the_file(self):
         r, _ = self.go([("bme280", "any")])
         d = r["drivers"][0]
@@ -525,7 +567,7 @@ class TheRoadInSourceMode(test_system.Setup):
             for d in drivers:
                 p = os.path.join(out, "%s-%s.cat" % (d["name"], d["scope"]))
                 open(p, "wb").write(b"drv")
-                ds.append({"name": d["name"], "scope": d["scope"], "version": "1.1.0+123456", "path": p, "file": os.path.basename(p), "size": 3, "sha256": "0" * 64})
+                ds.append({"name": d["name"], "scope": d["scope"], "version": "1.1.0+123456", "path": p, "file": os.path.basename(p), "size": 3, "sha256": __import__("hashlib").sha256(b"drv").hexdigest()})
             return {"ok": True, "modules": mods, "drivers": ds, "apps": [], "missing": []}
         with mock.patch.object(source, "pull", return_value={"commit": "1234567" + "0" * 33, "changed": True}), \
                 mock.patch.object(source, "compiler", return_value={"found": True, "version": "5.3.5", "path": "/idf", "right": True}), \

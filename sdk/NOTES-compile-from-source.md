@@ -51,3 +51,13 @@ The pulled tree is only refreshed when the commit changes, so after adding a pat
 ## For next time
 - Start with `sdk/tests/test_source.py` (fake runner) to see the shape; the real run is `scratchpad/realtrust.py` style: create a throwaway boot key and developer key (`purrstrap keys generate --role boot|developer --key-id N --out DIR`, password in the environment of that one command), set `parts_from=source`, `keep_ours`, run `system.build`, then `emulator.test_image()`.
 - A full cold run is ~10 minutes of compile plus the emulator's ~100 s.
+
+## Apps, the delivery check and the failure paths (second session, 2026-11-09)
+- **Apps compiled through the whole road, first try, no source change needed:** all 13 apps in the pulled `Apps/` (beacon, calculator, clock, contacts, devices, files, gamedemo, messages, msgecho, notes, photos, store, storesvc) plus a fresh `projects.new(ws, "app", "myhello")` from the kit template. Each `.cat` verifies with the developer key and the project's developer key fails on it. They are published into the delivery folder's `purr/v1` repository (index.json with url, size, sha256 per app). Needs `PURR_KIT=<kit>` so `projects.new` finds the template (`AppSDK/templates`).
+- **`system.check_delivery()`** (new last step, "verify"): every file a `*.manifest` names and every url in a repository `index.json` must exist with the size and sha256 given (the rule from CLAUDE.md: fetch every file a manifest names and compare). 36 files in a full build.
+- **Signatures are randomized** (ECDSA): rebuilding re-signs the baked-in binaries with different bytes, so the kernel recompiles on every build even from an unchanged commit. Expect a few minutes each time, not zero.
+- **Failure paths tried against the real tools:** wrong key password stops at the first signing step (`Signing about failed: ... Incorrect password`, before any compile); a branch that is not there; a key with no `.pub`; an unreachable source. The last one printed git's closing advice ("and the repository exists") until `_why()` was added to pick the `fatal:` line.
+- **Both toggle settings booted** in the virtual device with zero rejection lines (`bad-version`, `bad-sig`, `no-key`, `did not come up`): toggle off (key list 6, 7) and toggle on (key list 1-7), with the kernel verifying against the user's boot key.
+- **Version of the kit** is now 2.0.0 (`purrsdk/__init__.py`); the kit folder becomes `purr-sdk-2.0.0-<host>`.
+- **Still not run:** an app running on a device or in the emulator (needs `vm-flash.bin`: a VM-flavor build `coreos build --flavor vm` of the three profiles and a populated file system image); a real OTA either way; Windows.
+
