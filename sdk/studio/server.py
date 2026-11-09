@@ -848,7 +848,7 @@ def handle(state, method, route, q, body):
     if route == "system/save":
         try:
             s = systemmod.load(ws, body.get("name"))
-            for k in ("board", "parts", "key", "ui", "source_url", "source_ref"):
+            for k in ("board", "parts", "key", "ui", "source_url", "source_ref", "boot_key", "version"):
                 if k in body:
                     s[k] = str(body[k])
             if "parts_from" in body:
@@ -859,6 +859,10 @@ def handle(state, method, route, q, body):
                 s["shell"] = body["shell"]
             if "key_id" in body:
                 s["key_id"] = int(body["key_id"])
+            if "boot_key_id" in body:
+                s["boot_key_id"] = int(body["boot_key_id"])
+            if "keep_ours" in body:
+                s["keep_ours"] = bool(body["keep_ours"])
             if "drivers" in body:
                 s["drivers"], s["drivers_set"] = [str(x) for x in body["drivers"]], True
             if "apps" in body:
@@ -882,13 +886,13 @@ def handle(state, method, route, q, body):
             return {"ok": c["found"], "compiler": c}
         return {"job": state.jobs.start("Installing the compiler", work_idf)}
     if route == "system/build":
-        name, pw = body.get("name"), body.get("password") or None
+        name, pw, bpw = body.get("name"), body.get("password") or None, body.get("boot_password") or None
         systemmod.load(ws, name)
 
         def work(say):
             def step(i, st, note):
                 say("@@step|%s|%s|%s" % (i, st, note))
-            r = systemmod.build(ws, name, pw, on_step=step, on_line=say)
+            r = systemmod.build(ws, name, pw, on_step=step, on_line=say, boot_password=bpw)
             if not r["ok"]:
                 return {"ok": False, "steps": r["steps"]}
             activity.record(ws, "image", name, "system", name, "built, %d MB" % (r["bytes"] >> 20))

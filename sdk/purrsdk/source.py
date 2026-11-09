@@ -10,9 +10,11 @@ The result is a folder of parts named the way the image maker expects (`kernel-<
 ready-made parts. Nothing here touches your own checkout of the repository: the source lives in the workspace.
 """
 
+import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,7 +26,7 @@ from . import formats, runner
 
 DEFAULT_URL = "https://github.com/PastorCatto/PURR-OS-ESP32"
 DEFAULT_REF = "main"
-PATHS = ("PurrOS", "UI", "purrstrap", "bootloader", "bootpkg")      # what a firmware build reads from the repository
+PATHS = ("PurrOS", "UI", "purrstrap", "bootloader", "bootpkg", "Modules", "Apps", "tools/release")      # what a build reads from the repository
 IDF_VERSION = "5.3.5"
 PROFILES = (("full", "the kernel"), ("minimal", "the recovery loader"), ("recovery", "KittenOS"))
 SHELLS = ("w10m", "android")
@@ -202,7 +204,7 @@ def _extract_tar(data, dest):
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
         for m in tf:
             parts = m.name.split("/", 1)
-            if len(parts) < 2 or not parts[1].split("/")[0] in PATHS:
+            if len(parts) < 2 or not any(parts[1] == q or parts[1].startswith(q + "/") for q in PATHS):
                 continue
             target = os.path.realpath(os.path.join(dest, parts[1]))
             if not (target == root or target.startswith(root + os.sep)):
@@ -277,17 +279,32 @@ def runner_shell(argv, on_line):
 
 # ---------------------------------------------------------------------------------------------------------------- compile, package, sign
 
-def short_version(commit):
-    """The version a part built from source carries (12 characters at most in a container header): src- and the first seven letters of the commit."""
-    return "src-" + commit[:7]
+DEFAULT_VERSION = "1.1.0"
+_VERSION = re.compile(r"^\d{1,5}(\.\d{1,5}){0,2}$")
+
+
+def version_problem(base):
+    """Why `base` cannot be a version the device reads (major.minor.patch, numbers only), or ''."""
+    if not _VERSION.match(base or ""):
+        return "The version is numbers separated by dots, like 1.1.0: the device compares it to decide what is newer."
+    if len(base) > 10:
+        return "The version is too long (a container header holds 12 characters, and the commit's letters follow it)."
+    return ""
+
+
+def short_version(commit, base=DEFAULT_VERSION):
+    """The version a part built from source carries: your version, which the device compares, then a plus and as many letters of the commit as fit in the 12
+    characters of a container header (1.1.0+23e74). The device reads the numbers before the plus; the letters only say which source it was."""
+    room = 12 - len(base) - 1
+    return base + ("+" + commit[:room] if room > 0 and commit else "")
 
 
 def build_dir(ws, board, profile, shell):
     return os.path.join(tree(ws), "PurrOS", "build", "%s-%s%s" % (board, profile, "" if shell == "w10m" else "-" + shell))
 
 
-def compile_and_package(ws, board, shell="android", key=None, key_id=4, password=None, out=None, on_step=None, on_line=print, run=None, clean=False):
-    """Compile the firmware of `board` from the pulled source and put signed parts in `out`. Returns {"ok", "out", "version", "parts": [names], "problem"}.
+def compile_and_package(ws, board, shell="android", key=None, key_id=4, password=None, out=None, on_step=None, on_line=print, run=None, clean=False, base=DEFAULT_VERSION):
+    """Compile the firmware of `board` from the pulled source and put parts in `out`, signed with `key` (the boot key: it signs everything below the OS). Returns {"ok", "out", "version", "parts": [names], "problem"}.
 
     `run(args, extra_env=None, password=None)` runs purrstrap and returns {"rc", "output"}; it is a parameter so tests can stand in for the compiler."""
     st = state(ws)
@@ -298,8 +315,10 @@ def compile_and_package(ws, board, shell="android", key=None, key_id=4, password
     if shell not in SHELLS:
         return {"ok": False, "problem": "The shell is one of %s." % ", ".join(SHELLS)}
     if not key:
-        return {"ok": False, "problem": "Choose a signing key: the parts you compile have to be signed."}
-    version = short_version(st["commit"])
+        return {"ok": False, "problem": "Choose a boot key: the parts you compile have to be signed."}
+    if version_problem(base):
+        return {"ok": False, "problem": version_problem(base)}
+    version = short_version(st["commit"], base)
     t = tree(ws)
     env = {"PURR_REPO_ROOT": t}
     ps = run or (lambda args, extra_env=None, password=None: runner.purrstrap(args, password=password, on_line=on_line, extra_env=extra_env))
@@ -326,7 +345,7 @@ def compile_and_package(ws, board, shell="android", key=None, key_id=4, password
             args.append("--clean")
         r = ps(args, extra_env=env)
         if r["rc"] != 0:
-            return fail(sid, "The %s did not compile. The lines above say why." % what)
+            return fail(sid, "Compiling %s failed: %s" % (what, ([l.strip() for l in r["output"].splitlines() if l.strip()] or ["the lines above say why"])[-1]))
         b = os.path.join(build_dir(ws, board, profile, shell), "purros.bin")
         if not os.path.isfile(b):
             return fail(sid, "The compile finished but %s is not there." % b)
@@ -369,3 +388,319 @@ def compile_and_package(ws, board, shell="android", key=None, key_id=4, password
             return fail("sign", "Signing %s failed: %s" % (os.path.basename(p), (r["output"].strip().splitlines() or ["no reason given"])[-1]))
     step("sign", "done", "%d parts signed" % len(made))
     return {"ok": True, "out": out, "version": version, "parts": [os.path.basename(p) for p in made]}
+
+
+# ---------------------------------------------------------------------------------------------------------------- trust: whose keys the image believes
+
+OUR_IDS = (1, 2, 3, 4, 5)           # PURR's own keys, compiled into every build unless you take them out
+KEYS_C = os.path.join("PurrOS", "components", "coreos", "keys", "purr_default_keys.c")
+_ENTRY = re.compile(r"\.key_id\s*=\s*(\d+),\s*\.role\s*=\s*PURR_ROLE_(\w+),\s*\.pub\s*=\s*\{([^}]*)\}")
+
+
+def trust_problems(keep_ours, boot_key, boot_id, dev_key, dev_id):
+    """What is wrong with the choice of keys, as readable sentences (empty when it is fine)."""
+    out = []
+    if not boot_key:
+        out.append("Choose a boot key: it signs the kernel, the loader, KittenOS, the boot package and the bootloader.")
+    if not dev_key:
+        out.append("Choose a developer key: it signs the modules, drivers and apps.")
+    if boot_key and dev_key and boot_id == dev_id:
+        out.append("The boot key and the developer key need different ids.")
+    if keep_ours:
+        for what, i in (("boot", boot_id), ("developer", dev_id)):
+            if i in OUR_IDS:
+                out.append("The %s key's id %d is one of PURR's (1 to 5). While you keep PURR's keys, give yours an id from 6 to 31." % (what, i))
+    for what, i in (("boot", boot_id), ("developer", dev_id)):
+        if not 0 <= i <= 31:
+            out.append("The %s key's id must be from 0 to 31." % what)
+    return out
+
+
+def pub_path(key):
+    return os.path.splitext(key)[0] + ".pub"
+
+
+def read_keybag(text):
+    """[(id, role, 64 bytes)] from a generated purr_default_keys.c."""
+    out = []
+    for m in _ENTRY.finditer(text):
+        raw = bytes(int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", m.group(3)))
+        if len(raw) == 64:
+            out.append((int(m.group(1)), m.group(2).lower(), raw))
+    return out
+
+
+def apply_trust(ws, keep_ours, own, run=None, on_line=print):
+    """Write the key list the build compiles in: PURR's keys (when kept) and yours. `own` is [(public key file, role, id)]. The bootloader, the kernel and
+    the boot package all read this one list, so what is trusted is decided here. Returns the ids in the list."""
+    c = os.path.join(tree(ws), KEYS_C)
+    ours = c + ".ours"
+    if not os.path.isfile(c):
+        raise SourceError("The source has no key list (%s): it is not the PURR OS source." % KEYS_C)
+    if not os.path.isfile(ours):
+        shutil.copyfile(c, ours)                                # the list as pulled; kept so the choice can change later
+    ps = run or (lambda args, extra_env=None, password=None: runner.purrstrap(args, on_line=on_line, extra_env=extra_env))
+    tmp = os.path.join(folder(ws), "keys.work")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    if keep_ours:
+        with open(ours, "r", encoding="utf-8") as fh:
+            for kid, role, raw in read_keybag(fh.read()):
+                with open(os.path.join(tmp, "%s_%d.pub.bin" % (role, kid)), "wb") as out:
+                    out.write(raw)
+    for pub, role, kid in own:
+        if not os.path.isfile(pub):
+            raise SourceError("I cannot find the public key %s (make the key in Studio's keys page, which writes it next to the private one)." % pub)
+        r = ps(["keys", "export-public", "--pub", pub, "--role", role, "--key-id", str(kid), "--out", tmp])
+        if r["rc"] != 0:
+            raise SourceError("Could not add your %s key to the build: %s" % (role, (r["output"].strip().splitlines() or ["no reason given"])[-1]))
+    gen = os.path.join(tmp, "purr_default_keys.c")
+    if not os.path.isfile(gen):
+        raise SourceError("The key list was not written.")
+    shutil.copyfile(gen, c)
+    shutil.rmtree(tmp, ignore_errors=True)
+    with open(c, "r", encoding="utf-8") as fh:
+        return [k[0] for k in read_keybag(fh.read())]
+
+
+# ---------------------------------------------------------------------------------------------------------------- the modules, drivers and apps
+
+# the system modules: name, source in the repository, entry symbol (all are built as driver-kind modules, as the published ones are)
+SYSTEM_MODULES = (("about", "Modules/test/about_module.c", "about_module_entry"), ("appmgr", "Modules/coreos/appmgr_module.c", "appmgr_module_entry"),
+                  ("apps", "Modules/appmanager/apps_module.c", "apps_module_entry"), ("fs", "Modules/coreos/fs_module.c", "fs_module_entry"),
+                  ("login", "Modules/coreos/login_module.c", "login_module_entry"), ("netinstall", "Modules/netinstall/netinstall_module.c", "netinstall_module_entry"),
+                  ("sysinfo", "Modules/coreos/sysinfo_module.c", "sysinfo_module_entry"), ("wifi", "Modules/network/wifi_module.c", "wifi_module_entry"))
+
+
+def driver_source(ws, name):
+    """(source file, entry symbol) of a driver in the pulled source, or None. The file is Modules/drivers/<stem>_module.c and the driver is called <stem> with dashes, or that and a suffix."""
+    d = os.path.join(tree(ws), "Modules", "drivers")
+    if not os.path.isdir(d):
+        return None
+    best = None
+    for f in sorted(os.listdir(d)):
+        if not f.endswith("_module.c"):
+            continue
+        stem = f[:-len("_module.c")]
+        dashed = stem.replace("_", "-")
+        if name == dashed or name.startswith(dashed + "-"):
+            if best is None or len(stem) > len(best[0]):
+                best = (stem, os.path.join(d, f))
+    return (best[1], best[0] + "_entry") if best else None
+
+
+def tree_apps(ws):
+    """[(name, version)] of the apps in the pulled source (Apps/<name>/<name>.c with a manifest.toml)."""
+    d = os.path.join(tree(ws), "Apps")
+    out = []
+    if os.path.isdir(d):
+        for n in sorted(os.listdir(d)):
+            m = os.path.join(d, n, "manifest.toml")
+            if os.path.isfile(os.path.join(d, n, n + ".c")) and os.path.isfile(m):
+                mv = re.search(r'^version\s*=\s*"([^"]+)"', open(m, encoding="utf-8").read(), re.M)
+                out.append((n, mv.group(1) if mv else "0.1.0"))
+    return out
+
+
+def compile_modules(ws, board, key, key_id, password, drivers, apps, out, on_step=None, on_line=print, run=None, base=DEFAULT_VERSION):
+    """Compile the system modules, the chosen drivers and the chosen apps of the pulled source, and sign each with `key` (the developer key).
+
+    `drivers` is [{"name", "scope"}], `apps` is [name of an app in the pulled source]. Returns {"ok", "modules": [paths], "drivers": [{name, scope, version, path, file}],
+    "apps": [paths], "missing": [driver names with no source], "problem"}."""
+    st = state(ws)
+    version = short_version(st.get("commit", "0000000"), base)
+    env = {"PURR_REPO_ROOT": tree(ws)}
+    ps = run or (lambda args, extra_env=None, password=None: runner.purrstrap(args, password=password, on_line=on_line, extra_env=extra_env))
+    res = {"ok": False, "modules": [], "drivers": [], "apps": [], "missing": [], "problem": ""}
+    os.makedirs(out, exist_ok=True)
+
+    def step(i, state_, note=""):
+        if on_step:
+            on_step(i, state_, note)
+
+    def build(name, src, entry, kind, dest, ver):
+        r = ps(["modules", "build", "--board", board, "--source", src, "--entry", entry, "--kind", kind, "--name", name, "--version", ver, "--out", dest], extra_env=env)
+        if r["rc"] != 0:
+            return "%s did not compile: %s" % (name, (r["output"].strip().splitlines() or ["no reason given"])[-1])
+        r = ps(["keys", "sign", "--key", key, "--image", dest, "--key-id", str(int(key_id))], password=password)
+        if r["rc"] != 0:
+            return "Signing %s failed: %s" % (name, (r["output"].strip().splitlines() or ["no reason given"])[-1])
+        return ""
+
+    t = tree(ws)
+    step("modules", "run", "%d system modules" % len(SYSTEM_MODULES))
+    for name, rel, entry in SYSTEM_MODULES:
+        src = os.path.join(t, *rel.split("/"))
+        if not os.path.isfile(src):
+            res["problem"] = "The source of the %s module (%s) is not in the pulled source." % (name, rel)
+            step("modules", "fail", res["problem"])
+            return res
+        dest = os.path.join(out, "%s-%s.cat" % (name, board))
+        bad = build(name, src, entry, "driver", dest, version)
+        if bad:
+            res["problem"] = bad
+            step("modules", "fail", bad)
+            return res
+        res["modules"].append(dest)
+    step("modules", "done", "%d compiled and signed" % len(res["modules"]))
+
+    step("drivers", "run", "%d driver(s)" % len(drivers))
+    for d in drivers:
+        found = driver_source(ws, d["name"])
+        if not found:
+            res["missing"].append(d["name"])
+            on_line("There is no source for the driver %s in this source: it is left out (nothing ready-made is used in a build from source)." % d["name"])
+            continue
+        dest = os.path.join(out, "%s-%s.cat" % (d["name"], d["scope"]))
+        bad = build(d["name"], found[0], found[1], "driver", dest, version)
+        if bad:
+            res["problem"] = bad
+            step("drivers", "fail", bad)
+            return res
+        data = open(dest, "rb").read()
+        res["drivers"].append({"name": d["name"], "scope": d["scope"], "version": version, "path": dest, "file": os.path.basename(dest), "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    step("drivers", "done" if res["drivers"] else "skip", "%d compiled and signed%s" % (len(res["drivers"]), (", %d without source" % len(res["missing"])) if res["missing"] else ""))
+
+    avail = dict(tree_apps(ws))
+    step("srcapps", "run" if apps else "skip", "%d app(s) from the source" % len(apps) if apps else "none chosen")
+    for a in apps:
+        if a not in avail:
+            res["problem"] = "The app %s is not in the pulled source." % a
+            step("srcapps", "fail", res["problem"])
+            return res
+        dest = os.path.join(out, "%s.cat" % a)
+        bad = build(a, os.path.join(t, "Apps", a, a + ".c"), a + "_entry", "app", dest, avail[a])
+        if bad:
+            res["problem"] = bad
+            step("srcapps", "fail", bad)
+            return res
+        res["apps"].append(dest)
+    if apps:
+        step("srcapps", "done", "%d compiled and signed" % len(res["apps"]))
+    res["ok"] = True
+    return res
+
+
+# ---------------------------------------------------------------------------------------------------------------- binaries baked into the kernel
+
+# PurrOS/main/commands.c holds signed binaries as byte arrays (signed by PURR's developer key): the loader's display, keyboard and touch drivers come from them, and the
+# kernel plants the system modules from them. A build that trusts nobody's binaries compiles each one again from source and writes its own signed copy into the array.
+# array in commands.c -> (source, entry symbol)
+BAKED = (("s_about_module", "Modules/test/about_module.c", "about_module_entry"), ("s_apps_module", "Modules/appmanager/apps_module.c", "apps_module_entry"),
+         ("s_wifi_module", "Modules/network/wifi_module.c", "wifi_module_entry"), ("s_netinstall_module", "Modules/netinstall/netinstall_module.c", "netinstall_module_entry"),
+         ("s_sysinfo_module", "Modules/coreos/sysinfo_module.c", "sysinfo_module_entry"), ("s_fs_module", "Modules/coreos/fs_module.c", "fs_module_entry"),
+         ("s_login_module", "Modules/coreos/login_module.c", "login_module_entry"), ("s_appmgr_module", "Modules/coreos/appmgr_module.c", "appmgr_module_entry"),
+         ("s_debug_module", "Modules/test/debug_module.c", "debug_module_entry"),
+         ("s_kbd_i2c_driver_module", "Modules/drivers/kbd_i2c_module.c", "kbd_i2c_entry"), ("s_gt911_driver_module", "Modules/drivers/gt911_module.c", "gt911_entry"),
+         ("s_st7789_driver_module", "Modules/drivers/st7789_module.c", "st7789_entry"), ("s_battery_driver_module", "Modules/drivers/battery_module.c", "battery_entry"),
+         ("s_kbd_backlight_driver_module", "Modules/drivers/kbd_backlight_module.c", "kbd_backlight_entry"))
+BUILTIN_APPS = ("store", "storesvc")                    # purr_builtin_apps.c: the Store and its companion (unsigned: the kernel's hash vouches for them)
+KIND_OF_FLAGS = {2: "coreos", 3: "appmanager", 4: "runtime", 5: "driver", 7: "devbundle"}
+COMMANDS_C = os.path.join("PurrOS", "main", "commands.c")
+
+
+def _array_pattern(name):
+    return re.compile(r"(static const uint8_t %s\[\] = \{)(.*?)(\n\};)" % re.escape(name), re.S)
+
+
+def _array_bytes(text, name):
+    m = _array_pattern(name).search(text)
+    if not m:
+        return None
+    return bytes(int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", m.group(2)))
+
+
+def _format_array(data):
+    return "\n" + "\n".join("    " + " ".join("0x%02x," % b for b in data[i:i + 12]) for i in range(0, len(data), 12))
+
+
+def rebake(ws, board, key, key_id, password, on_step=None, on_line=print, run=None, gen=None, base=DEFAULT_VERSION):
+    """Compile again from source every binary baked into the kernel and sign it with `key` (the developer key), writing the result into the pulled tree: the arrays of
+    commands.c, and purr_builtin_apps.c (the Store). Returns {"ok", "count", "problem"}. `gen(args)` runs the generator script (a parameter for tests)."""
+    t = tree(ws)
+    st = state(ws)
+    version = short_version(st.get("commit", "0000000"), base)
+    env = {"PURR_REPO_ROOT": t}
+    ps = run or (lambda args, extra_env=None, password=None: runner.purrstrap(args, password=password, on_line=on_line, extra_env=extra_env))
+    img = formats.image()
+    work = os.path.join(folder(ws), "baked.work")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+
+    def step(i, state_, note=""):
+        if on_step:
+            on_step(i, state_, note)
+
+    def fail(i, note):
+        step(i, "fail", note)
+        on_line(note)
+        return {"ok": False, "count": 0, "problem": note}
+
+    cpath = os.path.join(t, COMMANDS_C)
+    orig = cpath + ".orig"
+    if not os.path.isfile(cpath):
+        return fail("baked", "The source has no %s: it is not the PURR OS source." % COMMANDS_C)
+    if not os.path.isfile(orig):
+        shutil.copyfile(cpath, orig)                            # as pulled, so the arrays can always be read from the originals
+    with open(orig, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    step("baked", "run", "%d modules and drivers built into the kernel" % len(BAKED))
+    n = 0
+    for array, rel, entry in BAKED:
+        old = _array_bytes(text, array)
+        src = os.path.join(t, *rel.split("/"))
+        if old is None or not os.path.isfile(src):
+            return fail("baked", "I cannot rebuild %s: %s." % (array, "it is not in commands.c" if old is None else "its source %s is missing" % rel))
+        try:
+            f = img.header_fields(img.parse_header(old))
+        except Exception:
+            return fail("baked", "%s in commands.c is not a PURR container." % array)
+        name = f["name"]
+        kind = KIND_OF_FLAGS.get(f["flags"], "driver")
+        dest = os.path.join(work, name + ".cat")
+        r = ps(["modules", "build", "--board", board, "--source", src, "--entry", entry, "--kind", kind, "--name", name, "--version", version, "--out", dest], extra_env=env)
+        if r["rc"] != 0:
+            return fail("baked", "%s did not compile: %s" % (name, (r["output"].strip().splitlines() or ["no reason given"])[-1]))
+        r = ps(["keys", "sign", "--key", key, "--image", dest, "--key-id", str(int(key_id))], password=password)
+        if r["rc"] != 0:
+            return fail("baked", "Signing %s failed: %s" % (name, (r["output"].strip().splitlines() or ["no reason given"])[-1]))
+        with open(dest, "rb") as fh:
+            new = fh.read()
+        text = _array_pattern(array).sub(lambda m: m.group(1) + _format_array(new) + m.group(3), text, count=1)
+        n += 1
+    with open(cpath, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    step("baked", "done", "%d compiled and signed" % n)
+
+    step("builtin", "run", "the Store and its companion")
+    cats = []
+    avail = dict(tree_apps(ws))
+    for a in BUILTIN_APPS:
+        if a not in avail:
+            return fail("builtin", "The app %s is not in the pulled source." % a)
+        dest = os.path.join(work, a + ".cat")
+        r = ps(["modules", "build", "--board", board, "--source", os.path.join(t, "Apps", a, a + ".c"), "--entry", a + "_entry", "--kind", "app", "--name", a,
+                "--version", avail[a], "--out", dest], extra_env=env)
+        if r["rc"] != 0:
+            return fail("builtin", "%s did not compile: %s" % (a, (r["output"].strip().splitlines() or ["no reason given"])[-1]))
+        cats.append(dest)
+    script = os.path.join(t, "tools", "release", "gen_builtin_apps.py")
+    if not os.path.isfile(script):
+        return fail("builtin", "The source has no tools/release/gen_builtin_apps.py.")
+    g = gen or (lambda args: _run_python(args, t, on_line))
+    r = g([script] + cats)
+    if r["rc"] != 0:
+        return fail("builtin", "Writing the built-in apps failed: %s" % (r["output"].strip().splitlines() or ["no reason given"])[-1])
+    step("builtin", "done", "%d apps compiled" % len(cats))
+    shutil.rmtree(work, ignore_errors=True)
+    return {"ok": True, "count": n + len(cats), "problem": ""}
+
+
+def _run_python(args, cwd, on_line):
+    try:
+        p = subprocess.run([sys.executable] + list(args), cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, errors="replace", stdin=subprocess.DEVNULL)
+    except OSError as e:
+        return {"rc": 127, "output": str(e)}
+    for line in p.stdout.splitlines():
+        on_line(line)
+    return {"rc": p.returncode, "output": p.stdout}

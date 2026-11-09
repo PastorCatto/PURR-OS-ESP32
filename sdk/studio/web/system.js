@@ -2,9 +2,11 @@
    The choices are saved in a system project (purrsdk/system.py); the build runs there and reports each step. */
 "use strict";
 
-const SRC_STEPS = [["source", "Pull the newest source"], ["compiler", "Find the compiler"], ["compile-full", "Compile the kernel"], ["compile-minimal", "Compile the recovery loader"], ["compile-recovery", "Compile KittenOS"], ["package", "Package the parts"], ["sign", "Sign the parts with your key"]];
+const SRC_STEPS = [["source", "Pull the newest source"], ["compiler", "Find the compiler"], ["trust", "Set whose keys the image trusts"], ["baked", "Compile the modules built into the kernel"], ["builtin", "Compile the Store and its companion"], ["compile-full", "Compile the kernel"], ["compile-minimal", "Compile the recovery loader"], ["compile-recovery", "Compile KittenOS"],
+  ["package", "Package the parts"], ["sign", "Sign the parts with your boot key"], ["modules", "Compile the system modules"], ["drivers", "Compile the drivers"], ["srcapps", "Compile the apps from the source"],
+  ["apps", "Compile and sign your own apps"], ["ui", "Draw your UI"], ["parts", "Check the system parts"], ["image", "Make the flash image"], ["delivery", "Lay out the delivery folder"]];
 const SYS_STEPS_BASE = [["apps", "Compile and sign your apps"], ["ui", "Draw your UI"], ["drivers", "Gather the drivers"], ["parts", "Check the system parts"], ["image", "Make the flash image"], ["delivery", "Lay out the delivery folder"]];
-const sysSteps = sys => (sys.parts_from === "source" ? SRC_STEPS : []).concat(SYS_STEPS_BASE);
+const sysSteps = sys => sys.parts_from === "source" ? SRC_STEPS : SYS_STEPS_BASE;
 const SYS_DEVICES = [
   ["tdeck_plus", "T-Deck Plus", "REFERENCE", "#0050ef", "ESP32-S3 · 16 MB · 8 MB PSRAM · 320 × 240 touch, keyboard, trackball, GPS, LoRa"],
   ["tdeck", "T-Deck", "SAME HARDWARE", "#2b2b2b", "The same board without GPS. Its set is published next to the Plus set."],
@@ -34,7 +36,7 @@ pages.system = {
     const O = await api.get("system", { name });
     const keys = (await api.get("keys")).keys.filter(k => k.kind === "private");
     $("#top-note").textContent = name;
-    const S = { tab: "parts", O, steps: {}, result: null, log: [], busy: false, pw: "" };
+    const S = { tab: "parts", O, steps: {}, result: null, log: [], busy: false, pw: "", bpw: "" };
     const body = h("div"), foot = h("div", { class: "bx-bar" }), tabs = h("nav", { class: "bx-screens", "aria-label": "Steps" });
     el.appendChild(tabs); el.appendChild(body); el.appendChild(foot);
     activity("image", name, "system", name, "opened");
@@ -47,6 +49,24 @@ pages.system = {
       clear(tabs);
       SYS_TABS.forEach(t => tabs.appendChild(h("button", { class: "bx-pivot" + (S.tab === t ? " on" : ""), "aria-pressed": S.tab === t, onclick: () => { S.tab = t; paint(); }, text: t })));
       tabs.appendChild(h("span", { class: "dim", style: { fontSize: "14px" }, text: "the same road for an image, drivers, apps and signing" }));
+    }
+
+    function trustBox() {
+      const sy = S.O.system, bad = S.O.source.trust || [];
+      const bsel = h("select", { class: "bx-input", "aria-label": "Boot key", style: { flex: "1 1 200px" }, onchange: ev => save({ boot_key: ev.target.value }) }, h("option", { value: "", text: "(choose your boot key)" }), keys.map(k => h("option", { value: k.name, text: k.name, selected: k.name === sy.boot_key })));
+      const bid = h("input", { type: "number", min: 0, max: 31, value: sy.boot_key_id, class: "bx-input", style: { width: "90px" }, "aria-label": "Boot key id", onchange: ev => save({ boot_key_id: +ev.target.value }) });
+      const dsel = h("select", { class: "bx-input", "aria-label": "Developer key", style: { flex: "1 1 200px" }, onchange: ev => save({ key: ev.target.value }) }, h("option", { value: "", text: "(choose your developer key)" }), keys.map(k => h("option", { value: k.name, text: k.name, selected: k.name === sy.key })));
+      const did = h("input", { type: "number", min: 0, max: 31, value: sy.key_id, class: "bx-input", style: { width: "90px" }, "aria-label": "Developer key id", onchange: ev => save({ key_id: +ev.target.value }) });
+      const wrap = h("div", { style: { display: "flex", flexDirection: "column", gap: "8px", borderTop: "1px solid var(--line)", paddingTop: "10px" } });
+      wrap.appendChild(h("div", { class: "bx-label", text: "WHOSE KEYS THE IMAGE TRUSTS" }));
+      wrap.appendChild(h("div", { class: "bx-row" }, toggle(sy.keep_ours, () => save({ keep_ours: !sy.keep_ours })),
+        h("span", { style: { display: "flex", flexDirection: "column", flexGrow: 1 } }, h("span", { text: "Keep PURR's keys" }),
+          h("span", { class: "dim small", style: { lineHeight: 1.45 }, text: sy.keep_ours ? "On: the image trusts yours and PURR's, so it still takes PURR's updates, and your own parts too. Turn it off to compile an image that trusts only your keys." : "Off: the bootloader, the kernel and every check compile in only your keys. Nothing signed by PURR is accepted, including PURR's updates, until you turn this on and build again." }))));
+      wrap.appendChild(h("div", { class: "row" }, h("span", { class: "dim small", style: { width: "130px" }, text: "boot key, id" }), bsel, bid));
+      wrap.appendChild(h("div", { class: "row" }, h("span", { class: "dim small", style: { width: "130px" }, text: "developer key, id" }), dsel, did));
+      wrap.appendChild(h("p", { class: "dim small", style: { margin: 0, lineHeight: 1.45 }, text: "The boot key signs the kernel, the loader, KittenOS, the boot package and the bootloader. The developer key signs the modules, drivers and apps. Make them on the keys page (with roles boot and developer); while PURR's keys are kept, use ids 6 to 31." }));
+      bad.forEach(t => wrap.appendChild(h("p", { style: { margin: 0, color: "#f0a30a", fontSize: "14px" }, text: t })));
+      return wrap;
     }
 
     function sourceBox() {
@@ -62,7 +82,9 @@ pages.system = {
       const ref = h("input", { type: "text", class: "bx-input", value: sy.source_ref, "aria-label": "Branch", style: { flex: "0 1 140px" }, onchange: ev => save({ source_ref: ev.target.value.trim() }) });
       const shell = h("select", { class: "bx-input", "aria-label": "Shell", style: { flex: "0 1 220px" }, onchange: ev => save({ shell: ev.target.value }) },
         h("option", { value: "android", text: "Android 2.2 (Froyo) shell", selected: sy.shell === "android" }), h("option", { value: "w10m", text: "Windows 10 Mobile shell", selected: sy.shell === "w10m" }));
-      box.appendChild(h("div", { class: "row" }, url, ref, shell));
+      const ver = h("input", { type: "text", class: "bx-input", value: sy.version, "aria-label": "Version", style: { flex: "0 1 110px" }, onchange: ev => save({ version: ev.target.value.trim() }) });
+      box.appendChild(h("div", { class: "row" }, url, ref, shell, h("span", { class: "dim small", text: "version" }), ver));
+      box.appendChild(trustBox());
       const status = h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: st.commit ? "Pulled " + st.commit.slice(0, 7) + " on " + st.when + ". Build pulls again if something newer is there." : "Nothing pulled yet. Build pulls it first." });
       const comp = src.compiler;
       const compLine = h("p", { style: { margin: 0, lineHeight: 1.5, fontSize: "14px", color: comp.found && comp.right ? "var(--fg)" : "#f0a30a" }, text: comp.found ? "Compiler: ESP-IDF " + (comp.version || "found") + (comp.right ? "" : " (the firmware wants 5.3.5)") : "Compiler: ESP-IDF 5.3.5 is not installed. It is the compiler for the firmware (about 2.5 GB, installed once)." });
@@ -72,7 +94,7 @@ pages.system = {
       if (!comp.found) { const ins = h("button", { class: "bx-primary", text: "install the compiler", onclick: async () => {
         ins.disabled = true; try { const { job } = await api.post("source/install-compiler", {}); let since = 0; for (;;) { const j = await api.get("job", { id: job, since }); since = j.next; j.lines.forEach(l => S.log.push(l)); if (j.done) break; await new Promise(res => setTimeout(res, 800)); } S.O = await api.get("system", { name }); } catch (e) { say(e); } paint(); } }); row.appendChild(ins); }
       box.appendChild(status); box.appendChild(compLine); box.appendChild(row);
-      box.appendChild(h("div", { class: "bx-note", text: "The first compile of the firmware takes a long time (about ten minutes for the kernel); later ones are shorter. The Android shell's pictures are packed into the kernel from the pulled source. The system modules still come ready-made." }));
+      box.appendChild(h("div", { class: "bx-note", text: "The first compile of the firmware takes a long time (about ten minutes for the kernel); later ones are shorter. The Android shell's pictures are packed into the kernel from the pulled source. Then the system modules, the drivers and the apps you switched on are compiled from the same source, so nothing ready-made is used." }));
       return box;
     }
 
@@ -90,7 +112,7 @@ pages.system = {
       body.appendChild(h("div", { class: "bx-icols" },
         h("div", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 360px" } }, h("div", { class: "bx-label", text: "BASE SYSTEM" }), h("div", { class: "bx-big", style: { fontWeight: 300 }, text: S.O.system.parts_from === "source" ? "compiled when you build" : plan && plan.ok ? "PURR OS " + vers : "parts not found" }),
           h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: S.O.system.parts_from === "source" ? "The kernel, recovery loader, KittenOS, boot package and bootloader are compiled from the pulled source and signed with your key. The folder of ready-made parts is not used." : plan && plan.ok ? "Kernel, recovery, loader, boot package and bootloader, signed. Use a different set by choosing another folder." : (plan ? plan.problems[0] : "Choose a folder with the five signed parts.") }), S.O.system.parts_from === "source" ? null : folderSel),
-        h("div", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 360px" } }, h("div", { class: "bx-label", text: "SIGNING KEY" }), h("div", { class: "bx-big", style: { fontWeight: 300 }, text: S.O.system.key ? S.O.system.key + " · id " + S.O.system.key_id : "no key chosen" }),
+        h("div", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 360px" } }, h("div", { class: "bx-label", text: S.O.system.parts_from === "source" ? "DEVELOPER KEY (MODULES, DRIVERS, APPS)" : "SIGNING KEY" }), h("div", { class: "bx-big", style: { fontWeight: 300 }, text: S.O.system.key ? S.O.system.key + " · id " + S.O.system.key_id : "no key chosen" }),
           h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: (S.O.system.parts_from === "source" ? "You type the key's password when Studio signs the parts it compiles and your apps, once, and it is never kept." : "You type the key's password only when Studio signs your apps, once, and it is never kept.") }), h("div", { class: "row" }, keySel, kid), h("a", { href: "#keys", class: "bx-link", onclick: ev => { ev.preventDefault(); go("keys"); }, text: "make a key" }))));
     }
 
@@ -102,7 +124,7 @@ pages.system = {
       const ap = h("section", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 320px", gap: "4px" } }, h("span", { class: "bx-label", text: "APPS" }));
       if (!S.O.apps.length) ap.appendChild(h("p", { class: "dim", style: { lineHeight: 1.5, margin: "6px 0" }, text: "No app projects yet. Make one and it shows up here." }));
       S.O.apps.forEach(a => ap.appendChild(h("div", { class: "bx-row" }, toggle(a.on, () => { const on = new Set(S.O.system.apps); a.on ? on.delete(a.name) : on.add(a.name); save({ apps: [...on] }); }),
-        h("span", { style: { display: "flex", flexDirection: "column", flexGrow: 1 } }, h("span", { text: a.name }), h("span", { class: "dim small", text: "yours · built and signed with your key" })), h("span", { class: "dim small", text: a.version }))));
+        h("span", { style: { display: "flex", flexDirection: "column", flexGrow: 1 } }, h("span", { text: a.name }), h("span", { class: "dim small", text: a.from_source ? "from the pulled source · compiled and signed with your developer key" : "yours · built and signed with your key" })), h("span", { class: "dim small", text: a.version }))));
       ap.appendChild(h("div", { class: "row", style: { marginTop: "8px" } }, h("button", { class: "bx-ghost", text: "new app", onclick: () => go("projects", "new") })));
       const lk = h("section", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 280px" } }, h("span", { class: "bx-label", text: "LOOK" }));
       if (!S.O.uis.length) lk.appendChild(h("p", { class: "dim", style: { lineHeight: 1.5, margin: 0 }, text: "No UI yet. Build one and choose it here; it goes onto the device with the system." }));
@@ -115,14 +137,15 @@ pages.system = {
       const left = h("section", { class: "bx-about", style: { maxWidth: "none", flex: "1.4 1 420px", gap: 0, padding: "6px 20px 20px" } });
       sysSteps(S.O.system).forEach(([id, label]) => {
         const st = S.steps[id] || { state: "wait", note: "" };
-        const note = st.note || { source: S.O.system.source_url.replace(/^https?:\/\//, "") + " · " + S.O.system.source_ref, compiler: "ESP-IDF 5.3.5", "compile-full": "from the pulled source", "compile-minimal": "from the pulled source", "compile-recovery": "from the pulled source", package: "five parts, one container each", sign: "with your key", apps: S.O.system.apps.length + " app(s) chosen", ui: S.O.system.ui || "no UI chosen", drivers: drivers().length + " driver(s) on", parts: "the five signed parts", image: "one file for the whole flash", delivery: "a folder to hand to a device" }[id];
+        const note = st.note || { source: S.O.system.source_url.replace(/^https?:\/\//, "") + " · " + S.O.system.source_ref, compiler: "ESP-IDF 5.3.5", trust: S.O.system.keep_ours ? "PURR's keys and yours" : "only yours", modules: "about, appmgr, apps, fs, login, netinstall, sysinfo, wifi", srcapps: "apps in the pulled source you switched on", "compile-full": "from the pulled source", "compile-minimal": "from the pulled source", "compile-recovery": "from the pulled source", package: "five parts, one container each", sign: "with your boot key", apps: S.O.system.apps.length + " app(s) chosen", ui: S.O.system.ui || "no UI chosen", drivers: drivers().length + " driver(s) on", parts: "the five signed parts", image: "one file for the whole flash", delivery: "a folder to hand to a device" }[id];
         left.appendChild(h("div", { class: "bx-job" }, h("span", { class: "bx-jicon " + st.state, text: { done: "✓", run: "▶", fail: "×", skip: "–" }[st.state] || "○" }),
           h("span", { style: { display: "flex", flexDirection: "column", flexGrow: 1 } }, h("span", { style: { fontWeight: st.state === "run" ? 600 : 400 }, text: label }), h("span", { class: "dim small", text: note })), h("span", { class: "dim small", text: st.state === "skip" ? "skipped" : "" })));
       });
       if (S.O.system.apps.length || S.O.system.parts_from === "source") {
-        const pw = h("input", { type: "password", placeholder: "key password", "aria-label": "Key password", class: "bx-input", style: { flex: "1 1 200px", background: "#000" }, value: S.pw, oninput: ev => { S.pw = ev.target.value; } });
+        const pw = h("input", { type: "password", placeholder: S.O.system.parts_from === "source" ? "developer key password" : "key password", "aria-label": "Key password", class: "bx-input", style: { flex: "1 1 200px", background: "#000" }, value: S.pw, oninput: ev => { S.pw = ev.target.value; } });
+        const bpw = S.O.system.parts_from === "source" ? h("input", { type: "password", placeholder: "boot key password", "aria-label": "Boot key password", class: "bx-input", style: { flex: "1 1 200px", background: "#000" }, value: S.bpw, oninput: ev => { S.bpw = ev.target.value; } }) : null;
         left.appendChild(h("div", { class: "bx-pw" }, h("span", { style: { fontSize: "16px", fontWeight: 600 }, text: (S.O.system.parts_from === "source" ? "Signing the parts and your apps needs your key" : "Signing your apps needs your key") + (S.O.system.key ? " (" + S.O.system.key + ", id " + S.O.system.key_id + ")" : "") }),
-          h("span", { style: { fontSize: "13px", opacity: .9 }, text: "Type its password. It is used once, in memory, and never saved." }), pw));
+          h("span", { style: { fontSize: "13px", opacity: .9 }, text: S.O.system.parts_from === "source" ? "Type the password of the boot key and of the developer key. They are used once, in memory, and never saved." : "Type its password. It is used once, in memory, and never saved." }), h("div", { class: "row" }, bpw, pw)));
       }
       const plan = S.O.plan, right = h("section", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 320px" } }, h("span", { class: "bx-label", text: "WILL IT FIT?" }));
       if (plan) plan.parts.filter(p => p.size && p.room).forEach(p => { const pct = Math.min(100, Math.round(p.size * 100 / p.room));
@@ -198,7 +221,7 @@ pages.system = {
     async function runBuild() {
       if (S.busy) return; S.busy = true; S.steps = {}; S.log = []; S.result = null; S.tab = "build"; paint();
       try {
-        const { job } = await api.post("system/build", { name, password: S.pw || null });
+        const { job } = await api.post("system/build", { name, password: S.pw || null, boot_password: S.bpw || null });
         let since = 0;
         for (;;) {
           const j = await api.get("job", { id: job, since }); since = j.next;
@@ -207,7 +230,7 @@ pages.system = {
           if (j.done) { S.result = j.result && j.result.ok ? j.result : null; if (j.result && j.result.steps) Object.keys(j.result.steps).forEach(k => { S.steps[k] = j.result.steps[k]; }); break; }
           await new Promise(res => setTimeout(res, 350));
         }
-        S.pw = "";
+        S.pw = ""; S.bpw = "";
         if (S.result) { toast("Built."); S.tab = "deliver"; } else toast("The build stopped. The failed step says why.");
       } catch (e) { say(e); }
       S.busy = false; paint();

@@ -67,7 +67,9 @@ def load(ws, name):
             "ui": str(s.get("ui", "")), "drivers": list(d.get("drivers", {}).get("enabled", [])), "apps": list(d.get("apps", {}).get("include", [])),
             "drivers_set": bool(d.get("drivers", {}).get("chosen", False)),
             "parts_from": "source" if s.get("parts_from") == "source" else "ready", "source_url": str(s.get("source_url", "") or sourcemod.DEFAULT_URL),
-            "source_ref": str(s.get("source_ref", "") or sourcemod.DEFAULT_REF), "shell": str(s.get("shell", "android")) if str(s.get("shell", "android")) in sourcemod.SHELLS else "android"}
+            "source_ref": str(s.get("source_ref", "") or sourcemod.DEFAULT_REF), "shell": str(s.get("shell", "android")) if str(s.get("shell", "android")) in sourcemod.SHELLS else "android",
+            "boot_key": str(s.get("boot_key", "")), "boot_key_id": int(s.get("boot_key_id", 7)), "keep_ours": bool(s.get("keep_ours", True)),
+            "version": str(s.get("version", "") or sourcemod.DEFAULT_VERSION)}
 
 
 def save(ws, name, s):
@@ -75,7 +77,8 @@ def save(ws, name, s):
     os.makedirs(os.path.dirname(p), exist_ok=True)
     doc = {"system": {"name": name, "board": s["board"], "parts": s.get("parts", ""), "key": s.get("key", ""), "key_id": int(s.get("key_id", 4)), "ui": s.get("ui", ""),
                       "parts_from": s.get("parts_from", "ready"), "source_url": s.get("source_url", "") or sourcemod.DEFAULT_URL, "source_ref": s.get("source_ref", "") or sourcemod.DEFAULT_REF,
-                      "shell": s.get("shell", "android")},
+                      "shell": s.get("shell", "android"), "boot_key": s.get("boot_key", ""), "boot_key_id": int(s.get("boot_key_id", 7)), "keep_ours": bool(s.get("keep_ours", True)),
+                      "version": s.get("version", "") or sourcemod.DEFAULT_VERSION},
            "drivers": {"enabled": list(s.get("drivers", [])), "chosen": bool(s.get("drivers_set", True))}, "apps": {"include": list(s.get("apps", []))}}
     tmp = p + ".part"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
@@ -88,7 +91,7 @@ def new_system(ws, name, board):
         raise SystemError_("The board is one of %s." % ", ".join(BOARDS))
     if os.path.isfile(_path(ws, name)):
         raise SystemError_("There is already a system called %s." % name)
-    save(ws, name, {"board": board, "drivers": [], "apps": [], "drivers_set": False})
+    save(ws, name, {"board": board, "drivers": [], "apps": [], "drivers_set": False, "key_id": 6, "boot_key_id": 7})
     return load(ws, name)
 
 
@@ -167,8 +170,10 @@ def overview(ws, name):
     folders = parts_folders(s["board"])
     folder = s["parts"] or next((f["path"] for f in folders if f["complete"]), "")
     plan = image.plan(s["board"], folder) if folder else None
-    src = {"git": sourcemod.have_git(), "compiler": sourcemod.compiler(), "state": sourcemod.state(ws)}
-    return {"source": src, "system": s, "drivers": [dict(d, on=d["name"] in chosen, raw=None, path=None) for d in drivers], "apps": [{"name": a["name"], "version": a["version"], "on": a["name"] in s["apps"]} for a in apps],
+    src = {"git": sourcemod.have_git(), "compiler": sourcemod.compiler(), "state": sourcemod.state(ws),
+           "trust": sourcemod.trust_problems(s["keep_ours"], s["boot_key"], s["boot_key_id"], s["key"], s["key_id"])}
+    return {"source": src, "system": s, "drivers": [dict(d, on=d["name"] in chosen, raw=None, path=None) for d in drivers], "apps": [{"name": a["name"], "version": a["version"], "on": a["name"] in s["apps"]} for a in apps]
+            + [{"name": "src:" + n, "version": v, "on": "src:" + n in s["apps"], "from_source": True} for n, v in sourcemod.tree_apps(ws)],
             "uis": [{"name": u["name"], "on": u["name"] == s["ui"]} for u in uis], "folders": folders, "folder": folder,
             "plan": ({"ok": plan["ok"], "problems": plan["problems"], "parts": plan["parts"]} if plan else None)}
 
@@ -198,7 +203,7 @@ def _find_modules(folder, board):
     return out if len(out) == len(MODULES) else []
 
 
-def build(ws, name, password=None, on_step=None, on_line=print):
+def build(ws, name, password=None, on_step=None, on_line=print, boot_password=None):
     """Run the whole road for a system. Returns {"ok", "image", "delivery", "steps": {id: {"state", "note"}}}. A failed step stops the road, and its note says why."""
     s = load(ws, name)
     steps = {}
@@ -221,11 +226,18 @@ def build(ws, name, password=None, on_step=None, on_line=print):
     if key and not os.path.isabs(key):
         key = os.path.join(ws.keys, key)
 
-    # 0 source: pull the newest source and compile the firmware, when the parts are to be made rather than taken ready-made
+    # 0 source: pull the newest source, compile everything from it and sign it with your own keys, when nothing ready-made is to be used
     built_parts = None
+    compiled = None
+    bkey = s["boot_key"] or None
+    if bkey and not os.path.isabs(bkey):
+        bkey = os.path.join(ws.keys, bkey)
     if s["parts_from"] == "source":
-        if not key:
-            return fail("source", "Choose a signing key on the device step: the parts you compile have to be signed.")
+        bad = sourcemod.trust_problems(s["keep_ours"], s["boot_key"], s["boot_key_id"], s["key"], s["key_id"])
+        if bad:
+            return fail("source", bad[0])
+        if sourcemod.version_problem(s["version"]):
+            return fail("source", sourcemod.version_problem(s["version"]))
         step("source", "run", "%s (%s)" % (s["source_url"], s["source_ref"]))
         try:
             pr = sourcemod.pull(ws, s["source_url"], s["source_ref"], on_line=on_line)
@@ -237,17 +249,33 @@ def build(ws, name, password=None, on_step=None, on_line=print):
         if not c["found"]:
             return fail("compiler", "ESP-IDF %s, the compiler for the firmware, is not installed. Use \"install the compiler\" on the device step (about 2.5 GB, once)." % sourcemod.IDF_VERSION)
         step("compiler", "done", "ESP-IDF %s" % (c["version"] or "found"))
-        res = sourcemod.compile_and_package(ws, s["board"], s["shell"], key, s["key_id"], password, out=os.path.join(out, "parts"), on_step=step, on_line=on_line)
+        step("trust", "run", "")
+        try:
+            ids = sourcemod.apply_trust(ws, s["keep_ours"], [(sourcemod.pub_path(bkey), "boot", s["boot_key_id"]), (sourcemod.pub_path(key), "developer", s["key_id"])], on_line=on_line)
+        except sourcemod.SourceError as e:
+            return fail("trust", str(e))
+        step("trust", "done", ("PURR's keys and yours (ids %s)" if s["keep_ours"] else "only yours (ids %s)") % ", ".join(str(i) for i in ids))
+        rb = sourcemod.rebake(ws, s["board"], key, s["key_id"], password, on_step=step, on_line=on_line, base=s["version"])
+        if not rb["ok"]:
+            return {"ok": False, "steps": steps, "image": "", "delivery": ""}
+        res = sourcemod.compile_and_package(ws, s["board"], s["shell"], bkey, s["boot_key_id"], boot_password or password, out=os.path.join(out, "parts"), on_step=step, on_line=on_line, base=s["version"])
         if not res["ok"]:
             return {"ok": False, "steps": steps, "image": "", "delivery": ""}
         built_parts = res["out"]
+        cat = driver_catalog(s["board"])
+        want = [d for d in cat if (d["name"] in s["drivers"] if s["drivers_set"] else d["scope"] != "xx")]
+        compiled = sourcemod.compile_modules(ws, s["board"], key, s["key_id"], password, [{"name": d["name"], "scope": d["scope"]} for d in want],
+                                             [a[4:] for a in s["apps"] if a.startswith("src:")], os.path.join(out, "compiled"), on_step=step, on_line=on_line, base=s["version"])
+        if not compiled["ok"]:
+            return {"ok": False, "steps": steps, "image": "", "delivery": ""}
 
     # 1 apps
-    if s["apps"]:
-        step("apps", "run", "%d app(s)" % len(s["apps"]))
+    own_apps = [a for a in s["apps"] if not a.startswith("src:")]
+    if own_apps:
+        step("apps", "run", "%d app(s)" % len(own_apps))
         if not key:
             return fail("apps", "Choose a signing key on the device step: your apps have to be signed before a device will run them.")
-        for a in s["apps"]:
+        for a in own_apps:
             root = os.path.join(ws.projects, a)
             try:
                 r = projects.build(ws, root, board=s["board"], key=key, key_id=s["key_id"], password=password or None, on_line=on_line)
@@ -258,7 +286,7 @@ def build(ws, name, password=None, on_step=None, on_line=print):
             built_apps.append(r["artifacts"][-1])
         step("apps", "done", "%d built and signed" % len(built_apps))
     else:
-        step("apps", "skip", "no apps chosen")
+        step("apps", "skip", "no apps of your own chosen")
 
     # 2 ui
     if s["ui"]:
@@ -272,13 +300,24 @@ def build(ws, name, password=None, on_step=None, on_line=print):
         ui_out = None
         step("ui", "skip", "no UI chosen")
 
-    # 3 drivers
+    # 3 drivers: gathered signed (ready-made), or the ones just compiled from the source
     cat = driver_catalog(s["board"])
     chosen = [d for d in cat if (d["name"] in s["drivers"] if s["drivers_set"] else True)]
-    step("drivers", "run", "%d driver(s)" % len(chosen))
     rec = os.path.join(out, "recovery")
     os.makedirs(rec, exist_ok=True)
     stanzas = ["release=system-%s-%s" % (name, time.strftime("%Y%m%d")), "released=%s" % time.strftime("%Y-%m-%d"), ""]
+    if compiled:
+        for d in compiled["drivers"]:
+            shutil.copyfile(d["path"], os.path.join(rec, d["file"]))
+            stanzas += ["component=%s" % d["name"], "type=driver", "version=%s" % d["version"], "chip=esp32s3", "board=%s" % d["scope"], "file=%s" % d["file"], "size=%d" % d["size"],
+                        "sha256=%s" % d["sha256"], "key=developer", ""]
+        if compiled["drivers"]:
+            with open(os.path.join(rec, "drivers.manifest"), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join(stanzas))
+        built_apps += compiled["apps"]
+        chosen = []
+    else:
+        step("drivers", "run", "%d driver(s)" % len(chosen))
     for d in chosen:
         data = open(d["path"], "rb").read()
         if d["sha256"] and hashlib.sha256(data).hexdigest() != d["sha256"]:
@@ -288,7 +327,8 @@ def build(ws, name, password=None, on_step=None, on_line=print):
     if chosen:
         with open(os.path.join(rec, "drivers.manifest"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join(stanzas))
-    step("drivers", "done" if chosen else "skip", "%d signed driver(s)" % len(chosen) if chosen else "none switched on")
+    if not compiled:
+        step("drivers", "done" if chosen else "skip", "%d signed driver(s)" % len(chosen) if chosen else "none switched on")
 
     # 4 parts
     folder = built_parts or s["parts"] or next((f["path"] for f in parts_folders(s["board"]) if f["complete"]), "")
@@ -315,9 +355,8 @@ def build(ws, name, password=None, on_step=None, on_line=print):
     args = ["dev", "recovery", "--dir", out, "--board", s["board"], "--kernel", parts["kernel"], "--kittenos", parts["kittenos"], "--loader", parts["loader"], "--bootpkg", parts["bootpkg"],
             "--bootloader", parts["bootloader"]]
     mods = _find_modules(folder, s["board"])
-    if not mods and built_parts:
-        ready = next((f["path"] for f in parts_folders(s["board"]) if f["complete"]), "")
-        mods = _find_modules(ready, s["board"]) if ready else []        # the system modules are not part of the firmware compile: they come ready-made
+    if compiled:
+        mods = list(compiled["modules"])                               # compiled from the source and signed with your key
     if mods:
         args += ["--modules", ",".join(mods)]
     r = runner.purrstrap(args, on_line=on_line)
