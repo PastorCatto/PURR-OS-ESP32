@@ -259,6 +259,32 @@ class Routes(test_studio.Studio):
         self.assertTrue(rep["options"]["recolour"])
         self.assertEqual(self.call("POST", "/api/ui/icons/import", {"name": "icp", "src": "/no/such"})[0], 400)
 
+    def test_slot_picture_made_export_and_reveal_guard(self):
+        self.call("POST", "/api/ui/new", {"name": "ex1", "shell": "android", "board": "tdeck_plus", "start": "android"})
+        tmp = helpers.tmpdir()
+        png = os.path.join(tmp, "x.png")
+        uimaker.write_png(png, 48, 48, test_uimaker.sample(48, 48, True))
+        with open(png, "rb") as fh:
+            st, rep = self.call("POST", "/api/ui/icons/slot?name=ex1&slot=fr_app", raw=fh.read())
+        self.assertEqual(st, 200, rep)
+        self.assertEqual({s["name"]: s["state"] for s in rep["slots"]}["fr_app"], "yours")
+        self.assertEqual(self.call("POST", "/api/ui/icons/slot?name=ex1&slot=nope", raw=b"x")[0], 400)
+        self.assertEqual(self.call("POST", "/api/ui/icons/slot?name=ex1&slot=fr_app", raw=b"not a png")[0], 400)
+        self.assertEqual(self.call("GET", "/api/ui/made?name=ex1")[1], {})
+        self.assertEqual(self.call("POST", "/api/ui/export", {"name": "ex1"})[0], 400)          # not made yet
+        st, mk = self.call("POST", "/api/ui/make", {"name": "ex1"})
+        self.wait_job(mk["job"])
+        st, made = self.call("GET", "/api/ui/made?name=ex1")
+        self.assertGreater(made["count"], 30)
+        self.assertEqual(made["screens"], ["home"])
+        st, z = self.call("POST", "/api/ui/export", {"name": "ex1"})
+        self.assertEqual(st, 200, z)
+        with zipfile.ZipFile(z["zip"]) as zf:
+            names = zf.namelist()
+        self.assertIn("ex1/pack.bin", names)
+        self.assertIn("ex1/shell.conf", names)
+        self.assertEqual(self.call("POST", "/api/reveal", {"path": "/etc/passwd"})[0], 400)       # only files inside the workspace
+
 
 if __name__ == "__main__":
     unittest.main()

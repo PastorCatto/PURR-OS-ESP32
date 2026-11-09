@@ -46,6 +46,16 @@ Gather the parts of a system into a folder a device can recover from, then hand 
 
 Edit the files that configure a device: `system.conf` (the settings), `apps.conf` (how apps run) and the boot trust block.
 
+## The main menu
+
+The big tile at the top is always **the last thing you did**, in any part of Studio: a UI you were building, a device image, a driver, a flash that stopped halfway. Press it and you are back where you were. To its right, **recent activity** lists the last things, newest first. Under the big tile every part of Studio is one press away, in groups: **make** (build a UI, device image, new app, new driver, describe a board, brand a system, icon packs), **deliver** (flash a board, serve to a device, try in the emulator, gather a release, run a repository), **trust** (keys, sign a file), **look and check** (open an image, kit check, configure a device) and **learn** (guides, the element library, import from SquareLine). The chip under the title says whether a board is plugged in.
+
+## build a UI
+
+Choose the device (T-Deck Plus, T-Deck, Waveshare e-paper) and a starting point (blank, Android style, Windows style, a SquareLine export), name it, and you are in the builder. The centre is the device's real screen at 200%. Drag Home, Back, Menu, an app drawer, a dock, an app grid, a clock and the rest from the list on the left (or click one to add it); move things on the screen (arrow keys nudge, Shift for bigger steps, Delete removes); the right side edits the selected element: label, position, size, what a tap should do, colour, layers. Screens (home, app drawer, lock, notifications) are tabs. Everything saves as you go. **make my ui** turns the layout into the picture pack, colours and the screen file the device reads, checks it, and opens the **it is ready** page: what the device will show, and how to put it on a device, try it in the emulator, export it as a zip or publish it. **icons** in the toolbar switches between Studio's set and your own icon pack; **icon packs…** opens the page where you drop a zip of PNGs, a `pack.bin` or a SquareLine export, see which slots it fills, which Studio fills, and which are resized. See [16-device-image.md](16-device-image.md) and [17-making-a-ui.md](17-making-a-ui.md) for what is made.
+
+What the device draws today is limited (at most 16 widgets a screen, and a tap does nothing yet on the shells that read the screen file): the builder says so as you work, and keeps every action in your layout for when the firmware wires it.
+
 ## make a UI
 
 Describe a theme in one small file, `ui.toml`, and Studio draws every picture a shell asks for; your own pictures, or a SquareLine Studio export dropped in as a zip, win. See [17-making-a-ui.md](17-making-a-ui.md).

@@ -757,6 +757,13 @@ def compose(project, on_line=print):
     checks = rep.get("checks", []) if isinstance(rep, dict) else []
     bad = [c for c in checks if c.get("status") == "bad"]
     on_line("Packed %d picture(s), %s bytes: %d drawn, %d yours, %d resized." % (r["count"], format(r["bytes"], ","), len(generated), len(yours), len(resized)))
+    summary = {"count": r["count"], "bytes": r["bytes"], "generated": len(generated), "yours": yours, "resized": resized, "screens": screens_out, "out": out, "when": int(__import__("time").time())}
+    try:
+        import json
+        with open(os.path.join(project, "build", "result.json"), "w", encoding="utf-8") as fh:
+            json.dump(summary, fh)
+    except OSError:
+        pass
     return {"ok": not bad and not layout_problems, "out": out, "pack": r["path"], "count": r["count"], "bytes": r["bytes"], "generated": generated, "yours": yours, "resized": resized,
             "problems": [c.get("text", "") for c in bad] + layout_problems, "notes": notes + layout_notes, "checks": checks, "screens": screens_out}
 

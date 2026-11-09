@@ -142,7 +142,7 @@ def make_handler(state):
                 return _json(self, {"error": "That is bigger than I can take in one go (%d MB)." % (MAX_UPLOAD >> 20)}, 413)
             raw = self.rfile.read(length) if length else b""
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
-            if url.path in ("/api/inspect/upload", "/api/ui/upload"):
+            if url.path in ("/api/inspect/upload", "/api/ui/upload", "/api/ui/icons/slot"):
                 return self._api("POST", url.path[5:], q, raw)
             try:
                 body = json.loads(raw.decode("utf-8")) if raw else {}
@@ -781,6 +781,52 @@ def handle(state, method, route, q, body):
         with open(toml, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
         return uimaker.icon_report(root)
+
+    if route == "ui/made":
+        root = state.safe_project(q.get("name"))
+        path = os.path.join(root, "build", "result.json")
+        if not os.path.isfile(path):
+            return {}
+        return json.loads(_read_text(path))
+    if route == "ui/icons/slot":
+        root = state.safe_project(q.get("name"))
+        cfg, problems = uimaker.load_template(os.path.join(root, "ui.toml"))
+        slot = q.get("slot") or ""
+        if cfg is None or slot not in uimaker.wanted(cfg):
+            raise ValueError("That is not a picture this UI has a slot for.")
+        if not body or body[:8] != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("That is not a PNG picture.")
+        os.makedirs(os.path.join(root, "images"), exist_ok=True)
+        with open(os.path.join(root, "images", slot + ".png"), "wb") as fh:
+            fh.write(body)
+        return uimaker.icon_report(root)
+    if route == "ui/export":
+        root = state.safe_project(body.get("name"))
+        src = os.path.join(root, "build", body.get("name"))
+        if not os.path.isfile(os.path.join(src, "pack.bin")):
+            raise ValueError("Make the UI first (make my ui), then export it.")
+        import zipfile
+        ws.ensure()
+        zpath = os.path.join(ws.builds, "%s-theme.zip" % body.get("name"))
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+            for dp, _d, fns in os.walk(src):
+                for f in fns:
+                    full = os.path.join(dp, f)
+                    zf.write(full, os.path.join(body.get("name"), os.path.relpath(full, src)))
+        activity.record(ws, "ui", body.get("name"), "ready", body.get("name"), "exported")
+        return {"zip": zpath}
+    if route == "reveal":
+        path = os.path.abspath(body.get("path") or "")
+        if not path.startswith(os.path.abspath(ws.path) + os.sep) or not os.path.exists(path):
+            raise ValueError("I can only show files inside your Studio workspace.")
+        import subprocess
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        elif sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", path])
+        else:
+            subprocess.Popen(["xdg-open", os.path.dirname(path) if os.path.isfile(path) else path])
+        return {"ok": True}
 
     # ---- docs
     if route == "docs":

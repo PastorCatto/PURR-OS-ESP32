@@ -237,7 +237,7 @@ def parse_screen_conf(text):
 def starter_layout(start, size):
     """The elements a new UI starts with, for a screen of `size`: 'blank', 'android' (home pages, dock, drawer button, key strip) or 'metro' (a big clock and tiles)."""
     sw, sh = size
-    bar = max(12, sh // 13)
+    bar = max(12, sh // 10)
     if start == "blank":
         return [{"screen": "home", "kind": "wallpaper", "glyph": "wallpaper", "name": "wallpaper", "x": 0, "y": 0, "w": sw, "h": sh, "label": "", "action": "nothing", "color": "#101214"}]
     if start == "metro":
