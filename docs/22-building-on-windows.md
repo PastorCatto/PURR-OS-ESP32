@@ -1,5 +1,7 @@
 # 22. Building on Windows
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - The project was written and tested on a Mac. This chapter is the **first Windows guide**, written on 2026-11-08 **without a Windows computer in reach**: every step below is expected to work and **none has been run on Windows**. If one fails, fix this page in the same step ([CLAUDE.md](../CLAUDE.md) rule: when a plan or page and the code disagree, fix one of them).

@@ -1,8 +1,10 @@
 # 13. Networking
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
-- The kernel has **two network backends**, chosen at build time: **Wi-Fi** (the real T-Deck Plus) and **wired W5500 Ethernet** (the VM flavor, which has no radio). Both sit behind `purr_net.h`.
+- The kernel has **two network backends**, chosen at build time: **Wi-Fi** (the real devices) and **wired W5500 Ethernet** (the VM flavor, which has no radio). Both sit behind `purr_net.h`.
 - Saved Wi-Fi networks are kept in `/etc/wifi` and the device **reconnects by itself**. The recovery loader, which has no file system, reads a small raw record instead.
 - All downloads go through `purr_fetch` (HTTPS GET). Fetches checked against a size and a SHA-256 are retried three times.
 - The **dev server** (`purrstrap dev serve`, port 47801) is found by a UDP broadcast on port 47800. In the VM it is at `http://10.0.2.2:47801`.

@@ -1,5 +1,7 @@
 # 14. The Store and repositories
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - A **repository** is a set of static files on any web host: a signed `repo.json`, a signed `index.json`, and packages. Whoever runs it signs it. The model is F-Droid.

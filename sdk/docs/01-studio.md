@@ -1,5 +1,7 @@
 # The tour of PURR Studio
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 Studio looks like the start screen of a Windows Phone on purpose. Every tile is a tool. Click one, and the back button (the circle with the arrow) takes you home.
 
 ## open an image
@@ -30,7 +32,7 @@ Shows a board file and checks it as you type: a pin the chip cannot use, two par
 
 ## brand
 
-Names and colours for your flavor. See [Making your own flavor](05-flavors).
+Names and colours for your flavor. See [Making your own flavor](05-flavors.md).
 
 ## keys
 
@@ -38,7 +40,7 @@ Make a key, see the keys every device already knows, and a plain table of who ma
 
 ## release, server
 
-Gather the parts of a system into a folder a device can recover from, then hand it to a device on your network. See [Releases and the dev server](07-release-and-server).
+Gather the parts of a system into a folder a device can recover from, then hand it to a device on your network. See [Releases and the dev server](07-release-and-server.md).
 
 ## configure
 

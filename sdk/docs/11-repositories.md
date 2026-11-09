@@ -1,5 +1,7 @@
 # Running a repository
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 A repository is a folder of files on any web host (a GitHub release is perfect) that lists apps, assets and extras, and holds them. People add it to their device, and the Store shows what is in it. **Whoever runs a repository signs it.** The full format is in `Repositories/SPEC.md`; this is how to do it.
 
 ## Make one

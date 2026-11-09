@@ -1,5 +1,7 @@
 # Glossary
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Every PURR word in one place, in alphabetical order, each with a link to the chapter where it is used.

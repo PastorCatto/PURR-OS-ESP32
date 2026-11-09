@@ -1,5 +1,7 @@
 # 18. The emulator and the VM flavor
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - The **emulator** is a separate project (`~/Projects/ESP32-Emulator`, outside this repository). It is a Rust shell around a patched QEMU that runs an ESP32-S3 flash image with a screen, touch, keyboard and SD card. The kit carries a built copy in `emulator/`.

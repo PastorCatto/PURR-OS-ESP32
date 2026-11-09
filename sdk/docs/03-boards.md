@@ -1,5 +1,7 @@
 # Describing a board
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 A board is **data**. You write down the pins, the buses and the parts, and the kit turns that into the two things a board needs:
 
 - the **board file**, a C source the kernel is built with (`PurrOS/components/kernel/boards/<id>.c`), and
@@ -7,7 +9,7 @@ A board is **data**. You write down the pins, the buses and the parts, and the k
 
 ## The file
 
-`sdk/boards/tdeck_plus.toml` is the example. It has these sections:
+`sdk/boards/tdeck_plus.toml` is the example (the reference board; the other boards in the repository, `tdeck` and `waveshare154`, are kernel board files without an SDK `.toml` yet). It has these sections:
 
 | Section | What it says |
 |---|---|

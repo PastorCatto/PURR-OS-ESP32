@@ -1,5 +1,7 @@
 # The `purr` command
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 `purr` with no arguments opens Studio. Everything Studio does works here too.
 
 | Command | What it does |

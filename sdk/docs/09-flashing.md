@@ -1,5 +1,7 @@
 # Flashing an image
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 Flashing writes an image to a real board over USB. It replaces what is on the board, so make sure you mean it.
 
 ## Put the board in download mode

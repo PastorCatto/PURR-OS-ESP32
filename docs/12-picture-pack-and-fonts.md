@@ -1,5 +1,7 @@
 # 12. The picture pack and fonts
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - **From 1.0.36 the Android shell's Froyo pack is embedded in the full OS image** (built from `UI/android-assets` by `PurrOS/main/CMakeLists.txt`, read in place from flash), so a kernel always has its pictures and `/ui/android/pack.bin` is no longer read. UI pictures otherwise live in **pack files in LittleFS**, one default pack per shell: `/ui/w10m/pack.bin` (a loaded shell module carries its own) and, before 1.0.36, `/ui/android/pack.bin`. There is no `ui_assets` partition in the new flash map ([chapter 2](02-flash-map-and-partitions.md), [plan1.md](../plan1.md) "Flash map v2"). The UI reads a pack into PSRAM at start.
@@ -54,7 +56,7 @@ Two colour formats exist: `RGB565` (2 bytes a pixel) and `RGB565A8` (the RGB565 
 
 | Path (LittleFS) | What |
 |---|---|
-| `/ui/w10m/pack.bin`, `/ui/android/pack.bin` | the default pack of a shell (a shell reads only its own) |
+| `/ui/w10m/pack.bin` (and, before 1.1, `/ui/android/pack.bin`; the Android pack is now inside the OS image) | the default pack of a shell (a shell reads only its own) |
 | `/ui/themes/<id>/pack.bin`, `/ui/themes/<id>/theme.conf` | an installed theme; at most three |
 | `/ui/active.conf` | `theme=<id>` (absent or empty: none), read at start |
 | `/sdcard/ui/themes/<id>/...` | the same on the SD card, any number; one chosen there is copied into a slot |

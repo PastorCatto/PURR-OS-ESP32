@@ -1,5 +1,7 @@
 # Making your own flavor
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 A flavor is PURR OS with your own name and look. Its names and colours are **data**, in a file called `brand.toml`, so changing them never means editing code.
 
 ```toml
@@ -48,4 +50,4 @@ purrstrap bootpkg build --brand purr_brand.h
 
 ## Will a device take it?
 
-A device only boots parts signed by a key in its key bag. A flavor you sign with your own key is accepted by a device in **warn** mode (it boots with a warning), or by one whose key bag has your key, which needs a bootloader built from source with your key. Until then, use a development board in developer mode. See [Keys and signing](06-keys).
+A device only boots parts signed by a key in its key bag. A flavor you sign with your own key is accepted by a device in **warn** mode (it boots with a warning), or by one whose key bag has your key, which needs a bootloader built from source with your key. Until then, use a development board in developer mode. See [Keys and signing](06-keys.md).

@@ -1,5 +1,7 @@
 # 10. Host tests
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Most of the logic of PURR OS is plain C that compiles on a laptop. The host tests build it with the system C compiler and run it in seconds, with no device.

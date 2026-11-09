@@ -1,5 +1,7 @@
 # 11. The UI stack and the three shells
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - The screen is drawn by **LVGL 9.2.2** inside one task, the **UI service**. Apps never touch LVGL; they call the **`ui` catcall** and the OS draws.

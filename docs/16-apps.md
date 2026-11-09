@@ -1,5 +1,7 @@
 # 16. The apps
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Apps live in `Apps/<name>/` as one C file and a `manifest.toml`. They are freestanding modules (no libc), loaded into PSRAM, signed with the **developer key (id 2)** and **sideloaded**.

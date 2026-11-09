@@ -1,5 +1,7 @@
 # 20. Tools and scripts
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Helper programs live in `tools/`: **`release/`** (build the official release folders), **`vm/`** (the emulator test loop), **`hw/`** (a flash image for a real T-Deck Plus), **`boot/`, `oobe/`, `lvgl_host/`, `ui/`** (previews and art), **`docs/`** (the documentation checks), and **`broken-kitten-recovery/`** (a recovery relay in Rust).

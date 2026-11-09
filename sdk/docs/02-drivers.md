@@ -1,5 +1,7 @@
 # Writing a driver
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 A driver teaches PURR OS to talk to one chip. It is a small, **freestanding** program: no standard library, no operating-system calls. It reaches the hardware only through a table of functions the OS hands it, called the **bus table**. That is why a driver cannot take the system down by touching things it should not, and why it can be built, signed, and sent to a device on its own.
 
 ## The shape of a driver

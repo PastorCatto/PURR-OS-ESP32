@@ -1,5 +1,7 @@
 # 05. Catcalls and the app ABI
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - An app is a freestanding module with no libc. Its only link to the system is `env->catcall_get(name, min_version)`, which returns a **versioned table of function pointers** or NULL.

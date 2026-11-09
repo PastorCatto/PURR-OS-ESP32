@@ -1,5 +1,7 @@
 # UI packs and themes
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - A **UI pack** is one file, `pack.bin`: pictures, looked up by name. Each shell (the Windows 10 Mobile style one, `w10m`, and the Android 2.2 style one, `android`) has its own default pack.
@@ -28,7 +30,7 @@ The contract (plan1.md, "Flash map v2"), in LittleFS:
 
 | Path | What |
 |---|---|
-| `/ui/w10m/pack.bin`, `/ui/android/pack.bin` | a shell's default pack (installed from the release components `ui_w10m` and `ui_android`) |
+| `/ui/w10m/pack.bin` (a loaded shell carries its own; the Android pack is inside the OS image since 1.1) | a shell's default pack (installed from the release components `ui_w10m` and `ui_android`) |
 | `/ui/themes/<id>/pack.bin`, `/ui/themes/<id>/theme.conf` | an installed theme; three at most are kept |
 | `/ui/active.conf` | `theme=<id>`; absent or empty means none. The choice applies at the next restart |
 | `/sdcard/ui/themes/<id>/...` | the same tree on the SD card, any number |

@@ -1,5 +1,7 @@
 # 09. purrstrap, the build and signing tool
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - `purrstrap` is a Python tool that builds, packages, signs and serves PURR OS parts. Run it as `python3 purrstrap/purrstrap.py <script> <action> [--option value]`.

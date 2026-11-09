@@ -1,11 +1,13 @@
 # 07. Drivers, modules and the driver bus
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - A **driver** is a small signed file (`.cat`, image type module, subtype driver) in `/boot/drivers`. It has no libc and reaches hardware only through the **driver bus table**, `purr_driver_bus_table_t`, whose layout is the ABI. The ABI is version **7**; the oldest still served is 4.
 - A board file names each device and the driver it needs (`compatible`). The kernel's registry matches them, claims the pins and calls `probe()`.
 - Five drivers are baked into the firmware and **planted again on every start**: display, touch, keyboard, battery, keyboard backlight. They are never set aside.
-- Other drivers come from the driver index (`drivers.manifest`, published next to the module index in JumpingJaguar2) and are fetched one at a time by the Device Manager.
+- Other drivers come from the driver index (`drivers.manifest`, published next to the module index in JumpingJaguar2; a copy for the hub is in the hub's `repos/drivers/`, where an entry says `board=any` for any ESP32-S3 board, or names a board, as the T-Deck keyboard drivers do) and are fetched one at a time by the Device Manager.
 - To change the bus table: **append only**, bump the version, then rebuild, re-sign and re-embed every baked-in driver.
 
 ## What it is for

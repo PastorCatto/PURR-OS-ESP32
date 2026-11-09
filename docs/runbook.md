@@ -1,5 +1,7 @@
 # Runbook: how the work is actually done
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - This chapter is the working knowledge that used to live in people's heads and chat notes: how to build, sign, publish, flash, test and debug, and the traps that have already cost time.
@@ -99,7 +101,7 @@ It listens on all interfaces. The emulated device reaches the computer at `10.0.
 
 - **A tested version stays as it was.** Once the owner has tested a version, do not sign and publish different content under the same number. New work builds as the next number, in a scratch folder, and is published only when the owner says to swap. Exception: the owner can explicitly ask for a rebuild under the same number (it happened for the 1.0.27 lock-screen fix); then the old set is backed up first.
 - **A device refuses to go below the version floors it has recorded.** New images must carry a version at or above what the device runs.
-- **1.0.27 is the stable, known-good release** (owner, 2026-11-06). Later work is 1.0.28.
+- **1.1 is the stable general release** (owner, 2026-11-08); it replaces 1.0.27 as the known-good one. Later work is a higher number (the owner's EDGE numbers above 1.1 are for internal development), built in a scratch folder.
 - The official releases are GitHub release assets: `JumpingJaguar1` (recovery images), `JumpingJaguar2` (modules and drivers), `JumpingJaguar3` (the app repository). [tools/release/make_release.py](../tools/release/make_release.py) builds the folder to upload. Uploading is done by the owner.
 - Read [08-updates-and-release-channels.md](08-updates-and-release-channels.md) for channels, rollback rules and the withdrawn mechanism.
 

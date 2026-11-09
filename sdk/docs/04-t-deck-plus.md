@@ -1,5 +1,7 @@
 # The T-Deck Plus, part by part
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 The goal for this board is **100 % supported**: every part has a driver you can read and rebuild. Here is where each one stands tonight. Pins marked "LilyGO" come from LilyGO's published headers and have not been checked on a real unit yet. They live in the board file as data, so correcting one is a one-line change.
 
 | Part | Chip and wiring | Driver | State |

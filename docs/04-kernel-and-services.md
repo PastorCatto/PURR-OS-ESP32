@@ -1,5 +1,7 @@
 # 04. The kernel and its services
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - One ESP-IDF project, [PurrOS/](../PurrOS/), builds all three runtime images. The **profile** chosen at build time decides which one: `full` (the normal OS), `recovery` (KittenOS), `minimal` (the recovery loader).

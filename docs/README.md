@@ -1,5 +1,7 @@
 # PURR OS documentation
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Twenty-one chapters, one per area, plus a start-here page, a runbook and a glossary. Every chapter opens with a short version.

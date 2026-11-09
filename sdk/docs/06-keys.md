@@ -1,5 +1,7 @@
 # Keys and signing
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 Every file a device installs carries a **signature**: a small proof that a key the device trusts vouched for it. Change one byte of the file and the proof stops matching. That is how a device knows what it is running was not tampered with.
 
 ## The vocabulary

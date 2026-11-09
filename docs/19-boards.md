@@ -1,5 +1,7 @@
 # 19. Boards
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - A **board** is data: which chip, which buses, which pins, which devices. In the firmware it is one C file in `PurrOS/components/kernel/boards/`, picked by a `CONFIG_PURR_BOARD_*` option.

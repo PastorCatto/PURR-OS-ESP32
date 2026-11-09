@@ -1,5 +1,7 @@
 # The emulator
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 **Short version.** The kit carries an emulator in `emulator/`: a window that runs a PURR OS flash image the way a T-Deck Plus would, with a screen, touch, keyboard and SD card, and no device on your desk. It emulates the ESP32-S3 (and the plain ESP32 enough to boot). The VM board has wired Ethernet, so the guest can reach your computer at `10.0.2.2`; it has no Wi-Fi radio. Nothing has to be installed. `emulator/run-emulator IMAGE BOARD` starts it, or `bin/purr emulator` and `bin/purr run` do it for you.
 
 ## Start it

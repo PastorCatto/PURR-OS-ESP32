@@ -1,8 +1,10 @@
 # Start here
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
-- PURR OS is an operating system for the LilyGO T-Deck Plus (ESP32-S3) with signed images, sandboxed apps and three interchangeable shells.
+- PURR OS is an operating system for small ESP32-S3 devices (the LilyGO T-Deck Plus and T-Deck; the Waveshare e-paper 1.54 is in progress) with signed images, sandboxed apps and three interchangeable shells.
 - Pick the path that matches what you want to do. Each path is a short list of pages, in order.
 - Every word you do not know is in the [glossary](glossary.md). Every working procedure is in the [runbook](runbook.md).
 - The plans (`plan1.md` to `plan10.md` in the repository root) say what is done and what is not. They are the source of truth: if a page here and a plan disagree, trust the plan and fix the page.

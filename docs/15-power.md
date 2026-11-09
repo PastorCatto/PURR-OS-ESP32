@@ -1,5 +1,7 @@
 # 15. Power
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - One policy object decides "is the device allowed to sleep now": `purr_power.c` in CoreOS. It has no ESP-IDF code, so a host test runs it with a fake clock.

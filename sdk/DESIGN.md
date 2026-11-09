@@ -1,5 +1,7 @@
 # PURR Developer Kit: design (2026-10-28)
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 The kit lets one person build **any part of PURR OS** from a download, on any computer, without this repository or ESP-IDF. The end goal the owner
 set: **a 100 % supported T-Deck Plus built through the SDK**: display, touch, keyboard, trackball, battery, GPS, LoRa, the SD card, sound, and the
 radios, all as drivers and configuration a person can read, change and rebuild.

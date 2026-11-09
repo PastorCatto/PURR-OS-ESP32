@@ -1,5 +1,7 @@
 # 03. Trust, keys and signing
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Every file that holds code starts with (or, for the three boot slots, ends with) a signed header: an ECDSA P-256 signature over a SHA-256 hash, made by a key with a **role**. A key only counts for the kinds of file its role allows.

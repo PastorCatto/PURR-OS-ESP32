@@ -1,5 +1,7 @@
 # Start here
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 Hello! This kit lets you make anything for PURR OS: an app, a driver for a chip, a description of a whole board, even your own flavor of the system with its own name and colours. Everything you need is in this folder. Nothing else has to be installed.
 
 ## The two ways in
@@ -25,7 +27,7 @@ Hello! This kit lets you make anything for PURR OS: an app, a driver for a chip,
 | `python/` | the kit's own Python, with the signing library inside |
 | `images/` | the prebuilt parts of a system, so you can make releases and flavors |
 | `Modules/drivers/` | real drivers to learn from |
-| `sdk/boards/` | the T-Deck Plus as a board file |
+| `sdk/boards/` | the reference board (T-Deck Plus) as a board file |
 
 ## If something does not work
 

@@ -1,5 +1,7 @@
 # Releases and the dev server
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## A release
 
 A release is the set of parts a device needs to recover itself: the **kernel**, **KittenOS**, the recovery **loader**, the **boot package** and the **bootloader**, each signed, with manifests that list their sizes and hashes.

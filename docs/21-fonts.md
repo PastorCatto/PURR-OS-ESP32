@@ -1,5 +1,7 @@
 # 21. Fonts from files
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Today every font is compiled in (Montserrat sizes and one monospace face). Loading fonts from **files** is **designed, not built**: the kernel side does not exist yet.

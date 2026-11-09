@@ -1,5 +1,7 @@
 # 17. The SDK (the PURR Developer Kit)
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - The kit is one folder (about 360 MB with the emulator) that lets one person build and sign apps, drivers, boards and flavors without this repository or ESP-IDF. Its version is **1.1.0** (`sdk/purrsdk/__init__.py`, owner decision of 2026-11-05).

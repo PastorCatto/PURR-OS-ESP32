@@ -1,5 +1,7 @@
 # 08. Updates, releases and channels
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Releases are **GitHub release assets** in three tagged releases: `JumpingJaguar1` (system images and the recovery manifest), `JumpingJaguar2` (command modules, drivers, their manifests) and `JumpingJaguar3` (the app repository, still a placeholder).
@@ -92,7 +94,7 @@ It builds the kernel, loader and KittenOS packages from `out/stdfull`, `out/stdm
 
 For testing, `purrstrap dev recovery` copies images into the developer server's `recovery/` folder under the names `<component>-<board>.cat` (note: a dash, where release files use an underscore) and regenerates both manifests **from the files in the folder**, so the system modules must be passed with `--modules`. `dev withdraw --version 1.0.20 --reason "..."` marks a bad version; the list is kept in `recovery/withdrawn.list` and written into both manifests on every later `dev recovery`.
 
-## Releases 1.0.30 to 1.0.35 (what changed, for whoever reads the dev server)
+## Releases 1.0.30 to 1.1 (what changed, for whoever reads the dev server)
 
 Every release is a set of three signed files (kernel, KittenOS, loader) plus the manifests; the previous set is copied to `out/ota/recovery-<version>-<note>` before it is replaced, and every file the manifests name is fetched back and compared by size and sha256.
 
@@ -104,6 +106,7 @@ Every release is a set of three signed files (kernel, KittenOS, loader) plus the
 | 1.0.33 | the Store's official address is the hub; first Store-on-hub test. It was published twice: signed by key 3, then as a bridge signed by key 1 for a device that had been reset to an old OS |
 | 1.0.34 | the shell's app list follows Store installs; a tap on a running app's icon brings it to the front; set-aside drivers come back after sign-in; signed by key 3 |
 | 1.0.35 | the Store's buttons side by side; the Store updates itself from the hub (when `store.auto_update` is on); signed by key 3 |
+| **1.1** | the stable general release: the Android shell's Froyo pictures are built into the OS image (no separate file to go missing after an update); a `tdeck` set (the original T-Deck) next to the `tdeck_plus` set in the manifests; one version number for the kernel, KittenOS and loader; signed by key 3. Hardware results are in the plans. |
 
 A version that has reached a device is never rebuilt under the same number; new work gets a new number. **A full reset** (the data is wiped) reinstalls the system from the *official* release and forgets the developer-server setting, so the device lands on an old system with the old keys and has to be pointed at the dev server again; the data partition is kept, so newer apps then refuse to start until the system is updated.
 

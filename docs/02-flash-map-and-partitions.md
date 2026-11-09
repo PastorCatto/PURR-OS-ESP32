@@ -1,5 +1,7 @@
 # 02. The flash map and the partitions
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - The T-Deck Plus has 16 MB of flash. The layout is in one file: [PurrOS/partitions/tdeck_plus.csv](../PurrOS/partitions/tdeck_plus.csv). If any document disagrees with that file, the file is right.

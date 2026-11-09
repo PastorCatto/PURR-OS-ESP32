@@ -1,5 +1,7 @@
 # Configuring a device
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 Three files, and the boot trust block, decide how a device behaves. Studio's **configure** tool edits them with checks, so you cannot write a value the device would refuse.
 
 ## settings (`/etc/system.conf`)
@@ -37,4 +39,4 @@ The small signed area that says how strict a device is: **enforce** (refuse anyt
 
 ## the board profile (`/etc/board.conf`)
 
-Which extra parts a device has. Write it from a board file: see [Describing a board](03-boards).
+Which extra parts a device has. Write it from a board file: see [Describing a board](03-boards.md).

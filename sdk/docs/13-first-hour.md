@@ -1,5 +1,7 @@
 # Your first hour
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 **Short version.** In about an hour you can check the kit, make an app, build and sign it, watch it install on an emulated device, and know where to go to put it on a real T-Deck Plus. Every command here is run from the kit folder. If a step fails, `bin/purr doctor` says what is missing.
 
 What has been checked: the commands below exist and are covered by the kit's tests; the emulator steps were run end to end on a development image (unlock, Developer Portal, find the server, trust it, install). **Not yet in the kit:** the VM flash image that `purr run` and `purr emulator` boot (see "What is missing"), and launching the installed app by script (open it from the app drawer by hand).

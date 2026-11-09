@@ -11,15 +11,18 @@
 
 # PURR OS
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 An operating system for small ESP32 devices, built around one idea: a device this small should still be able to check that the code it runs is the code it was meant to run, recover by itself when something goes wrong, and let a person write and install their own apps without special tools.
 
-The first target is the LilyGO T-Deck Plus (an ESP32-S3 with 16 MB of flash, 8 MB of PSRAM, a 320 by 240 touch display, a keyboard and a trackball). Other ESP32-S3 boards are supported through board files.
+PURR OS runs on a family of ESP32-S3 boards. The reference board is the LilyGO T-Deck Plus (16 MB of flash, 8 MB of PSRAM, a 320 by 240 touch display, a keyboard and a trackball); the original T-Deck and the Waveshare ESP32-S3 e-paper 1.54 have board files too (see [Supported devices](#supported-devices)). A board is data: its pins and devices are a table, and the drivers read their pins from it.
 
 This page is the overview. Every section ends with links to the detailed specifications. If this page and a specification disagree, the specification wins and this page is the bug.
 
 ## Contents
 
 - [Where the project stands](#where-the-project-stands)
+- [Supported devices](#supported-devices)
 - [What it does](#what-it-does)
 - [How the device starts](#how-the-device-starts)
 - [What happens when something fails](#what-happens-when-something-fails)
@@ -36,7 +39,7 @@ This page is the overview. Every section ends with links to the detailed specifi
 
 ## Where the project stands
 
-PURR OS is in active development. The current series is 1.0.x; each of those numbers is a patch on the way to **1.1, which is the version that will count as the stable general release**.
+PURR OS is in active development. **1.1 is the stable general release.** The 1.0.x numbers before it were the patches on the way there.
 
 Being straight about what has been proven:
 
@@ -44,9 +47,20 @@ Being straight about what has been proven:
 |---|---|
 | Built and tested on the host | The C host tests and the Python tests pass on a development computer (the manifest parser, the image format and signatures, the driver registry, the build and signing tool, the developer kit). |
 | Compiled | It builds for the chip. It has not necessarily run. |
-| Run on a T-Deck Plus | It has been seen working on a real device. |
+| Run on a device | It has been seen working on real hardware. The T-Deck Plus is the reference board; the notes say which board a result comes from. |
 
-The boot chain, the signed image format, recovery over Wi-Fi, the app runtime and the Android-style shell have all run on a real T-Deck Plus. Several newer pieces are compiled and host-tested but not yet seen on a device; the plans say which, item by item (start with [plan9.md](plan9.md) and [plan3.md](plan3.md)). Nothing in the documentation is claimed as working unless it has been run, and where it has only been read or compiled, the text says so.
+The boot chain, the signed image format, recovery over Wi-Fi, the app runtime and the Android-style shell have all run on a real T-Deck Plus (the reference board). Several newer pieces are compiled and host-tested but not yet seen on a device; the plans say which, item by item (start with [plan9.md](plan9.md) and [plan3.md](plan3.md)). Nothing in the documentation is claimed as working unless it has been run, and where it has only been read or compiled, the text says so.
+
+## Supported devices
+
+| Board | Chip, flash, PSRAM | State in 1.1 |
+|---|---|---|
+| LilyGO T-Deck Plus (`tdeck_plus`) | ESP32-S3, 16 MB, 8 MB | The reference board. Everything in this document has been run here unless the text says otherwise. |
+| LilyGO T-Deck (`tdeck`) | ESP32-S3, 16 MB, 8 MB | The same hardware without GPS. Its configuration was brought in step with the Plus for 1.1 and a signed set is published next to the Plus set; check the plans for what has been run on a unit. |
+| Waveshare ESP32-S3-ePaper-1.54 (`waveshare154`) | ESP32-S3, 8 MB, 8 MB | Board file and a flash map v2 style partition table. The recovery loader and KittenOS compile; the full system does not link for it yet and there is no e-paper shell. Not run on a device. |
+| CYD 2.4C | ESP32 | Named in the build tool only. No board file. |
+
+Drivers are not tied to one board. A driver file carries only the chip it was built for (ESP32-S3), and takes its pins from the board's device table, so the same signed file serves any ESP32-S3 board that lists a matching device. Drivers that talk to a board's own parts (the T-Deck keyboard controller) are labelled for those boards. Adding a board means adding data, not changing code: see [docs/19-boards.md](docs/19-boards.md).
 
 ## What it does
 
@@ -54,7 +68,7 @@ The boot chain, the signed image format, recovery over Wi-Fi, the app runtime an
 - **Falls back and repairs itself.** If the main system will not start, the device falls back to a smaller recovery system (KittenOS), and then to a recovery loader that downloads a fresh copy over Wi-Fi. A bad update or a damaged slot should not leave the device unusable.
 - **Runs apps that other people write**, loaded from signed packages into external memory, each in its own sandbox with a list of permissions that the user is asked about. See [How apps are loaded and run](#how-apps-are-loaded-and-run).
 - **Has an app store in the style of F-Droid.** Anyone can run a repository; whoever runs it signs it; the device decides how far to trust it.
-- **Has two interface styles**: one in the look of Android 2.2 (Froyo) and one in the feel of Windows 10 Mobile. Both draw with LVGL on a 320 by 240 screen.
+- **Has two interface styles**: one in the look of Android 2.2 (Froyo) and one in the feel of Windows 10 Mobile. Both draw with LVGL on the colour boards (320 by 240); the e-paper board has no LVGL shell yet.
 - **Treats drivers as downloadable, signed modules.** The display, touch and keyboard drivers ship with the system. Others (storage, sensors, the LoRa radio, trackball) are installed on demand and set aside automatically if one of them ever stops the device.
 - **Comes with a developer kit** that can build, sign and run an app, and an emulator that runs the system without the hardware.
 

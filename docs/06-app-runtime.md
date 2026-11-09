@@ -1,5 +1,7 @@
 # 06. The app runtime, the app manager, the sandbox and permissions
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - **AppManager** keeps signed `package.cat` files on the filesystem and checks them. **The runtime** loads one into PSRAM, gives it a task and a queue, and drives it through a lifecycle. **Permissions** gate the dangerous catcalls.

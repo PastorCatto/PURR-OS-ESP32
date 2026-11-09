@@ -1,5 +1,7 @@
 # 01. The boot chain
 
+*Current as of PURR OS 1.1 (2026-11-08).*
+
 ## Short version
 
 - Power on runs the chip's ROM, then the **PURR bootloader** at flash 0x0, then (usually) the **boot package** for a splash or menu, then one of three slots: the **kernel** (the full PURR OS), **KittenOS** (recovery), or the **recovery loader** (reinstall from the network).
@@ -10,7 +12,7 @@
 
 ## What it is for
 
-The boot chain gets a T-Deck Plus from "power on" to a running system, and gets it back to a running system when something is wrong. It does three jobs:
+The boot chain gets a device from "power on" to a running system, and gets it back to a running system when something is wrong. It does three jobs:
 
 1. Pick a slot to run.
 2. Check that the slot is the one we signed.
