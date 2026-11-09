@@ -103,6 +103,12 @@ class Testing(Base):
         self.assertEqual(self.status(r)["crash"], "bad")
         self.assertFalse(r["ok"])
 
+    def test_a_dump_header_in_the_middle_of_the_boot_package_line_is_not_a_failure(self):
+        # seen on a real T-Deck boot: the dump's section header landed inside "(key id 3, ok)"
+        r = self.run_test(log().replace("(key id 1, ok)", "(key id 3, \n--- UART0 ---\nok)"))
+        self.assertEqual(self.status(r)["bootpkg"], "ok")
+        self.assertIn("key 3", [c["text"] for c in r["checks"] if c["id"] == "bootpkg"][0])
+
     def test_a_boot_package_that_does_not_verify_fails(self):
         r = self.run_test(log().replace("(key id 1, ok)", "(key id 9, bad signature)"))
         self.assertEqual(self.status(r)["bootpkg"], "bad")

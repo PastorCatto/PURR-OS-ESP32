@@ -501,10 +501,13 @@ def test_image(image, board="tdeck_plus", seconds=120, workdir=None, on_check=No
     else:
         check("start", "bad", "The board never printed the bootloader's banner: nothing booted from this image.")
     m = re.search(r"bootpkg ([\w.-]+) loaded \(key id (\d+), ([^)]*)\)", serial)
-    if m and m.group(3).strip() == "ok":
+    if m:                                               # the dump has a header between the UART and USB copies, and it can land in the middle of this line
+        status = re.sub(r"\s*--- [^\n]* ---\s*", " ", m.group(3)).strip()
+        m_status = status
+    if m and m_status == "ok":
         check("bootpkg", "ok", "The boot package %s verified (signed by key %s)." % (m.group(1), m.group(2)))
     elif m:
-        check("bootpkg", "bad", "The boot package did not verify: %s." % m.group(0))
+        check("bootpkg", "bad", "The boot package did not verify: %s." % re.sub(r"\s+", " ", m.group(0)))
     else:
         check("bootpkg", "warn" if boots else "bad", "The boot package's check did not show in the log.")
     crashed = [c for c in CRASH if c in serial and c != "Rebooting..."]
