@@ -2,7 +2,9 @@
    The choices are saved in a system project (purrsdk/system.py); the build runs there and reports each step. */
 "use strict";
 
-const SYS_STEPS = [["apps", "Build your apps"], ["ui", "Draw your UI"], ["drivers", "Gather the drivers"], ["parts", "Check the system parts"], ["image", "Make the flash image"], ["delivery", "Lay out the delivery folder"]];
+const SRC_STEPS = [["source", "Pull the newest source"], ["compiler", "Find the compiler"], ["compile-full", "Compile the kernel"], ["compile-minimal", "Compile the recovery loader"], ["compile-recovery", "Compile KittenOS"], ["package", "Package the parts"], ["sign", "Sign the parts with your key"]];
+const SYS_STEPS_BASE = [["apps", "Compile and sign your apps"], ["ui", "Draw your UI"], ["drivers", "Gather the drivers"], ["parts", "Check the system parts"], ["image", "Make the flash image"], ["delivery", "Lay out the delivery folder"]];
+const sysSteps = sys => (sys.parts_from === "source" ? SRC_STEPS : []).concat(SYS_STEPS_BASE);
 const SYS_DEVICES = [
   ["tdeck_plus", "T-Deck Plus", "REFERENCE", "#0050ef", "ESP32-S3 · 16 MB · 8 MB PSRAM · 320 × 240 touch, keyboard, trackball, GPS, LoRa"],
   ["tdeck", "T-Deck", "SAME HARDWARE", "#2b2b2b", "The same board without GPS. Its set is published next to the Plus set."],
@@ -47,6 +49,33 @@ pages.system = {
       tabs.appendChild(h("span", { class: "dim", style: { fontSize: "14px" }, text: "the same road for an image, drivers, apps and signing" }));
     }
 
+    function sourceBox() {
+      const sy = S.O.system, src = S.O.source, fromSrc = sy.parts_from === "source", st = src.state || {};
+      const box = h("div", { class: "bx-about", style: { maxWidth: "none", marginTop: "12px", gap: "10px" } });
+      const choice = (v, title, text) => h("button", { class: "bx-pivot" + (sy.parts_from === v ? " on" : ""), "aria-pressed": sy.parts_from === v, style: { textAlign: "left", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "2px", padding: "10px 14px" }, onclick: () => save({ parts_from: v }) },
+        h("span", { style: { fontWeight: 600 }, text: title }), h("span", { class: "dim small", style: { fontWeight: 400 }, text: text }));
+      box.appendChild(h("div", { class: "bx-label", text: "WHERE THE SYSTEM COMES FROM" }));
+      box.appendChild(h("div", { class: "row", style: { alignItems: "stretch" } }, choice("ready", "Ready-made parts", "Use the signed kernel, loader and recovery from a release. Nothing to compile; the quickest."),
+        choice("source", "Compile from the newest source", "Pull the source, compile the firmware yourself, and sign it with your key.")));
+      if (!fromSrc) return box;
+      const url = h("input", { type: "text", class: "bx-input", value: sy.source_url, "aria-label": "Source address", style: { flex: "2 1 300px" }, onchange: ev => save({ source_url: ev.target.value.trim() }) });
+      const ref = h("input", { type: "text", class: "bx-input", value: sy.source_ref, "aria-label": "Branch", style: { flex: "0 1 140px" }, onchange: ev => save({ source_ref: ev.target.value.trim() }) });
+      const shell = h("select", { class: "bx-input", "aria-label": "Shell", style: { flex: "0 1 220px" }, onchange: ev => save({ shell: ev.target.value }) },
+        h("option", { value: "android", text: "Android 2.2 (Froyo) shell", selected: sy.shell === "android" }), h("option", { value: "w10m", text: "Windows 10 Mobile shell", selected: sy.shell === "w10m" }));
+      box.appendChild(h("div", { class: "row" }, url, ref, shell));
+      const status = h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: st.commit ? "Pulled " + st.commit.slice(0, 7) + " on " + st.when + ". Build pulls again if something newer is there." : "Nothing pulled yet. Build pulls it first." });
+      const comp = src.compiler;
+      const compLine = h("p", { style: { margin: 0, lineHeight: 1.5, fontSize: "14px", color: comp.found && comp.right ? "var(--fg)" : "#f0a30a" }, text: comp.found ? "Compiler: ESP-IDF " + (comp.version || "found") + (comp.right ? "" : " (the firmware wants 5.3.5)") : "Compiler: ESP-IDF 5.3.5 is not installed. It is the compiler for the firmware (about 2.5 GB, installed once)." });
+      const row = h("div", { class: "row" });
+      const chk = h("button", { class: "bx-ghost", text: "check for something newer", onclick: async () => { chk.disabled = true; try { const c = await api.get("source/check", { url: sy.source_url, ref: sy.source_ref }); toast(c.error || (c.newer ? "There is a newer source (" + c.latest.slice(0, 7) + ")." : "You have the newest source.")); } catch (e) { say(e); } chk.disabled = false; } });
+      row.appendChild(chk);
+      if (!comp.found) { const ins = h("button", { class: "bx-primary", text: "install the compiler", onclick: async () => {
+        ins.disabled = true; try { const { job } = await api.post("source/install-compiler", {}); let since = 0; for (;;) { const j = await api.get("job", { id: job, since }); since = j.next; j.lines.forEach(l => S.log.push(l)); if (j.done) break; await new Promise(res => setTimeout(res, 800)); } S.O = await api.get("system", { name }); } catch (e) { say(e); } paint(); } }); row.appendChild(ins); }
+      box.appendChild(status); box.appendChild(compLine); box.appendChild(row);
+      box.appendChild(h("div", { class: "bx-note", text: "The first compile of the firmware takes a long time (about ten minutes for the kernel); later ones are shorter. The Android shell's pictures are packed into the kernel from the pulled source. The system modules still come ready-made." }));
+      return box;
+    }
+
     function deviceTab() {
       const cards = h("div", { class: "bx-cards" });
       SYS_DEVICES.forEach(d => cards.appendChild(h("button", { class: "bx-card", style: { background: d[3], outline: S.O.system.board === d[0] ? "3px solid var(--fg)" : "none", minHeight: "190px" }, onclick: () => save({ board: d[0] }) },
@@ -57,11 +86,12 @@ pages.system = {
         S.O.folders.map(f => h("option", { value: f.path, text: f.path + (f.complete ? "" : "  (" + f.found.length + " of 5 parts)"), selected: f.path === S.O.folder })));
       const keySel = h("select", { class: "bx-input", "aria-label": "Signing key", onchange: ev => save({ key: ev.target.value }) }, h("option", { value: "", text: "(none)" }), keys.map(k => h("option", { value: k.name, text: k.name, selected: k.name === S.O.system.key })));
       const kid = h("input", { type: "number", min: 1, max: 31, value: S.O.system.key_id, class: "bx-input", style: { width: "90px" }, "aria-label": "Key id", onchange: ev => save({ key_id: +ev.target.value }) });
+      body.appendChild(sourceBox());
       body.appendChild(h("div", { class: "bx-icols" },
-        h("div", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 360px" } }, h("div", { class: "bx-label", text: "BASE SYSTEM" }), h("div", { class: "bx-big", style: { fontWeight: 300 }, text: plan && plan.ok ? "PURR OS " + vers : "parts not found" }),
-          h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: plan && plan.ok ? "Kernel, recovery, loader, boot package and bootloader, signed. Use a different set by choosing another folder." : (plan ? plan.problems[0] : "Choose a folder with the five signed parts.") }), folderSel),
+        h("div", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 360px" } }, h("div", { class: "bx-label", text: "BASE SYSTEM" }), h("div", { class: "bx-big", style: { fontWeight: 300 }, text: S.O.system.parts_from === "source" ? "compiled when you build" : plan && plan.ok ? "PURR OS " + vers : "parts not found" }),
+          h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: S.O.system.parts_from === "source" ? "The kernel, recovery loader, KittenOS, boot package and bootloader are compiled from the pulled source and signed with your key. The folder of ready-made parts is not used." : plan && plan.ok ? "Kernel, recovery, loader, boot package and bootloader, signed. Use a different set by choosing another folder." : (plan ? plan.problems[0] : "Choose a folder with the five signed parts.") }), S.O.system.parts_from === "source" ? null : folderSel),
         h("div", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 360px" } }, h("div", { class: "bx-label", text: "SIGNING KEY" }), h("div", { class: "bx-big", style: { fontWeight: 300 }, text: S.O.system.key ? S.O.system.key + " · id " + S.O.system.key_id : "no key chosen" }),
-          h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: "You type the key's password only when Studio signs your apps, once, and it is never kept." }), h("div", { class: "row" }, keySel, kid), h("a", { href: "#keys", class: "bx-link", onclick: ev => { ev.preventDefault(); go("keys"); }, text: "make a key" }))));
+          h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: (S.O.system.parts_from === "source" ? "You type the key's password when Studio signs the parts it compiles and your apps, once, and it is never kept." : "You type the key's password only when Studio signs your apps, once, and it is never kept.") }), h("div", { class: "row" }, keySel, kid), h("a", { href: "#keys", class: "bx-link", onclick: ev => { ev.preventDefault(); go("keys"); }, text: "make a key" }))));
     }
 
     function partsTab() {
@@ -83,22 +113,22 @@ pages.system = {
 
     function buildTab() {
       const left = h("section", { class: "bx-about", style: { maxWidth: "none", flex: "1.4 1 420px", gap: 0, padding: "6px 20px 20px" } });
-      SYS_STEPS.forEach(([id, label]) => {
+      sysSteps(S.O.system).forEach(([id, label]) => {
         const st = S.steps[id] || { state: "wait", note: "" };
-        const note = st.note || { apps: S.O.system.apps.length + " app(s) chosen", ui: S.O.system.ui || "no UI chosen", drivers: drivers().length + " driver(s) on", parts: "the five signed parts", image: "one file for the whole flash", delivery: "a folder to hand to a device" }[id];
+        const note = st.note || { source: S.O.system.source_url.replace(/^https?:\/\//, "") + " · " + S.O.system.source_ref, compiler: "ESP-IDF 5.3.5", "compile-full": "from the pulled source", "compile-minimal": "from the pulled source", "compile-recovery": "from the pulled source", package: "five parts, one container each", sign: "with your key", apps: S.O.system.apps.length + " app(s) chosen", ui: S.O.system.ui || "no UI chosen", drivers: drivers().length + " driver(s) on", parts: "the five signed parts", image: "one file for the whole flash", delivery: "a folder to hand to a device" }[id];
         left.appendChild(h("div", { class: "bx-job" }, h("span", { class: "bx-jicon " + st.state, text: { done: "✓", run: "▶", fail: "×", skip: "–" }[st.state] || "○" }),
           h("span", { style: { display: "flex", flexDirection: "column", flexGrow: 1 } }, h("span", { style: { fontWeight: st.state === "run" ? 600 : 400 }, text: label }), h("span", { class: "dim small", text: note })), h("span", { class: "dim small", text: st.state === "skip" ? "skipped" : "" })));
       });
-      if (S.O.system.apps.length) {
+      if (S.O.system.apps.length || S.O.system.parts_from === "source") {
         const pw = h("input", { type: "password", placeholder: "key password", "aria-label": "Key password", class: "bx-input", style: { flex: "1 1 200px", background: "#000" }, value: S.pw, oninput: ev => { S.pw = ev.target.value; } });
-        left.appendChild(h("div", { class: "bx-pw" }, h("span", { style: { fontSize: "16px", fontWeight: 600 }, text: "Signing your apps needs your key" + (S.O.system.key ? " (" + S.O.system.key + ", id " + S.O.system.key_id + ")" : "") }),
+        left.appendChild(h("div", { class: "bx-pw" }, h("span", { style: { fontSize: "16px", fontWeight: 600 }, text: (S.O.system.parts_from === "source" ? "Signing the parts and your apps needs your key" : "Signing your apps needs your key") + (S.O.system.key ? " (" + S.O.system.key + ", id " + S.O.system.key_id + ")" : "") }),
           h("span", { style: { fontSize: "13px", opacity: .9 }, text: "Type its password. It is used once, in memory, and never saved." }), pw));
       }
       const plan = S.O.plan, right = h("section", { class: "bx-about", style: { maxWidth: "none", flex: "1 1 320px" } }, h("span", { class: "bx-label", text: "WILL IT FIT?" }));
       if (plan) plan.parts.filter(p => p.size && p.room).forEach(p => { const pct = Math.min(100, Math.round(p.size * 100 / p.room));
         right.appendChild(h("div", { style: { display: "flex", flexDirection: "column", gap: "5px" } }, h("div", { class: "row", style: { justifyContent: "space-between", fontSize: "14px" } }, h("span", { text: p.part }), h("span", { class: "dim", text: (p.size / 1048576).toFixed(2) + " of " + (p.room / 1048576).toFixed(2) + " MB" })),
           h("div", { style: { height: "10px", background: "var(--line)" } }, h("div", { style: { width: pct + "%", height: "10px", background: pct > 92 ? "#f0a30a" : "#60a917" } })))); });
-      right.appendChild(h("div", { class: "bx-note", text: "Everything fits when the bars are below the amber. If a driver ever pushes the kernel over, Studio tells you which one to switch off." }));
+      right.appendChild(h("div", { class: "bx-note", text: (S.O.system.parts_from === "source" ? "These are the sizes of the ready-made parts. After compiling, the build checks the sizes of your own, and stops if one does not fit its slot. " : "") + "Everything fits when the bars are below the amber. If a driver ever pushes the kernel over, Studio tells you which one to switch off." }));
       const lg = h("div", { class: "log", hidden: !S.log.length }); S.log.forEach(l => appendLog(lg, l));
       body.appendChild(h("div", { class: "bx-icols", style: { marginTop: 0 } }, left, right)); body.appendChild(lg);
     }

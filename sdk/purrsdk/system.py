@@ -21,7 +21,7 @@ import shutil
 import socket
 import time
 
-from . import image, minitoml, projects, runner, uimaker, workspace
+from . import image, minitoml, projects, runner, source as sourcemod, uimaker, workspace
 
 STEPS = (("apps", "Build your apps"), ("ui", "Draw your UI"), ("drivers", "Gather the drivers"), ("parts", "Check the system parts"), ("image", "Make the flash image"),
          ("delivery", "Lay out the delivery folder"))
@@ -65,13 +65,17 @@ def load(ws, name):
     s = d.get("system", {})
     return {"name": name, "board": str(s.get("board", "tdeck_plus")), "parts": str(s.get("parts", "")), "key": str(s.get("key", "")), "key_id": int(s.get("key_id", 4)),
             "ui": str(s.get("ui", "")), "drivers": list(d.get("drivers", {}).get("enabled", [])), "apps": list(d.get("apps", {}).get("include", [])),
-            "drivers_set": bool(d.get("drivers", {}).get("chosen", False))}
+            "drivers_set": bool(d.get("drivers", {}).get("chosen", False)),
+            "parts_from": "source" if s.get("parts_from") == "source" else "ready", "source_url": str(s.get("source_url", "") or sourcemod.DEFAULT_URL),
+            "source_ref": str(s.get("source_ref", "") or sourcemod.DEFAULT_REF), "shell": str(s.get("shell", "android")) if str(s.get("shell", "android")) in sourcemod.SHELLS else "android"}
 
 
 def save(ws, name, s):
     p = _path(ws, name)
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    doc = {"system": {"name": name, "board": s["board"], "parts": s.get("parts", ""), "key": s.get("key", ""), "key_id": int(s.get("key_id", 4)), "ui": s.get("ui", "")},
+    doc = {"system": {"name": name, "board": s["board"], "parts": s.get("parts", ""), "key": s.get("key", ""), "key_id": int(s.get("key_id", 4)), "ui": s.get("ui", ""),
+                      "parts_from": s.get("parts_from", "ready"), "source_url": s.get("source_url", "") or sourcemod.DEFAULT_URL, "source_ref": s.get("source_ref", "") or sourcemod.DEFAULT_REF,
+                      "shell": s.get("shell", "android")},
            "drivers": {"enabled": list(s.get("drivers", [])), "chosen": bool(s.get("drivers_set", True))}, "apps": {"include": list(s.get("apps", []))}}
     tmp = p + ".part"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
@@ -163,7 +167,8 @@ def overview(ws, name):
     folders = parts_folders(s["board"])
     folder = s["parts"] or next((f["path"] for f in folders if f["complete"]), "")
     plan = image.plan(s["board"], folder) if folder else None
-    return {"system": s, "drivers": [dict(d, on=d["name"] in chosen, raw=None, path=None) for d in drivers], "apps": [{"name": a["name"], "version": a["version"], "on": a["name"] in s["apps"]} for a in apps],
+    src = {"git": sourcemod.have_git(), "compiler": sourcemod.compiler(), "state": sourcemod.state(ws)}
+    return {"source": src, "system": s, "drivers": [dict(d, on=d["name"] in chosen, raw=None, path=None) for d in drivers], "apps": [{"name": a["name"], "version": a["version"], "on": a["name"] in s["apps"]} for a in apps],
             "uis": [{"name": u["name"], "on": u["name"] == s["ui"]} for u in uis], "folders": folders, "folder": folder,
             "plan": ({"ok": plan["ok"], "problems": plan["problems"], "parts": plan["parts"]} if plan else None)}
 
@@ -216,6 +221,27 @@ def build(ws, name, password=None, on_step=None, on_line=print):
     if key and not os.path.isabs(key):
         key = os.path.join(ws.keys, key)
 
+    # 0 source: pull the newest source and compile the firmware, when the parts are to be made rather than taken ready-made
+    built_parts = None
+    if s["parts_from"] == "source":
+        if not key:
+            return fail("source", "Choose a signing key on the device step: the parts you compile have to be signed.")
+        step("source", "run", "%s (%s)" % (s["source_url"], s["source_ref"]))
+        try:
+            pr = sourcemod.pull(ws, s["source_url"], s["source_ref"], on_line=on_line)
+        except sourcemod.SourceError as e:
+            return fail("source", str(e))
+        step("source", "done", "%s%s" % (pr["commit"][:7], "" if pr["changed"] else ", already the newest"))
+        step("compiler", "run", "")
+        c = sourcemod.compiler()
+        if not c["found"]:
+            return fail("compiler", "ESP-IDF %s, the compiler for the firmware, is not installed. Use \"install the compiler\" on the device step (about 2.5 GB, once)." % sourcemod.IDF_VERSION)
+        step("compiler", "done", "ESP-IDF %s" % (c["version"] or "found"))
+        res = sourcemod.compile_and_package(ws, s["board"], s["shell"], key, s["key_id"], password, out=os.path.join(out, "parts"), on_step=step, on_line=on_line)
+        if not res["ok"]:
+            return {"ok": False, "steps": steps, "image": "", "delivery": ""}
+        built_parts = res["out"]
+
     # 1 apps
     if s["apps"]:
         step("apps", "run", "%d app(s)" % len(s["apps"]))
@@ -265,7 +291,7 @@ def build(ws, name, password=None, on_step=None, on_line=print):
     step("drivers", "done" if chosen else "skip", "%d signed driver(s)" % len(chosen) if chosen else "none switched on")
 
     # 4 parts
-    folder = s["parts"] or next((f["path"] for f in parts_folders(s["board"]) if f["complete"]), "")
+    folder = built_parts or s["parts"] or next((f["path"] for f in parts_folders(s["board"]) if f["complete"]), "")
     step("parts", "run", folder or "looking")
     if not folder:
         return fail("parts", "I cannot find the five signed system parts (kernel, recovery, loader, boot package, bootloader). Put them in the kit's images folder, or choose the folder on the device step.")
@@ -289,6 +315,9 @@ def build(ws, name, password=None, on_step=None, on_line=print):
     args = ["dev", "recovery", "--dir", out, "--board", s["board"], "--kernel", parts["kernel"], "--kittenos", parts["kittenos"], "--loader", parts["loader"], "--bootpkg", parts["bootpkg"],
             "--bootloader", parts["bootloader"]]
     mods = _find_modules(folder, s["board"])
+    if not mods and built_parts:
+        ready = next((f["path"] for f in parts_folders(s["board"]) if f["complete"]), "")
+        mods = _find_modules(ready, s["board"]) if ready else []        # the system modules are not part of the firmware compile: they come ready-made
     if mods:
         args += ["--modules", ",".join(mods)]
     r = runner.purrstrap(args, on_line=on_line)

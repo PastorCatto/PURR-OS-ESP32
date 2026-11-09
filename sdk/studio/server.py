@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 from purrsdk import (__version__, activity, boards, brand, configs, devserver, doctor, emulator, flash, image as imagemaker, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
-                     release, system as systemmod, uibuilder, uimaker, workspace)
+                     release, source as sourcemod, system as systemmod, uibuilder, uimaker, workspace)
 
 WEB = os.path.join(HERE, "web")
 MAX_UPLOAD = 64 * 1024 * 1024
@@ -848,9 +848,15 @@ def handle(state, method, route, q, body):
     if route == "system/save":
         try:
             s = systemmod.load(ws, body.get("name"))
-            for k in ("board", "parts", "key", "ui"):
+            for k in ("board", "parts", "key", "ui", "source_url", "source_ref"):
                 if k in body:
                     s[k] = str(body[k])
+            if "parts_from" in body:
+                s["parts_from"] = "source" if body["parts_from"] == "source" else "ready"
+            if "shell" in body:
+                if body["shell"] not in sourcemod.SHELLS:
+                    raise ValueError("The shell is one of %s." % ", ".join(sourcemod.SHELLS))
+                s["shell"] = body["shell"]
             if "key_id" in body:
                 s["key_id"] = int(body["key_id"])
             if "drivers" in body:
@@ -864,6 +870,17 @@ def handle(state, method, route, q, body):
             raise ValueError(str(e))
         activity.record(ws, "image", body.get("name"), "system", body.get("name"), "%d drivers, %d apps" % (len(s["drivers"]), len(s["apps"])))
         return {"saved": True}
+    if route == "source/check":
+        return sourcemod.check(ws, q.get("url") or sourcemod.DEFAULT_URL, q.get("ref") or sourcemod.DEFAULT_REF)
+    if route == "source/install-compiler":
+        def work_idf(say):
+            try:
+                c = sourcemod.install_compiler(on_line=say)
+            except sourcemod.SourceError as e:
+                say(str(e))
+                return {"ok": False}
+            return {"ok": c["found"], "compiler": c}
+        return {"job": state.jobs.start("Installing the compiler", work_idf)}
     if route == "system/build":
         name, pw = body.get("name"), body.get("password") or None
         systemmod.load(ws, name)

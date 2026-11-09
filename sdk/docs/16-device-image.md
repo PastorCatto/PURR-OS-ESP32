@@ -38,3 +38,12 @@ bin/purr flash <the image> --port /dev/cu.usbmodem1101
 - The result is checked before it is written: the partition table inside it is read back and compared with the board's layout. `purr inspect` on the image agrees (layout, hashes, signatures).
 - A device only boots parts signed by a key in its key bag. A stock device knows the project's keys; see [06-keys.md](06-keys.md) for what your own key means.
 - Not run on a device yet. The image was built and inspected on the computer; flashing it is the next step to try.
+
+## Compile the parts yourself
+
+The image maker packs signed parts and does not care where they came from. **Ready-made** parts come from a release. In Studio's *build a system* (device step) you can choose **compile from the newest source** instead: Studio pulls the PURR OS source into `<workspace>/source/tree` (git, only the `PurrOS`, `UI`, `purrstrap`, `bootloader` and `bootpkg` folders; without git, a GitHub tarball), compiles the kernel (`full` profile), the recovery loader (`minimal`) and KittenOS (`recovery`) with ESP-IDF 5.3.5 through `purrstrap coreos build`, builds the boot package, wraps the five parts in PURR containers and signs them with your key (version `src-<seven letters of the commit>`). The image maker and the delivery folder then use that folder.
+
+- **The Android Froyo screen is part of the kernel.** The build packs the pictures from `UI/android-assets` into the kernel; with the shell set to Android (`--shell android`, the `sdkconfig.shell.android` overlay) that comes from the pulled source, so pulling updates it too.
+- **The system modules** (about, appmgr, fs, wifi ...) are not part of the firmware compile; the delivery folder takes them ready-made from the parts folder when it finds them.
+- **A build of yours is not a release.** It is signed with your key, not the project's boot key. A device that only trusts the project's keys (secure mode) will not start it; the emulator, a device in developer mode, and your own bootloader will. Whether a stock device accepts it depends on its trust mode.
+- From a terminal the same steps are `purrstrap coreos build --board tdeck_plus --profile full --shell android` (and `minimal`, `recovery`), then `coreos package-component`, `coreos package`, `bootpkg build` and `keys sign`; `PURR_REPO_ROOT=<folder>` makes purrstrap build another checkout than its own.
