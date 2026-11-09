@@ -399,12 +399,57 @@ pages.flash = {
   },
 };
 
+/* The emulator, right here (sdk/docs/12-emulator.md). The same thing `purr run` does: build the app, serve it, boot the VM, put the app on it through the Developer Portal. */
+async function showShots(box, names) {
+  clear(box);
+  for (const name of names || []) {
+    try {
+      const r = await api.get("emulator/shot", { name });
+      box.appendChild(h("figure", { style: { margin: "0 14px 14px 0", display: "inline-block" } }, h("img", { src: r.data, alt: name, style: { width: "320px", imageRendering: "pixelated", border: "1px solid var(--line, #888)" } }),
+        h("figcaption", { class: "dim mono", text: name })));
+    } catch (e) { say(e); }
+  }
+}
+
 pages.run = {
   title: "run",
   async render(el) {
-    el.appendChild(h("div", { class: "empty", style: { maxWidth: "60ch" }, text: "The emulator is on its way." }));
-    el.appendChild(h("p", { class: "dim", style: { maxWidth: "62ch" }, text: "It will be a fork of the ESP32 emulator, built separately. When it is installed, this tile will run the image you just built, on a T-Deck Plus screen, right here. Until then you can flash an image to a real board (see the docs), or look inside it by dropping it on the Open page." }));
-    el.appendChild(h("p", { class: "dim", style: { maxWidth: "62ch" }, text: "The kit already leaves a hook for it: set the PURR_EMULATOR environment variable to the emulator's launcher and `purr run image.bin` will call it with the image." }));
+    const st = await api.get("emulator");
+    if (!st.available) {
+      el.appendChild(h("div", { class: "empty", style: { maxWidth: "60ch" }, text: "The emulator is not ready." }));
+      el.appendChild(h("p", { class: "dim", style: { maxWidth: "62ch" }, text: st.why }));
+      el.appendChild(h("p", { class: "dim", style: { maxWidth: "62ch" }, text: "You can still flash an image to a real board (the flash page), or look inside one on the Open page." }));
+      return;
+    }
+    const list = (await api.get("projects")).projects.filter(p => p.kind === "app");
+    const proj = h("select", {}, list.length ? list.map(p => h("option", { value: p.name, text: p.name })) : [h("option", { value: "", text: "(no app projects yet)" })]);
+    const board = h("select", {}, ["tdeck_plus", "tdeck"].map(b => h("option", { value: b, text: b })));
+    const ebd = h("select", {}, (st.boards.length ? st.boards : [st.default_board]).map(b => h("option", { value: b, text: b, selected: b === st.default_board })));
+    const win = h("input", { type: "checkbox", checked: !st.headless });
+    if (!st.headless) win.disabled = true;
+    const kc = await keyChooser();
+    const log = h("div", { class: "log", hidden: true });
+    const shots = h("div", { style: { marginTop: "14px" } });
+    const go_ = btn("run in the emulator", async () => {
+      if (!proj.value) return say("Make an app project first.");
+      clear(log); clear(shots); log.hidden = false; go_.disabled = true;
+      try {
+        const { job } = await api.post("emulator/run", { project: proj.value, board: board.value, emulator_board: ebd.value, window: win.checked, key: kc.sel.value, key_id: +kc.id.value, password: kc.pw.value });
+        const r = await watchJob(job, log);
+        kc.pw.value = "";
+        if (r.shots && r.shots.length) await showShots(shots, r.shots);
+        toast(r.ok ? "Done." : "That did not work. The lines say why.");
+      } catch (e) { say(e); }
+      go_.disabled = false;
+    }, "primary");
+    const open_ = btn("open the emulator", async () => { try { await api.post("emulator/open", { board: ebd.value }); toast("The emulator is opening."); } catch (e) { say(e); } });
+    const stop_ = btn("stop it", async () => { try { await api.post("emulator/stop"); toast("Stopped."); } catch (e) { say(e); } });
+    el.appendChild(h("p", { class: "dim", style: { maxWidth: "64ch" }, text: "This builds your app, puts it on the dev server (port 47801), boots the emulated device and installs the app through the Developer Portal. With the window you drive it yourself; without, the emulator presses the screen for you and shows pictures here." }));
+    el.appendChild(h("div", { style: { maxWidth: "620px" } }, field("Which app?", proj), field("Build for which board?", board), field("Emulator board file", ebd), kc.el,
+      h("label", { class: "switch", style: { margin: "0 0 14px", display: "flex" } }, win, h("span", { text: "Open the window and let me drive it" })), h("div", { class: "row" }, go_, open_, stop_)));
+    el.appendChild(h("p", { class: "dim mono", text: "emulator: " + st.root + "   image: " + st.image }));
+    el.appendChild(log);
+    el.appendChild(shots);
   },
 };
 

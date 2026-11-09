@@ -185,7 +185,7 @@ pages.home = {
     T("c7", "docs", "docs", "How it all works, kindly explained.", () => go("docs"));
     T("c8", "doctor", "doctor", "Is the kit whole?", () => go("doctor"));
     T("c3", "flash", "release", "Write an image to a board over USB.", () => go("flash"));
-    T("muted", "run", "run", "Soon: the emulator, right here.", () => go("run"));
+    T("c4", "run", "run", "Try an app in the emulator, no device needed.", () => go("run"));
     el.appendChild(tiles);
     el.appendChild(h("p", { class: "dim", style: { marginTop: "26px", maxWidth: "62ch" }, text: "Hello there! Pick a tile to start, or drop a file anywhere. Everything here also works from the terminal with the purr command." }));
     $("#top-note").textContent = appState ? "kit " + appState.version : "";

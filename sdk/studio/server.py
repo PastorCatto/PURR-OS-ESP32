@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from purrsdk import (__version__, boards, brand, configs, devserver, doctor, flash, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
+from purrsdk import (__version__, boards, brand, configs, devserver, doctor, emulator, flash, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
                      release, workspace)
 
 WEB = os.path.join(HERE, "web")
@@ -68,6 +68,7 @@ class State:
         self.server = devserver.DevServer()
         self.token = secrets.token_urlsafe(24)
         self.uploads = tempfile.mkdtemp(prefix="purr-studio-")
+        self.emu = {"busy": False, "proc": None, "shots_dir": None}          # the Run page: one run or window at a time, and the folder of its pictures
 
     def safe_project(self, name):
         if not name or "/" in name or "\\" in name or name.startswith("."):
@@ -186,6 +187,76 @@ def make_handler(state):
 def _read_text(path):
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
+
+
+# ------------------------------------------------------------------------------------------------------------------ the emulator
+
+def _emulator_status(state):
+    """What the Run page needs to know: is there an emulator, can it show a window, can it run headless, is there an image to boot, and why not."""
+    em = emulator.find()
+    image = emulator.vm_image()
+    why = ""
+    if os.name == "nt":
+        why = "The emulator is not available on Windows yet (the patched QEMU has no Windows build)."
+    elif em is None:
+        why = "There is no emulator in this kit. A kit built with the emulator has an emulator/ folder; set PURR_EMULATOR_DIR to use another."
+    elif not (em["gui"] or em["headless"]):
+        why = "The emulator folder has no program to run."
+    elif not image:
+        why = "There is no VM flash image to boot. Put one at images/vm-flash.bin in the kit, or set PURR_VM_IMAGE."
+    boards_dir = em["boards"] if em else None
+    names = sorted(f[:-5] for f in os.listdir(boards_dir) if f.endswith(".toml")) if boards_dir and os.path.isdir(boards_dir) else []
+    proc = state.emu["proc"]
+    return {"available": not why, "window": bool(em and em["gui"]), "headless": bool(em and em["headless"]), "image": image, "root": em["root"] if em else None,
+            "boards": names, "default_board": emulator.DEFAULT_BOARD, "why": why, "busy": state.emu["busy"], "open": proc is not None and proc.poll() is None}
+
+
+def _emulator_run(state, body):
+    """Build an app (or take a built .cat), put it on the emulated device and show it. A job: the page watches its lines."""
+    ws = state.ws
+    st = _emulator_status(state)
+    window = bool(body.get("window"))
+    if not st["available"]:
+        raise ValueError(st["why"])
+    if window and not st["window"]:
+        raise ValueError("This kit's emulator has no window program. Run it without the window.")
+    if not window and not st["headless"]:
+        raise ValueError("This kit's emulator has no headless program. Use the window.")
+    if state.emu["busy"] or (state.emu["proc"] is not None and state.emu["proc"].poll() is None):
+        raise ValueError("The emulator is already busy. Close its window, or stop it, first.")
+    cat = body.get("file") or None
+    root = None
+    if not cat:
+        root = state.safe_project(body.get("project"))
+    elif not (os.path.isfile(cat) and cat.endswith(".cat")):
+        raise ValueError("That is not a built app (.cat).")
+    key, kid, pw = body.get("key") or None, int(body.get("key_id") or 0), body.get("password") or None
+    if key and not os.path.isabs(key):
+        key = os.path.join(ws.keys, key)
+    board = body.get("board") or "tdeck_plus"
+    image = body.get("image") or None
+    ebd = body.get("emulator_board") or emulator.DEFAULT_BOARD
+    shots = tempfile.mkdtemp(prefix="purr-shots-", dir=state.uploads)
+    state.emu["busy"], state.emu["shots_dir"] = True, shots
+
+    def work(say):
+        try:
+            path = cat
+            if root:
+                r = projects.build(ws, root, board=board, key=key, key_id=kid, password=pw, on_line=say)
+                if not r["ok"] or not r["artifacts"]:
+                    say("The build did not work, so there is nothing to run. The lines above say why.")
+                    return {"ok": False}
+                path = r["artifacts"][-1]
+            try:
+                res = emulator.run_app(path, image, ebd, shots, int(body.get("port") or devserver.DEFAULT_PORT), headless=not window, on_line=say)
+            except emulator.EmulatorError as e:
+                say("Not this time: %s" % e)
+                return {"ok": False}
+            return {"ok": res["ok"], "shots": [os.path.basename(x) for x in res["shots"]]}
+        finally:
+            state.emu["busy"] = False
+    return {"job": state.jobs.start("Running in the emulator", work)}
 
 
 def _repo_folder(ws, name):
@@ -470,6 +541,36 @@ def handle(state, method, route, q, body):
             r = runner.purrstrap(args, password=pw, on_line=say)
             return {"ok": r["rc"] == 0, "artifacts": [out] if r["rc"] == 0 else []}
         return {"job": state.jobs.start("Trust block", work)}
+
+    # ---- emulator (the Run page and the run button on a project)
+    if route == "emulator":
+        return _emulator_status(state)
+    if route == "emulator/run":
+        return _emulator_run(state, body)
+    if route == "emulator/open":
+        em = state.emu
+        if em["busy"] or (em["proc"] is not None and em["proc"].poll() is None):
+            raise ValueError("The emulator is already busy. Close its window, or stop it, first.")
+        try:
+            em["proc"] = emulator.open_window(body.get("image") or None, body.get("board") or emulator.DEFAULT_BOARD)
+        except emulator.EmulatorError as e:
+            raise ValueError(str(e))
+        return {"ok": True}
+    if route == "emulator/stop":
+        proc = state.emu["proc"]
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        state.emu["proc"] = None
+        return {"ok": True}
+    if route == "emulator/shot":
+        name = os.path.basename(q.get("name") or "")
+        folder = state.emu["shots_dir"]
+        path = os.path.join(folder, name) if folder and name.endswith(".png") else None
+        if not path or not os.path.isfile(path):
+            raise ValueError("I do not have that picture.")
+        import base64
+        with open(path, "rb") as fh:
+            return {"name": name, "data": "data:image/png;base64," + base64.b64encode(fh.read()).decode("ascii")}
 
     # ---- docs
     if route == "docs":

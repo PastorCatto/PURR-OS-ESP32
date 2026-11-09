@@ -124,9 +124,24 @@ async function buildTab(root, p) {
     } catch (e) { say(e); }
     go_.disabled = false;
   }, "primary");
-  root.appendChild(h("div", { style: { maxWidth: "620px" } }, field("Which board?", board), kc.el, go_));
+  const shots = h("div", { style: { marginTop: "14px" } });
+  const run_ = p.kind === "app" ? btn("run in the emulator", async () => {
+    let st; try { st = await api.get("emulator"); } catch (e) { return say(e); }
+    if (!st.available) { clear(log); log.hidden = false; appendLog(log, st.why); return; }
+    clear(log); clear(results); clear(shots); log.hidden = false; run_.disabled = true;
+    try {
+      const { job } = await api.post("emulator/run", { project: p.name, board: board.value, window: !st.headless, key: kc.sel.value, key_id: +kc.id.value, password: kc.pw.value });
+      const r = await watchJob(job, log);
+      kc.pw.value = "";
+      if (r.shots && r.shots.length) await showShots(shots, r.shots);
+      toast(r.ok ? "Done." : "That did not work. The lines say why.");
+    } catch (e) { say(e); }
+    run_.disabled = false;
+  }) : null;
+  root.appendChild(h("div", { style: { maxWidth: "620px" } }, field("Which board?", board), kc.el, h("div", { class: "row" }, go_, run_)));
   root.appendChild(log);
   root.appendChild(results);
+  root.appendChild(shots);
 }
 
 /* ------------------------------------------------------------------------------------------------ keys */

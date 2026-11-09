@@ -48,4 +48,4 @@ Edit the files that configure a device: `system.conf` (the settings), `apps.conf
 
 ## doctor, run
 
-**doctor** checks the kit. **run** is where the emulator will live; it is a separate project, so for now it tells you so kindly.
+**doctor** checks the kit. **run** puts an app on the emulated device: pick an app project, the board to build for and a key, and press **run in the emulator** (the same button sits on a project's build tab). Studio builds and signs the app, serves it on port 47801, boots the VM and installs the app through the Developer Portal. Without the window the emulator presses the screen itself and the pictures appear on the page; with the window you drive it. **open the emulator** opens the VM on its own, and **stop it** closes a window Studio opened. The page says plainly when it cannot run (no emulator in the kit, no VM image, Windows) and why. Port 47801 must be free: stop a dev server that is using it first. The same thing from a terminal is `purr run`.
