@@ -19,7 +19,7 @@ The flash map fixes where each part of the system lives, so that the bootloader,
 |---|---|
 | [PurrOS/partitions/tdeck_plus.csv](../PurrOS/partitions/tdeck_plus.csv) | T-Deck Plus, 16 MB. The layout the OS images are built against |
 | [PurrOS/partitions/tdeck.csv](../PurrOS/partitions/tdeck.csv) | T-Deck (non-Plus). Same layout as the Plus |
-| [PurrOS/partitions/waveshare154.csv](../PurrOS/partitions/waveshare154.csv) | Waveshare e-paper 1.54, 8 MB flash, smaller slots. It keeps its own table (flash map v2 is the T-Deck layout) |
+| [PurrOS/partitions/waveshare154.csv](../PurrOS/partitions/waveshare154.csv) | Waveshare e-paper 1.54, 8 MB flash, smaller slots. Its own table in the flash map v2 shape (2026-11-08), scaled to 8 MB |
 | [bootloader/partitions.csv](../bootloader/partitions.csv) | The bootloader project's copy of the T-Deck Plus table (identical to the one above, apart from comments) |
 | [bootloader/partitions/waveshare154.csv](../bootloader/partitions/waveshare154.csv) | The bootloader project's copy for the e-paper board |
 | [Kernel/partitions.csv](../Kernel/partitions.csv) | Table for the standalone kernel project. Same rows as the T-Deck Plus table (flash map v2) |
@@ -96,7 +96,7 @@ The boot package is not run from flash. The bootloader copies it into the bottom
 
 ### The other boards
 
-The e-paper board has 8 MB of flash, so its slots are smaller: `kittenos` 0x120000, `kernel` 0x140000, `loader` 0x120000, and `root` of 0x45F000 (it never had a picture partition). The first four rows (`nvs`, `purrcfg`, `phy_init`, `bootpkg`) are the same as the T-Deck Plus. The original ESP32 board (the CYD 2.4C) appears in [coreos.py](../purrstrap/scripts/coreos.py) and in the bootloader sdkconfig, but [PurrOS/partitions/](../PurrOS/partitions/) has no table for it, so the PurrOS images cannot be built for it today.
+The e-paper board has 8 MB of flash, so its slots are smaller. Since 2026-11-08 its table has the flash map v2 shape (the files in LittleFS, the slots with room to grow): `kittenos` 0x20000 / 0x160000 (1.375 MB), `kernel` 0x180000 / 0x180000 (1.5 MB), `loader` 0x300000 / 0x160000 (1.375 MB), `netrec` 0x460000 and `root` 0x461000 / 0x39F000 (about 3.6 MiB, to the end of the flash). Before that: `kittenos` 0x120000, `kernel` 0x140000, `loader` 0x120000 and `root` of 0x45F000 at 0x3A1000. Each slot is 256 KB larger, the step the T-Deck took. The KittenOS image measures 1.19 MB and the loader 1.13 MB; the full image does not link for this board yet, so the kernel slot is not measured. The table is not run on a device and needs a cable flash and a full erase of `root`; `purrstrap dev recovery` checks the board's own slot sizes. The first four rows (`nvs`, `purrcfg`, `phy_init`, `bootpkg`) are the same as the T-Deck Plus. The original ESP32 board (the CYD 2.4C) appears in [coreos.py](../purrstrap/scripts/coreos.py) and in the bootloader sdkconfig, but [PurrOS/partitions/](../PurrOS/partitions/) has no table for it, so the PurrOS images cannot be built for it today.
 
 ## What each partition holds, byte for byte
 

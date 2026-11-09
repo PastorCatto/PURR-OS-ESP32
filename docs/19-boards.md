@@ -42,7 +42,7 @@ The rule is plug and play: adding a board should mean adding data, not changing 
 |---|---|---|---|---|
 | T-Deck Plus | ESP32-S3 | 16 MB, 8 MB | yes | Primary. Display, touch, keyboard and keyboard backlight "work on the device" per the SDK table; GPS, LoRa, trackball, SD are written and tested against fakes |
 | T-Deck | ESP32-S3 | see `sdkconfig.board.tdeck` | yes | Same family as the Plus; I did not compare the two board files |
-| Waveshare ESP32-S3-ePaper-1.54 | ESP32-S3 | 8 MB, 8 MB | yes | A board file and partition table exist; the e-paper path is still compiled into the kernel (`epd1in54.c`) |
+| Waveshare ESP32-S3-ePaper-1.54 | ESP32-S3 | 8 MB, 8 MB | yes | A board file and a partition table in the flash map v2 shape exist (2026-11-08); the e-paper path is still compiled into the kernel (`epd1in54.c`). The minimal and recovery builds compile; the full profile does not link yet (no UI stack for this board) |
 | CYD 2.4C | ESP32 | 4 MB, none | **no** | In `BOARDS` in `coreos.py`, a `bootloader/sdkconfig.board.cyd_24c`, and the spec; nothing in the kernel builds for it |
 
 The spec also names the Heltec, JC3248W535, the CYD 2.8-inch variants, the Waveshare 1.69-inch and the Tab5 as "not yet planned". The Display and Boards notes agree that LVGL builds only for the two T-Deck boards ([UI/DISPLAY_NOTES.md](../UI/DISPLAY_NOTES.md)).

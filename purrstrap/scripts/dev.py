@@ -324,6 +324,8 @@ def build_recovery_manifests(repo):
 # single pack for the raw partition (gone from the new table), keeps its old slot size.
 SLOT_BYTES = {"kernel": 0x220000, "kittenos": 0x1C0000, "loader": 0x1C0000, "bootpkg": 0xE000, "bootloader": 0xA000, "uiassets": 0x500000,
               "ui_w10m": 5 * 1024 * 1024, "ui_android": 5 * 1024 * 1024}
+# Boards with a smaller flash have their own slot sizes (the partition table in PurrOS/partitions/<board>.csv); the T-Deck sizes above are the default.
+BOARD_SLOT_BYTES = {"waveshare154": {"kernel": 0x180000, "kittenos": 0x160000, "loader": 0x160000}}
 
 
 def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader="", uiassets="", ui_w10m="", ui_android=""):
@@ -340,7 +342,7 @@ def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules,
         if not pimg.is_purr_image(head):
             ctx.error("%s: not a PURR image" % src)
             return 1
-        room = SLOT_BYTES.get(comp)
+        room = BOARD_SLOT_BYTES.get(board, {}).get(comp, SLOT_BYTES.get(comp))
         size = pimg.header_fields(pimg.parse_header(head))["payload_size"]
         if room is not None and size > room:
             what = "limit for a UI pack is" if comp.startswith("ui_") else "%s partition holds" % comp
