@@ -10,6 +10,7 @@ What goes in (see sdk/DESIGN.md):
     sdk/                                 purrsdk (the library), studio (the app), purr.py, boards, data, docs, tests
     purrstrap/                           the build tool
     PurrOS/components/...                the ABI headers the builders compile against, and the device's built-in public keys
+    PurrOS/partitions/                   each board's partition table (the image maker writes them into a whole flash image)
     AppSDK/, Modules/, Drivers/, bootpkg/  starters, reference driver sources, specs, and the boot package source
     images/                              the prebuilt parts of a system (kernel, KittenOS, loader, boot package, bootloader)
     emulator/                            the standalone emulator: esp32-emulator (window), headless_tap, the patched QEMU with its own libraries
@@ -671,7 +672,7 @@ def main():
                  ("purrstrap/lib", "purrstrap/lib"), ("purrstrap/scripts", "purrstrap/scripts"), ("purrstrap/purrstrap.py", "purrstrap/purrstrap.py"),
                  ("purrstrap/freestanding", "purrstrap/freestanding"), ("purrstrap/SPEC.md", "purrstrap/SPEC.md"),
                  ("PurrOS/components/coreos/include", "PurrOS/components/coreos/include"), ("PurrOS/components/kernel/include", "PurrOS/components/kernel/include"),
-                 ("PurrOS/components/coreos/keys", "PurrOS/components/coreos/keys"), ("PurrOS/components/kernel/boards", "PurrOS/components/kernel/boards"),
+                 ("PurrOS/components/coreos/keys", "PurrOS/components/coreos/keys"), ("PurrOS/components/kernel/boards", "PurrOS/components/kernel/boards"), ("PurrOS/partitions", "PurrOS/partitions"),
                  ("PurrOS/components/coreos/src/purr_menu.c", "PurrOS/components/coreos/src/purr_menu.c"),
                  ("PurrOS/components/kernel/src/purr_font_data.c", "PurrOS/components/kernel/src/purr_font_data.c"),
                  ("AppSDK", "AppSDK"), ("Modules/drivers", "Modules/drivers"), ("Modules/SPEC.md", "Modules/SPEC.md"), ("Drivers/SPEC.md", "Drivers/SPEC.md"),

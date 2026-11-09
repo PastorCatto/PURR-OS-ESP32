@@ -46,6 +46,10 @@ Gather the parts of a system into a folder a device can recover from, then hand 
 
 Edit the files that configure a device: `system.conf` (the settings), `apps.conf` (how apps run) and the boot trust block.
 
+## device image
+
+One whole flash image for a device, from the signed parts, with no terminal: pick the device and the folder with the parts, check how each part fits its slot, press **make the image**, then flash it. See [16-device-image.md](16-device-image.md).
+
 ## doctor, run
 
 **doctor** checks the kit. **run** puts an app on the emulated device: pick an app project, the board to build for and a key, and press **run in the emulator** (the same button sits on a project's build tab). Studio builds and signs the app, serves it on port 47801, boots the VM and installs the app through the Developer Portal. Without the window the emulator presses the screen itself and the pictures appear on the page; with the window you drive it. **open the emulator** opens the VM on its own, and **stop it** closes a window Studio opened. The page says plainly when it cannot run (no emulator in the kit, no VM image, Windows) and why. Port 47801 must be free: stop a dev server that is using it first. The same thing from a terminal is `purr run`.

@@ -399,6 +399,60 @@ pages.flash = {
   },
 };
 
+/* The image maker: one whole flash image for a device, from the signed parts. No terminal, no compiler (purrsdk/image.py). */
+function mb(n) { return n == null ? "" : (n / 1048576).toFixed(2) + " MB"; }
+pages.image = {
+  title: "device image",
+  async render(el) {
+    const bl = (await api.get("image/boards")).boards;
+    const board = h("select", {}, bl.map(b => h("option", { value: b.id, text: b.name })));
+    const folder = h("select", {});
+    const typed = h("input", { type: "text", placeholder: "or type the folder with the parts", "aria-label": "Folder with the parts" });
+    const table = h("div"), log = h("div", { class: "log", hidden: true }), result = h("div");
+    const make = btn("make the image", async () => {
+      clear(log); clear(result); log.hidden = false; make.disabled = true;
+      try {
+        const { job } = await api.post("image/build", { board: board.value, folder: typed.value || folder.value });
+        const r = await watchJob(job, log);
+        if (r.ok) {
+          result.appendChild(h("div", { class: "check" }, h("div", { class: "sq ok", text: "✓" }), h("div", {}, h("div", { class: "n", text: "Your flash image is ready." }), h("div", { class: "t mono", text: r.out + "  ·  " + mb(r.bytes) + "  ·  sha256 " + r.sha256.slice(0, 16) }))));
+          (r.notes || []).forEach(n => result.appendChild(h("p", { class: "dim", style: { maxWidth: "66ch" }, text: n })));
+          result.appendChild(h("div", { class: "row" }, btn("flash it to a board", () => go("flash", r.out), "primary"), btn("look inside", () => inspectPath(r.out))));
+        } else toast("That did not work. The lines say why.");
+      } catch (e) { say(e); }
+      make.disabled = false;
+    }, "primary");
+    async function check() {
+      clear(table); make.disabled = true;
+      try {
+        const p = await api.get("image/plan", { board: board.value, folder: typed.value || folder.value });
+        p.parts.forEach(r => {
+          const pct = r.size && r.room ? Math.min(100, Math.round(r.size * 100 / r.room)) : 0;
+          table.appendChild(h("div", { class: "item", style: { cursor: "default" } },
+            h("span", { class: "badge " + (r.found ? "ok" : "warn"), text: r.found ? "found" : "missing" }),
+            h("span", { style: { flex: "1 1 auto" } }, h("div", { text: r.part + (r.version ? "  " + r.version : "") }), h("div", { class: "sub", text: r.found ? mb(r.size) + " of " + mb(r.room) + (r.key_id ? " · signed by key " + r.key_id : "") : "not in this folder" })),
+            r.found ? h("span", { style: { width: "140px", height: "8px", background: "var(--panel2)" } }, h("div", { style: { width: pct + "%", height: "8px", background: pct > 92 ? "var(--warn)" : "var(--ok)" } })) : null));
+        });
+        p.problems.forEach(t => table.appendChild(h("p", { class: "dim", text: t })));
+        make.disabled = !p.ok;
+      } catch (e) { table.appendChild(h("p", { class: "dim", text: e.message || String(e) })); }
+    }
+    async function folders() {
+      const f = (await api.get("image/folders", { board: board.value })).folders;
+      clear(folder);
+      f.forEach(x => folder.appendChild(h("option", { value: x.path, text: x.path + (x.complete ? "" : "  (" + x.found.length + " of 5 parts)") })));
+      if (!f.length) folder.appendChild(h("option", { value: "", text: "(no folder found: type one)" }));
+      const best = f.find(x => x.complete); if (best) folder.value = best.path;
+      await check();
+    }
+    board.onchange = folders; folder.onchange = check; typed.onchange = check;
+    el.appendChild(h("p", { class: "dim", style: { maxWidth: "66ch" }, text: "This puts the signed bootloader, partition table, boot package, recovery, system and loader into one file the size of the board's flash. Flash it by cable and the device starts straight into the system. The parts must already be signed: the kit's own are, and a release made with your key is too." }));
+    el.appendChild(h("div", { style: { maxWidth: "720px" } }, field("Which device?", board), field("Where are the signed parts?", folder), typed, h("div", { style: { height: "12px" } }), table, h("div", { style: { height: "14px" } }), make));
+    el.appendChild(log); el.appendChild(result);
+    await folders();
+  },
+};
+
 /* The emulator, right here (sdk/docs/12-emulator.md). The same thing `purr run` does: build the app, serve it, boot the VM, put the app on it through the Developer Portal. */
 async function showShots(box, names) {
   clear(box);

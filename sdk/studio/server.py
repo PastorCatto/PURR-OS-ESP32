@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from purrsdk import (__version__, boards, brand, configs, devserver, doctor, emulator, flash, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
+from purrsdk import (__version__, boards, brand, configs, devserver, doctor, emulator, flash, image, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
                      release, workspace)
 
 WEB = os.path.join(HERE, "web")
@@ -571,6 +571,41 @@ def handle(state, method, route, q, body):
         import base64
         with open(path, "rb") as fh:
             return {"name": name, "data": "data:image/png;base64," + base64.b64encode(fh.read()).decode("ascii")}
+
+    # ---- image maker (a whole flash image for a device)
+    if route == "image/boards":
+        return {"boards": [{"id": b, "name": n} for b, n in (("tdeck_plus", "LilyGO T-Deck Plus"), ("tdeck", "LilyGO T-Deck"), ("waveshare154", "Waveshare e-paper 1.54"))]}
+    if route == "image/folders":
+        board = q.get("board") or "tdeck_plus"
+        cands = [os.environ.get("PURR_IMAGES"), workspace.kit_path("images")]
+        if os.path.isdir(ws.builds):
+            cands += [os.path.join(ws.builds, d) for d in sorted(os.listdir(ws.builds)) if d.startswith("release")]
+        out = []
+        for c in cands:
+            if c and os.path.isdir(c) and c not in [x["path"] for x in out]:
+                found = image.find_parts(c, board)
+                out.append({"path": c, "found": sorted(found), "complete": len(found) == len(image.PARTS)})
+        return {"folders": out}
+    if route == "image/plan":
+        board, folder = q.get("board") or "tdeck_plus", q.get("folder") or ""
+        try:
+            return image.plan(board, folder)
+        except image.ImageError as e:
+            raise ValueError(str(e))
+    if route == "image/build":
+        ws.ensure()
+        board, folder = body.get("board") or "tdeck_plus", body.get("folder") or ""
+        out = os.path.join(ws.builds, "%s-%s.img" % (board, time.strftime("%Y%m%d-%H%M%S")))
+
+        def work(say):
+            try:
+                r = image.build(board, folder, out, trust_block=body.get("trust_block") or None, on_line=say)
+            except image.ImageError as e:
+                say("Not this time: %s" % e)
+                return {"ok": False}
+            say("[ok] Your flash image is ready.")
+            return {"ok": True, "out": r["out"], "bytes": r["bytes"], "sha256": r["sha256"], "notes": r["notes"], "fit": r["fit"], "artifacts": [r["out"]]}
+        return {"job": state.jobs.start("Making the flash image", work)}
 
     # ---- docs
     if route == "docs":

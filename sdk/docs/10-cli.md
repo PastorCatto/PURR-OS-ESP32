@@ -16,6 +16,7 @@
 | `purr brand check\|build brand.toml` | check a flavor, or write its header |
 | `purr board check\|build board.toml` | check a board, or write its board file and profile |
 | `purr release --board B --key K` | gather a signed release |
+| `purr image --board B [--parts DIR] [--out FILE] [--trust-block F] [--plan]` | make one whole flash image from the signed parts (see [16-device-image.md](16-device-image.md)) |
 | `purr serve [--dir D] [--port P]` | run the dev server |
 | `purr publish FILE` | put a build in the server's folder |
 | `purr flash IMAGE --port P` | write an image to a board (a whole image whose partition table is not the board's layout gets a note first) |

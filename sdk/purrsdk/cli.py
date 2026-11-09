@@ -7,8 +7,9 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
-from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, inspector, keys, minitoml, projects, release, repo, runner, ui, workspace
+from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, image, inspector, keys, minitoml, projects, release, repo, runner, ui, workspace
 
 TTY = sys.stdout.isatty()
 COL = {"ok": "92", "warn": "93", "bad": "91", "info": "96", "dim": "90"}
@@ -209,6 +210,30 @@ def cmd_release(a):
     r = release.assemble(out, parts, a.board, key, a.key_id, pw, on_line=lambda l: print("  " + l))
     print(paint("Your release is ready: ", "ok") + out if r["ok"] else paint("That did not work. The lines above say why.", "bad"))
     return 0 if r["ok"] else 1
+
+
+def cmd_image(a):
+    """Make one whole flash image for a device from the signed parts (a release folder, or the kit's images/)."""
+    ws = ws_of(a)
+    folder = a.parts or os.environ.get("PURR_IMAGES") or workspace.kit_path("images")
+    out = a.out or os.path.join(ws.builds, "%s-%s.img" % (a.board, time.strftime("%Y%m%d-%H%M%S")))
+    try:
+        if a.plan:
+            p = image.plan(a.board, folder)
+            for r in p["parts"]:
+                line("ok" if r["found"] else "bad", r["part"], ("%s · %s bytes of %s" % (r["version"], r["size"], r["room"])) if r["found"] else "missing")
+            for t in p["problems"]:
+                print(paint("  " + t, "bad"))
+            return 0 if p["ok"] else 1
+        r = image.build(a.board, folder, out, trust_block=a.trust_block, on_line=print)
+    except image.ImageError as e:
+        print(paint("Not this time: ", "bad") + str(e))
+        return 1
+    for n in r["notes"]:
+        line("info", "", n)
+    print(paint("Your flash image is ready: ", "ok") + r["out"])
+    print("  Flash it with: purr flash %s --port <your port>" % r["out"])
+    return 0
 
 
 def cmd_serve(a):
@@ -455,6 +480,14 @@ def build_parser():
     s.add_argument("--key-id", type=int, default=4)
     s.add_argument("--out")
     s.set_defaults(fn=cmd_release)
+
+    s = sub.add_parser("image", help="make one whole flash image for a device from the signed parts")
+    s.add_argument("--board", default="tdeck_plus")
+    s.add_argument("--parts", help="the folder with the signed parts (default: PURR_IMAGES, or the kit's images/)")
+    s.add_argument("--out")
+    s.add_argument("--trust-block", help="a trust block (purrcfg) to put in the image; without it the device uses its defaults")
+    s.add_argument("--plan", action="store_true", help="only say what is there and what is missing")
+    s.set_defaults(fn=cmd_image)
 
     s = sub.add_parser("serve", help="run the dev server for a device on your network")
     s.add_argument("--dir")

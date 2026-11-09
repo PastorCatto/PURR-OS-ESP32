@@ -184,6 +184,7 @@ pages.home = {
     T("c6", "configure", "settings", "system.conf, apps.conf, boot options.", () => go("configure"));
     T("c7", "docs", "docs", "How it all works, kindly explained.", () => go("docs"));
     T("c8", "doctor", "doctor", "Is the kit whole?", () => go("doctor"));
+    T("c2 wide", "device image", "release", "One whole image for a device, ready to flash. No terminal.", () => go("image"));
     T("c3", "flash", "release", "Write an image to a board over USB.", () => go("flash"));
     T("c4", "run", "run", "Try an app in the emulator, no device needed.", () => go("run"));
     el.appendChild(tiles);
