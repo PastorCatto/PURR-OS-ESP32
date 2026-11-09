@@ -51,6 +51,15 @@ def _state_path(ws):
     return os.path.join(folder(ws), "source.json")
 
 
+def path_warning(ws, windows=None):
+    """On Windows the pulled source and ESP-IDF's build folders sit under the workspace, and a long path runs into the 260-character limit: a sentence saying so, or ''."""
+    windows = (os.name == "nt") if windows is None else windows
+    if windows and len(ws.path) > 24:
+        return ("The workspace folder %s is long. ESP-IDF's build folders go several levels deeper and Windows stops at 260 characters, so a compile can fail with a missing file. "
+                "Use a short workspace such as C:\\p (set PURR_WORKSPACE, or pass --workspace) and turn on long paths (git config --system core.longpaths true)." % ws.path)
+    return ""
+
+
 def have_git():
     return bool(shutil.which("git"))
 

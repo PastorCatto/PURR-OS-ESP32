@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, image, inspector, keys, minitoml, projects, release, repo, runner, ui, uimaker, workspace
+from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, image, inspector, keys, minitoml, projects, release, repo, runner, source as sourcemod, system as systemmod, ui, uimaker, workspace
 
 TTY = sys.stdout.isatty()
 COL = {"ok": "92", "warn": "93", "bad": "91", "info": "96", "dim": "90"}
@@ -234,6 +234,126 @@ def cmd_image(a):
     print(paint("Your flash image is ready: ", "ok") + r["out"])
     print("  Flash it with: purr flash %s --port <your port>" % r["out"])
     return 0
+
+
+def _system_overview(ws, name, s):
+    line("info", name, "%s, parts %s%s" % (s["board"], "compiled from source" if s["parts_from"] == "source" else "ready-made",
+                                              (" (%s, %s, shell %s, version %s)" % (s["source_url"], s["source_ref"], s["shell"], s["version"])) if s["parts_from"] == "source" else ""))
+    if s["parts_from"] == "source":
+        line("info", "keys", "boot %s (id %d), developer %s (id %d), PURR's keys %s" % (s["boot_key"] or "not chosen", s["boot_key_id"], s["key"] or "not chosen", s["key_id"], "kept" if s["keep_ours"] else "taken out"))
+        for t in sourcemod.trust_problems(s["keep_ours"], s["boot_key"], s["boot_key_id"], s["key"], s["key_id"]):
+            line("bad", "", t)
+    line("info", "apps", ", ".join(s["apps"]) or "none")
+    line("info", "drivers", ", ".join(s["drivers"]) if s["drivers_set"] else "all that fit the board")
+
+
+def cmd_system(a):
+    """A system is a device, its parts, drivers, apps and keys, saved by name: make one, change it, build it from the signed parts or from source, test the image."""
+    ws = ws_of(a)
+    try:
+        if a.action == "list":
+            for x in systemmod.list_systems(ws):
+                line("info", x["name"], "%s, %d drivers, %d apps" % (x["board"], x["drivers"], x["apps"]))
+            return 0
+        if a.action == "new":
+            systemmod.new_system(ws, a.name, a.board)
+            line("ok", a.name, "made. Change it with `purr system set %s ...`, build it with `purr system build %s`." % (a.name, a.name))
+            return 0
+        s = systemmod.load(ws, a.name)
+        if a.action == "show":
+            _system_overview(ws, a.name, s)
+            return 0
+        if a.action == "set":
+            for k, attr in (("board", "board"), ("parts_from", "parts_from"), ("source_url", "source_url"), ("source_ref", "source_ref"), ("shell", "shell"), ("version", "version"),
+                            ("boot_key", "boot_key"), ("key", "key"), ("ui", "ui"), ("parts", "parts")):
+                if getattr(a, attr, None) is not None:
+                    s[k] = getattr(a, attr)
+            for k in ("boot_key_id", "key_id"):
+                if getattr(a, k, None) is not None:
+                    s[k] = getattr(a, k)
+            if a.keep_ours is not None:
+                s["keep_ours"] = a.keep_ours == "on"
+            if a.drivers is not None:
+                s["drivers"], s["drivers_set"] = [x for x in a.drivers.split(",") if x], True
+            if a.apps is not None:
+                s["apps"] = [x for x in a.apps.split(",") if x]
+            if s["board"] not in systemmod.BOARDS:
+                raise systemmod.SystemError_("The board is one of %s." % ", ".join(systemmod.BOARDS))
+            if s["shell"] not in sourcemod.SHELLS:
+                raise systemmod.SystemError_("The shell is one of %s." % ", ".join(sourcemod.SHELLS))
+            systemmod.save(ws, a.name, s)
+            _system_overview(ws, a.name, systemmod.load(ws, a.name))
+            return 0
+        if a.action == "build":
+            from_source = s["parts_from"] == "source"
+            dev_pw = password(a, "Developer key password: ") if (from_source or s["apps"]) else None
+            boot_pw = None
+            if from_source:
+                boot_pw = os.environ.get("PURRSTRAP_BOOT_KEY_PASSWORD")
+                if boot_pw is None:
+                    boot_pw = dev_pw if (not sys.stdin.isatty() or s["boot_key"] == s["key"]) else getpass.getpass("Boot key password (Enter for the same): ") or dev_pw
+            marks = {"run": "info", "done": "ok", "skip": "dim", "fail": "bad"}
+
+            def on_step(i, st, note):
+                if st != "run":
+                    print("  %s %s%s" % (paint(MARK.get(marks[st], "i") if st != "skip" else "-", marks[st]), i, (": " + note) if note else ""))
+            r = systemmod.build(ws, a.name, dev_pw, on_step=on_step, on_line=lambda l: print("    " + l) if a.verbose else None, boot_password=boot_pw)
+            if not r["ok"]:
+                bad = [(k, v["note"]) for k, v in r["steps"].items() if v["state"] == "fail"]
+                print(paint("Not this time: ", "bad") + (bad[0][0] + ": " + bad[0][1] if bad else "the build stopped; run again with --verbose."))
+                return 1
+            print(paint("Built: ", "ok") + r["image"])
+            print("  Delivery folder: " + r["delivery"])
+            return 0
+        if a.action == "test":
+            img = a.image
+            if not img:
+                found = [os.path.join(ws.builds, "system-" + a.name, f) for f in os.listdir(os.path.join(ws.builds, "system-" + a.name))] if os.path.isdir(os.path.join(ws.builds, "system-" + a.name)) else []
+                found = [f for f in found if f.endswith(".img")]
+                if not found:
+                    raise systemmod.SystemError_("There is no built image for %s yet: run `purr system build %s` first." % (a.name, a.name))
+                img = found[0]
+            if not emulator.available(s["board"]):
+                raise systemmod.SystemError_("The emulator is not available for %s here (it needs the kit's emulator, or PURR_EMULATOR_DIR)." % s["board"])
+            t = emulator.test_image(img, s["board"], seconds=a.seconds, workdir=os.path.join(ws.builds, "system-" + a.name, "shots"), on_line=lambda l: None)
+            for c in t["checks"]:
+                line({"ok": "ok", "warn": "warn", "fail": "bad"}.get(c["status"], "info"), c["id"], c["text"])
+            return 0 if t["ok"] else 1
+    except (systemmod.SystemError_, sourcemod.SourceError) as e:
+        print(paint("Not this time: ", "bad") + str(e))
+        return 1
+    return 1
+
+
+def cmd_source(a):
+    """The PURR OS source a system is compiled from: is something newer, pull it, is the compiler there, install it."""
+    ws = ws_of(a)
+    try:
+        if a.action == "compiler":
+            c = sourcemod.compiler()
+            line("ok" if c["found"] and c["right"] else "bad", "ESP-IDF", ("%s at %s" % (c["version"] or "found", c["path"])) if c["found"] else "not installed (`purr source install-compiler` installs 5.3.5, about 2.5 GB)")
+            return 0 if c["found"] and c["right"] else 1
+        if a.action == "install-compiler":
+            c = sourcemod.install_compiler(on_line=print)
+            line("ok" if c["found"] else "bad", "ESP-IDF", c["version"] or "not found after the install")
+            return 0 if c["found"] else 1
+        url, ref = a.url or sourcemod.DEFAULT_URL, a.ref or sourcemod.DEFAULT_REF
+        if a.action == "check":
+            c = sourcemod.check(ws, url, ref)
+            if c["error"]:
+                line("bad", "", c["error"])
+                return 1
+            line("info", "pulled", c["commit"][:10] if c["pulled"] else "nothing yet")
+            line("ok" if not c["newer"] else "warn", "latest", c["latest"][:10] + ("  (newer than what you have)" if c["newer"] else "  (what you have)"))
+            return 0
+        if a.action == "pull":
+            r = sourcemod.pull(ws, url, ref, on_line=print)
+            line("ok", "pulled", r["commit"][:10] + ("" if r["changed"] else " (already the newest)"))
+            return 0
+    except sourcemod.SourceError as e:
+        print(paint("Not this time: ", "bad") + str(e))
+        return 1
+    return 1
 
 
 def cmd_serve(a):
@@ -512,6 +632,35 @@ def build_parser():
     s.add_argument("--trust-block", help="a trust block (purrcfg) to put in the image; without it the device uses its defaults")
     s.add_argument("--plan", action="store_true", help="only say what is there and what is missing")
     s.set_defaults(fn=cmd_image)
+
+    s = sub.add_parser("system", help="a device with its parts, drivers, apps and keys: new, set, show, build (from signed parts or from source), test, list")
+    s.add_argument("action", choices=("list", "new", "show", "set", "build", "test"))
+    s.add_argument("name", nargs="?")
+    s.add_argument("--board", choices=systemmod.BOARDS)
+    s.add_argument("--parts-from", dest="parts_from", choices=("ready", "source"), help="ready-made signed parts, or compile everything from the newest source")
+    s.add_argument("--source-url", dest="source_url")
+    s.add_argument("--source-ref", dest="source_ref", help="the branch (default main)")
+    s.add_argument("--shell", choices=sourcemod.SHELLS)
+    s.add_argument("--version", help="the version the device compares, like 1.1.0")
+    s.add_argument("--boot-key", dest="boot_key", help="name of your boot key in the keys folder (signs the firmware)")
+    s.add_argument("--boot-key-id", dest="boot_key_id", type=int)
+    s.add_argument("--key", help="name of your developer key (signs modules, drivers, apps)")
+    s.add_argument("--key-id", dest="key_id", type=int)
+    s.add_argument("--keep-ours", dest="keep_ours", choices=("on", "off"), help="keep PURR's keys in the image (so it takes PURR's updates) or take them out")
+    s.add_argument("--drivers", help="comma-separated driver names (default: all that fit the board)")
+    s.add_argument("--apps", help="comma-separated app projects; src:<name> is an app of the pulled source")
+    s.add_argument("--ui")
+    s.add_argument("--parts", help="the folder with ready-made signed parts")
+    s.add_argument("--image", help="test: the image (default: the one the last build made)")
+    s.add_argument("--seconds", type=int, default=100, help="test: how long to watch it boot")
+    s.add_argument("--verbose", action="store_true", help="build: print every line the tools print")
+    s.set_defaults(fn=cmd_system)
+
+    s = sub.add_parser("source", help="the PURR OS source a system is compiled from: check, pull, compiler, install-compiler")
+    s.add_argument("action", choices=("check", "pull", "compiler", "install-compiler"))
+    s.add_argument("--url")
+    s.add_argument("--ref")
+    s.set_defaults(fn=cmd_source)
 
     s = sub.add_parser("serve", help="run the dev server for a device on your network")
     s.add_argument("--dir")

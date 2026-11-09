@@ -287,6 +287,9 @@ def build(ws, name, password=None, on_step=None, on_line=print, boot_password=No
             return fail("source", bad[0])
         if sourcemod.version_problem(s["version"]):
             return fail("source", sourcemod.version_problem(s["version"]))
+        warn = sourcemod.path_warning(ws)
+        if warn:
+            on_line(warn)
         step("source", "run", "%s (%s)" % (s["source_url"], s["source_ref"]))
         try:
             pr = sourcemod.pull(ws, s["source_url"], s["source_ref"], on_line=on_line)

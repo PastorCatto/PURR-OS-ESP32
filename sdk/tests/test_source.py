@@ -97,6 +97,13 @@ class Helpers(unittest.TestCase):
         self.assertEqual(source._why("something odd\nhappened\n"), "happened")
         self.assertEqual(source._why(""), "no reason given")
 
+    def test_a_long_workspace_path_is_warned_about_on_windows_only(self):
+        short = mock.Mock(path="C:\\p")
+        long_ = mock.Mock(path="C:\\Users\\somebody\\Documents\\PURR-Projects")
+        self.assertEqual(source.path_warning(short, windows=True), "")
+        self.assertIn("260", source.path_warning(long_, windows=True))
+        self.assertEqual(source.path_warning(long_, windows=False), "")
+
     def test_github_addresses(self):
         self.assertEqual(source.github("https://github.com/A/B"), ("A", "B"))
         self.assertEqual(source.github("https://github.com/A/B.git/"), ("A", "B"))
