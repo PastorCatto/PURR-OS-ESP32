@@ -36,9 +36,9 @@ static int s_raw;                               /* the keyboard is in raw mode *
 static int s_menu_ms;
 static esp_timer_handle_t s_watch;
 
-/* The T-Deck Plus: which bit of the keyboard controller's raw bitmap is which button (from sdk/boards/tdeck_plus.toml [game.keys]; Retro-Go's target
+/* The T-Deck and the T-Deck Plus: which bit of the keyboard controller's raw bitmap is which button (from sdk/boards/tdeck_plus.toml [game.keys]; Retro-Go's target
  * uses the same numbers). A board without a table has no buttons yet. TODO: generate this table from the board file with the rest of the board. */
-#if CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_TDECK_PLUS || CONFIG_PURR_BOARD_TDECK      /* the original T-Deck has the same keyboard controller and trackball */
 #define MENU_GPIO 0                             /* the BOOT button, which the trackball's click shares */
 static const struct { uint8_t num; uint32_t btn; } k_keys[] = {
     {18, PURR_GBTN_UP}, {17, PURR_GBTN_RIGHT}, {20, PURR_GBTN_DOWN}, {19, PURR_GBTN_LEFT},
