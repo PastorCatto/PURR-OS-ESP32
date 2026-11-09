@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from purrsdk import (__version__, boards, brand, configs, devserver, doctor, emulator, flash, image, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
+from purrsdk import (__version__, boards, brand, configs, devserver, doctor, emulator, flash, image as imagemaker, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
                      release, workspace)
 
 WEB = os.path.join(HERE, "web")
@@ -583,14 +583,14 @@ def handle(state, method, route, q, body):
         out = []
         for c in cands:
             if c and os.path.isdir(c) and c not in [x["path"] for x in out]:
-                found = image.find_parts(c, board)
-                out.append({"path": c, "found": sorted(found), "complete": len(found) == len(image.PARTS)})
+                found = imagemaker.find_parts(c, board)
+                out.append({"path": c, "found": sorted(found), "complete": len(found) == len(imagemaker.PARTS)})
         return {"folders": out}
     if route == "image/plan":
         board, folder = q.get("board") or "tdeck_plus", q.get("folder") or ""
         try:
-            return image.plan(board, folder)
-        except image.ImageError as e:
+            return imagemaker.plan(board, folder)
+        except imagemaker.ImageError as e:
             raise ValueError(str(e))
     if route == "image/build":
         ws.ensure()
@@ -599,8 +599,8 @@ def handle(state, method, route, q, body):
 
         def work(say):
             try:
-                r = image.build(board, folder, out, trust_block=body.get("trust_block") or None, on_line=say)
-            except image.ImageError as e:
+                r = imagemaker.build(board, folder, out, trust_block=body.get("trust_block") or None, on_line=say)
+            except imagemaker.ImageError as e:
                 say("Not this time: %s" % e)
                 return {"ok": False}
             say("[ok] Your flash image is ready.")
