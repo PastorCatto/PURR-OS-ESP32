@@ -89,6 +89,11 @@ def find_idf(env=None, home=None, windows=None, which=None):
             root = os.path.dirname(script)
             name = os.path.basename(os.path.dirname(root)).lstrip("v")
             return Idf("export", root, script, _read_version(root) or name)
+        # the other common layout: ~/esp/esp-idf-v5.3.5/export.sh (or ~/esp/esp-idf/export.sh)
+        for script in sorted(glob.glob(os.path.join(home, "esp", "esp-idf*", "export.sh"))):
+            root = os.path.dirname(script)
+            name = os.path.basename(root)[len("esp-idf"):].lstrip("-v")
+            return Idf("export", root, script, _read_version(root) or name)
     return None
 
 
@@ -130,13 +135,19 @@ def child_env(env=None):
 FLAVORS = ("standard", "vm")
 
 
-def build_dir_name(board, profile, flavor="standard"):
-    return f"build/{board}-{profile}" + ("" if flavor == "standard" else f"-{flavor}")
+# The official shell compiled into an image (plan7.md): the Windows 10 Mobile style one (no overlay) or the Android 2.2 style one.
+SHELLS = ("w10m", "android")
 
 
-def idf_args(board, profile, flavor="standard"):
-    d = build_dir_name(board, profile, flavor)
+def build_dir_name(board, profile, flavor="standard", shell="w10m"):
+    return f"build/{board}-{profile}" + ("" if flavor == "standard" else f"-{flavor}") + ("" if shell == "w10m" else f"-{shell}")
+
+
+def idf_args(board, profile, flavor="standard", shell="w10m"):
+    d = build_dir_name(board, profile, flavor, shell)
     overlays = ["sdkconfig.defaults", f"sdkconfig.board.{board}", f"sdkconfig.profile.{profile}"]
+    if shell != "w10m":
+        overlays.append(f"sdkconfig.shell.{shell}")
     if flavor != "standard":
         overlays.append(f"sdkconfig.flavor.{flavor}")
     defaults = ";".join(overlays)
@@ -146,12 +157,14 @@ def idf_args(board, profile, flavor="standard"):
 
 
 # -- project checks ----------------------------------------------------
-def project_problems(project, board, profile, flavor="standard"):
+def project_problems(project, board, profile, flavor="standard", shell="w10m"):
     """Files the build needs that are missing, as readable strings."""
     needed = ["CMakeLists.txt", "sdkconfig.defaults", f"sdkconfig.board.{board}",
               f"sdkconfig.profile.{profile}", f"partitions/{board}.csv"]
     if flavor != "standard":
         needed.append(f"sdkconfig.flavor.{flavor}")
+    if shell != "w10m":
+        needed.append(f"sdkconfig.shell.{shell}")
     return [f"{PROJECT_DIR}/{n} is missing" for n in needed
             if not os.path.isfile(os.path.join(project, n))]
 
@@ -229,9 +242,9 @@ def next_build_number(project):
     return n
 
 
-def build(ctx, board, profile, clean, flavor="standard"):
+def build(ctx, board, profile, clean, flavor="standard", shell="w10m"):
     project = _project(ctx)
-    problems = project_problems(project, board, profile, flavor)
+    problems = project_problems(project, board, profile, flavor, shell)
     if problems:
         ctx.error(f"cannot build {board}/{profile}{'' if flavor == 'standard' else '/' + flavor}:")
         for line in problems:
@@ -240,14 +253,14 @@ def build(ctx, board, profile, clean, flavor="standard"):
     idf = _require_idf(ctx)
     if idf is None:
         return 1
-    bdir = os.path.join(project, build_dir_name(board, profile, flavor))
+    bdir = os.path.join(project, build_dir_name(board, profile, flavor, shell))
     if clean and os.path.isdir(bdir):
         ctx.info(f"removing {bdir}")
         shutil.rmtree(bdir)
     build_number = next_build_number(project)
     project_ver = f"internaldirty{DEV_VERSION_BASE}-{build_number}"
     ctx.info(f"building {board}/{profile} into {bdir} (version {project_ver})")
-    code = ctx.run(wrap(idf, idf_args(board, profile, flavor) +
+    code = ctx.run(wrap(idf, idf_args(board, profile, flavor, shell) +
                         ["-D", f"PROJECT_VER={project_ver}", "build"]), cwd=project,
                    env=child_env(),
                    log_path=os.path.join(bdir, "purrstrap-build.log"))
@@ -290,14 +303,14 @@ def size(ctx, board, profile):
                    env=child_env())
 
 
-def package(ctx, board, profile, version, out):
+def package(ctx, board, profile, version, out, shell="w10m"):
     """Wrap an already-built profile's binary into an unsigned PURR image container, ready
     for `keys sign`, so it can be published as a release asset (OTA/SPEC.md section 5)."""
     if profile not in PACKAGE_KIND:
         ctx.error(f"{profile}: nothing to package (it is flashed directly, never downloaded)")
         return 1
     project = _project(ctx)
-    bdir = os.path.join(project, build_dir_name(board, profile))
+    bdir = os.path.join(project, build_dir_name(board, profile, "standard", shell))
     binpath = os.path.join(bdir, "purros.bin")
     if not os.path.isfile(binpath):
         ctx.error(f"no build for {board}/{profile}. Run 'coreos build' first.")
@@ -459,7 +472,9 @@ SCRIPT = Script(
                        Param("clean", "bool", default=False,
                              help="delete the build directory first"),
                        Param("flavor", "choice", default="standard", choices=FLAVORS,
-                             help="standard, or vm: no radio, a W5500 Ethernet controller instead"))),
+                             help="standard, or vm: no radio, a W5500 Ethernet controller instead"),
+                       Param("shell", "choice", default="w10m", choices=SHELLS,
+                             help="the official shell to compile in: w10m or android"))),
         Action("clean", "Clean", clean,
                help="delete one build directory", params=(_BOARD, _PROFILE)),
         Action("size", "Size", size,
@@ -470,7 +485,9 @@ SCRIPT = Script(
                params=(_BOARD, _PROFILE,
                        Param("version", "str", required=True, help='e.g. "1.2.0"'),
                        Param("out", "path", default="",
-                             help="output file (default: <board>-<profile> build dir)"))),
+                             help="output file (default: <board>-<profile> build dir)"),
+                       Param("shell", "choice", default="w10m", choices=SHELLS,
+                             help="the shell the build was made with"))),
         Action("package-component", "Package a partition-level component", package_component,
                help="wrap a built kernel/loader binary into an unsigned PURR_IMG_MODULE, "
                     "ready to sign",
