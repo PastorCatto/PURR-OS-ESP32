@@ -211,7 +211,7 @@ def bundle_toolchain():
     dst = os.path.join(KIT, "toolchain")
 
     def ignore(directory, names):
-        rel = os.path.relpath(directory, src)
+        rel = os.path.relpath(directory, src).replace(os.sep, "/")        # (on Windows the folders are joined with backslashes: without this none of the trimming below matched and the kit kept the whole compiler)
         drop = set()
         for n in names:
             full = os.path.join(rel, n)
@@ -234,7 +234,7 @@ def bundle_toolchain():
     shutil.copytree(src, dst, symlinks=not IS_WIN, ignore=ignore)      # (Windows: copying a link needs a privilege)
     for root, _d, files in os.walk(os.path.join(dst, "libexec")):
         for f in files:
-            if f == "cc1plus":
+            if f in ("cc1plus", "cc1plus.exe"):
                 os.remove(os.path.join(root, f))
     size = sum(os.path.getsize(os.path.join(r, f)) for r, _d, fs in os.walk(dst) for f in fs if not os.path.islink(os.path.join(r, f)))
     say("  %d MB" % (size >> 20))

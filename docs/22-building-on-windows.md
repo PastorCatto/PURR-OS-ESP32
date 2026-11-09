@@ -51,6 +51,7 @@ The owner has a Windows PC and wants a Windows build of the developer kit and a 
 
 ## What is not finished
 
+- **The Windows kit was about 900 MB (owner, 2026-11-08).** The toolchain trimming compared folder names with `/`, which never matched on Windows (folders there are joined with `\`), so the whole compiler was copied; `cc1plus.exe` was also kept. Fixed in `bundle_toolchain()` (the Mac kit is unchanged at 220 MB of toolchain). The new Windows size is not measured. If it is still large, list the size of each top-level folder of the kit (`toolchain`, `python`, `PurrOS`, `images`) and send it.
 - **Everything above is untested on Windows.** The kit builder's Windows branch was written blind (the Python build tag, the wheel platform, `Lib\site-packages`, the `.cmd` launchers); it passes a syntax check and the Mac behaviour is unchanged (the SDK and purrstrap suites pass).
 - **No emulator on Windows** until the patched QEMU has a Windows build ([chapter 18](18-emulator-and-vm.md)).
 - **No Windows installer or signed Windows binaries.** The kit is a folder.
