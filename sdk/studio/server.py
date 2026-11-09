@@ -22,8 +22,8 @@ from urllib.parse import parse_qs, urlparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
-from purrsdk import (__version__, boards, brand, configs, devserver, doctor, emulator, flash, image as imagemaker, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
-                     release, uimaker, workspace)
+from purrsdk import (__version__, activity, boards, brand, configs, devserver, doctor, emulator, flash, image as imagemaker, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
+                     release, uibuilder, uimaker, workspace)
 
 WEB = os.path.join(HERE, "web")
 MAX_UPLOAD = 64 * 1024 * 1024
@@ -236,6 +236,7 @@ def _emulator_run(state, body):
     board = body.get("board") or "tdeck_plus"
     image = body.get("image") or None
     ebd = body.get("emulator_board") or emulator.DEFAULT_BOARD
+    activity.record(ws, "emulator", (body.get("project") or os.path.basename(cat or "an app")), "run", "", "in the emulator")
     shots = tempfile.mkdtemp(prefix="purr-shots-", dir=state.uploads)
     state.emu["busy"], state.emu["shots_dir"] = True, shots
 
@@ -340,6 +341,11 @@ def handle(state, method, route, q, body):
             key = os.path.join(ws.keys, key)
         board = body.get("board") or "tdeck_plus"
         jid = state.jobs.start("Building %s" % body.get("project"), lambda say: projects.build(ws, root, board=board, key=key, key_id=kid, password=pw, on_line=say))
+        try:
+            kind = minitoml.load(os.path.join(root, "purr-project.toml")).get("project", {}).get("kind", "app")
+        except (OSError, minitoml.TomlError):
+            kind = "app"
+        activity.record(ws, {"app": "app", "driver": "driver", "board": "board", "theme": "ui", "flavor": "other"}.get(kind, "other"), body.get("project"), "projects", body.get("project"), "built" + (", signed" if key else ", not signed"))
         return {"job": jid}
     if route == "job":
         out = state.jobs.get(q.get("id"), int(q.get("since") or 0))
@@ -518,6 +524,7 @@ def handle(state, method, route, q, body):
         offset = str(body.get("offset") or "0x0")
         if not offset.lower().startswith("0x") or not all(c in "0123456789abcdefx" for c in offset.lower()):
             raise ValueError("The offset is a hex number like 0x0.")
+        activity.record(ws, "flash", "flash %s" % os.path.basename(image or "an image"), "flash", image or "", "to %s" % port)
         return {"job": state.jobs.start("Flashing", lambda say: flash.write(port, image, offset, on_line=say))}
     if route == "trust/build":
         ws.ensure()
@@ -604,6 +611,7 @@ def handle(state, method, route, q, body):
                 say("Not this time: %s" % e)
                 return {"ok": False}
             say("[ok] Your flash image is ready.")
+            activity.record(ws, "image", "%s image" % board, "image", "", "made, %d MB" % (r["bytes"] >> 20))
             return {"ok": True, "out": r["out"], "bytes": r["bytes"], "sha256": r["sha256"], "notes": r["notes"], "fit": r["fit"], "artifacts": [r["out"]]}
         return {"job": state.jobs.start("Making the flash image", work)}
 
@@ -624,7 +632,8 @@ def handle(state, method, route, q, body):
         ws.ensure()
         name = (body.get("name") or "").strip()
         try:
-            r = uimaker.new_project(ws, name, body.get("shell") or "android", body.get("board") or "tdeck_plus", squareline=body.get("squareline") or None, on_line=lambda l: None)
+            r = uimaker.new_project(ws, name, body.get("shell") or "android", body.get("board") or "tdeck_plus", squareline=body.get("squareline") or None, on_line=lambda l: None, start=body.get("start") or "android")
+            activity.record(ws, "ui", name, "builder", name, "started")
         except projects.ProjectError as e:
             raise ValueError(str(e))
         return {"name": name, "path": r["path"], "import": r["import"]}
@@ -688,8 +697,90 @@ def handle(state, method, route, q, body):
             if not r["ok"]:
                 return {"ok": False}
             say("[ok] Your UI is ready.")
+            activity.record(ws, "ui", body.get("name"), "ready", body.get("name"), "made, %d pictures" % r["count"])
             return {"ok": True, "out": r["out"], "bytes": r["bytes"], "count": r["count"], "generated": len(r["generated"]), "yours": r["yours"], "resized": r["resized"], "checks": r["checks"], "artifacts": [r["pack"]]}
         return {"job": state.jobs.start("Making the UI", work)}
+
+    # ---- what was done last (the main menu's big tile)
+    if route == "activity":
+        ws.ensure()
+        now = time.time()
+        return {"items": [dict(i, ago=activity.ago(i["when"], now)) for i in activity.load(ws)[:12]]}
+    if route == "activity/record":
+        ws.ensure()
+        activity.record(ws, body.get("kind") or "other", (body.get("title") or "").strip() or "something", body.get("route") or "home", body.get("arg") or "", body.get("note") or "")
+        return {"ok": True}
+
+    # ---- the UI builder (layouts, icon packs)
+    if route == "ui/builder":
+        root = state.safe_project(q.get("name"))
+        toml = os.path.join(root, "ui.toml")
+        if not os.path.isfile(toml):
+            raise ValueError("That project has no ui.toml.")
+        cfg, problems = uimaker.load_template(toml)
+        if cfg is None:
+            raise ValueError(" ".join(problems))
+        look = cfg["look"]
+        return {"name": q.get("name"), "shell": cfg["shell"], "board": cfg["board"], "size": {"w": cfg["size"][0], "h": cfg["size"][1]}, "elements": cfg["elements"],
+                "screens": uibuilder.screens(cfg["elements"]), "icons": cfg["icons"], "problems": problems,
+                "look": {"accent": cfg["accent_text"], "background": "#%02x%02x%02x" % look.bg, "foreground": "#%02x%02x%02x" % look.fg}}
+    if route == "ui/builder/save":
+        root = state.safe_project(body.get("name"))
+        toml = os.path.join(root, "ui.toml")
+        text = uimaker.save_elements(_read_text(toml), body.get("elements") or [])
+        cfg, problems = uimaker.load_template(text)
+        if cfg is None:
+            raise ValueError(" ".join(problems))
+        with open(toml, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        notes, probs = [], []
+        names = set(uimaker.wanted(cfg))
+        for scr in uibuilder.screens(cfg["elements"]):
+            _t, n, p = uibuilder.to_screen_conf(cfg["elements"], scr, cfg["size"], names)
+            notes += ["[%s] %s" % (scr, x) for x in n]
+            probs += p
+        activity.record(ws, "ui", body.get("name"), "builder", body.get("name"), "%d elements" % len(cfg["elements"]))
+        return {"saved": True, "count": len(cfg["elements"]), "notes": notes, "problems": problems + probs}
+    if route == "ui/icons":
+        root = state.safe_project(q.get("name"))
+        return uimaker.icon_report(root)
+    if route == "ui/icons/import":
+        root = state.safe_project(body.get("name"))
+        src = body.get("src") or ""
+        if not src or not os.path.exists(src):
+            raise ValueError("I cannot find that icon pack. Drop a zip or folder of PNGs, a pack.bin, or a SquareLine export.")
+        toml = os.path.join(root, "ui.toml")
+        cfg, problems = uimaker.load_template(toml)
+        if cfg is None:
+            raise ValueError(" ".join(problems))
+        try:
+            info = uimaker.import_icon_pack(src, root, cfg["shell"], on_line=lambda l: None)
+        except ValueError as e:
+            raise ValueError(str(e))
+        text = uimaker.apply_import(_read_text(toml), info)
+        icons = dict(cfg["icons"], use=True, pack=os.path.basename(src))
+        text = uimaker.set_icons(text, **icons)
+        with open(toml, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        activity.record(ws, "ui", body.get("name"), "builder", body.get("name"), "icon pack: %s" % os.path.basename(src))
+        rep = uimaker.icon_report(root)
+        rep["imported"] = info["pictures"]
+        rep["skipped"] = info["skipped"]
+        return rep
+    if route == "ui/icons/options":
+        root = state.safe_project(body.get("name"))
+        toml = os.path.join(root, "ui.toml")
+        cfg, problems = uimaker.load_template(toml)
+        if cfg is None:
+            raise ValueError(" ".join(problems))
+        icons = dict(cfg["icons"])
+        for k in ("use", "fill_missing", "resize", "recolour"):
+            if k in body:
+                icons[k] = bool(body[k])
+        text = uimaker.set_icons(_read_text(toml), **icons)
+        with open(toml, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return uimaker.icon_report(root)
 
     # ---- docs
     if route == "docs":

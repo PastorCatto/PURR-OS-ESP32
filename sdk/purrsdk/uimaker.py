@@ -26,7 +26,9 @@ import tempfile
 import zipfile
 import zlib
 
-from . import minitoml, ui
+from . import minitoml, ui, uibuilder
+
+DEVICE_SIZES = {"tdeck_plus": (320, 240), "tdeck": (320, 240), "waveshare154": (200, 200)}
 
 # ---------------------------------------------------------------------------------------------------------------- PNG in and out
 
@@ -493,6 +495,14 @@ def load_template(text_or_path):
         "accent_text": str(lk.get("accent", "#60a917")),
         "scale": float(ad.get("scale", 1.0)), "wallpapers": int(ad.get("wallpapers", 1)), "pictures": dict(d.get("pictures", {})),
     }
+    ic = d.get("icons", {})
+    cfg["icons"] = {"use": bool(ic.get("use", True)), "pack": str(ic.get("pack", "")), "fill_missing": bool(ic.get("fill_missing", True)), "resize": bool(ic.get("resize", True)), "recolour": bool(ic.get("recolour", False))}
+    cfg["size"] = DEVICE_SIZES.get(cfg["board"]) or (int(u.get("width", 320)), int(u.get("height", 240)))
+    try:
+        cfg["elements"] = uibuilder.elements_from(d)
+    except ValueError as e:
+        cfg["elements"] = []
+        problems.append(str(e))
     if not ui.THEME_ID_RE.match(cfg["name"]):
         problems.append("[ui] name needs 1 to 39 letters, digits, underscores or dashes: it becomes the folder /ui/themes/<name> on the device.")
     if cfg["shell"] not in ui.SHELLS:
@@ -580,7 +590,7 @@ def _extract(src, tmp):
     raise ValueError("%s is neither a folder nor a zip." % src)
 
 
-def import_squareline(src, dest, shell="android", on_line=print):
+def import_squareline(src, dest, shell="android", on_line=print, any_png=False):
     """Bring a SquareLine Studio export into `dest/imported/` as PNG files. `src` is the export folder, the project folder, or a .zip of either.
     Returns {"pictures": [{"id", "w", "h", "slot", "file", "from"}], "skipped": [...]}; the slot is a guess by name and may be None."""
     tmp = tempfile.mkdtemp(prefix="purr-sqline-")
@@ -606,7 +616,7 @@ def import_squareline(src, dest, shell="android", on_line=print):
             for f in sorted(fns):
                 full = os.path.join(dp, f)
                 rel = os.path.relpath(full, root).replace(os.sep, "/")
-                if f.lower().endswith(".png") and (rel.startswith("assets/") or "/assets/" in rel):
+                if f.lower().endswith(".png") and (any_png or rel.startswith("assets/") or "/assets/" in rel):
                     pngs.append((full, rel, f))
                 elif f.startswith("ui_img_") and f.endswith("_png.c"):
                     arrays.append((full, rel, f))
@@ -635,6 +645,20 @@ def import_squareline(src, dest, shell="android", on_line=print):
 
 # ---------------------------------------------------------------------------------------------------------------- compose and pack
 
+def _candidates(project, cfg, name):
+    """The files a slot may take its picture from, best first: a [pictures] line, images/<name>.png, then the imported pack (unless the pack is switched off, which
+    also switches off any [pictures] line that points into imported/)."""
+    use = cfg["icons"]["use"]
+    mapped = cfg["pictures"].get(name)
+    out = []
+    if mapped and (use or not mapped.replace("\\", "/").startswith("imported/")):
+        out.append(os.path.join(project, mapped))
+    out.append(os.path.join(project, "images", name + ".png"))
+    if use:
+        out.append(os.path.join(project, "imported", name + ".png"))
+    return out
+
+
 def wanted(cfg):
     """{name: (w, h)} for this shell and scale: every required picture, the fallback ones except wallpapers beyond the asked number."""
     out = {}
@@ -656,11 +680,11 @@ def compose(project, on_line=print):
     src_dir = os.path.join(project, "build", "pack-src")
     shutil.rmtree(src_dir, ignore_errors=True)
     os.makedirs(src_dir)
-    generated, yours, resized, notes = [], [], [], []
+    generated, yours, resized, notes, missing = [], [], [], [], []
     for name, (w, h) in names.items():
         path = None
         mapped = cfg["pictures"].get(name)
-        for cand in ([os.path.join(project, mapped)] if mapped else []) + [os.path.join(project, "images", name + ".png"), os.path.join(project, "imported", name + ".png")]:
+        for cand in _candidates(project, cfg, name):
             if os.path.isfile(cand):
                 path = cand
                 break
@@ -674,13 +698,24 @@ def compose(project, on_line=print):
                 path = None
         if path:
             if (pw, ph) != (w, h):
-                rgba = resize(pw, ph, rgba, w, h)
-                resized.append("%s %dx%d -> %dx%d" % (name, pw, ph, w, h))
+                if not cfg["icons"]["resize"]:
+                    notes.append("%s is %dx%d and the slot is %dx%d: left as it is (resize is off)." % (name, pw, ph, w, h))
+                    w, h = pw, ph
+                else:
+                    rgba = resize(pw, ph, rgba, w, h)
+                    resized.append("%s %dx%d -> %dx%d" % (name, pw, ph, w, h))
+            if cfg["icons"]["recolour"] and not re.match(r"^img\d+$", name):
+                rgba = tint(rgba, cfg["look"].accent)
             yours.append(name)
+        elif not cfg["icons"]["fill_missing"] and cfg["icons"]["pack"] and not re.match(r"^img\d+$", name):
+            missing.append(name)
+            continue
         else:
             rgba = draw(name, w, h, cfg["look"])
             generated.append(name)
         write_png(os.path.join(src_dir, name + ".png"), w, h, rgba)
+    if missing:
+        return {"ok": False, "problems": ["Your icon pack has no picture for %d slot(s) and 'use Studio's icon for anything missing' is off: %s." % (len(missing), ", ".join(missing[:8]) + (", ..." if len(missing) > 8 else ""))]}
     # pictures of yours that are not slots at all (a theme may carry extras the shell's own layout names) are kept as they are
     for extra_dir in ("images",):
         d = os.path.join(project, extra_dir)
@@ -699,16 +734,44 @@ def compose(project, on_line=print):
     conf = "name=%s\nauthor=%s\nlicence=%s\nversion=%s\nshell=%s\naccent=%s\ndark=%d\n" % (cfg["name"], cfg["author"], cfg["licence"], cfg["version"], cfg["shell"], acc, 1 if cfg["look"].dark else 0)
     with open(os.path.join(out, "theme.conf"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(conf)
+    screens_out, layout_notes, layout_problems = [], [], []
+    if cfg["elements"]:
+        names_set = set(names)
+        shutil.rmtree(os.path.join(out, "screens"), ignore_errors=True)
+        for k, scr in enumerate(uibuilder.screens(cfg["elements"])):
+            text, nts, probs = uibuilder.to_screen_conf(cfg["elements"], scr, cfg["size"], names_set)
+            try:
+                uibuilder.parse_screen_conf(text)
+            except ValueError as e:
+                probs.append("The screen file for %r does not read back: %s" % (scr, e))
+            layout_notes += ["[%s] %s" % (scr, n) for n in nts]
+            layout_problems += probs
+            os.makedirs(os.path.join(out, "screens"), exist_ok=True)
+            with open(os.path.join(out, "screens", scr + ".conf"), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(text)
+            if k == 0:
+                with open(os.path.join(out, "shell.conf"), "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(text)
+            screens_out.append(scr)
     rep = ui.check_theme_folder(out, cfg["shell"])
     checks = rep.get("checks", []) if isinstance(rep, dict) else []
     bad = [c for c in checks if c.get("status") == "bad"]
     on_line("Packed %d picture(s), %s bytes: %d drawn, %d yours, %d resized." % (r["count"], format(r["bytes"], ","), len(generated), len(yours), len(resized)))
-    return {"ok": not bad, "out": out, "pack": r["path"], "count": r["count"], "bytes": r["bytes"], "generated": generated, "yours": yours, "resized": resized,
-            "problems": [c.get("text", "") for c in bad], "notes": notes, "checks": checks}
+    return {"ok": not bad and not layout_problems, "out": out, "pack": r["path"], "count": r["count"], "bytes": r["bytes"], "generated": generated, "yours": yours, "resized": resized,
+            "problems": [c.get("text", "") for c in bad] + layout_problems, "notes": notes + layout_notes, "checks": checks, "screens": screens_out}
 
 
-def new_project(ws, name, shell="android", board="tdeck_plus", squareline=None, on_line=print):
-    """Start a UI project in the workspace (a theme project with a ui.toml); with `squareline` (a path) the export's pictures are imported and matched."""
+def apply_import(text, info):
+    """ui.toml text with a [pictures] line for every imported picture whose name matches a slot (so it is used), and none for the rest."""
+    for p in info["pictures"]:
+        if p["slot"]:
+            text = set_mapping(text, p["slot"], p["file"])
+    return text
+
+
+def new_project(ws, name, shell="android", board="tdeck_plus", squareline=None, on_line=print, start="android"):
+    """Start a UI project in the workspace (a theme project with a ui.toml and a starting layout: blank, android or metro); with `squareline` (a path) the export's
+    pictures are imported and matched to slots."""
     from . import projects
     projects.new(ws, "theme", name)
     path = os.path.join(ws.projects, name)
@@ -716,12 +779,10 @@ def new_project(ws, name, shell="android", board="tdeck_plus", squareline=None, 
     info = None
     if squareline:
         info = import_squareline(squareline, path, shell, on_line)
-        lines = []
-        for p in info["pictures"]:
-            if p["slot"]:
-                lines.append('%s = "%s"' % (p["slot"], p["file"]))
-        if lines:
-            text = text.replace('# fr_app = "imported/home.png"', "\n".join(lines))
+        text = apply_import(text, info)
+        text = set_icons(text, pack=os.path.basename(squareline))
+    size = DEVICE_SIZES.get(board, (320, 240))
+    text = save_elements(text, uibuilder.starter_layout("metro" if start == "metro" else "blank" if start == "blank" else "android", size))
     with open(os.path.join(path, "ui.toml"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
     return {"path": path, "import": info}
@@ -761,3 +822,125 @@ def set_mapping(text, slot, file, old_slot=None):
             out.pop()
         out.append('%s = "%s"' % (slot, file))
     return "\n".join(out).rstrip("\n") + "\n"
+
+
+def tint(rgba, colour):
+    """The picture with every pixel's colour set to `colour` and its own transparency kept: a one-colour icon recoloured to the accent."""
+    out = bytearray(rgba)
+    for i in range(0, len(out), 4):
+        out[i], out[i + 1], out[i + 2] = colour
+    return bytes(out)
+
+
+def _pack_to_pngs(path, out_dir, seen, add):
+    """Decode the pictures of a pack.bin (RGB565, or RGB565 + an alpha plane) into PNGs through add()."""
+    ua = ui._u()
+    with open(path, "rb") as fh:
+        data = fh.read()
+    entries, problems, facts = ui.read_pack(data)
+    if problems:
+        raise ValueError("%s is not a usable pack: %s" % (os.path.basename(path), problems[0]))
+    base = struct.calcsize(ua.HEADER_FMT) + facts["count"] * ua.ENTRY_SIZE
+    for e in entries:
+        w, h = e["w"], e["h"]
+        px = data[base + e["offset"]:base + e["offset"] + e["length"]]
+        n = w * h
+        rgba = bytearray(n * 4)
+        alpha = e["cf"] == ua.CF_RGB565A8 and len(px) >= n * 3
+        for i in range(n):
+            v = px[i * 2] | px[i * 2 + 1] << 8
+            r, g, b = v >> 11 & 31, v >> 5 & 63, v & 31
+            rgba[i * 4:i * 4 + 4] = bytes([r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, px[n * 2 + i] if alpha else 255])
+        add(e["name"], w, h, bytes(rgba), os.path.basename(path))
+
+
+def import_icon_pack(src, dest, shell="android", on_line=print):
+    """Take a person's icon pack into `dest/imported/`: a folder or zip of PNG files (anywhere inside), a pack.bin, or a SquareLine Studio export. A picture is
+    matched to a slot by name. Returns {"pictures": [...], "skipped": [...]} like import_squareline()."""
+    if os.path.isfile(src) and not zipfile.is_zipfile(src):
+        out_dir = os.path.join(dest, "imported")
+        os.makedirs(out_dir, exist_ok=True)
+        pics, seen = [], set()
+
+        def add(ident, w, h, rgba, origin):
+            nid = re.sub(r"[^A-Za-z0-9_.-]+", "_", ident)[:23] or "picture"
+            if nid in seen:
+                return
+            seen.add(nid)
+            write_png(os.path.join(out_dir, nid + ".png"), w, h, rgba)
+            pics.append({"id": nid, "w": w, "h": h, "slot": guess_slot(nid, shell), "file": "imported/%s.png" % nid, "from": origin})
+        if src.lower().endswith(".png"):
+            w, h, rgba = read_png(src)
+            add(os.path.splitext(os.path.basename(src))[0], w, h, rgba, os.path.basename(src))
+        else:
+            _pack_to_pngs(src, out_dir, seen, add)
+        if not pics:
+            raise ValueError("I found no pictures in %s." % src)
+        on_line("Imported %d picture(s): %d match a slot by name." % (len(pics), sum(1 for p in pics if p["slot"])))
+        return {"pictures": pics, "skipped": []}
+    return import_squareline(src, dest, shell, on_line, any_png=True)
+
+
+def icon_report(project):
+    """How the project's pictures stand against the shell's slots, for the icon pack page: for each slot, where its picture comes from."""
+    cfg, problems = load_template(os.path.join(project, "ui.toml"))
+    if cfg is None:
+        return {"problems": problems, "slots": []}
+    slots = []
+    for name, (w, h) in wanted(cfg).items():
+        mapped = cfg["pictures"].get(name)
+        path = None
+        for cand in _candidates(project, cfg, name):
+            if os.path.isfile(cand):
+                path = cand
+                break
+        row = {"name": name, "w": w, "h": h, "state": "studio", "from": "", "pw": None, "ph": None}
+        if path:
+            try:
+                pw, ph, _ = read_png(path)
+                row.update(state="resized" if (pw, ph) != (w, h) else "yours", **{"from": os.path.relpath(path, project), "pw": pw, "ph": ph})
+            except ValueError:
+                pass
+        slots.append(row)
+    return {"slots": slots, "matched": sum(1 for r in slots if r["state"] in ("yours", "resized")), "resized": sum(1 for r in slots if r["state"] == "resized"),
+            "fallback": sum(1 for r in slots if r["state"] == "studio"), "options": cfg["icons"], "problems": problems}
+
+
+def save_elements(text, elements):
+    """ui.toml text with its [[element]] blocks replaced by `elements` (they are always the last thing in the file)."""
+    lines = text.split("\n")
+    for i, l in enumerate(lines):
+        if l.strip() == "[[element]]":
+            lines = lines[:i]
+            break
+    base = "\n".join(lines).rstrip("\n") + "\n"
+    out = [base]
+    for e in elements:
+        e = uibuilder.element(e)
+        out.append("\n[[element]]\n")
+        out.append('screen = "%s"\nkind = "%s"\nglyph = "%s"\nname = "%s"\nx = %d\ny = %d\nw = %d\nh = %d\nlabel = "%s"\naction = "%s"\ncolor = "%s"\n' % (
+            e["screen"], e["kind"], e["glyph"], e["name"].replace('"', "'"), e["x"], e["y"], e["w"], e["h"], e["label"].replace('"', "'"), e["action"], e["color"]))
+    return "".join(out)
+
+
+def set_icons(text, **opts):
+    """ui.toml text with the [icons] section set (pack, fill_missing, resize, recolour). Replaces the whole section; other sections stay as they are."""
+    lines = text.split("\n")
+    out, skip = [], False
+    for l in lines:
+        st = l.strip()
+        if st == "[icons]":
+            skip = True
+            continue
+        if skip and st.startswith("["):
+            skip = False
+        if not skip:
+            out.append(l)
+    body = "\n".join(out).rstrip("\n")
+    cur = {"use": True, "pack": "", "fill_missing": True, "resize": True, "recolour": False}
+    cur.update(opts)
+    sec = '\n\n[icons]\nuse = %s\npack = "%s"\nfill_missing = %s\nresize = %s\nrecolour = %s\n' % (str(bool(cur["use"])).lower(), cur["pack"].replace('"', "'"), str(bool(cur["fill_missing"])).lower(), str(bool(cur["resize"])).lower(), str(bool(cur["recolour"])).lower())
+    first_el = body.find("\n[[element]]")
+    if first_el >= 0:
+        return body[:first_el].rstrip("\n") + sec + body[first_el:] + "\n"
+    return body + sec
