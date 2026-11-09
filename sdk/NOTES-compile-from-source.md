@@ -70,3 +70,12 @@ Not part of the source road, but learned in the same session, so kept here.
 - **Blank images:** `purr image --board tdeck|tdeck_plus --parts <JumpingJaguar1 folder>` (16 MB, flash map v2, purrcfg blank, so the bootloader starts in `warn`). Both boot to the recovery loader in the emulator ("signed by key 1" is the boot package). The official copies want a signed trust block: `purrstrap keys trust-block --key <boot key> --mode enforce --force-loader`, then `purr image ... --trust-block FILE`. That needs the boot key's passphrase typed for that command. `tools/hw/make_hw_image.sh` is T-Deck Plus only, signs with `signing_keys/boot.key` (the old key) and turns developer mode on by default: do not use it unchanged for a public image.
 - A minimal blank image downloads the rest from the address compiled into its loader (`JumpingJaguar1/2`), so those must hold 1.1 before anyone burns one.
 
+### The full re-sign, as a procedure (prepared 2026-11-09; the real run waits for the passphrases)
+1. `resign_release.py --src out/devrepo/recovery --out out/release-1.1/signed-dev ...` (34 files: 9 boot to key 3, 25 developer to key 4).
+2. `make_official_from_dev.py --release 1.1 --src out/release-1.1/signed-dev --out ...` (it carries the live Waveshare entries, still on key 1).
+3. `resign_release.py` again on the new JumpingJaguar1 folder (the 3 Waveshare files go to key 3); JumpingJaguar2 needs nothing more.
+4. JasparOTA = the two folders merged flat; `check_delivery` and `verify_release.py` against a local copy over HTTP.
+5. A signed trust block (`keys trust-block --key boot.key --mode enforce`, developer mode off) and `purr image --trust-block` for T-Deck and T-Deck Plus; boot both in the emulator.
+6. The four folders (JumpingJaguar1, JumpingJaguar2, JasparOTA, Jaspar with the two images) go into `~/Desktop/PURR-OS-release-1.1/`, with SHA256SUMS and a README.
+The passwords are given in the environment of each command (`PURRSTRAP_BOOT_KEY_PASSWORD`, `PURRSTRAP_KEY_PASSWORD`), never written down.
+

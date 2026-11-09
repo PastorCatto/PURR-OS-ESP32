@@ -130,7 +130,7 @@ The first keys were made for development. Five keys are now compiled into the bo
 
 | Id | Role | What it is |
 |---|---|---|
-| 1 | boot | the old boot key (still accepted until the last step) |
+| 1 | boot | the old boot key: **deprecated since 1.1** (still accepted, not revoked; nothing is signed with it from 1.1) |
 | 2 | developer | the old developer key (still accepted until the last step) |
 | 3 | boot | the new boot key: signs kernel, KittenOS, loader, boot package, trust blocks |
 | 4 | developer | the new developer key: signs apps, drivers and modules |
@@ -172,3 +172,5 @@ The order, and where it stands ([plan3.md](../plan3.md)):
 - **Not verified on a device:** the `secure` and `trust apply` commands typed by hand, and the whole `enforce` refusal path for the `loader` slot.
 
 Plan references: [plan3.md](../plan3.md) (hardening, key rotation), [plan1.md](../plan1.md) (the trailer).
+
+**Deprecated, not revoked (owner, 2026-11-09).** Keys 1 and 2 stay in the list. Release 1.1 is signed again with keys 3 and 4 (`tools/release/resign_release.py`: the bootloader, boot package and picture packs with key 3, the modules and drivers with key 4; the 1.1 kernel, KittenOS and loader were already on key 3). Revoking 1 and 2 on devices is a later decision, and by then nothing a device fetches depends on them.
