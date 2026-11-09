@@ -11,10 +11,13 @@
 #include "bootloader_flash_priv.h"
 #include "bootloader_utility.h"
 #include "esp_flash_partitions.h"
+/* Our own lines stay at INFO even though the rest of the bootloader logs at WARN. */
+#define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
 #include "esp_rom_gpio.h"
 #include "esp_rom_sys.h"
 #include "hal/gpio_ll.h"
+#include "hal/wdt_hal.h"
 #include "soc/gpio_sig_map.h"
 
 #include "purr_abi.h"
@@ -53,9 +56,34 @@ static void svc_log(const char *line)
     flush_log();
 }
 
+/* The bootloader arms the RTC watchdog when it starts (CONFIG_BOOTLOADER_WDT_TIME_MS, 9 s) and nothing fed it, so the boot menu waiting for a key was reset
+ * by the watchdog about 5 s after it appeared (the verification and the splash had already used the first few seconds): the device restarted instead of
+ * falling through to its default after the menu's own 20 s idle time, and did that in a loop. The package waits through delay_us, so that is where the
+ * watchdog is fed, every half second at most. It is fed only for a bounded total (90 s of waiting, far more than a menu and its 20 s fall-through need):
+ * a package that hangs in its wait loop is still reset, as the watchdog is there to do. */
+#define WAIT_CHUNK_US   500000u
+#define WAIT_FEED_MAX_US (90ull * 1000000ull)
+static uint64_t s_waited_us;
+
+static void wdt_feed(void)
+{
+    wdt_hal_context_t rwdt = RWDT_HAL_CONTEXT_DEFAULT();
+    wdt_hal_write_protect_disable(&rwdt);
+    wdt_hal_feed(&rwdt);
+    wdt_hal_write_protect_enable(&rwdt);
+}
+
 static void svc_delay_us(uint32_t us)
 {
-    esp_rom_delay_us(us);
+    while (us > 0) {
+        uint32_t chunk = us > WAIT_CHUNK_US ? WAIT_CHUNK_US : us;
+        if (s_waited_us < WAIT_FEED_MAX_US) {
+            wdt_feed();
+        }
+        esp_rom_delay_us(chunk);
+        s_waited_us += chunk;
+        us -= chunk;
+    }
 }
 
 static void svc_gpio_setup(int pin, int mode)
@@ -72,7 +100,7 @@ static void svc_gpio_setup(int pin, int mode)
     }
 }
 
-static const purr_boot_services_t s_services = {
+static purr_boot_services_t s_services = {
     .version = PURR_PKG_SERVICES_VERSION,
     .log = svc_log,
     .delay_us = svc_delay_us,
@@ -81,14 +109,24 @@ static const purr_boot_services_t s_services = {
 
 /* ------------------------------------------------------------ finding it */
 
+/* The partition table is read once into RAM with the plain flash reader, never through
+ * bootloader_mmap(). The bootloader stage only ever allows one mmap at a time ("tried to
+ * bootloader_mmap twice", found on real hardware 2026-09-29): this used to map the table on
+ * every lookup, so any lookup made while load_package() held its own mapping of the boot
+ * package would crash, and whether one did depended on call order. With no mapping here,
+ * a lookup is safe from anywhere, in any order, any number of times. */
+static uint32_t s_table[ESP_PARTITION_TABLE_MAX_LEN / sizeof(uint32_t)];   /* word aligned */
+static bool s_table_loaded;
+
 bool purr_find_partition(const char *name, uint32_t *offset, uint32_t *size)
 {
-    const esp_partition_info_t *table = bootloader_mmap(ESP_PARTITION_TABLE_OFFSET,
-                                                        ESP_PARTITION_TABLE_MAX_LEN);
-    if (table == NULL) {
-        return false;
+    if (!s_table_loaded) {
+        if (bootloader_flash_read(ESP_PARTITION_TABLE_OFFSET, s_table, sizeof(s_table), false) != ESP_OK) {
+            return false;
+        }
+        s_table_loaded = true;
     }
-    bool found = false;
+    const esp_partition_info_t *table = (const esp_partition_info_t *)s_table;
     for (int i = 0; i < ESP_PARTITION_TABLE_MAX_ENTRIES; i++) {
         if (table[i].magic != ESP_PARTITION_MAGIC) {
             break;
@@ -97,12 +135,10 @@ bool purr_find_partition(const char *name, uint32_t *offset, uint32_t *size)
             strncmp((const char *)table[i].label, name, sizeof(table[i].label)) == 0) {
             *offset = table[i].pos.offset;
             *size = table[i].pos.size;
-            found = true;
-            break;
+            return true;
         }
     }
-    bootloader_munmap(table);
-    return found;
+    return false;
 }
 
 /* ------------------------------------------------------------ loading it */
@@ -122,6 +158,33 @@ static int mmap_read(void *ctx, uint32_t offset, void *buf, uint32_t len)
     return 0;
 }
 
+/* Whether the loaded package understands progress calls (purr_abi.h): its version is 0.2 or later. A package
+ * from before that would read a negative nparts as a count, so it is never sent one. */
+static bool s_pkg_progress;
+static bool s_pkg_v4;               /* 0.3 or later: it understands the splash, the key check and the menu reasons (services version 4) */
+
+static bool version_at_least_0_2(const char *v)
+{
+    int major = 0, minor = 0, i = 0;
+    while (v[i] >= '0' && v[i] <= '9') major = major * 10 + (v[i++] - '0');
+    if (v[i] == '.') {
+        i++;
+        while (v[i] >= '0' && v[i] <= '9') minor = minor * 10 + (v[i++] - '0');
+    }
+    return major > 0 || minor >= 2;
+}
+
+static bool version_at_least(const char *v, int want_major, int want_minor)
+{
+    int major = 0, minor = 0, i = 0;
+    while (v[i] >= '0' && v[i] <= '9') major = major * 10 + (v[i++] - '0');
+    if (v[i] == '.') {
+        i++;
+        while (v[i] >= '0' && v[i] <= '9') minor = minor * 10 + (v[i++] - '0');
+    }
+    return major > want_major || (major == want_major && minor >= want_minor);
+}
+
 // Returns the entry address, or 0 with a reason logged.
 static uint32_t load_package(void)
 {
@@ -139,14 +202,18 @@ static uint32_t load_package(void)
         return 0;
     }
 
+    /* The effective state (trust block checked once, development mode applied): bootloader/
+     * SPEC.md section 5. secure_mode here is the effective mode, the key bag only holds
+     * override keys a valid signature vouched for. */
+    const purr_cfg_t *cfg_view = purr_bootcfg_view();
+    purr_cfg_t cfg = *cfg_view;
+
+    /* The only mapping held anywhere in the bootloader: nothing below may map again. */
     const uint8_t *base = bootloader_mmap(off, part_size);
     if (base == NULL) {
         ESP_LOGW(TAG, "bootpkg: cannot read flash");
         return 0;
     }
-
-    purr_cfg_t cfg;
-    purr_bootcfg_load(&cfg);      /* defaults (secure_mode = warn) if unreadable */
 
     purr_keybag_t bag;
     purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &cfg);
@@ -199,6 +266,8 @@ static uint32_t load_package(void)
             memset((void *)(PURR_PKG_S3_DATA + p.data_size), 0, p.bss_size);
             __asm__ __volatile__("memw; isync");
             entry = p.entry;
+            s_pkg_progress = version_at_least_0_2(h.version);
+            s_pkg_v4 = version_at_least(h.version, 0, 3);
             ESP_LOGI(TAG, "bootpkg %.12s loaded (key id %u, %s): code %u, data %u, bss %u bytes",
                      h.version, (unsigned)h.key_id, purr_verify_name(vr),
                      (unsigned)p.text_size, (unsigned)p.data_size, (unsigned)p.bss_size);
@@ -220,7 +289,7 @@ static void set_name(purr_boot_part_t *p, const char *name)
     }
 }
 
-static uint8_t looks_bootable(const esp_partition_pos_t *pos)
+uint8_t purr_looks_bootable(const esp_partition_pos_t *pos)
 {
     uint32_t first = 0;   /* the flash reader takes whole words */
     if (pos->size == 0) {
@@ -230,22 +299,46 @@ static uint8_t looks_bootable(const esp_partition_pos_t *pos)
            (first & 0xFF) == 0xE9;   /* an ESP app image */
 }
 
-bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index)
+/* Tells the package which slot is being verified and how far along (thousandths), so it can draw it. */
+static void stage(uint32_t entry, const char *label, int done, int total)
 {
-    uint32_t entry = load_package();
-    if (entry == 0) {
-        return false;
+    if (s_pkg_progress) {
+        ((purr_pkg_entry_fn)entry)(&s_services, (const purr_boot_part_t *)label, -PURR_PKG_STAGE_VERIFY,
+                                   total > 0 ? done * 1000 / total : 0);
     }
+}
 
-    /* The menu's list: the PURR OS slots first, then KittenOS (the factory slot). */
+static int pkg_stage(uint32_t entry, int stage, const char *text, int arg)
+{
+    return ((purr_pkg_entry_fn)entry)(&s_services, (const purr_boot_part_t *)text, -stage, arg);
+}
+
+/* Lists the slots (verifying each), runs the package's menu, and maps its answer. Returns 1 with *boot_index set, 2 for "restart", 0 if it
+ * could not be shown. */
+static int run_menu(uint32_t entry, const bootloader_state_t *bs, int preferred, int *boot_index, bool (*usable)(int index),
+                    uint32_t reason, const char *detail1, const char *detail2, bool show_progress)
+{
+    int total = bs->app_count + (bs->factory.size != 0 ? 1 : 0), done = 0;
+
+    /* The menu's list: the kernel slot first (PurrOS/SPEC.md's fallback chain), then KittenOS
+     * (the factory slot). Only ever one kernel-style slot now -- the whole point of
+     * consolidating the old ota_0/ota_1 pair into a single named "kernel" partition -- but
+     * the loop stays general in case that ever changes. */
     purr_boot_part_t parts[PURR_PKG_MAX_PARTS];
     int map[PURR_PKG_MAX_PARTS];          /* menu index -> the bootloader's slot index */
     int n = 0, menu_preferred = -1;
     for (int i = 0; i < bs->app_count && n < PURR_PKG_MAX_PARTS - 1; i++) {
-        char name[16] = "PURR OS ota_0";   /* no snprintf: it drags newlib's printf in */
-        name[12] = (char)('0' + (i % 10));
+        char name[16] = "Kernel";   /* no snprintf: it drags newlib's printf in */
+        if (i > 0) {
+            name[6] = ' ';
+            name[7] = (char)('0' + (i % 10));
+            name[8] = '\0';
+        }
         set_name(&parts[n], name);
-        parts[n].bootable = looks_bootable(&bs->ota[i]);
+        if (show_progress) {
+            stage(entry, name, done++, total);
+        }
+        parts[n].bootable = usable(i);
         map[n] = i;
         if (i == preferred) {
             menu_preferred = n;
@@ -254,7 +347,10 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
     }
     if (bs->factory.size != 0 && n < PURR_PKG_MAX_PARTS) {
         set_name(&parts[n], "KittenOS");
-        parts[n].bootable = looks_bootable(&bs->factory);
+        if (show_progress) {
+            stage(entry, "KittenOS", done++, total);
+        }
+        parts[n].bootable = usable(FACTORY_INDEX);
         map[n] = FACTORY_INDEX;
         if (preferred == FACTORY_INDEX) {
             menu_preferred = n;
@@ -262,12 +358,101 @@ bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_ind
         n++;
     }
 
-    ESP_LOGI(TAG, "starting the boot menu");
+    if (show_progress) {
+        stage(entry, "slots", total, total);               /* the bar is full before the menu takes over */
+    }
+    s_services.menu_reason = reason;
+    s_services.menu_idle_ms = 20000;
+    s_services.detail1 = detail1;
+    s_services.detail2 = detail2;
+    ESP_LOGI(TAG, "starting the boot menu (reason %u)", (unsigned)reason);
     flush_log();
     int choice = ((purr_pkg_entry_fn)entry)(&s_services, parts, n, menu_preferred);
+    if (choice == PURR_PKG_CHOICE_RESTART) {
+        return 2;
+    }
+    if (choice == PURR_PKG_CHOICE_INTERNET_RECOVERY) {
+        if (bs->test.size == 0) {
+            ESP_LOGW(TAG, "internet recovery requested, but there is no recovery loader");
+            return 0;
+        }
+        ESP_LOGI(TAG, "internet recovery: starting the recovery loader");
+        *boot_index = TEST_APP_INDEX;
+        return 1;
+    }
     if (choice < 0 || choice >= n) {
-        return false;
+        return 0;
     }
     *boot_index = map[choice];
-    return true;
+    return 1;
+}
+
+static void set_secure_state(void)
+{
+    const purr_trust_t *t = purr_bootcfg_trust();          /* the package's status chips read this */
+    s_services.secure_state = (t->mode & 3u) | (t->dev ? PURR_SECST_DEV : 0u) | (t->signature_ok ? PURR_SECST_SIGNED : 0u);
+}
+
+bool purr_bootpkg_run(const bootloader_state_t *bs, int preferred, int *boot_index,
+                      bool (*usable)(int index))
+{
+    uint32_t entry = load_package();
+    if (entry == 0) {
+        return false;
+    }
+    set_secure_state();
+    return run_menu(entry, bs, preferred, boot_index, usable, PURR_MENU_WHY_KEY, NULL, NULL, true) == 1;
+}
+
+int purr_bootpkg_start(const bootloader_state_t *bs, int preferred, bool fast, uint32_t why, int fail_slot,
+                       int *boot_index, bool (*usable)(int index))
+{
+    uint32_t entry = 0;
+    bool shown = false;
+    if (!fast || why != 0) {
+        entry = load_package();
+        if (entry == 0) {
+            return -1;                                      /* no usable package: boot what the ladder chose, no screen */
+        }
+        set_secure_state();
+        if (!s_pkg_v4) {                                    /* an older package knows only the old menu: show it as before */
+            int r = run_menu(entry, bs, preferred, boot_index, usable, PURR_MENU_WHY_KEY, NULL, NULL, true);
+            return r == 1 ? 1 : (r == 2 ? 2 : 0);
+        }
+        pkg_stage(entry, PURR_PKG_STAGE_SPLASH, preferred == FACTORY_INDEX ? "Starting KittenOS" : "Starting PURR OS", 0);
+        shown = true;
+    }
+
+    /* The check of the slot that would start. On a fast start this is the only thing that happens; the signature check is never skipped. */
+    bool ok = usable(preferred);
+    if (why == 0 && !ok) {
+        why = PURR_MENU_WHY_NO_VERIFY;
+    }
+    if (why == 0 && shown) {
+        if (pkg_stage(entry, PURR_PKG_STAGE_KEYCHECK, "", 300) == 1) {
+            why = PURR_MENU_WHY_KEY;
+        }
+    }
+    if (why == 0) {
+        *boot_index = preferred;
+        return 0;
+    }
+
+    if (entry == 0) {                                       /* a fast start that ran into trouble: the screens come back for this one */
+        entry = load_package();
+        if (entry == 0) {
+            return -1;
+        }
+        set_secure_state();
+        if (!s_pkg_v4) {
+            int r = run_menu(entry, bs, preferred, boot_index, usable, PURR_MENU_WHY_KEY, NULL, NULL, true);
+            return r == 1 ? 1 : (r == 2 ? 2 : 0);
+        }
+    }
+    const char *d1 = NULL, *d2 = NULL;
+    if (why == PURR_MENU_WHY_NO_VERIFY) {
+        purr_slot_failure_text(fail_slot >= 0 ? fail_slot : preferred, &d1, &d2);
+    }
+    int r = run_menu(entry, bs, preferred, boot_index, usable, why, d1, d2, false);
+    return r == 1 ? 1 : (r == 2 ? 2 : 0);
 }

@@ -6,6 +6,8 @@
 
 /* 64 hex characters: 32 bytes of 0xAB. */
 #define HASH64 "abababababababababababababababababababababababababababababababab"
+/* 64 hex characters: 32 bytes of 0xCD -- a second, distinct hash for payload_sha256 tests. */
+#define HASH64_B "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
 
 static void expect_hash(const uint8_t *got)
 {
@@ -61,6 +63,124 @@ static void test_basic_parse(void)
     CHECK(k != NULL);
     CHECK(strcmp(k->chip, "any") == 0);
     CHECK(strcmp(k->board, "any") == 0);
+}
+
+static void test_payload_fields(void)
+{
+    /* F-14: payload_size/payload_sha256 are optional -- a component whose partition holds
+     * only the stripped payload (kernel, kittenos) carries them so RecoveryLoader can check
+     * what's already installed without downloading it again; bootpkg (the whole signed
+     * container lands on its partition) has no reason to. */
+    const char *text =
+        "component=kernel\n"
+        "version=1.0.0\n"
+        "file=kernel.cat\n"
+        "size=1086941\n"
+        "sha256=" HASH64 "\n"
+        "key=boot\n"
+        "payload_size=233796\n"
+        "payload_sha256=" HASH64_B "\n"
+        "\n"
+        "component=bootpkg\n"
+        "version=1.0.0\n"
+        "file=bootpkg.cat\n"
+        "size=4361\n"
+        "sha256=" HASH64 "\n"
+        "key=boot\n";
+
+    purr_manifest_t m;
+    int n = purr_manifest_parse(&m, text, strlen(text));
+    CHECK_EQ(n, 2);
+    CHECK_EQ(m.dropped, 0);
+
+    const purr_manifest_entry_t *kernel = purr_manifest_find(&m, "kernel", NULL, NULL);
+    CHECK(kernel != NULL);
+    CHECK_EQ(kernel->payload_size, 233796u);
+    CHECK_EQ(kernel->have_payload_sha256, 1);
+    for (int i = 0; i < 32; i++) {
+        CHECK_EQ(kernel->payload_sha256[i], 0xCD);
+    }
+
+    /* An entry that never had the lines at all: absent, not a zeroed-out "match anything". */
+    const purr_manifest_entry_t *bootpkg = purr_manifest_find(&m, "bootpkg", NULL, NULL);
+    CHECK(bootpkg != NULL);
+    CHECK_EQ(bootpkg->payload_size, 0u);
+    CHECK_EQ(bootpkg->have_payload_sha256, 0);
+}
+
+static void test_ui_pack_entry(void)
+{
+    /* The UI picture pack (OTA/SPEC.md, uiassets): a recovery component like the kernel, signed for the system key, with its payload hash so
+     * stage 2 can see what is already in the ui_assets partition. It is found by name and board; a release without one simply has no entry. */
+    const char *text =
+        "component=uiassets\n"
+        "version=1.0.17\n"
+        "chip=esp32s3\n"
+        "board=tdeck_plus\n"
+        "file=uiassets-tdeck_plus.cat\n"
+        "size=149000\n"
+        "sha256=" HASH64 "\n"
+        "key=system\n"
+        "payload_size=148831\n"
+        "payload_sha256=" HASH64_B "\n";
+
+    purr_manifest_t m;
+    CHECK_EQ(purr_manifest_parse(&m, text, strlen(text)), 1);
+    const purr_manifest_entry_t *e = purr_manifest_find(&m, "uiassets", "esp32s3", "tdeck_plus");
+    CHECK(e != NULL);
+    CHECK_EQ(e->size, 149000u);
+    CHECK_EQ(e->payload_size, 148831u);
+    CHECK_EQ(e->have_payload_sha256, 1);
+    CHECK(strcmp(e->file, "uiassets-tdeck_plus.cat") == 0);
+    CHECK(strcmp(e->key_role, "system") == 0);
+    CHECK(purr_manifest_find(&m, "uiassets", "esp32s3", "waveshare154") == NULL);            /* another board has no pack here */
+    CHECK(purr_manifest_find(&m, "kernel", "esp32s3", "tdeck_plus") == NULL);
+}
+
+static void test_module_index_entry(void)
+{
+    const char *text =
+        "component=fs\n"
+        "type=kernelmod\n"
+        "version=0.1.0\n"
+        "chip=esp32s3\n"
+        "board=tdeck_plus\n"
+        "file=fs-tdeck_plus-0.1.0.cat\n"
+        "size=2737\n"
+        "sha256=" HASH64 "\n"
+        "key=developer\n"
+        "min_coreos=1.2.0\n"
+        "\n"
+        "component=about\n"
+        "type=module\n"
+        "version=0.1.0\n"
+        "file=about-tdeck_plus-0.1.0.cat\n"
+        "size=453\n"
+        "sha256=" HASH64 "\n"
+        "key=developer\n";
+
+    purr_manifest_t m;
+    int n = purr_manifest_parse(&m, text, strlen(text));
+    CHECK_EQ(n, 2);
+    CHECK_EQ(m.dropped, 0);
+
+    const purr_manifest_entry_t *fs = purr_manifest_find(&m, "fs", "esp32s3", "tdeck_plus");
+    CHECK(fs != NULL);
+    CHECK(strcmp(fs->type, "kernelmod") == 0);
+    CHECK(strcmp(fs->min_coreos, "1.2.0") == 0);
+
+    const purr_manifest_entry_t *about = purr_manifest_find(&m, "about", NULL, NULL);
+    CHECK(about != NULL);
+    CHECK(strcmp(about->type, "module") == 0);
+
+    /* A whole-component entry (no `type=` line at all) still parses with an empty type,
+     * distinguishing it from either module shape -- existing recovery-manifest entries are
+     * unaffected by this field's addition. */
+    const char *plain =
+        "component=coreos\nversion=1.0.0\nfile=c.kitt\nsize=10\nsha256=" HASH64 "\n";
+    purr_manifest_t m2;
+    purr_manifest_parse(&m2, plain, strlen(plain));
+    CHECK(strcmp(m2.entries[0].type, "") == 0);
 }
 
 static void test_find_misses(void)
@@ -179,9 +299,83 @@ static void test_empty_input(void)
     CHECK_EQ(m.dropped, 0);
 }
 
+static void test_driver_entry_abi_range_and_blocked(void)
+{
+    const char *text =
+        "component=bme280\ntype=driver\nversion=2\nboard=any\nfile=bme280.cat\nsize=900\nsha256=" HASH64 "\n"
+        "compatible=bme280\nbuses=i2c\ncatcall=sensor\nabi_min=4\nabi_max=6\n\n"
+        "component=old\ntype=driver\nversion=1\nfile=old.cat\nsize=10\nsha256=" HASH64 "\nblocked=yes\nabi_min=banana\n";
+    purr_manifest_t m;
+    CHECK_EQ(purr_manifest_parse(&m, text, strlen(text)), 2);
+    CHECK_EQ(m.entries[0].abi_min, 4);
+    CHECK_EQ(m.entries[0].abi_max, 6);
+    CHECK_EQ(m.entries[0].blocked, 0);
+    CHECK_EQ(m.entries[1].blocked, 1);
+    CHECK_EQ(m.entries[1].abi_min, 0);                 /* a malformed number is ignored, not guessed */
+}
+
+static void test_withdrawn_entry_is_never_found(void)
+{
+    const char *text =
+        "release=dev-1\n"
+        "\n"
+        "component=kernel\nversion=1.0.20\nfile=k.cat\nsize=100\nsha256=" HASH64 "\nwithdrawn=yes\n"
+        "\n"
+        "component=loader\nversion=1.0.20\nfile=l.cat\nsize=100\nsha256=" HASH64 "\n";
+    purr_manifest_t m;
+    purr_manifest_parse(&m, text, strlen(text));
+    CHECK_EQ(m.count, 2);
+    CHECK_EQ(m.entries[0].withdrawn, 1);
+    CHECK_EQ(m.entries[1].withdrawn, 0);
+    CHECK(purr_manifest_find(&m, "kernel", NULL, NULL) == NULL);       /* a client asking for the kernel is told there is none */
+    CHECK(purr_manifest_find_any(&m, "kernel", NULL, NULL) != NULL);   /* the tool and the "why" can still see it */
+    CHECK(purr_manifest_find(&m, "loader", NULL, NULL) != NULL);       /* only the withdrawn one is affected */
+}
+
+static void test_withdrawn_list_names_versions_and_wildcards(void)
+{
+    const char *text =
+        "release=dev-2\n"
+        "withdrawn_versions=kernel@1.0.20, kittenos@1.0.20,*@1.0.9\n"
+        "withdrawn_reason=the setup wizard showed two Wi-Fi pages\n"
+        "\n"
+        "component=kernel\nversion=1.0.21\nfile=k.cat\nsize=100\nsha256=" HASH64 "\n"
+        "\n"
+        "component=loader\nversion=1.0.9\nfile=l.cat\nsize=100\nsha256=" HASH64 "\n";
+    purr_manifest_t m;
+    char why[80] = "";
+    purr_manifest_parse(&m, text, strlen(text));
+    CHECK(purr_manifest_is_withdrawn(&m, "kernel", "1.0.20", why, sizeof(why)));       /* the version a device may be running */
+    CHECK_EQ(strcmp(why, "the setup wizard showed two Wi-Fi pages"), 0);
+    CHECK(purr_manifest_is_withdrawn(&m, "kittenos", "1.0.20", NULL, 0));
+    CHECK(!purr_manifest_is_withdrawn(&m, "kernel", "1.0.21", NULL, 0));               /* the good one is not on the list */
+    CHECK(!purr_manifest_is_withdrawn(&m, "kernel", "1.0.2", NULL, 0));                /* a prefix of a version is not that version */
+    CHECK(!purr_manifest_is_withdrawn(&m, "loader", "1.0.20", NULL, 0));               /* not named for that component */
+    CHECK(purr_manifest_is_withdrawn(&m, "loader", "1.0.9", NULL, 0));                 /* "*" is every component */
+    CHECK(purr_manifest_find(&m, "kernel", NULL, NULL) != NULL);                       /* 1.0.21 is offered */
+    CHECK(purr_manifest_find(&m, "loader", NULL, NULL) == NULL);                       /* the loader entry IS 1.0.9, which the list names */
+    CHECK(!purr_manifest_is_withdrawn(&m, "kernel", NULL, NULL, 0));
+}
+
+static void test_a_manifest_without_the_fields_withdraws_nothing(void)
+{
+    const char *text = "release=1\n\ncomponent=kernel\nversion=1.0.0\nfile=k.cat\nsize=100\nsha256=" HASH64 "\n";
+    purr_manifest_t m;
+    purr_manifest_parse(&m, text, strlen(text));
+    CHECK(purr_manifest_find(&m, "kernel", NULL, NULL) != NULL);
+    CHECK(!purr_manifest_is_withdrawn(&m, "kernel", "1.0.0", NULL, 0));
+    CHECK_EQ(m.withdrawn_versions[0], 0);
+}
+
 int main(void)
 {
+    test_withdrawn_entry_is_never_found();
+    test_withdrawn_list_names_versions_and_wildcards();
+    test_a_manifest_without_the_fields_withdraws_nothing();
     test_basic_parse();
+    test_payload_fields();
+    test_ui_pack_entry();
+    test_module_index_entry();
     test_find_misses();
     test_comments_and_blank_runs();
     test_missing_required_fields_are_dropped();
@@ -191,5 +385,6 @@ int main(void)
     test_lines_without_equals_are_ignored();
     test_too_many_entries();
     test_empty_input();
+    test_driver_entry_abi_range_and_blocked();
     TK_DONE("test_manifest");
 }

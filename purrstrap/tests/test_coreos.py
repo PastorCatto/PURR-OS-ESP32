@@ -71,6 +71,11 @@ class FindIdfTests(unittest.TestCase):
                               which=lambda n: None)
         self.assertEqual((idf.kind, idf.version), ("export", "5.3.5"))
 
+    def test_export_sh_in_the_esp_folder_next_to_the_version(self):
+        touch(self.home, "esp/esp-idf-v5.3.5/export.sh")
+        idf = coreos.find_idf(env={}, home=self.home, windows=False, which=lambda n: None)
+        self.assertEqual((idf.kind, idf.version), ("export", "5.3.5"))
+
     def test_nothing_found(self):
         self.assertIsNone(coreos.find_idf(env={}, home=self.home, windows=False,
                                           which=lambda n: None))
@@ -85,6 +90,34 @@ class CommandTests(unittest.TestCase):
         self.assertIn("SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.board.cyd_24c;"
                       "sdkconfig.profile.recovery", args)
         self.assertIn("IDF_TARGET=esp32s3", coreos.idf_args("tdeck_plus", "full"))
+
+    def test_vm_flavor_adds_its_overlay_and_its_own_build_directory(self):
+        args = coreos.idf_args("tdeck_plus", "full", "vm")
+        self.assertEqual(args[:3], ["idf.py", "-B", "build/tdeck_plus-full-vm"])
+        self.assertIn("SDKCONFIG=build/tdeck_plus-full-vm/sdkconfig", args)
+        self.assertIn("SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.board.tdeck_plus;"
+                      "sdkconfig.profile.full;sdkconfig.flavor.vm", args)
+        # the standard flavor is unchanged, and keeps its old directory
+        self.assertEqual(coreos.build_dir_name("tdeck_plus", "full"), "build/tdeck_plus-full")
+        self.assertEqual(coreos.build_dir_name("tdeck_plus", "full", "standard"), "build/tdeck_plus-full")
+        self.assertNotIn("sdkconfig.flavor", ";".join(coreos.idf_args("tdeck_plus", "full")))
+
+    def test_android_shell_adds_its_overlay_after_the_profile_and_its_own_build_directory(self):
+        args = coreos.idf_args("tdeck_plus", "full", "standard", "android")
+        self.assertEqual(args[:3], ["idf.py", "-B", "build/tdeck_plus-full-android"])
+        self.assertIn("SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.board.tdeck_plus;"
+                      "sdkconfig.profile.full;sdkconfig.shell.android", args)
+        self.assertEqual(coreos.build_dir_name("tdeck_plus", "full", "vm", "android"), "build/tdeck_plus-full-vm-android")
+        # the default shell is unchanged
+        self.assertEqual(coreos.build_dir_name("tdeck_plus", "full"), "build/tdeck_plus-full")
+        self.assertNotIn("sdkconfig.shell", ";".join(coreos.idf_args("tdeck_plus", "full")))
+
+    def test_vm_flavor_overlay_file_is_required(self):
+        # the repo's real PurrOS/ has it; a tree without it is reported like any missing file
+        real = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "PurrOS")
+        self.assertEqual(coreos.project_problems(real, "tdeck_plus", "full", "vm"), [])
+        problems = coreos.project_problems(tempfile.mkdtemp(), "tdeck_plus", "full", "vm")
+        self.assertTrue(any("sdkconfig.flavor.vm" in p for p in problems))
 
     def test_wrap_active_is_unchanged(self):
         idf = coreos.Idf("active")

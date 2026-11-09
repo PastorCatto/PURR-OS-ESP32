@@ -32,6 +32,14 @@ typedef struct {
     uint16_t width;               /* current orientation */
     uint16_t height;
     uint16_t max_chunk_pixels;    /* the most the driver wants in one blit call */
+    /* F-02: 16 for every RGB565 panel so far, 1 for a monochrome e-ink/e-paper panel. Callers
+     * still pass/receive uint16_t pixel data either way -- blit()/fill() never change shape --
+     * a 1bpp driver thresholds each RGB565 value to black/white itself (0x0000 -> black,
+     * anything else -> white, the archive epd1in54.c driver's own convention, carried over
+     * unchanged since it already matches every existing text-drawing caller's background/
+     * foreground choice). This field is purely informational, for a caller that wants to
+     * know not to expect real color. */
+    uint8_t  bits_per_pixel;
     char     name[24];
 } purr_display_info_t;
 

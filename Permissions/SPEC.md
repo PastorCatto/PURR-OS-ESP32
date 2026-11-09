@@ -26,7 +26,10 @@ installing and the shell (`../AppManager/SPEC.md`), running apps
 - **Revocation:** the user can change or remove any grant later. The next attempt
   asks again, unless "don't ask again" is set *(assumed)*.
 - **Prompts are text on the console for now,** since the shell comes first. A dialog
-  can replace them later.
+  can replace them later. *(plan10: the W10M shell now shows a dialog card with Allow always / Just once /
+  Don't allow, and the third button becomes "Don't ask again" after two refusals. The call that caused it
+  returns `ASK` at once and the app is sent `PURR_APPEV_PERM` with the answer, so no app task ever blocks
+  inside a callback.)*
 
 ## 2. The permissions
 
@@ -40,15 +43,23 @@ app's own storage folder, `system` (read-only battery, time, memory), audio outp
 |------------|--------|
 | `wifi` | Scanning and connecting |
 | `bluetooth` | Bluetooth |
-| `radio` | LoRa and similar radios |
+| `radio` | LoRa and similar radios. A messaging service asks for the radio lease with it (`../Messaging/SPEC.md`). |
+| `messaging` | Reading and sending messages through the shared message layer, and listing the messaging services (`../Messaging/SPEC.md`). Added 2026-11-05, draft. |
+| `contacts` | Reading and changing the address book (`../Messaging/SPEC.md`). Added 2026-11-05, draft. |
 | `gps` | Location, as parsed fixes |
 | `gps-raw` | The raw GPS stream (`gps_raw`) |
-| `shared-storage` | Files and the SD card outside the app's own folder |
+| `shared-storage` | Files outside the app's own folder: the signed-in user's home, read and write (`files` catcall). The SD card is not mounted by any driver yet. |
+| `system-files` | Reading (never changing) the rest of the file system through the `files` catcall. Administrators only. |
 | `input-monitor` | Reading keys while the app is not focused |
 | `audio-input` | The microphone (a later catcall) |
 | `system-settings` | Brightness, time and similar settings |
 | `hardware-raw` | Direct GPIO, I2C and SPI (`gpio`, `i2c`, `spi`), never pins or buses that drivers own |
 | `device-admin` | Adding, removing and exporting other installed apps (`appmgr` catcall) |
+| `keep-awake` | Holding the screen on or the CPU out of light sleep (`power` catcall, `hold`). Added by plan10. |
+| `wake-alarm` | Waking the device on a schedule (`power` catcall, `alarm_set`). Added by plan10. |
+
+Both power permissions are dangerous because battery is what a handheld runs out of. Android makes plain wake locks a
+normal permission; here a CPU lock carries a lease and expires on its own, and the user still gets the say.
 
 **Special:**
 

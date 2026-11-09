@@ -1,0 +1,3 @@
+# T-Deck (original, no Plus): ESP32-S3, 16 MB quad flash, 8 MB PSRAM -- same module as
+# T-Deck Plus, same partition layout (bootloader/partitions.csv's default already fits).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y

@@ -1,0 +1,487 @@
+/*
+ * purr_w10m_notes.c - the Notes app: a sheet over the start screen, drawn from the W10M theme.
+ *
+ * A list of the signed-in user's notes (newest first) and an editor. A note is a plain text file,
+ * /home/<name>/notes/NNNN.txt; the first line is its title. Leaving the editor saves it (an empty note is
+ * not kept). Deleting asks twice. Typing comes from the hardware keyboard through the keypad group.
+ *
+ * UI service task only, like the rest of the shell.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_log.h"
+#include "lvgl.h"
+
+#include "commands.h"
+#include "login.h"
+#include "purr_lvgl.h"
+#include "purr_w10m_priv.h"
+#include "purr_w10m_theme.h"
+
+#define TAG "w10m-notes"
+#define HEAD_H 30
+#define MAX_NOTES 24
+#define NOTE_MAX 2000
+#define PREVIEW_READ 160
+
+typedef enum { NOTES_LIST, NOTES_EDIT } notes_page_t;
+
+typedef struct {
+    char file[16];
+    char title[40];
+    char sub[48];
+} note_t;
+
+static lv_obj_t *s_sheet, *s_head, *s_head_title, *s_head_act, *s_body;
+static lv_obj_t *s_ta, *s_count;
+static lv_group_t *s_group;
+static notes_page_t s_page = NOTES_LIST;
+static int s_open;
+static int s_armed;                                 /* the delete button was tapped once */
+static char s_cur[16];                              /* the file being edited, "" for a new note */
+
+static note_t s_notes[MAX_NOTES];
+static int s_n;
+static char s_text[NOTE_MAX + 1];
+
+static void show_page(notes_page_t p);
+
+/* ---------------------------------------------------------------- storage */
+
+static void notes_dir(char *out, size_t cap)
+{
+    snprintf(out, cap, "/home/%.24s/notes", purr_login_current()->name);
+}
+
+static void note_path(char *out, size_t cap, const char *file)
+{
+    char dir[64];
+    notes_dir(dir, sizeof(dir));
+    snprintf(out, cap, "%s/%.15s", dir, file);
+}
+
+typedef struct {
+    char *buf;
+    size_t cap, len;
+} acc_t;
+
+static int accumulate(void *vctx, const void *data, uint32_t n)
+{
+    acc_t *a = vctx;
+    size_t room = a->cap - a->len;
+    size_t take = n < room ? n : room;
+    memcpy(a->buf + a->len, data, take);
+    a->len += take;
+    return take < n ? -1 : 0;                       /* stop reading once the buffer is full */
+}
+
+/* Reads up to cap-1 bytes of a note into buf; returns the length (0 when missing or empty). */
+static size_t read_note(const char *file, char *buf, size_t cap)
+{
+    char path[96];
+    note_path(path, sizeof(path), file);
+    acc_t a = {buf, cap - 1, 0};
+    purr_fs_read(purr_login_fs(), path, accumulate, &a);
+    buf[a.len] = '\0';
+    return a.len;
+}
+
+static void list_cb(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)ctx;
+    (void)size;
+    size_t l = strlen(name);
+    if (is_dir || l < 5 || l >= sizeof(s_notes[0].file) || strcmp(name + l - 4, ".txt") != 0 || s_n >= MAX_NOTES) {
+        return;
+    }
+    snprintf(s_notes[s_n++].file, sizeof(s_notes[0].file), "%s", name);
+}
+
+/* The first non-empty line, and the one after it, of a note's text. */
+static void split_lines(const char *text, char *first, size_t fcap, char *second, size_t scap)
+{
+    first[0] = second[0] = '\0';
+    char *dst[2] = {first, second};
+    size_t cap[2] = {fcap, scap};
+    int which = 0;
+    const char *p = text;
+    while (*p != '\0' && which < 2) {
+        while (*p == '\n' || *p == '\r' || *p == ' ') {
+            p++;
+        }
+        size_t n = 0;
+        while (p[n] != '\0' && p[n] != '\n' && p[n] != '\r') {
+            n++;
+        }
+        if (n > 0) {
+            size_t take = n < cap[which] - 1 ? n : cap[which] - 1;
+            memcpy(dst[which], p, take);
+            dst[which][take] = '\0';
+            which++;
+        }
+        p += n;
+    }
+}
+
+static void load_list(void)
+{
+    s_n = 0;
+    char dir[64];
+    notes_dir(dir, sizeof(dir));
+    purr_fs_list(purr_login_fs(), dir, list_cb, NULL);
+    for (int i = 1; i < s_n; i++) {                 /* newest (highest number) first */
+        note_t t = s_notes[i];
+        int k = i - 1;
+        while (k >= 0 && strcmp(s_notes[k].file, t.file) < 0) {
+            s_notes[k + 1] = s_notes[k];
+            k--;
+        }
+        s_notes[k + 1] = t;
+    }
+    char head[PREVIEW_READ];
+    for (int i = 0; i < s_n; i++) {
+        read_note(s_notes[i].file, head, sizeof(head));
+        split_lines(head, s_notes[i].title, sizeof(s_notes[i].title), s_notes[i].sub, sizeof(s_notes[i].sub));
+        if (s_notes[i].title[0] == '\0') {
+            snprintf(s_notes[i].title, sizeof(s_notes[i].title), "(empty)");
+        }
+    }
+}
+
+static int next_number(void)
+{
+    int top = 0;
+    for (int i = 0; i < s_n; i++) {
+        int v = atoi(s_notes[i].file);
+        if (v > top) {
+            top = v;
+        }
+    }
+    return top + 1;
+}
+
+static void write_note(const char *file, const char *text)
+{
+    char dir[64], path[96];
+    purr_fs_mkdir(purr_login_fs(), "/home");
+    snprintf(dir, sizeof(dir), "/home/%.24s", purr_login_current()->name);
+    purr_fs_mkdir(purr_login_fs(), dir);
+    notes_dir(dir, sizeof(dir));
+    purr_fs_mkdir(purr_login_fs(), dir);            /* an existing folder is just an ignored error */
+    note_path(path, sizeof(path), file);
+    if (purr_fs_write(purr_login_fs(), path, text, (uint32_t)strlen(text)) < 0) {
+        ESP_LOGW(TAG, "could not save %s", path);
+    }
+}
+
+static void remove_note(const char *file)
+{
+    char path[96];
+    note_path(path, sizeof(path), file);
+    purr_fs_remove(purr_login_fs(), path);
+}
+
+/* ---------------------------------------------------------------- small widget helpers */
+
+static lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font, purr_th_style_t style)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_label_set_text(l, text);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_obj_set_style_text_font(l, font, 0);
+    purr_theme_apply(l, style);
+    return l;
+}
+
+static void note_row(lv_obj_t *parent, const note_t *n, lv_event_cb_t cb)
+{
+    lv_obj_t *r = lv_obj_create(parent);
+    lv_obj_remove_style_all(r);
+    lv_obj_set_size(r, LV_PCT(100), 48);
+    lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(r, LV_OBJ_FLAG_EVENT_BUBBLE);
+    purr_theme_apply(r, PURR_TH_SURFACE);
+    purr_theme_apply(r, PURR_TH_ACCENT_BORDER);
+    purr_theme_apply(r, PURR_TH_ROW_PRESSED);
+    lv_obj_add_event_cb(r, cb, LV_EVENT_CLICKED, (void *)n);
+
+    lv_obj_t *a = lv_label_create(r);
+    lv_label_set_text(a, n->title);
+    lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(a, LV_PCT(92));
+    lv_obj_set_style_text_font(a, &lv_font_montserrat_14, 0);
+    purr_theme_apply(a, PURR_TH_TEXT);
+    lv_obj_align(a, LV_ALIGN_LEFT_MID, 10, n->sub[0] ? -9 : 0);
+    if (n->sub[0]) {
+        lv_obj_t *d = lv_label_create(r);
+        lv_label_set_text(d, n->sub);
+        lv_label_set_long_mode(d, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(d, LV_PCT(92));
+        lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
+        purr_theme_apply(d, PURR_TH_DIM);
+        lv_obj_align(d, LV_ALIGN_LEFT_MID, 10, 10);
+    }
+}
+
+/* ---------------------------------------------------------------- pages */
+
+static void set_action(const char *symbol, int accent)
+{
+    lv_label_set_text(s_head_act, symbol);
+    lv_obj_set_style_text_color(s_head_act, accent ? purr_theme_accent_color() : purr_theme_text_color(), 0);
+    lv_obj_remove_flag(s_head_act, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void edit_open(const char *file);
+
+static void note_clicked(lv_event_t *e)
+{
+    const note_t *n = lv_event_get_user_data(e);
+    edit_open(n->file);
+}
+
+static void page_list(void)
+{
+    lv_label_set_text(s_head_title, "Notes");
+    set_action(LV_SYMBOL_PLUS, 1);
+    load_list();
+    if (s_n == 0) {
+        label(s_body, "No notes yet.", &lv_font_montserrat_16, PURR_TH_TEXT);
+        label(s_body, "Tap + to write one. Notes are kept in your own folder.", &lv_font_montserrat_12, PURR_TH_DIM);
+        return;
+    }
+    for (int i = 0; i < s_n; i++) {
+        note_row(s_body, &s_notes[i], note_clicked);
+    }
+}
+
+static int edit_height(void)
+{
+    return w10m_disp_h() - W10M_STATUS_H - HEAD_H - 28;
+}
+
+static void ta_changed(lv_event_t *e)
+{
+    (void)e;
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%u / %d", (unsigned)strlen(lv_textarea_get_text(s_ta)), NOTE_MAX);
+    lv_label_set_text(s_count, buf);
+}
+
+static void page_edit(const char *file)
+{
+    snprintf(s_cur, sizeof(s_cur), "%s", file);
+    s_text[0] = '\0';
+    if (file[0] != '\0') {
+        read_note(file, s_text, sizeof(s_text));
+    }
+    lv_label_set_text(s_head_title, file[0] ? "Note" : "New note");
+    set_action(LV_SYMBOL_TRASH, 0);
+    s_armed = 0;
+
+    s_ta = lv_textarea_create(s_body);
+    lv_textarea_set_max_length(s_ta, NOTE_MAX);
+    lv_textarea_set_placeholder_text(s_ta, "Write something...");
+    lv_obj_set_size(s_ta, LV_PCT(100), edit_height());
+    lv_obj_set_style_text_font(s_ta, &lv_font_montserrat_14, 0);
+    lv_textarea_set_text(s_ta, s_text);
+    lv_obj_add_event_cb(s_ta, ta_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_group_add_obj(s_group, s_ta);
+    lv_group_focus_obj(s_ta);
+
+    s_count = label(s_body, "", &lv_font_montserrat_12, PURR_TH_DIM);
+    lv_obj_set_style_text_align(s_count, LV_TEXT_ALIGN_RIGHT, 0);
+    ta_changed(NULL);
+}
+
+static void show_page(notes_page_t p)
+{
+    s_page = p;
+    s_ta = s_count = NULL;
+    lv_group_remove_all_objs(s_group);
+    lv_obj_clean(s_body);
+    lv_obj_scroll_to(s_body, 0, 0, LV_ANIM_OFF);
+    if (p == NOTES_LIST) {
+        page_list();
+    }
+}
+
+static void edit_open(const char *file)
+{
+    show_page(NOTES_EDIT);
+    page_edit(file);
+}
+
+/* Saves what is in the editor (an empty note is dropped), then shows the list. */
+static void leave_editor(int keep)
+{
+    if (s_page == NOTES_EDIT && s_ta != NULL) {
+        const char *t = lv_textarea_get_text(s_ta);
+        if (!keep || t[0] == '\0') {
+            if (s_cur[0] != '\0') {
+                remove_note(s_cur);
+            }
+        } else {
+            char file[16];
+            if (s_cur[0] != '\0') {
+                snprintf(file, sizeof(file), "%s", s_cur);
+            } else {
+                load_list();
+                snprintf(file, sizeof(file), "%04d.txt", next_number());
+            }
+            write_note(file, t);
+        }
+    }
+    show_page(NOTES_LIST);
+}
+
+/* ---------------------------------------------------------------- the sheet */
+
+static void x_cb(void *obj, int32_t v) { lv_obj_set_x((lv_obj_t *)obj, v); }
+
+static void anim_done(lv_anim_t *a)
+{
+    (void)a;
+    if (!s_open) {
+        lv_obj_add_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void move(int open)
+{
+    s_open = open;
+    lv_indev_t *kb = purr_lvgl_keypad();
+    if (open) {
+        lv_obj_remove_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
+        show_page(NOTES_LIST);
+        if (kb != NULL) {
+            lv_indev_set_group(kb, s_group);
+        }
+    } else if (kb != NULL) {
+        lv_indev_set_group(kb, NULL);
+    }
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_sheet);
+    lv_anim_set_exec_cb(&a, x_cb);
+    lv_anim_set_values(&a, lv_obj_get_x(s_sheet), open ? 0 : w10m_disp_w());
+    lv_anim_set_duration(&a, 200);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, anim_done);
+    lv_anim_start(&a);
+}
+
+static void back_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_page == NOTES_EDIT) {
+        leave_editor(1);
+    } else {
+        move(0);
+    }
+}
+
+static void action_clicked(lv_event_t *e)
+{
+    (void)e;
+    if (s_page == NOTES_LIST) {
+        edit_open("");
+        return;
+    }
+    if (s_cur[0] == '\0' && lv_textarea_get_text(s_ta)[0] == '\0') {
+        leave_editor(0);                            /* nothing was written: just close it */
+        return;
+    }
+    if (!s_armed) {
+        s_armed = 1;
+        lv_label_set_text(s_head_act, "Delete?");
+        lv_obj_set_style_text_color(s_head_act, lv_color_hex(0xFFB900), 0);
+        return;
+    }
+    leave_editor(0);
+}
+
+void w10m_notes_open(void)
+{
+    if (s_sheet != NULL && !s_open && purr_login_current()->name[0] != '\0') {
+        move(1);
+    }
+}
+
+int w10m_notes_is_open(void) { return s_open; }
+
+void w10m_notes_layout(void)
+{
+    if (s_sheet == NULL) {
+        return;
+    }
+    int w = w10m_disp_w(), h = w10m_disp_h();
+    lv_obj_set_size(s_sheet, w, h - W10M_STATUS_H);
+    lv_obj_set_pos(s_sheet, s_open ? 0 : w, W10M_STATUS_H);
+    lv_obj_set_size(s_head, w, HEAD_H);
+    lv_obj_set_size(s_body, w, h - W10M_STATUS_H - HEAD_H);
+    lv_obj_align(s_body, LV_ALIGN_TOP_LEFT, 0, HEAD_H);
+    if (s_ta != NULL) {
+        lv_obj_set_height(s_ta, edit_height());
+    }
+    if (!s_open) {
+        lv_obj_add_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void w10m_notes_refresh(void)
+{
+    if (s_sheet != NULL && s_open && s_page == NOTES_LIST) {
+        show_page(NOTES_LIST);                      /* the theme changed: redraw with the new colours */
+    } else if (s_head_act != NULL && s_page == NOTES_LIST) {
+        set_action(LV_SYMBOL_PLUS, 1);
+    }
+}
+
+void w10m_notes_build(void)
+{
+    s_group = lv_group_create();
+    s_sheet = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(s_sheet);
+    purr_theme_apply(s_sheet, PURR_TH_SHEET);
+    lv_obj_clear_flag(s_sheet, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_sheet, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
+
+    s_head = lv_obj_create(s_sheet);
+    lv_obj_remove_style_all(s_head);
+    lv_obj_clear_flag(s_head, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_head, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_head, back_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *arrow = lv_label_create(s_head);
+    lv_label_set_text(arrow, LV_SYMBOL_LEFT);
+    purr_theme_apply(arrow, PURR_TH_TEXT);
+    lv_obj_align(arrow, LV_ALIGN_LEFT_MID, 8, 0);
+    s_head_title = lv_label_create(s_head);
+    lv_label_set_text(s_head_title, "Notes");
+    lv_obj_set_style_text_font(s_head_title, &lv_font_montserrat_16, 0);
+    purr_theme_apply(s_head_title, PURR_TH_TEXT);
+    lv_obj_align(s_head_title, LV_ALIGN_LEFT_MID, 34, 0);
+
+    /* The action sits above the header's own tap area, so it has its own. */
+    s_head_act = lv_label_create(s_sheet);
+    lv_label_set_text(s_head_act, LV_SYMBOL_PLUS);
+    lv_obj_set_style_text_font(s_head_act, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_pad_all(s_head_act, 6, 0);
+    lv_obj_add_flag(s_head_act, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_head_act, action_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_align(s_head_act, LV_ALIGN_TOP_RIGHT, -6, 0);
+
+    s_body = lv_obj_create(s_sheet);
+    lv_obj_remove_style_all(s_body);
+    lv_obj_set_flex_flow(s_body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_body, 4, 0);
+    lv_obj_set_style_pad_hor(s_body, 10, 0);
+    lv_obj_set_scrollbar_mode(s_body, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scroll_dir(s_body, LV_DIR_VER);
+    w10m_notes_layout();
+}

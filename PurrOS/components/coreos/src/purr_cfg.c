@@ -19,6 +19,7 @@ void purr_cfg_defaults(purr_cfg_t *cfg)
     cfg->size = (uint16_t)sizeof(purr_cfg_t);
     cfg->secure_mode = PURR_SECURE_WARN;
     cfg->boot_target = PURR_TARGET_NORMAL;
+    cfg->flags = PURR_CFGF_FRESH;                   /* never reached a healthy boot of the full OS yet */
     purr_cfg_seal(cfg);
 }
 
@@ -87,6 +88,9 @@ int purr_cfg_store(const purr_flash_t *fl, purr_cfg_t *cfg)
     purr_cfg_t copy[2], verify;
     int ok[2];
 
+    if (cfg->magic == PURR_CFG_VIEW_MAGIC) {
+        return -1;      /* a purr_trust_view(): effective values, never to be stored back */
+    }
     if (read_both(fl, copy, ok) != 0) {
         return -1;
     }
@@ -132,4 +136,32 @@ int purr_cfg_take_flag(purr_cfg_t *cfg, uint32_t flag)
     }
     cfg->flags &= ~flag;
     return 1;
+}
+
+#define HANDOFF_CRC_LEN  (sizeof(purr_handoff_t) - sizeof(uint32_t))
+
+void purr_handoff_make(purr_handoff_t *h, uint8_t boot_state, uint8_t key_id_used,
+                       uint8_t flags_used, uint32_t bootloader_version, uint8_t secure_state)
+{
+    memset(h, 0, sizeof(*h));
+    h->magic = PURR_HANDOFF_MAGIC;
+    h->version = PURR_HANDOFF_VERSION;
+    h->boot_state = boot_state;
+    h->key_id_used = key_id_used;
+    h->flags_used = flags_used;
+    h->bootloader_version = bootloader_version;
+    h->secure_state = secure_state;
+    h->crc32 = purr_crc32(0, h, HANDOFF_CRC_LEN);
+}
+
+void purr_handoff_set_reasons(purr_handoff_t *h, uint16_t reasons)
+{
+    h->recovery_reasons = reasons;
+    h->crc32 = purr_crc32(0, h, HANDOFF_CRC_LEN);
+}
+
+int purr_handoff_valid(const purr_handoff_t *h)
+{
+    return h->magic == PURR_HANDOFF_MAGIC && h->version == PURR_HANDOFF_VERSION &&
+           h->crc32 == purr_crc32(0, h, HANDOFF_CRC_LEN);
 }

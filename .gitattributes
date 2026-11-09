@@ -1,0 +1,6 @@
+# purrstrap-generated files must stay LF regardless of the OS/editor that
+# wrote them (it writes with plain open(path, "w"), so on Windows every \n
+# becomes \r\n on disk) — without this, every regen shows as a full-file diff.
+CatReleases/**/build.json text eol=lf
+CatReleases/**/manifest.json text eol=lf
+CoreOS/sdkconfig_* text eol=lf

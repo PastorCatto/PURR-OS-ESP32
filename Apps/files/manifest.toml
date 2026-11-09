@@ -1,0 +1,27 @@
+name = "files"
+version = "1.1.0"
+description = "File manager: browse, copy, rename and delete in your home folder; administrators can also read system files"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "files_entry"
+
+[catcalls]
+console = "1.0"
+ui = "2.0"
+app = "1.0"
+files = "1.0"
+
+[permissions]
+requests = ["shared-storage", "system-files"]
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 24576
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "Files"
+icon = ""

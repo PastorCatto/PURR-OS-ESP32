@@ -2,21 +2,23 @@
 
 #include "esp_partition.h"
 
+#include "purr_io.h"
+
 #define SECTOR 4096
 
 static int cs_read(void *ctx, uint32_t addr, void *buf, uint32_t len)
 {
-    return esp_partition_read(ctx, addr, buf, len) == ESP_OK ? 0 : -1;
+    return purr_io_partition_read(ctx, addr, buf, len) == ESP_OK ? 0 : -1;
 }
 
 static int cs_erase(void *ctx, uint32_t addr)
 {
-    return esp_partition_erase_range(ctx, addr, SECTOR) == ESP_OK ? 0 : -1;
+    return purr_io_partition_erase_range(ctx, addr, SECTOR) == ESP_OK ? 0 : -1;
 }
 
 static int cs_write(void *ctx, uint32_t addr, const void *buf, uint32_t len)
 {
-    return esp_partition_write(ctx, addr, buf, len) == ESP_OK ? 0 : -1;
+    return purr_io_partition_write(ctx, addr, buf, len) == ESP_OK ? 0 : -1;
 }
 
 int purr_cfgstore_open(purr_flash_t *fl)

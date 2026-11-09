@@ -6,24 +6,34 @@ See bootloader/SPEC.md section 9.
 """
 
 import glob
-import hashlib
 import os
 import shutil
 import struct
 
+from lib import image as pimg
 from lib.model import Action, Param, Script
 
 PKG_DIR = "bootpkg"
 # board -> (compiler prefix, chip id, linker script). Chip ids are esp_chip_id_t values.
-BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld")}
-VERSION = "0.1.0"
+BOARDS = {
+    "tdeck": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
+    "tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
+    "waveshare154": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
+}
+# Which pkg_hw_*.c backs a board's display/input -- the one real per-board source file
+# (the rest of sources() below is shared). "tdeck" reuses tdeck_plus's pkg_hw.c outright:
+# identical pins, nothing here talks to the one hardware difference (GPS) either. "BlackDeck"/
+# "BlackDeck+"/"InkyTuxedo" are this project's own codenames for these builds (pkg_main.c's
+# draw_header()), not upstream terms -- picked so a device on the bench is identifiable by
+# sight/log line, same reason the recovery releases this repo publishes are named
+# (JumpingJaguar1, ...).
+HW_SOURCE = {"tdeck": "pkg_hw.c", "tdeck_plus": "pkg_hw.c", "waveshare154": "pkg_hw_epd.c"}
+VERSION = "0.3.1"
 
-# Layout of purr_image_header_t in PurrOS/components/coreos/include/purr_abi.h.
-IMAGE_MAGIC = 0x50555252
-HEADER_FORMAT = "<IBHHBBH32s12s12sII32s64s"
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
+# Re-exported under their original names: purrstrap/tests/test_bootpkg.py reads these.
+HEADER_FORMAT = pimg.HEADER_FORMAT
+HEADER_SIZE = pimg.HEADER_SIZE
 PREAMBLE_FORMAT = "<IIII"          # purr_pkg_preamble_t
-IMG_MODULE, MOD_BOOTPKG = 3, 6
 TEXT_MAX = DATA_MAX = 0x8000
 
 
@@ -40,11 +50,7 @@ def make_image(text, data, bss_size, entry, chip_id, version=VERSION):
         raise ValueError(f"package too big for its window: text {len(text)} of "
                          f"{TEXT_MAX}, data+bss {len(data) + bss_size} of {DATA_MAX}")
     payload = pack_preamble(len(text), len(data), bss_size, entry) + text + data
-    header = struct.pack(HEADER_FORMAT, IMAGE_MAGIC, 1, HEADER_SIZE, chip_id, IMG_MODULE,
-                         0, MOD_BOOTPKG, b"bootpkg", version.encode(), b"",
-                         HEADER_SIZE, len(payload), hashlib.sha256(payload).digest(),
-                         b"\0" * 64)
-    return header + payload
+    return pimg.make_image("bootpkg", version, pimg.IMG_MODULE, pimg.MOD_BOOTPKG, payload, chip_id)
 
 
 # -- tools -------------------------------------------------------------
@@ -67,8 +73,9 @@ def find_tool(prefix, name, env=None):
     return None
 
 
-def compile_args(repo_root, board):
-    return ["-Os", "-std=gnu11", "-ffreestanding", "-fno-builtin", "-mlongcalls",
+def compile_args(repo_root, board, brand=""):
+    brand_flag = [f'-DPURR_BRAND_HEADER="{brand}"'] if brand else []
+    return brand_flag + ["-Os", "-std=gnu11", f'-DPKG_VERSION="{VERSION}"', "-ffreestanding", "-fno-builtin", "-mlongcalls",
             "-ffunction-sections", "-fdata-sections", "-Wall", "-Wextra", "-Werror",
             "-I", os.path.join(repo_root, PKG_DIR, "src"),
             "-I", os.path.join(repo_root, PKG_DIR, "boards"),
@@ -76,9 +83,10 @@ def compile_args(repo_root, board):
             "-I", os.path.join(repo_root, "PurrOS", "components", "kernel", "include")]
 
 
-def sources(repo_root):
+def sources(repo_root, board):
     return [os.path.join(repo_root, PKG_DIR, "src", "pkg_main.c"),
-            os.path.join(repo_root, PKG_DIR, "src", "pkg_hw.c"),
+            os.path.join(repo_root, PKG_DIR, "src", "pkg_ui.c"),
+            os.path.join(repo_root, PKG_DIR, "src", HW_SOURCE[board]),
             os.path.join(repo_root, "PurrOS", "components", "coreos", "src", "purr_menu.c"),
             os.path.join(repo_root, "PurrOS", "components", "kernel", "src",
                          "purr_font_data.c")]
@@ -98,7 +106,7 @@ def _symbols(nm_output):
     return table
 
 
-def build(ctx, board):
+def build(ctx, board, brand="", out=""):
     if board not in BOARDS:
         ctx.error(f"unknown board {board}")
         return 1
@@ -108,7 +116,11 @@ def build(ctx, board):
         ctx.error(f"{prefix} tools not found. Install ESP-IDF, or put them on PATH.")
         return 1
     root = ctx.repo_root
-    out = os.path.join(root, PKG_DIR, "build", board)
+    brand = os.path.abspath(brand).replace(os.sep, "/") if brand else ""
+    if brand and not os.path.isfile(brand):
+        ctx.error(f"{brand}: no such brand header. Make one with `purr brand build brand.toml`.")
+        return 1
+    out = os.path.abspath(out) if out else os.path.join(root, PKG_DIR, "build", board)
     os.makedirs(out, exist_ok=True)
 
     # The board header is included as "board.h".
@@ -117,9 +129,9 @@ def build(ctx, board):
         fh.write(f'#include "{board_header(root, board).replace(os.sep, "/")}"\n')
 
     objs = []
-    for src in sources(root):
+    for src in sources(root, board):
         obj = os.path.join(out, os.path.basename(src)[:-2] + ".o")
-        code = ctx.run([gcc] + compile_args(root, board) + ["-I", out, "-c", src, "-o", obj])
+        code = ctx.run([gcc] + compile_args(root, board, brand) + ["-I", out, "-c", src, "-o", obj])
         if code != 0:
             ctx.error(f"compile failed: {os.path.basename(src)}")
             return code
@@ -175,6 +187,8 @@ SCRIPT = Script(
     actions=(
         Action("build", "Build", build, help="compile, link and pack one board's package",
                params=(Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
-                             help="the board to build for"),)),
+                             help="the board to build for"),
+                      Param("brand", "path", default="", help="a purr_brand.h from `purr brand build`: the flavor's names and colours"),
+                      Param("out", "path", default="", help="build in this folder instead of bootpkg/build/<board>"))),
     ),
 )

@@ -41,6 +41,117 @@ typedef struct {
     uint32_t hz;
 } purr_keyboard_cfg_t;
 
+/* GT911 capacitive touch (T-Deck/T-Deck Plus), confirmed against the PURR-OS 0.11 archive's
+ * own hand-tuned driver (archive/DP9/code/source/drivers/touch/gt911/gt911.c) -- real values
+ * exercised on actual hardware, not guessed: shares the keyboard's I2C bus (same sda/scl),
+ * polling mode (int_pin = PURR_PIN_NONE; this board's INT line is unreliable/unused), and a
+ * reset pulse on rst_pin at probe time. native_x_max/native_y_max are this specific chip
+ * unit's own raw-coordinate range (NOT the usual assumed 0-4095 -- confirmed by direct
+ * capture), needed to rescale a raw point to real screen pixels; width/height are the panel's
+ * real pixel resolution, used once at probe time to correct the chip's own internal
+ * X/Y_OUTPUT_MAX config if it disagrees (seen shipped as portrait on a landscape panel).
+ * A board with no touch simply omits a "touch" entry from its device list -- same convention
+ * purr_display_cfg_t/epd_cfg_t already use, no separate presence flag needed here. */
+typedef struct {
+    int port;
+    int sda, scl;
+    int int_pin;                  /* PURR_PIN_NONE = polling mode, no GPIO interrupt */
+    int rst_pin;                  /* PURR_PIN_NONE = chip has no reset pin wired */
+    uint32_t hz;
+    uint16_t width, height;
+    uint16_t native_x_max, native_y_max;
+} purr_touch_cfg_t;
+
+/* F-02: the Waveshare 1.54" e-paper panel (SSD1681-family, src/epd1in54.c) -- its own SPI
+ * device on the board's shared bus (cs/spi_hz), plus three pins no other display driver so
+ * far has needed: rst (hardware reset), busy (polled, not interrupt-driven -- a refresh
+ * already blocks for ~0.3-2s regardless), and pwr (a separate rail enable for the panel
+ * itself, confirmed active-low against the vendor's own board_power_bsp.cpp). width/height
+ * are fixed at 200x200 for this specific panel, not configurable -- unlike
+ * purr_display_cfg_t, there is only one real variant of this part today. */
+typedef struct {
+    const char *name;
+    const char *compatible;       /* "epd1in54" */
+    int cs, dc, rst, busy, pwr;
+    uint32_t spi_hz;
+} purr_epd_cfg_t;
+
+/* kernel/SPEC.md section 3: "required" (the product cannot run without it), "important",
+ * "optional". The kernel only records the level and reports failures against it; CoreOS and
+ * the product decide what a failure of each level means. */
+typedef enum {
+    PURR_PRI_REQUIRED,
+    PURR_PRI_IMPORTANT,
+    PURR_PRI_OPTIONAL,
+} purr_priority_t;
+
+#define PURR_MAX_EXTRA_PINS 6
+
+/* The cfg of a device found by "Find hardware" (the discovered profile, /etc/board.conf) and of any other plain I2C device: a driver whose
+ * entry says buses=i2c reads dev->cfg as this. The bus table's i2c_add_device() takes these values as they are. */
+typedef struct {
+    int port;                     /* the I2C controller: 1 for a discovered device (0 is the board's own bus) */
+    int sda, scl;
+    uint8_t addr;
+    uint32_t hz;
+} purr_i2c_dev_cfg_t;
+
+/* The cfg of a device that is just a voltage on an ADC pin (the battery): the pin, and the divider in front of it, so the driver sees
+ * pin_mV * mul / div as the real voltage. */
+typedef struct {
+    int pin;
+    int mul, div;
+} purr_adc_dev_cfg_t;
+
+/* The cfg of a device that is configured by data: a short list of named integers ("tx=43 rx=44 baud=38400"). It is how a driver for any bus (a UART
+ * GPS, an SPI LoRa radio, a modem) gets its pins and settings without a C struct of its own, from the board file or the discovered profile. Keys are at
+ * most 7 characters. A driver asks for what it needs with purr_kv() and says what to use when the key is absent. */
+#define PURR_KV_MAX 12
+
+typedef struct {
+    uint8_t count;
+    struct {
+        char key[8];
+        int32_t val;
+    } kv[PURR_KV_MAX];
+} purr_kv_cfg_t;
+
+static inline int32_t purr_kv(const purr_kv_cfg_t *c, const char *key, int32_t fallback)
+{
+    if (c == NULL) {
+        return fallback;
+    }
+    for (int i = 0; i < c->count && i < PURR_KV_MAX; i++) {
+        const char *a = c->kv[i].key, *b = key;
+        while (*a != '\0' && *a == *b) {
+            a++;
+            b++;
+        }
+        if (*a == '\0' && *b == '\0') {
+            return c->kv[i].val;
+        }
+    }
+    return fallback;
+}
+
+/* One entry in a board's device list (section 3, section 5's driver-matching target).
+ * `compatible` matches a purr_driver_t's own `compatible` (purr_driver.h) -- the kernel never
+ * calls a driver by name. `extra_pins` are the device's own pins beyond whatever bus it's
+ * on (chip select, data/command, reset, backlight, busy...), claimed through the pin
+ * registry before `probe()` runs, so two devices claiming the same pin are caught instead of
+ * misbehaving. `cfg` is driver-specific -- a pointer to this board's own
+ * purr_display_cfg_t/purr_keyboard_cfg_t/etc., which `compatible` says how to interpret. */
+typedef struct {
+    const char *name;
+    const char *compatible;
+    purr_priority_t priority;
+    int extra_pins[PURR_MAX_EXTRA_PINS];
+    const void *cfg;
+    uint8_t defer;                /* 0, or PURR_DEFER_NET: do not claim pins or probe until Wi-Fi has settled (purr_drivers_net_settled) */
+} purr_device_t;
+
+#define PURR_DEFER_NET 1
+
 typedef struct {
     const char *name;             /* the board's codename */
     /* A GPIO that switches the peripheral power rail. PURR_PIN_NONE if there is none. */
@@ -51,6 +162,24 @@ typedef struct {
     purr_spi_bus_t spi;
     purr_display_cfg_t display;
     purr_keyboard_cfg_t keyboard;
+    purr_touch_cfg_t touch;
+    /* A board with no keyboard (waveshare154/InkyTuxedo) still needs a way to drive
+     * purr_menu_t-based UI (bootpkg's boot menu, and now purr_continue_install()'s install
+     * confirm screen): two plain buttons instead. PURR_PIN_NONE on both (the default, e.g.
+     * tdeck_plus) means "this board has no buttons" -- purr_kernel_key() (purr_kernel.c)
+     * then falls back to returning 0 the same way it always did without a keyboard, instead
+     * of polling pins that don't exist. btn_hold_ms: how long BOOT must be held to read as
+     * select/confirm rather than a short down-press; 0 means "use the same default bootpkg
+     * uses" (purr_kernel.c), not "no hold needed". */
+    int btn_boot_pin;
+    int btn_pwr_pin;
+    uint32_t btn_hold_ms;
+    /* F-02: the device list purr_drivers_bind_all() (purr_driver.h) walks. A board's own
+     * .c file points these at &board.display/&board.keyboard/etc. above -- the fixed fields
+     * stay (every existing driver reads them directly by name still), this is the registry's
+     * own view onto the same data, not a second copy of it. */
+    const purr_device_t *devices;
+    int device_count;
 } purr_board_t;
 
 /* The profile compiled in for this build. */

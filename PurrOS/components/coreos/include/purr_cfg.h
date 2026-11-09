@@ -57,6 +57,16 @@ int purr_cfg_store(const purr_flash_t *fl, purr_cfg_t *cfg);
 int purr_cfg_set_flag(purr_cfg_t *cfg, uint32_t flag);
 int purr_cfg_take_flag(purr_cfg_t *cfg, uint32_t flag);   /* clears it, and says it was set */
 
+/*
+ * Bootloader handoff (bootloader/SPEC.md section 7). make fills and seals one; valid says
+ * whether a block of RTC memory holds a real one (magic, version, CRC). valid returns 1 or 0.
+ */
+void purr_handoff_make(purr_handoff_t *h, uint8_t boot_state, uint8_t key_id_used,
+                       uint8_t flags_used, uint32_t bootloader_version, uint8_t secure_state);
+int purr_handoff_valid(const purr_handoff_t *h);
+/* Adds the recovery reasons (PURR_RR_*) to a made handoff and seals it again. */
+void purr_handoff_set_reasons(purr_handoff_t *h, uint16_t reasons);
+
 #ifdef __cplusplus
 }
 #endif

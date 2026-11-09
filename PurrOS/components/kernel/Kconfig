@@ -7,11 +7,17 @@ menu "PURR OS"
             The board profile compiled in (pins, buses and devices). Only the
             kernel reads this.
 
+        config PURR_BOARD_TDECK
+            bool "LilyGO T-Deck (BlackDeck)"
+
         config PURR_BOARD_TDECK_PLUS
-            bool "LilyGO T-Deck Plus"
+            bool "LilyGO T-Deck Plus (BlackDeck+)"
 
         config PURR_BOARD_CYD_24C
             bool "CYD 2.4C (ESP32-2432S024C)"
+
+        config PURR_BOARD_WAVESHARE154
+            bool "Waveshare ESP32-S3-ePaper-1.54"
     endchoice
 
 endmenu

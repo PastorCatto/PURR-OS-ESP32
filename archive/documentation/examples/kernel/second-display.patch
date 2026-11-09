@@ -1,0 +1,233 @@
+--- a/PurrOS/components/kernel/CMakeLists.txt
++++ b/PurrOS/components/kernel/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ set(srcs
+     "src/purr_kernel.c"
+     "src/st7789.c"
++    "src/ssd1306.c"
+     "src/purr_gfx.c"
+     "src/purr_console.c"
+     "src/purr_cfgstore.c"
+--- a/PurrOS/components/kernel/include/purr_board.h
++++ b/PurrOS/components/kernel/include/purr_board.h
+@@ -34,6 +34,15 @@
+     uint32_t spi_hz;
+ } purr_display_cfg_t;
+ 
++/* An optional monochrome OLED on the I2C bus the keyboard already uses (addr 0 = none). */
++typedef struct {
++    const char *name;
++    const char *compatible;       /* "ssd1306" */
++    uint8_t addr;                 /* 7-bit address, usually 0x3C; 0 if the board has no OLED */
++    uint16_t width, height;       /* 128 x 64 or 128 x 32 */
++    uint32_t hz;
++} purr_oled_cfg_t;
++
+ typedef struct {
+     int port;                     /* an i2c port number */
+     int sda, scl;
+@@ -50,6 +59,8 @@
+     int idle_high_pins[PURR_MAX_IDLE_PINS];
+     purr_spi_bus_t spi;
+     purr_display_cfg_t display;
++    purr_display_cfg_t display2;  /* a second SPI display on the same bus; width 0 = none */
++    purr_oled_cfg_t oled;         /* an optional I2C OLED; addr 0 = none */
+     purr_keyboard_cfg_t keyboard;
+ } purr_board_t;
+ 
+--- a/PurrOS/components/kernel/include/purr_kernel.h
++++ b/PurrOS/components/kernel/include/purr_kernel.h
+@@ -8,6 +8,7 @@
+ #ifndef PURR_KERNEL_H
+ #define PURR_KERNEL_H
+ 
++#include "driver/i2c_master.h"
+ #include "esp_err.h"
+ 
+ #include "purr_board.h"
+@@ -27,6 +28,16 @@
+ esp_err_t purr_st7789_init(const purr_display_cfg_t *cfg, int spi_host,
+                            const purr_display_v2_t **out);
+ 
++/* Several SPI panels of one controller: `slot` 0 is the console display, 1 the second. */
++esp_err_t purr_st7789_init_slot(int slot, const purr_display_cfg_t *cfg, int spi_host,
++                                const purr_display_v2_t **out);
++esp_err_t purr_ssd1306_init(i2c_master_bus_handle_t bus, const purr_oled_cfg_t *cfg,
++                            const purr_display_v2_t **out);
++
++/* Extra displays, or NULL if the board has none (or it did not come up). */
++const purr_display_v2_t *purr_kernel_display2(void);
++const purr_display_v2_t *purr_kernel_oled(void);
++
+ /* The next key as a character, or 0 if none is waiting (or there is no keyboard). */
+ char purr_kernel_key(void);
+ 
+--- a/PurrOS/components/kernel/include/purr_gfx.h
++++ b/PurrOS/components/kernel/include/purr_gfx.h
+@@ -21,6 +21,11 @@
+ int purr_gfx_text_width(const char *s, int scale);
+ int purr_gfx_text_height(int scale);
+ 
++/* A display that forwards every call to both `a` and `b`, so one console can appear on two
++ * panels of the SAME size. Only one tee can exist at a time (the display table has no context
++ * pointer). Returns NULL if either is NULL or the sizes differ. */
++const purr_display_v2_t *purr_display_tee(const purr_display_v2_t *a, const purr_display_v2_t *b);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/PurrOS/components/kernel/src/purr_kernel.c
++++ b/PurrOS/components/kernel/src/purr_kernel.c
+@@ -9,6 +9,9 @@
+ 
+ static const char *TAG = "kernel";
+ static const purr_display_v2_t *s_display;
++static const purr_display_v2_t *s_display2;
++static const purr_display_v2_t *s_oled;
++static i2c_master_bus_handle_t s_i2c_bus;
+ static i2c_master_dev_handle_t s_kbd;
+ 
+ static void pin_out(int pin, int level)
+@@ -43,7 +46,7 @@
+         .sclk_io_num = b->spi.sclk,
+         .quadwp_io_num = -1,
+         .quadhd_io_num = -1,
+-        .max_transfer_sz = b->display.width * 16 * 2,
++        .max_transfer_sz = (b->display.width > b->display2.width ? b->display.width : b->display2.width) * 16 * 2,
+     };
+     esp_err_t e = spi_bus_initialize((spi_host_device_t)b->spi.host, &bus, SPI_DMA_CH_AUTO);
+     if (e != ESP_OK) {
+@@ -58,7 +61,7 @@
+             .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
+             .flags.enable_internal_pullup = true,
+         };
+-        i2c_master_bus_handle_t bus_h;
++        i2c_master_bus_handle_t bus_h = NULL;
+         i2c_device_config_t dc = {
+             .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = k->addr,
+             .scl_speed_hz = k->hz,
+@@ -68,12 +71,29 @@
+             s_kbd = NULL;
+             ESP_LOGW(TAG, "keyboard bus did not start");
+         }
++        s_i2c_bus = bus_h;
+     }
+ 
+     e = purr_st7789_init(&b->display, b->spi.host, &s_display);
+     if (e != ESP_OK) {
+         s_display = NULL;
+         ESP_LOGE(TAG, "display did not come up: %s", esp_err_to_name(e));
++    }
++
++    /* Optional extras. A failure here is logged, never fatal: the console display is what matters. */
++    if (b->display2.width != 0) {
++        esp_err_t e2 = purr_st7789_init_slot(1, &b->display2, b->spi.host, &s_display2);
++        if (e2 != ESP_OK) {
++            s_display2 = NULL;
++            ESP_LOGW(TAG, "second display did not come up: %s", esp_err_to_name(e2));
++        }
++    }
++    if (b->oled.addr != 0 && s_i2c_bus != NULL) {
++        esp_err_t e3 = purr_ssd1306_init(s_i2c_bus, &b->oled, &s_oled);
++        if (e3 != ESP_OK) {
++            s_oled = NULL;
++            ESP_LOGW(TAG, "OLED did not come up: %s", esp_err_to_name(e3));
++        }
+     }
+     return e;
+ }
+@@ -91,3 +111,13 @@
+     }
+     return (char)c;
+ }
++
++const purr_display_v2_t *purr_kernel_display2(void)
++{
++    return s_display2;
++}
++
++const purr_display_v2_t *purr_kernel_oled(void)
++{
++    return s_oled;
++}
+--- a/PurrOS/components/kernel/src/purr_gfx.c
++++ b/PurrOS/components/kernel/src/purr_gfx.c
+@@ -52,3 +52,51 @@
+     free(buf);
+     return e;
+ }
++
++/* ---------------------------------------------------------------- tee (mirror) display */
++
++static const purr_display_v2_t *s_tee_a, *s_tee_b;
++
++static esp_err_t tee_get_info(purr_display_info_t *out)
++{
++    return s_tee_a->get_info(out);
++}
++
++static esp_err_t tee_blit(int x, int y, int w, int h, const uint16_t *px)
++{
++    esp_err_t ea = s_tee_a->blit(x, y, w, h, px);
++    esp_err_t eb = s_tee_b->blit(x, y, w, h, px);
++    return ea != ESP_OK ? ea : eb;
++}
++
++static esp_err_t tee_fill(int x, int y, int w, int h, uint16_t color)
++{
++    esp_err_t ea = s_tee_a->fill(x, y, w, h, color);
++    esp_err_t eb = s_tee_b->fill(x, y, w, h, color);
++    return ea != ESP_OK ? ea : eb;
++}
++
++static purr_display_v2_t s_tee_ops = {
++    .struct_size = sizeof(purr_display_v2_t),
++    .major = PURR_DISPLAY_MAJOR,
++    .minor = PURR_DISPLAY_MINOR,
++    .features = 0,                       /* no optional functions: brightness is per panel */
++    .get_info = tee_get_info,
++    .blit = tee_blit,
++    .fill = tee_fill,
++};
++
++const purr_display_v2_t *purr_display_tee(const purr_display_v2_t *a, const purr_display_v2_t *b)
++{
++    if (a == NULL || b == NULL) {
++        return NULL;
++    }
++    purr_display_info_t ia, ib;
++    if (a->get_info(&ia) != ESP_OK || b->get_info(&ib) != ESP_OK ||
++        ia.width != ib.width || ia.height != ib.height) {
++        return NULL;
++    }
++    s_tee_a = a;
++    s_tee_b = b;
++    return &s_tee_ops;
++}
+--- a/PurrOS/main/main.c
++++ b/PurrOS/main/main.c
+@@ -24,6 +24,7 @@
+ #include "commands.h"
+ #include "purr_cli.h"
+ #include "purr_console.h"
++#include "purr_gfx.h"
+ #include "purr_kernel.h"
+ #include "recovery_loader.h"
+ #include "sdkconfig.h"
+@@ -117,6 +118,16 @@
+     }
+     purr_console_init(d);
+ 
++    /* Extra displays (documentation/15): label each one that came up. */
++    const purr_display_v2_t *d2 = purr_kernel_display2();
++    if (d2 != NULL) {
++        purr_gfx_text(d2, 8, 8, "PURR OS: display 2", PURR_RGB565(255, 180, 0), 0, 2);
++    }
++    const purr_display_v2_t *oled = purr_kernel_oled();
++    if (oled != NULL) {
++        purr_gfx_text(oled, 0, 0, "PURR OS", 0xFFFF, 0, 2);
++    }
++
+     /* A throwaway cli, just so purr_fs_setup/purr_net_setup have somewhere to print their
+      * status before the login prompt (which uses the console directly, not the shell). */
+     static purr_cli_t boot_cli;

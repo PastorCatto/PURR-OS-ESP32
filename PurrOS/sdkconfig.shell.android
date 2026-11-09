@@ -1,0 +1,4 @@
+# The Android 2.2 (Froyo) style official shell (plan7.md, "Android shell build-out"). Add this fragment to SDKCONFIG_DEFAULTS after the profile.
+# Without it the image is built with the Windows 10 Mobile style shell. Only one official shell is compiled per image.
+CONFIG_PURR_SHELL_ANDROID=y
+CONFIG_PURR_UI_DEFAULT_MODE="android"

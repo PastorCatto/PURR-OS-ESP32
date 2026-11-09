@@ -2,4 +2,54 @@
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# 16384 overflowed in real, live testing 2026-10-03 (first-ever real-network run of the
+# recovery path, "a stack overflow in task main has been detected", mid-download of
+# kernel_waveshare154.cat): purr_recovery_loader_main() runs directly on the "main" task,
+# with no task boundary between it and HTTPS (esp_http_client) + a full TLS handshake
+# (mbedtls, esp_crt_bundle's X.509 chain validation) + this project's own SHA-256/ECDSA
+# image verification (purr_verify/purr_crypto_mbedtls) all nested in one call stack --
+# KittenOS's own stage-2 continue-install and the shell's "netinstall" command hit the
+# identical call depth on their own main task too, so this is not loader-specific.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
+
+# The recovery manifest (OTA/SPEC.md section 5): used by the recovery loader on its own,
+# and by KittenOS's "net install". Kept here (not just as the Kconfig default) so it is
+# not silently stuck on a stale value in an already-configured build directory.
+#
+# IMPORTANT: this file overrides Kconfig.projbuild's own default and is NOT re-applied to a
+# build directory that already has a cached sdkconfig -- found the hard way, 2026-09-30, when
+# updating only Kconfig.projbuild silently left two already-built binaries pointing at the old
+# URL. Update both files together, and wipe or regenerate any existing build/<board>-<profile>
+# directory's sdkconfig after changing either.
+CONFIG_PURR_RECOVERY_MANIFEST_URL="https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar1/recovery.manifest"
+CONFIG_PURR_MODULE_INDEX_URL="https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar2/modules.manifest"
+
+# The shared PURR bootloader (bootloader/bootloader_components/main) is almost out of room
+# before the partition table: IDF's own bootloader code logs at WARN, and the PURR files set
+# their own lines back to INFO. Must match bootloader/sdkconfig.defaults.
+CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
+
+# The bootloader hands the OS a purr_handoff_t through IDF's custom RTC FAST area
+# (bootloader/SPEC.md section 7). The bootloader and the app must use the same option and
+# size, so every project that builds or reads it sets both here.
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC=y
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE=0x14
+
+# The partition table moved from 0x8000 to 0xA000 (2026-10-25) so the PURR bootloader can be up to
+# 40 KB instead of 32 KB (plan3.md item 3b): the bootloader lives between 0x0 and the table. The
+# `otadata` partition was dropped to pay for it -- the PURR bootloader never read it. Every
+# project that builds the bootloader must agree.
+CONFIG_PARTITION_TABLE_OFFSET=0xA000
+
+# The SD card (main/purr_sd.c) is a FAT card, and the files on it have long names: FatFs needs its long-file-name support (kept on the heap, so the stack
+# of whoever opens a file stays small). FatFs in ESP-IDF has no exFAT, so a card of 64 GB or more (sold as exFAT) has to be formatted FAT32 first.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
+# The Task Manager lists the system's own tasks and the fast RAM their stacks hold (purr_systasks.c).
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+
+# Internal RAM (owner, 2026-11-05): the Wi-Fi driver's code placed in IRAM took 17 KB (measured on the kernel image: static D/IRAM 220,287 -> 203,095 bytes), all
+# of it fast RAM that apps need. Wi-Fi runs from flash instead, a little slower.
+# CONFIG_ESP_WIFI_IRAM_OPT is not set
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set

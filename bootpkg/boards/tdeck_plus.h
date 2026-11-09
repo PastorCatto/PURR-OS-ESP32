@@ -4,6 +4,11 @@
 #define PKG_BOARD_H
 
 #define BOARD_NAME        "tdeck_plus"
+#define BOARD_CODENAME    "BlackDeck+"    /* this project's own name for this build --
+                                           * printed on the boot screen and logged at
+                                           * entry, same convention as waveshare154's
+                                           * "InkyTuxedo". */
+#define BOARD_HAS_KEYBOARD 1
 #define PIN_POWER         10      /* peripheral power rail, must be high */
 #define PIN_IDLE_A        9       /* LoRa chip select, held high */
 #define PIN_IDLE_B        39      /* SD card chip select, held high */

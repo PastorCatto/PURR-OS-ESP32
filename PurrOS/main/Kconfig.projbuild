@@ -16,4 +16,143 @@ menu "PURR OS profile"
             bool "minimal: the recovery loader"
     endchoice
 
+    config PURR_VERBOSE_BOOT
+        bool "Verbose boot log (module/kernelmod loading) on screen"
+        default y
+        help
+            Prints each /system module and /kernelmods kernelmod's name as it's found,
+            verified and loaded (or rejected/quarantined) onto the actual boot screen, not
+            just the serial log -- lets a developer see what's happening during
+            purr_modules_setup() without a serial capture. Meant to be turned off for an
+            official/shipped build, which would show a splash screen here instead (not yet
+            built; this option is the switch point for it).
+
+    config PURR_RECOVERY_MANIFEST_URL
+        string "Recovery manifest URL"
+        default "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar1/recovery.manifest"
+        help
+            Where the recovery manifest (OTA/SPEC.md section 5) is fetched from, over HTTPS.
+            The recovery loader (minimal profile) uses this on its own for KittenOS; KittenOS
+            itself (recovery profile) uses it for the shell's "net install" (Install/SPEC.md),
+            which installs PURR OS. Named images are fetched from the same URL's directory.
+            Set this to a real release's manifest before building for a device that needs to
+            recover or install over the internet.
+
+    config PURR_MODULE_INDEX_URL
+        string "Module index URL"
+        default "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar2/modules.manifest"
+        help
+            Where the module index (OTA/SPEC.md section 6.1) is fetched from, over HTTPS.
+            Lists the individual command modules and kernelmods for a specific CoreOS
+            release -- a separate, smaller file from the recovery manifest above, since the
+            recovery loader never reads it; only "netinstall modules" (Install/SPEC.md) does,
+            once Wi-Fi and the filesystem are both up. Named images are fetched from the same
+            URL's directory, same convention as the recovery manifest.
+
+endmenu
+
+menu "PURR OS network"
+
+    choice PURR_NET_BACKEND
+        prompt "Network backend"
+        default PURR_NET_WIFI
+        help
+            How this build reaches a network (kernel/include/purr_net.h). Set by the
+            sdkconfig.flavor.<name> file that purrstrap passes; Wi-Fi unless a flavor says otherwise.
+
+        config PURR_NET_WIFI
+            bool "Wi-Fi station (the radio)"
+
+        config PURR_NET_ETH_W5500
+            bool "Wired Ethernet: W5500 on SPI (the VM flavor; the radio is never started)"
+            select ETH_USE_SPI_ETHERNET
+            select ETH_SPI_ETHERNET_W5500
+    endchoice
+
+    if PURR_NET_ETH_W5500
+
+        config PURR_ETH_CS_GPIO
+            int "W5500 chip-select GPIO"
+            default 9
+            help
+                The W5500 shares the board's SPI bus with the other devices and is told apart by
+                chip select. 9 is the slot the LoRa module uses on a real T-Deck Plus; the VM
+                flavor has no LoRa, so it is free there. The emulator's W5500 model answers on the
+                same pin (plan4.md).
+
+        config PURR_ETH_INT_GPIO
+            int "W5500 interrupt GPIO (-1 to poll)"
+            default -1
+            help
+                -1 makes the driver poll the chip for received frames every PURR_ETH_POLL_MS
+                instead of waiting for an interrupt line. The VM needs no interrupt wiring.
+
+        config PURR_ETH_RST_GPIO
+            int "W5500 reset GPIO (-1 for none)"
+            default -1
+            help
+                -1 leaves the pin alone: the driver resets the chip through its MR register.
+
+        config PURR_ETH_SPI_MHZ
+            int "W5500 SPI clock (MHz)"
+            default 20
+            range 1 33
+
+        config PURR_ETH_POLL_MS
+            int "RX poll period when no interrupt is wired (ms)"
+            default 10
+            range 1 100
+
+    endif
+
+endmenu
+
+
+menu "PURR OS user interface"
+
+    config PURR_UI_DEFAULT_MODE
+        string "Shell planted in /ui/mode.conf on first boot"
+        default "card_shell"
+        help
+            card_shell, nav or w10m (the Windows 10 Mobile style shell). Only used when
+            /ui/mode.conf does not exist yet; edit that file to switch afterwards.
+
+    # The built-in shell is the Android 2.2 style one (purr_android*.c), in every image: the one that always works (the fallback). Any other shell, the Windows
+    # 10 Mobile style one (purr_w10m.c) for instance, is a loadable module installed from the Store or the hub under /ui/shells/ and chosen in Settings
+    # (plan7.md, "Shells as installable items"). There is nothing to configure: it used to be a choice between the two (PURR_OFFICIAL_SHELL).
+
+    config PURR_W10M_ROTATE_DEMO
+        bool "Turn the Windows 10 Mobile style shell through every orientation (test only)"
+        default n
+        help
+            Rotates the shell by 90 degrees every few seconds, so a run in the emulator shows the
+            layout in landscape and portrait. Never on a shipped build.
+
+endmenu
+
+menu "PURR OS test images"
+
+    config PURR_TEST_AUTOLOGIN
+        bool "Test image: sign in automatically as a built-in account (VM images only)"
+        depends on PURR_NET_ETH_W5500
+        default n
+        help
+            For bench testing in the emulator without typing at the sign-in screen. At boot, if the account
+            below does not exist it is created as an administrator, and it is signed in with no password
+            asked. A KNOWN PASSWORD is built into the image, so this is only offered in the VM flavor (the
+            W5500 Ethernet flavor) and the build refuses it anywhere else. Holding space at boot still shows
+            the normal sign-in. A runtime "automatic sign-in" user set in Settings wins over this one. Like every
+            automatic sign-in it only works while developer mode is active for the boot, so the test image
+            is meant to be assembled with a developer-mode trust block (see mkimage.sh in the notes).
+
+    config PURR_TEST_AUTOLOGIN_USER
+        string "Test image account name"
+        depends on PURR_TEST_AUTOLOGIN
+        default "dev"
+
+    config PURR_TEST_AUTOLOGIN_PASSWORD
+        string "Test image account password"
+        depends on PURR_TEST_AUTOLOGIN
+        default "dev"
+
 endmenu

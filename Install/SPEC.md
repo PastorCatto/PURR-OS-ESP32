@@ -14,8 +14,11 @@ in `../Boards/SPEC.md`, and the drivers and the pin registry in
    gets the same loader.
 2. **The recovery loader** connects to Wi-Fi and downloads the newest signed KittenOS.
 3. **KittenOS,** which has Wi-Fi on these boards, downloads the rest into the root filesystem: the
-   kernel, CoreOS, AppManager, the runtimes, the boot package and the board's driver pack
-   (`../Drivers/SPEC.md`). It formats
+   kernel, CoreOS, AppManager, the runtimes, the boot package, the board's driver pack
+   (`../Drivers/SPEC.md`), the individual command modules and kernelmods from the module index
+   (`../OTA/SPEC.md` section 6.1 -- what used to be `plant_temp_modules`'s embedded-firmware
+   stand-in) and, so the device is actually usable and not just recovered, the apps
+   from the app repo (`../OTA/SPEC.md` section 8). It formats
    the filesystem and boots normally.
 
 Everything is verified by signature. The recovery manifest (`../OTA/SPEC.md` section 5) can list an **install profile** per board,
@@ -70,6 +73,8 @@ pin can damage hardware.
 matching known map. Some boards also **power their peripherals through an enable pin.** Until that pin is
 set, the display and sensors are invisible, so a scan finds nothing. The database needs those enable pins
 for known boards.
+
+> **Built 2026-10-28** (plan8.md "Driver foundation"): the I2C walk (pull-up sensing, pair scan, ID registers), the discovered profile, driver fetch and the Settings > Updates page. SPI and UART discovery are still design.
 
 ## 4. Shell tools
 

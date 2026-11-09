@@ -27,6 +27,17 @@ esp_err_t purr_console_init(const purr_display_v2_t *d)
     return ESP_OK;
 }
 
+esp_err_t purr_console_init_headless(const purr_board_t *board)
+{
+    if (board == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    s_d = NULL;
+    purr_term_init(&s_term, board->display.width / CELL_W, board->display.height / ROW_H);
+    s_cur_x = s_cur_y = -1;
+    return ESP_OK;
+}
+
 void purr_console_put(void *ctx, char c)
 {
     (void)ctx;
@@ -38,9 +49,22 @@ void purr_console_clear(void)
     purr_term_clear(&s_term);
 }
 
+static volatile int s_muted;
+
+void purr_console_set_muted(int muted)
+{
+    s_muted = muted;
+    if (!muted && s_d != NULL) {
+        for (int r = 0; r < s_term.rows; r++) {
+            s_term.dirty[r] = 1;                /* repaint everything the text screen missed */
+        }
+        s_cur_x = s_cur_y = -1;
+    }
+}
+
 void purr_console_flush(void)
 {
-    if (s_d == NULL) {
+    if (s_d == NULL || s_muted) {
         return;
     }
     /* A moved cursor means both its old and new rows need drawing. */

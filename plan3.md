@@ -1,0 +1,374 @@
+# plan3: hardening
+
+**Source of truth for this work.** Re-read after any context compaction. Update the Status table
+and the Session log as work happens. Builds on `plan1.md` (boot chain, signature trailer; now
+running on the T-Deck Plus) and `SECURITY.md` (the public description of the model).
+
+Started 2026-10-25. Nothing here is committed.
+
+## Method
+
+Think like the attacker, per `SECURITY.md` section 11, then fix in order of value. Every finding
+below is backed by code or by the device, not by assumption. Where a fix changes policy (what
+the device allows), the decision is written down here before it is built.
+
+## Baseline (what is true today)
+
+- The device runs the PURR bootloader, a signed boot package, and signed `kernel`, `kittenos`,
+  `loader` slots with signature trailers. `secure_mode` is `warn`. The kernel slot verifies on
+  boot, taking about 2.0 s. Details in `plan1.md`.
+- Host tests: 18 files pass (`PurrOS/components/coreos/test/host/run.py`).
+
+## Findings from the audit
+
+| # | Finding | Evidence | Severity |
+|---|---|---|---|
+| F1 | `purrcfg` trust fields are not authenticated. The bootloader accepts `secure_mode`, the revoked-key mask, and up to N **override keys of any role** from `purrcfg` on a CRC alone. Anyone who can write the `purrcfg` partition can add a boot-role key and sign arbitrary images, or set `off`. The one-shot flags `SECURE_OFF_ONCE` and `IGNORE_ONCE` are also honored from unsigned `purrcfg`. | `purr_keybag_build()` applies `cfg->keys[]` when `valid == 1`; `purr_boot.c` honors the flags; nothing signs `purrcfg` | High for any attacker who gets a flash write; physical attackers can do this anyway (tier 3), so it matters most as defence in depth against a future bug |
+| F2 | **There is no way to reach `enforce`.** No command, tool or request path writes `secure_mode`, a key slot or the revoked mask. They change only by flashing a hand-made `purrcfg`. So `enforce` is untested on a device and unusable in practice. | grep of `PurrOS/main` and `components` finds no writer; the signed-request design (`bootloader/SPEC.md` 5.1) is unbuilt | High (the whole policy is effectively `warn` forever) |
+| F3 | The bootloader does not enforce version floors, so a validly signed **older** kernel/kittenos/loader boots in every mode (a rollback). The OS install paths do enforce floors (`commands.c` `find_floor`). | `purr_slotverify.c` sets `enforce_floor = 0` | Medium |
+| F4 | Verifying a slot takes about 2.0 s at every boot (software SHA-256, 1 KB flash windows). The bootloader has 432 bytes free. Both are fixed by the same change (hardware SHA). | measured on the device 2026-10-25 | Medium (usability, and it blocks adding bootloader features) |
+| F5 | In `enforce` with no usable slot the bootloader resets in a loop. | `purr_boot.c` final gate | Medium (a policy decision, listed below) |
+| F6 | Parsers of untrusted input (container header, trailer, relocation tables, recovery manifest, `purrcfg`, `.cat`/module headers) have unit tests but no fuzzing. | `test/host` | Medium |
+| F7 | Boot menu: anyone at power-on can pick KittenOS or "internet recovery". | `pkg_main.c` | Policy decision |
+| F8 | The debug serial console (`debug.cat`) only answers `ping` and echoes; `serial write/read` sits behind the shell login. | `Modules/test/debug_module.c` | Low, closed |
+| F9 | Wi-Fi credentials are plaintext in `netrec` and the saved-networks file; user passwords are PBKDF2-hashed. | `purr_netrec.c` | Low until flash encryption exists |
+| F10 | Modules can call `fs_*` and `login_*` through the kernel table (full root-filesystem access, user management). The model is "signed code is trusted"; there is no per-module permission. | `purr_kernel_table.h` | Design limit, not a bug |
+| F11 | The driver module ABI had no version check (found 2026-10-25, fixed: `bus_abi`). Kernelmods and modules already check their tables' ABI. | `plan2.md`, `Drivers/SPEC.md` 4.1 | Fixed |
+
+## Work items, in order
+
+1. **Fuzz the parsers (F6).** A deterministic mutation fuzzer under ASan/UBSan for
+   `purr_image_verify`, `purr_trailer_verify`, the relocator, `purr_manifest_parse`,
+   `purr_cfg_load`. Host-only, no device risk. Fix whatever it finds.
+2. **Hardware SHA-256 backend for the bootloader (F4).** Make the hash pluggable in
+   `purr_verify_env_t`; the bootloader supplies `bootloader_sha256_*`; drop the software SHA from
+   the bootloader image. Target: well under 1 s for the kernel slot, and room freed.
+3. **Version floors in the bootloader (F3).** Pass the per-component floor from `purrcfg` and
+   enforce it in `enforce` mode.
+4. **Authenticated trust block (F1) and a path to `enforce` (F2).** Design below; needs sign-off
+   on the decisions listed.
+5. **Hardware tests of the policy**: tampered slot in `warn`, refusal in `enforce`,
+   `IGNORE_ONCE`, the failure ladder, `reboot recovery`/`loader`, the handoff read-back
+   (`plan1.md` checklist).
+6. **Policy decisions** F5, F7.
+
+## Design: trust block, development mode, secure status (item 4) -- DECIDED 2026-10-25
+
+Decisions from the owner:
+1. **Tighten unsigned, loosen only with a signature.** Accepted.
+2. **Development mode** exists for everything, is **off by default**, and can be turned on either
+   (a) before flashing, in a config baked into the device's `purrcfg`, or (b) at runtime by a
+   toggle in Settings. When it is on, the bootloader relaxes `enforce` to `warn` (a failed or
+   unsigned image boots with a warning), and **apps that need a security model can see it** and
+   refuse. The aim is commercial partnerships: an app (a DRM-protected service, say) must be able
+   to ask "is this device genuinely in a trusted state?" and get an honest yes or no.
+3. (Not answered; decided here, revisit freely.) The **boot key** signs trust blocks, no new role.
+
+### Model
+
+- `purrcfg` v2 splits the trust state into a **signed part** and **unsigned, tighten-only parts**.
+  - Signed (covered by a 64-byte ECDSA signature, checked by the bootloader against the
+    compiled-in default boot-role keys only, never the overridden bag):
+    `trust_mode` (off / warn / enforce), `trust_flags` (bit 0 `DEV_LOCKED`: a production device
+    refuses development mode outright), `revoked_keys`, and the override `keys[]`.
+  - Unsigned, written by the OS: `tighten` (0, warn or enforce: a floor on the mode), the
+    persistent flag `DEV_MODE`, the version floors (raised by the OS on healthy boots), and the
+    existing one-shot flags.
+- **Effective mode**, computed by the bootloader:
+  `mode = max(signature_ok ? trust_mode : WARN, tighten)`, and
+  `if (DEV_MODE && !(signature_ok && DEV_LOCKED)) mode = min(mode, WARN)`.
+  An unsigned writer can therefore only raise the mode (D1); it can lower it only through
+  development mode, which is explicit, visible, and lockable by a production signature.
+- **Override keys and revocations count only when the signature is valid.** An invalid or missing
+  signature means "defaults": the compiled-in keys and `WARN`, exactly what a fresh device does.
+- **Development mode is never silent.** It shows on the boot menu, in the handoff, and in the
+  secure status below. It never goes below `warn` (nothing lets a writer reach `off`; only a
+  signed block can set `off`).
+- The one-shot flags `SECURE_OFF_ONCE` / `IGNORE_ONCE` are honored only in development mode.
+
+### Secure status for the OS and apps
+
+- The handoff gains a `secure_state` byte: effective mode, `dev` bit, `signature_ok` bit.
+- A kernel-table call `secure_status()` returns: effective mode, dev mode, whether the running
+  slot verified (and with which key), whether the trust block is signed, bootloader version.
+  Shell: `secure` (shows it). `secure enforce` tightens (admin). `secure dev on|off` needs an
+  admin login and a typed confirmation, and is refused when the signed block says `DEV_LOCKED`.
+- Apps reach it through a catcall (`Catcalls/SPEC.md`, to be added): a small answer such as
+  **GENUINE** (mode `enforce`, not dev, running slot verified), **DEVELOPMENT**, or
+  **UNVERIFIED**.
+- **Honest limit, for any partner conversation:** this is a *software* attestation. Without the
+  hardware root of trust (eFuse Secure Boot, `bootloader/SPEC.md` section 8) someone who can write
+  flash can still make a device report GENUINE. A DRM partner will want that hardware layer; the
+  design leaves room for a third level (**HARDWARE-ROOTED**) when it exists.
+
+### Tooling
+
+- `purrstrap keys trust-block` builds and signs a block (mode, flags, keys to add or revoke).
+- `purrstrap` can also write an initial `purrcfg` image containing a block, for flashing at the
+  `purrcfg` partition: this is the "set it prior to flash" path (including a dev-mode-on config for
+  development boards).
+- An OS command applies a verified block to the device (a loosening that needs a signature).
+
+### Order of work
+
+1. **3b (now):** drop `otadata`, table to `0xA000`, 40 KB bootloader. Needs a full reflash.
+2. 4a: `purrcfg` v2 structure, the effective-mode function (shared plain C, host-tested), the
+   bootloader using it, handoff `secure_state`.
+3. 4b: `purrstrap keys trust-block` and the initial-`purrcfg` image tool.
+4. 4c: `secure_status()`, the `secure` shell command, the Settings toggle hook, the catcall.
+5. 5: hardware tests, now including `enforce` refusal and development mode.
+
+## Status
+
+| # | Item | State |
+|---|---|---|
+| 0 | Audit and this plan | done |
+| 1 | Parser fuzzing | **done**: `test/host/fuzz/` (6 targets: image verify, trailer verify, module layout + relocations, manifest, purrcfg + key bag overrides, Wi-Fi list). 5.4 million executions over 3 seeds under ASan + UBSan found nothing; the harness catches a deliberately planted bounds bug at once on every seed. Not covered: the `.cat`/appmgr manifest, user store, CLI, and the ESP-IDF glue in `load_relocatable_file()` (needs the device or a mock) |
+| 2 | Hardware SHA backend | **done and verified on the device**: slot verify 1954 ms -> 656 ms. Measured breakdown before: 328 ms flash reads, about 1300 ms software SHA-256 (the bootloader runs at only 80 MHz), about 250 ms the signature check. Now `purr_hash_t` is an optional hook in `purr_verify_env_t`; the bootloader plugs in IDF's `bootloader_sha256_*` (ROM/hardware SHA, whole words only, so a payload whose size is not a multiple of 4 falls back to software) and reads flash in 4 KB read-ahead windows. 21 new host checks. Bootloader is 32,544 bytes, **224 free** (the software SHA is still linked for the 109-byte header hash). Remaining time is about 250 ms signature check plus flash reads; the bootloader's 80 MHz clock is the next lever |
+| 3 | Floors in the bootloader | **done and verified on the device (warn mode)**. Bootloader: each slot is checked against its `purrcfg` floor (always as `enforce_floor`, so below-floor is a failed verification: warn boots with a warning, enforce refuses). OS: `purr_mark_boot_healthy()` raises the floor for the running slot (kernel / kittenos / loader) to the version in its signature trailer, **only if that trailer verifies right then** and the version is above the current floor. Device test: booted 0.2.1 (floor raised), flashed the older validly signed 0.2.0 back: `slot @0x1a0000: below-version-floor` + `booting slot 0 although it did not verify`. Restored to 0.2.1. `enforce` refusal itself is still untested on hardware (needs item 4). No tool yet to LOWER a floor deliberately (a downgrade needs the signed trust block, item 4) |
+| 3b | Make room in the bootloader | **DONE and running on the device (2026-10-25).** Bootloader limit is now 40 KB; it is 32,608 bytes, **8,352 free**. Table at 0xA000, `otadata` gone, `nvs` 0xB000, `purrcfg` 0xF000. All three OS images were rebuilt (the app reads the table at the compiled offset) and reflashed as 0.2.2 with the new bootloader and table; the first boot verified the boot package and kernel slot (647 ms) and mounted the filesystem. Floors reset (purrcfg moved and was erased). Original notes: CSVs and `sdkconfig.defaults` changed, `esp_ota_set_boot_partition` removed, three clean builds running; then full reflash. Original plan: Bootloader is 32,608 bytes, 160 free of 32,768. Plan: drop `otadata` (the PURR bootloader ignores it; only `esp_ota_set_boot_partition` in netinstall uses it, which is meaningless here) and move the partition table to `0xA000`, giving the bootloader 40 KB. New layout: `nvs` 0xB000/16K, `purrcfg` 0xF000/8K, `phy_init` 0x11000, `bootpkg` 0x12000/56K unchanged. Needs `CONFIG_PARTITION_TABLE_OFFSET=0xA000` in all three `sdkconfig.defaults`, the CSVs, dropping the `esp_ota_set_boot_partition` call, and another full reflash of bootloader + table (erase nvs/purrcfg) |
+| 4 | Trust block, development mode, secure status, path to `enforce` | **built and tested on the device (2026-10-25).** 4a: `purrcfg` keeps its size/version (spare bytes became `tighten` and `trust_flags`, `reserved1` became `trust_sig`), new shared `purr_trust.c` (effective mode, 85 host checks incl. forged/wrong-key/self-vouching/dev-lock cases), bootloader evaluates it once per boot, one-shot loosening flags only in dev mode, handoff v2 with `secure_state`, boot menu shows the policy and `DEVELOPMENT MODE`, the OS reads the effective view everywhere (a view can never be stored back). 4b: `purrstrap keys trust-block` (+ `lib/purrcfg.py`, 11 Python tests, byte-for-byte cross-checked against the C evaluator with the real boot key). 4c: `secure` (status; admin: `enforce`, `relax`, `dev on|off`), `trust apply <file>`, `purr_secure_status()` (GENUINE / DEVELOPMENT / UNVERIFIED). **Device tests** (blocks flashed to `purrcfg`, kernel slot tampered by one byte): signed enforce boots clean; enforce + tampered kernel -> `REFUSED`, falls back to KittenOS; signed enforce + dev flag -> `warn (DEVELOPMENT MODE)`, tampered kernel boots with a warning; `DEV_LOCKED` + dev flag -> enforce holds; a block signed by the developer key (mode off) ignored; a signed enforce block forged to `off` with a valid checksum ignored. Device restored to unsigned/warn afterwards |
+| 4d | Remaining from item 4 | the app-facing catcall for the secure status and the Settings toggle (UI/app work; the API `purr_secure_status()` and the setter logic exist); replay protection for signed blocks (needs a spare `purrcfg` field, a format change); signed or otherwise protected version floors (needs the hardware root); try `secure` / `trust apply` at the keyboard (not exercised by hand yet) |
+| 5 | Hardware policy tests | **mostly done** (see item 4): enforce refusal + fallback, tamper, dev mode, production lock, wrong-key and forged blocks, rollback (item 3). Still to do by hand: the failure ladder (seven power cycles), `reboot recovery` / `reboot loader`, menu choices, `secure` / `trust apply` at the keyboard, `net_install` writing a trailer |
+| 6 | Policy decisions (F5 `enforce` with nothing usable; F7 boot menu) | open |
+
+## Session log
+
+- 2026-10-25: audit done from the code and the live device; plan written.
+- 2026-10-25: item 4 built (4a-4c) and tested on the device; docs updated (SECURITY.md 6.1/6.2, bootloader/SPEC.md 5.2).
+- 2026-10-25: 3b done and flashed (layout change, 40 KB bootloader).
+- 2026-10-25: item 3 done (floors); 3b identified.
+- 2026-10-25: item 2 done (timing instrumentation added, measured, removed; the hook flashed to the device).
+- 2026-10-25: item 1 done. Run with `python3 PurrOS/components/coreos/test/host/fuzz/fuzz.py [target] [iterations] [seed]`.
+
+### Item 6 decided (owner, 2026-10-28)
+- KittenOS stays bootable even when policy is `enforce` and nothing else is usable; it gets restricted heavily before shipping so that it is
+  purely a recovery menu (recovery app, Security tab, nothing else).
+- If KittenOS itself is corrupt, the escape route is, in order: (1) the dev server path (local restore), driven by a desktop tool for
+  Windows, macOS and Linux that triggers a safe restore over the network, no USB cable; (2) an emergency pull of the newest image from
+  the official GitHub repository, whose address is hard-coded into the bootloader (so it needs the bootloader to speak Wi-Fi/HTTPS or hand
+  off to a minimal fetcher; size budget is ~6.4 KB free, so likely a fixed loader slot does the fetching and the bootloader only stores the URL
+  and trust key).
+- Boot menu (F7): kept; no change decided yet beyond the BAD-slot greying already done.
+- Also here: the bootloader reset crash-loop (park_app_cpu) hardware check, moved from plan1.
+Open design for this item: the desktop restore tool (name, protocol: reuse `purrstrap dev serve` discovery, signed images only).
+
+### Recovery tool and KittenOS scope (owner, 2026-10-28)
+- Desktop restore tool: **broken-kitten-recovery** ("broken kitty recovery"), one self-contained executable for Windows, macOS and Linux that does the
+  whole safe restore. Also allowed on consumer devices: during the recovery loader's update channels, the device looks on the network for a trusted
+  source (a proxy, or a machine holding signed, verified images) and may use it. Trust is by signature, never by address. The GitHub emergency pull
+  (Q5) waits until this tool has been tested.
+- KittenOS must not touch apps: no app manager, no scan of installed apps at boot. Its job is to wipe, format the file system, verify (security,
+  signatures) and restore. Done 2026-10-28: the recovery profile no longer runs `purr_apps_setup` or `purr_catrt_setup` at boot (stdrec 5% free).
+- Still to do: the stage-2 module installs must reuse the kernel's own verification (the app manager and verifier belong to the kernel/CoreOS, not
+  to KittenOS). Options: (a) stage 2 only downloads and the kernel verifies on first boot; (b) KittenOS keeps a minimal verify-and-write path for
+  signed modules; (c) run the kernel's verifier from inside recovery (chroot-like). Recommendation: (a) for apps, (b) for the few modules the first
+  boot needs.
+
+### Must verify (owner, 2026-10-28)
+KittenOS and the recovery loader must keep working signature verification for everything they write (kernel, modules, KittenOS, loader image
+checks) after the app manager is gone from KittenOS. Add an explicit test: recovery profile boots, restores from a signed source, refuses a bad
+signature and a tampered image. Run in the VM (unattended recovery with a corrupted image) before the next release.
+
+### Emergency mode + verification test, VM (2026-10-28)
+- Built: `purr_recovery_emergency()` (purr_recovery_src.c). When the official manifest cannot be fetched and the bootloader allowed a dev server, the loader
+  finds a dev server on the LAN, checks it has recovery files for this board, and restores from it. Needs DEV_MODE + DEV_RECOVERY; not remembered across boots.
+- Test 1 (VM, blank device, official URL set to `.../JumpingJaguar3/recovery.manifest`): "Couldn't reach the install server" -> "emergency mode: using dev
+  server" -> kernel 1.0.0 and kittenos 1.0.0 installed. Pass.
+- Test 2 (same, one byte of the served kernel flipped): "download does not match the manifest (size or hash)"; the kernel was not written; KittenOS (untouched
+  file) installed; the loader ended with "Something went wrong while installing. Power it off and on to try again." and did not restart. Pass.
+- Not covered yet: a correct hash with a bad signature (needs a re-signed image with a wrong key), a tampered KittenOS image, hardware, and the case where the
+  dev server is also bad. After KittenOS has no app manager the stage 2 modules still go through the old verify path.
+
+### Verified relay for secure mode (owner idea, 2026-10-28; design, not built)
+A PC/Mac client (part of broken-kitten-recovery) downloads the official images, verifies them (hash and signature against the official key, plus the
+version floor), and serves them on the LAN. The device may pull from it even in secure (enforce) mode, which today is refused because the dev-server
+channel needs developer mode.
+- **The device never trusts the relay's word.** The relay announces "verified" for the user's benefit, but the loader checks every image itself against
+  the boot key, in enforce mode strictly (`purr_image_verify` + slot trailer check, already how restore works), whatever the source. A lying relay can only
+  waste time or serve an older signed image, and a below-floor image is rejected by the trailer check ("the bootloader would reject it").
+  That is why this is safe to allow without developer mode: the channel is a transport, not a trust source.
+- **Needed on the device:** a recovery source kind "relay" separate from "dev server": allowed in any secure mode, local addresses only (`purr_repo.h` rule),
+  verification forced strict for relay sources (never "accepted because secure mode is off"), and the saved source remembers the relay's id.
+- **Needed on the relay:** announce `relay` in the discovery line, serve `recovery.manifest` with hashes, its checks logged for the owner.
+- **Open (owner):** attended recovery asks "Use <name> at <address>?" on the device before pulling anything; unattended automatic recovery only uses a relay that
+  was paired earlier (its id saved while the owner was present), so a stranger's laptop on the network is never picked up silently.
+
+### Relay decisions (owner, 2026-10-28)
+- **Unattended recovery** may pull from a relay on its own, since the device verifies every image itself. Attended recovery always shows the relay's name and address
+  and asks first.
+- If verification fails in unattended mode: **dev mode** flashes anyway (existing "accepted because secure mode is off" behaviour); **not dev mode**, it fails and
+  the log says why.
+- The relay client also carries a **dev role**: when the system image is signed but drivers are not (onboarding new hardware), the client pushes the new drivers from
+  the developer's machine, and the client does the verifying for them.
+- The client is **broken-kitten-recovery**, written in Rust for Windows, macOS and Linux: `tools/broken-kitten-recovery/`.
+
+### Relay support on the device, VM tests (2026-10-28)
+Built: `relay-` discovery ids (purr_recovery_src.c: `purr_recovery_server_allowed`, `purr_recovery_dev_mode`, `purr_recovery_source_is_relay`); a relay may be used in any
+secure mode, a developer's server only when the bootloader allowed one (it is ignored otherwise, and said so in the log); a relay is never remembered across boots.
+Unattended recovery (auto mode) picks a relay by itself when the official server is unreachable (`s_emergency_ok`). Attended recovery (the wizard): a failed
+restore shows "Use a recovery computer", which lists what was found with its name and address and uses it only after the owner picks it. Verification: an image that fails
+the device's own check from a relay is refused unless developer mode is on (`unverified_ok` in recovery_loader.c); from other sources the old rule (secure mode off) stands.
+Tests (VM, enforce mode, developer mode OFF, official URL set to a dead address):
+- real broken-kitten-recovery serving the 1.0.3 release: found, used, kernel 1.0.3 and kittenos 1.0.3 installed. Pass.
+- a developer server on the network in that state: ignored. Pass.
+- a rogue "relay" serving images with the manifest hashes forged to match: "kernel verification failed: bad-hash", "verification failed: bad-hash"; nothing written. Pass.
+Not run: the attended wizard screens (no touch input in the headless runner), dev mode flashing a failing image, hardware.
+Found while testing: the unicast discovery probe to the VM host reaches only one program per UDP port, so the relay and `dev serve` cannot both answer in the VM.
+
+## Quieter bootloader (owner approved the design, 2026-10-28)
+Design: menu only when needed, "PURR OS!" bold italic logo (white, orange "!"), no progress bar, status chips kept, Fast startup, 20 s fall-through to the default, Space opens the menu
+(a setting later; the SDK is to expose the mapping, plan5.md). Full description: `bootloader/SPEC.md` section 9.1.
+- Built: config flags `FAST_START` (persistent) and `SHOW_MENU` (one-shot); package ABI v4 (splash, key check, menu reasons, restart); `purr_menu` idle timer with the default as the fall-through
+  (host tests pass); boot package 0.3.0 (splash, menu with descriptions, problem screen, logo drawn from the 8x8 font); bootloader flow (`purr_bootpkg_start`, `purr_slot_failure_text`);
+  Settings > Devices > Startup (Fast startup switch, Restart to the boot menu). Seen in the emulator: the splash. See below for the menu and problem screens.
+- The loader now ends every install in KittenOS's second stage (also a reset that keeps the data). Needs one flash of the new loader.
+- Not done: the crash during the old autorun countdown is not located (needs a serial log). The new flow has no countdown screen, but that is not proof the crash is gone.
+- Not on a device yet. A bootloader change is never delivered by recovery: it needs a flash of 0x0 (the blank image has it).
+
+## Bootloader OTA (owner, 2026-10-28)
+Built: `PURR_MOD_BOOTLOADER`, the staged swap with a backup and rollback (`bootloader/SPEC.md` 9.2), the packaging (`make_release.py --bootloader`, `dev recovery --bootloader`), Settings > About lists
+"bootloader X" when newer and says so on the install tap, the Rust client verifies the new component. Bootloader 0.3.0 is published with release 1.0.10; a board flashed earlier reports 0.2.0, so it is
+offered the update (a first real test). Not run on a device: have the USB flasher ready for the first try.
+
+## Release channels, rollback rules, and vendor overlays (owner decisions, 2026-11-01; designed, nothing built)
+
+**Channels.** `stable` (today's rules: the version floor is enforced and raised on healthy boots) and `beta`. A channel is a row: name, repository / release URL base, whether rollback is allowed. A vendor ships its own rows with the same mechanism.
+- **Beta** keeps every signature rule (valid signature, a key role that may sign, no revoked key) and skips only the floor check. Beta does not raise the floor: it holds whatever stable last reached. This is not developer mode (no unsigned images).
+- **Compatibility limit (owner):** a downgrade is refused when the target is 5 or more release numbers below the highest version the device has run (files may not be readable by older code). Needs a second per-component number, the highest version run, which rises on both channels; the floor does not. Interpretation to confirm: "release number" is the last component of 1.0.N; a different major.minor counts as incompatible.
+- **Beta -> stable** is staged: the recovery loader installs the newest stable images first (at or above the floor, and not 5 or more below the highest run), verifies them, then flips the channel. On any failure the device stays on beta. If stable is 5 or more behind, the only way back is "switch and erase data".
+- **Stable -> beta** only through the recovery app, with a warning. **Refused on a device whose signed trust block locks developer mode** (DEV_LOCKED is final).
+- Limits: with no eFuse secure boot, the floor is a number in flash and can be lowered by someone with flash access (floors are not signed; see "Not built" in bootloader/SPEC.md). Hardware anti-rollback is not used (irreversible, and it would block going back and forth). The bootloader change is small (read the channel flag, pass floor 0 when beta and not locked); it has about 5 KB free.
+- A signed minimum version in the stable release manifest keeps an installer from putting a fresh device below the current floor of the release (1.0.12 at the time of writing).
+
+**Vendor overlays (owner's architecture goal).** One generic core OS, built and improved once; each vendor's devices are that core plus a signed overlay: board description, drivers, boot package (branding), default settings, channel rows, and the vendor's key. A build step composes the shared core with each vendor's overlay into that vendor's flash images (the SDK kit already repackages and re-signs prebuilt parts without ESP-IDF).
+What is true today: the loader, drivers and `/etc/board.conf` are already data; the boot package is per board; but the kernel is built per board (`CONFIG_PURR_BOARD_*` in `components/kernel/boards/` and 12 places in `main/`) and ESP-IDF fixes PSRAM mode, flash size and the partition table at build time, so "generic" means one core image per chip and memory class (two boards with the same chip, flash and PSRAM share it), not one image for everything.
+Work to get there: move the remaining board-specific code into data and drivers; a new signed "vendor bundle" image type; extend `purr_role_may_sign` (today the Vendor role signs only drivers and apps, and the boot package and everything below it need the boot key); per-vendor channel rows; and the compose step in the SDK.
+
+**Refinement (owner, 2026-11-01): the downgrade window is measured in patch releases and is extendable per release.** Default: a downgrade is refused when the target is 5 or more patch releases below the highest version the device has run. A release may declare a wider window ("data-compatible back to 1.0.N") when the owner knows the update did not touch file formats (speed and quality-of-life work). The declaration is part of the release (written by the release tooling from a per-release setting, carried in the signed image or its signed manifest) and the device records it when that release reaches a healthy boot, so the window in force always comes from the highest release run. It is deliberately not an editable file on the device: only a signed release may loosen the limit. Open: which signed field carries it (check the image trailer for room before adding one).
+
+## Fast startup: quick check, and its lockout (owner decisions, 2026-11-01; designed, nothing built)
+- **Default stays off** for now (the secure default). The splash stays and is the place for custom boot animations later (the boot package draws it; an animation would be part of a signed package).
+- **Quick check = hash only.** On a fast start the bootloader hashes the slot and compares it with the hash recorded at the last full verification, instead of checking the signature. Enabling it shows a warning that it weakens security.
+- **A hash that changes without an update forces a full verification.** The device runs the full check, turns fast startup off, and will not let it be turned on again until 10 starts in a row have completed with no hash trouble. Each fully verified, healthy start counts one; any hash mismatch or failed verification resets the count to 10. At 0 it can be turned on again by the user; it does not turn itself on.
+- **Expected vs unexpected change:** an update legitimately changes the hash. The recorded hash is replaced only after a full verification (the install flow, or the first healthy boot after the update). Any other change is unexpected.
+- **Honest limits:** (1) the SHA-256 over the whole image is most of the verify cost, so a hash-only check saves only the signature maths; measure on the device first (the open plan1 item "measure verify time at boot") before building. (2) The recorded hash lives in unsigned `purrcfg`, so it catches accidents (corruption, a half-written update), not someone with flash access who rewrites image and hash together. That is the weakening the warning describes. (3) A device whose signed trust block locks developer mode should refuse the quick check (locked is final).
+- **Needs:** a recorded hash per slot and a lockout counter in `purrcfg` (layout change), the compare path in the bootloader (about 5 KB free), the warning and a disabled state ("N more good starts") in Settings > Devices > Startup. Open: nest it as a separate "Quick check" switch under Fast startup, so existing Fast startup users (full check today) are not silently weakened by an update.
+
+### Really fast boot (owner, 2026-11-01; designed, nothing built)
+A second switch beside Quick check, under Fast startup. Warning shown on enabling: it turns the start-up security check off unless something is detected wrong.
+- **What it does:** no signature check and no hash. The bootloader reads only the slot header and trailer and compares cheap fields (magic, size, version, key id) with the record made at the last full verification. "Something detected wrong" = those fields differ, an update is pending or unconfirmed, the last start never reached healthy, or the boot-fail count is above zero. Any of these: full verification now, the switch turns off, and the same 10-clean-starts lockout as Quick check applies.
+- **Precedence:** if both are on, Really fast boot wins. Every start after an install or update is fully verified; the record is replaced only then.
+- **Only on select devices:** off unless the board description (or the vendor overlay, which is signed) says the device may use it. A signed trust block that locks developer mode forbids it outright.
+- **Only if no content needs a verified start:** an app (or repository, or policy) can declare `requires-verified-boot` (new manifest field). While any is installed the switch is disabled and says which one; installing one while the switch is on turns it off first, with a notice.
+- **Attestation stays honest:** a start that skipped the check cannot report GENUINE. The handoff records how the slot was checked (full, hash, none), `purr_secure_status` reports UNVERIFIED for the last two, and the About page says "not checked at start". That is also how `requires-verified-boot` content is kept off such a start.
+- **Limit:** it detects accidents (boot loops, a half-written update), not tampering. Measure first what it saves over Quick check; reading and hashing the image is most of the cost, and Really fast boot is the only mode that skips that.
+
+### Check after start, and the Security app (owner, 2026-11-03; designed, nothing built)
+Owner's goal: fast startup has to be fast. Allow a start that does not verify the system first, and verify it once everything is up; a Security app manages that and checks the device after a fast start. ("Encryption" here means the start-up signature check: nothing on the device is encrypted, and flash encryption / eFuse Secure Boot are not used.)
+- **What Fast startup is today:** it only skips the splash and menu; "verification is never skipped" (`purr_boot.c`). The check costs about 0.66 s per slot started (hardware SHA, plan1), so today's Fast startup is barely faster. The levels above (Quick check, Really fast boot) are what make it fast. Measure the whole start on a unit first (bootloader, kernel, drivers, shell up) before promising numbers: the verify may be a smaller share than the owner expects.
+- **New behaviour: the skipped check is made up after the start.** On a Quick check / Really fast boot start the slot is handed over as `checked: none|hash` (see "Attestation stays honest" above), and a late check runs once the shell and network are up: the same `purr_verify` code (shared with the bootloader, mbedtls in the kernel) reads each slot in 4 KB chunks at low priority, checks hash and signature against the key bag, and also checks the running kernel's own slot. Status moves from UNVERIFIED to "verified after start" (never GENUINE-at-boot; the About page says which). Cost: a few seconds of low-priority background work (about 0.7 s of hashing per MB of image) plus a 4 KB buffer and a task stack in the scarce internal RAM, only while it runs.
+- **Where it lives:** the engine is in the kernel (`purr_latecheck.c`, a one-shot low-priority task), not in an app, so removing or breaking an app cannot switch the check off. The **Security app** is the front end: a system-signed app over a read-only `security` catcall (status, history of checks, "Check now", the Startup levels moved here from Settings > Devices > Startup). It asks the kernel; it verifies nothing itself.
+- **If the late check fails (or the hash differs):** show a notice, block app installs, repository changes and anything marked `requires-verified-boot` until a clean full check, record it, turn Quick check / Really fast boot off, reset the 10-clean-starts lockout, and make the next start a full verification (which falls back through the normal ladder to recovery if the slot does not pass). It does not wipe anything by itself.
+- **Honest limit, to state in the app:** a late check run by the system being checked can be lied to by a tampered system. It catches corruption, half-written updates and ordinary mistakes; it does not protect against someone who can rewrite the kernel (that needs the hardware root of trust, as the warning already says). It is better than nothing and better than skipping the check silently, but it is not the same as verifying first.
+- **Locked devices:** a signed trust block that locks developer mode forbids skipping the start-up check at all, late check or not (locked is final).
+- **Order:** (1) measure the real start (add timing marks to the bootloader and kernel logs, read them on a unit); (2) the engine and `security` catcall with the late check on a normal start ("Check now" only, nothing skipped), which is safe to ship alone; (3) the Security app; (4) the bootloader's Quick check / Really fast boot paths and the handoff field; (5) Settings controls.
+
+### Fast startup is disabled (owner, 2026-11-04)
+Not allowed for now: with it on the bootloader shows no logo or menu on a healthy start, and it went with black-display start-ups on the owner's unit (cause not found; see plan7.md). The OS now refuses to turn it on (`purr_boot_fast_set(1)` returns -1), the Settings switch is gone (the Startup section says so), and the kernel, KittenOS and the recovery loader each clear the flag on every start (`purr_boot_fast_clear`), so a device that had it on loses it at its next start. The bootloader itself still reads `PURR_CFGF_FAST_START` (a bootloader change needs its own build and a flash of 0x0 or the staged bootloader update); until then the flag's only effect is for the one start before the OS clears it. Quick check and Really fast boot (designed above, never built) wait behind this.
+
+### Bootloader updates over the air are turned off (2026-11-05)
+Found on the bench by reading the serial log: KittenOS aborted on every start in `purr_swap_setup()` -> `bootloader_swap()` -> `purr_bootupdate_write()` -> `esp_flash_erase_region()`, because ESP-IDF aborts any erase of flash 0x0 while `CONFIG_SPI_FLASH_DANGEROUS_WRITE_ABORTS=y` (every build; nothing in the repo sets `ALLOWED`). The swap records MOVING in purrcfg before the write, so it resumed on every boot (`boot_fail_count` past 100), and `purr_swap_setup()` runs before `purr_modules_setup()` loads the display module, so the screen never came up; the loader's last frame ("restarting...") stayed on the panel. The same loop was behind the black display after a restore from the dev server. The staged version was 0.3.0 while 0.4.0 was running; why it counted as newer is not proven (no bootloader download appears in the dev server's log, so stage 2 probably used the official server; `have` may read as 0 on the continue-install path, which boots "slot -1").
+What changed: `PURR_BOOTLOADER_OTA` (commands.h) is 0. `netinstall bootloader` and stage 2 leave the bootloader alone, Settings no longer offers one, and a pending bootloader request left by an older build is dropped (state FAILED) instead of acted on. Also kept for when it comes back: a resumed swap is counted in `update.attempts` and `purr_swap_decide()` stops resuming at 3 (test_swap), and a running bootloader whose version reads 0 is never replaced. A bootloader reaches a device by a flash until the swap is proven on a bench device.
+To bring it back: set `CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED=y` in `sdkconfig.profile.recovery` only (KittenOS; the full system and the loader keep the abort), set `PURR_BOOTLOADER_OTA` to 1, publish a test bootloader one patch above the running one, and watch the swap on a device that has the USB flasher at hand (power lost during the sector rewrite, well under a second, leaves a board that needs it). Not done yet.
+
+### Bootloader 0.4.0 (was 0.3.1): the boot menu no longer trips the RTC watchdog (2026-11-04)
+Renumbered 0.4.0 by the owner on 2026-11-05 (the code is the 0.3.1 fix; nothing else changed). The text below says 0.3.1 where it was written then.
+Owner's report: left alone for about 5 seconds, the boot menu restarted the device instead of falling through to the default after its 20 second idle time, in a loop. Cause: the bootloader arms the RTC watchdog at start (`CONFIG_BOOTLOADER_WDT_TIME_MS`, 9 s) and nothing fed it; the slot checks and the splash use the first few seconds, so the menu was reset about 5 s into its wait. Fix (`purr_bootpkg.c`): the package waits through the `delay_us` service, which now feeds the watchdog (`wdt_hal_feed`, the way ESP-IDF documents it) in chunks of at most 0.5 s, for a bounded 90 s of waiting in all, so a package that hangs in its wait loop is still reset. `PURR_BOOTLOADER_VERSION` is 0x00040000 (0.4.0). Built, not run on a device. A bootloader is not delivered by recovery: it is written at 0x0 (`BL_FROM=<bootloader.bin> tools/hw/make_hw_image.sh`) or arrives as the staged `bootloader` component (not published yet; the dev server still has 0.3.0). Audit so far (purr_bootpkg.c, the start of purr_boot.c): `load_package` reads the payload and its preamble from `base + h.payload_offset` before the header's layout is known to be sound when the signature check failed but secure mode is off (dev boards only); not changed.
+
+
+
+### Withdrawing a bad release (2026-11-05)
+Owner: a bad OTA that has been pushed must be stoppable at once. Design and the first step are in OTA/SPEC.md 8.1. Built (host-tested, not yet in a firmware build): `withdrawn=yes` on an entry, a release-wide `withdrawn_versions` / `withdrawn_reason` list, `purr_manifest_find()` skips withdrawn entries (so every reader does), `purr_manifest_find_any()`, `purr_manifest_is_withdrawn()` (test_manifest: 162 checks), and `purrstrap dev withdraw` / `unwithdraw` (`recovery/withdrawn.list`, kept across `dev recovery`; 127 purrstrap tests pass with the IDF Python). To do, in order: words on the device and the lower-version offer, a manifest re-read before the loader's last write, a signed manifest with a release-stamp floor, the companion's hourly check, the Store index flag, a downgrade guard.
+Finding the same day, about the reinstall that "failed its modules": the official source (JumpingJaguar1/2) has the same modules as the dev server (about, fs and login are byte-identical, same payload hash and key) but also bootloader 0.3.0, which stage 2 staged; KittenOS's swap aborted at start (flash 0x0 is protected), before `purr_modules_setup()`, so no module ever loaded and the display never came up. The cause was the image source set to official by mistake, which the withdraw/downgrade-guard work above is meant to make harder to do quietly (Settings shows "Source: the official server", `purr_w10m_settings.c`).
+
+### Developer mode is off on the first boot after an install: by design (owner, 2026-11-05)
+After a loader install (minimal image, dev server chosen in the loader) the setup wizard's stage 2 pulled from the official release, not the dev server: the dev server's log shows no `legal.txt`, `modules.manifest`, module or `uiassets` request after KittenOS, and the pictures were missing (the official manifest has no `uiassets`). The cause is that the device starts in a safe-mode type state with developer mode off; a manual restart from inside the OS brings developer mode back. With developer mode off, `purr_recovery_dev_allowed()` (developer mode AND the DEV_RECOVERY flag in the hand-off) is false, so stage 2 uses the official server.
+**The owner wants it that way and said not to fix it: it protects the user, especially after a power loss** (a device that comes up after an interrupted install or a power cut must not trust a developer server, or run developer-signed or unsigned code, until someone turns developer mode on on purpose). So: do not change it, do not "restore" developer mode automatically after an install or a power loss. To test from a dev server, install, then restart once from inside the OS (developer mode returns), then run the Settings update or `netinstall` for what the first pass missed. The mechanism is not traced to the line (`cfg.flags & PURR_CFGF_DEV_MODE` in `purr_trust.c`; `mark_install_success_ex` in `recovery_loader.c` falls back to `purr_cfg_defaults()` when the config cannot be read), and does not need to be.
+
+## Downloads: one small file at a time, checked, tried again (2026-11-05)
+The owner suspected corruption during reinstalls and asked to reinforce the download path, keeping the releases as many small files rather than one big package. What was already true: every component, module, driver and the picture pack is its own file, fetched whole, checked against its index entry (size and SHA-256), signature-verified, written, and (netinstall, KittenOS) read back. What was missing, and is now in (built, not yet run on a device):
+- **A short body is a failed download.** `purr_fetch.c`: when the server states a length and the body ends before it, all three fetch functions now fail with `ESP_ERR_INVALID_SIZE` instead of handing back a smaller buffer.
+- **Three tries, each checked.** `purr_fetch_alloc_checked()` (fetch, then size and hash against the index, wait 2 s then 4 s between tries). Used by the loader (kernel, bootpkg, loader modules and KittenOS) and `netinstall` (modules, the picture pack). Drivers retry in `download_driver()` the same way (1.5 s, 3 s).
+- **Read-back everywhere.** The loader's module write (`fetch_and_install_module`) now reads the slot back and compares the payload hash, like `install_kittenos` and `netinstall` already did. A driver file saved to `/boot/drivers` is read back and removed if it does not match.
+- Not changed: the picture pack is still one 5 MB file in one PSRAM block. If reinstalls still fail there, split it into parts of a few hundred KB, each with its own hash in the index and written straight to flash as it arrives (also makes a resume possible); that needs a purrstrap and manifest change.
+
+## Key rotation (owner, due 7 November 2026; planned 2026-11-05, nothing generated or changed yet)
+
+**What is rotated:** the boot key (id 1) and the developer key (id 2), and with them everything that carries or is signed by them: the public keys compiled into the bootloader and the firmware (`PurrOS/components/coreos/keys/purr_default_keys.c`), the signatures on the boot package, KittenOS, the kernel, the loader, the modules, the drivers and the picture pack, the apps in the dev repository (and the new apps repository), the official repository's key and the endorsement of Devices as an official app. The developer key becomes **developer-mode only** and driver signing is restricted, as the owner decided earlier.
+
+**Order (owner, 2026-11-05):** Showtime Plan 1 (`showtime1.md`) starts first and the rotation follows it; the 7 November date is the owner's to move.
+
+**Checked against `bootloader/SPEC.md` sections 4, 5.1 and 5.2 (2026-11-05), which changes two things in the phases below:** (1) a key update replaces **one slot** of the bag, so the overlap uses new key ids in unused slots (3 and 4), and new keys reach a device as `keys[]` entries of the **signed trust block**, signed by the old boot key; (2) the trust block's own signature is checked against the **compiled-in boot keys only, never the overridden bag**, and revocation does not reach the keys the bootloader carries. So until a bootloader without the old key is flashed, the old boot key can still sign a trust block (it could change `secure_mode`, add keys or clear revocations); revoking it in the bag protects images but not that. The trust block has no replay protection yet, so with flash access an older signed block can be written back. Phases 4 and 6 (new bootloaders over the cable) are therefore the real cut-over. Files that carry public keys or call the key tools, for the re-signing step: `PurrOS/components/coreos/keys/purr_default_keys.c`, the bootloader's `purr_bootcfg.c`, `purr_bootpkg.c`, `purr_slotverify.c`, `purr_trust.h`/`purr_trust_os.c`, `recovery_loader.c`, `commands.c`, `purrstrap/scripts/keys.py`, `coreos.py`, `uiassets.py`, `tools/release/make_release.py`, `make_jj3.sh`, `tools/hw/make_hw_image.sh`, `tools/vm/*`, `tools/broken-kitten-recovery/src/keys.rs`.
+
+**What the code gives us (read 2026-11-05):** two keys are compiled in (id 1 boot, id 2 developer); `purrcfg` has 8 override slots and the key bag holds up to 16 keys, so new keys can be added on a device by a signed key-update request without reflashing; keys can be revoked by a bit in `revoked_keys`; the trust block is signed against the compiled-in keys, so a boot key that has to sign trust blocks needs a new bootloader (the bootloader's own OTA is switched off: a cable flash at 0x0). `Keys/SPEC.md` lists "rotating the boot key" as an open question, so this is the first time it is done.
+
+**Phases:**
+1. **Prepare (before touching anything).** List every device that has to be rotated and who holds it (the owner's T-Deck, any other unit). Decide where the new private keys live and how they are backed up offline. The owner chooses the new passphrases; they are given to one signing command at a time and never written down. Back up the whole server set and the old keys first.
+2. **Generate the new keys** (boot id 3, developer id 4, and a new official repository key) with `purrstrap keys`; record only the public halves in the repository.
+3. **Overlap, no reflash.** Sign a key-update request with the old boot key that adds the new keys to the override slots. Release the next set signed with the new boot key. Devices that took the request trust both.
+4. **Bootloader with the new keys.** Build a bootloader (0.5.0) that carries the new public keys beside the old ones; flash each device over the cable; re-sign the trust block with the new boot key.
+5. **Re-sign everything** with the new keys: the boot package, KittenOS, kernel, loader, modules, drivers, picture pack; the apps in the dev repository and the apps repository; the repository index and the endorsement. Verify every file from a fresh download.
+6. **Revoke the old keys** (signed request, `revoked_keys`), then ship a bootloader that no longer carries them (0.6.0), flashed the same way.
+7. **Write it down:** `Keys/SPEC.md` (the rotation procedure is no longer open), `SECURITY.md`, the SDK's key guide, this plan.
+
+**Risks to settle first:** a device that misses phase 3 and 4 cannot verify new releases and has to be reflashed with a cable; a mistake in the trust block can lock a device out (the recovery loader and a cable flash are the way back); the revoked old keys must not be needed by anything still in the field. A locked (dev-locked) device is never weakened to make this easier.
+
+**Order against the other work:** after the owner has tested 1.0.26 and the default-account change; before the apps repository is filled (so its packages are signed once, with the new developer key); the Showtime documentation then describes the new setup. Start with phase 1 on 6 November so that 7 November is the cut-over.
+
+## Four system keys and the dev channel (owner, 2026-11-06; designed, not built)
+
+The owner will have **four main system keys**: **boot** (OS images and the trust block; offline), **developer** (apps and drivers; the owner's computer), **hub** (signs the hub's channel list, the move file and the app indexes; offline) and **nightly** (held by CI; signs the dev channel only). **The boot key is never put in CI** (whoever can run CI would own every device); the nightly key is its own role, accepted only on a device that is in developer mode and on the dev channel.
+
+**Switching to the dev channel** fetches a key bundle (the nightly public key with an **expiry**, signed with the boot key) through the existing signed key-update request (override slots in `purrcfg`, up to 16 keys in the bag, a revocation bit), so no reflash. A device leaving the channel removes it; an expired or revoked nightly key stops working by itself. The channel switch is **queued** until the key has arrived. `purr_role_may_sign()` gets the nightly role (kernel, loader, KittenOS and apps, for the dev channel only). This is designed together with the key rotation, which stays held until the owner moves it.
+
+**Hub keys and the rotation (owner, 2026-11-06 night):** the owner chose "rotate first": nothing signed is built for the hub (plan8, "The hub, as decided with the owner") until the rotation has generated the new keys. The rotation is also the moment to generate the four system keys of the section above in one go (boot, developer, hub, nightly), so the hub's `keys/` gets its public halves once. Proposed: the hub key takes the existing `PURR_ROLE_SYSTEM` on the device (it already may sign modules, indexes, picture packs and now shells); the nightly key is the new role. Phase 1 of the rotation (the device list, where the private keys live, backups of the server set and the old keys) is the next step; it needs the owner.
+
+### Rotation phase 1 started (owner, 2026-11-06 night: "yes" to the hub key on the system role, "yes" to starting phase 1; nothing generated)
+
+**Decided:** the hub key takes the device's existing **`PURR_ROLE_SYSTEM`** (it already may sign modules, indexes, picture packs and shells; no firmware change). The nightly key is the one new role (plan3, "Four system keys and the dev channel").
+
+**What the code and the machine show (checked 2026-11-06, public facts only):**
+- **Custody today:** both private keys, `signing_keys/boot.key` (id 1) and `signing_keys/developer.key` (id 2), are encrypted PKCS#8 PEM files in the project folder on the owner's Mac, made on 30 September. `signing_keys/` is gitignored (verified with `git check-ignore`); no tracked file in the firmware repository is a private key (the `.key` and `.pem` files git lists are third-party test data under `archive/`). **The permissions were world-readable (0644); tightened to 0700 for the folder and 0600 for the files on 6 November.** No other copy and no offline backup is known: one copy, on the same disk as the working tree. Public fingerprints (first 16 hex digits of the SHA-256 of the `.pub` file): boot `d349847710f59c70`, developer `0b63c12fc9aad705`.
+- **Where the public keys are compiled in:** one generated file, `PurrOS/components/coreos/keys/purr_default_keys.c` (by `purrstrap keys export-public`), built into **both the bootloader** (`bootloader_components/main/purr_slotverify.c`, `purr_bootpkg.c`, `purr_bootcfg.c`) **and the firmware** (`purr_trust_os.c`, `recovery_loader.c`). Only two keys exist there (ids 1 boot, 2 developer). **No key with the system role exists today**: the pictures and indexes the dev server calls "system" are signed with the boot key, which the role check also allows for them. So the hub key is a **new** key (role SYSTEM), not a rename.
+- **Limits:** key ids go to 31 (`PURR_KEY_MAX_ID`, the revocation mask is 32 bits); a device's bag holds up to 16 keys and `purrcfg` has 8 override slots; the trust block's own signature is checked against the compiled-in keys only (so the old boot key can still sign a trust block until a bootloader without it is flashed, as phases 4 to 6 say).
+- **Proposed ids:** boot 3 (BOOT), developer 4 (DEVELOPER), hub 5 (SYSTEM); nightly 6 (new NIGHTLY role; delivered to a device by a signed key bundle with an expiry, not compiled in). The old 1 and 2 are revoked in phase 6.
+- **Passphrases:** three are the owner's to choose (boot, developer, hub), each given to one signing command and never written down; the nightly key is a CI secret (no passphrase file in any repository).
+- **What carries the old keys and has to be redone (phase 5):** `out/devrepo` (28 MB: the 1.0.30 and 1.0.31 sets), the backups in `out/ota` (252 MB, history only), about twenty release folders on the Desktop (`PURR-OS-release-1.0.1` to `-1.0.28`, three marked "OLD, do not upload"), the VM and kit images in the emulator project (`Testrun/vm-secure`: their trust blocks and slots are signed with the boot key), `out/hw/tdeck_plus-1.0.29-blank-flash.bin` (what was flashed on the owner's T-Deck on 6 November), and the bootloader 0.4.0 at flash 0x0 on every device.
+- **Backed up (6 November):** the whole server set, as `out/ota/pre-rotation-2026-11-06` (public artifacts only). **Not yet:** an offline copy of the two private key files: the medium is the owner's choice (not the Desktop or any folder that syncs to a cloud service).
+- **Devices to rotate (to confirm with the owner):** the owner's T-Deck Plus (1.0.29 blank image flashed by cable on 6 November, recovery installed 1.0.30; a cable flash is needed for phases 4 and 6), "possibly one device sent to a friend", any other T-Deck, CYD or partner hardware, and the emulator and kit images.
+
+**Rotation phase 1, answers (owner, 2026-11-06 night):**
+- **Devices:** the owner's T-Deck Plus and the VM (the "possibly one sent to a friend" is a VM): **rotate the VM and all devices**. That is the T-Deck Plus (cable flashes in phases 4 and 6), every VM and kit image (rebuilt with the new bootloader, trust block and slots), and the emulator project's `Testrun/vm-secure` images.
+- **Where the private keys live:** `signing_keys/` in the repository folder, **named for what each key is for** (`boot`, `developer`, `hub`; the nightly key is a CI secret and is not stored there). A folder literally named `keys/` is not possible in this repository: `Keys/` (the tracked key specification) already exists and the Mac's file system ignores case, so `keys/` would be the same folder. `signing_keys/` is gitignored (verified), and `*.key` and `*.pem` are now ignored everywhere else too, so a stray private key cannot be added by accident. The folder's `README.txt` (itself ignored) says which key is which: now `boot.key` (id 1) and `developer.key` (id 2); after the rotation `new/boot.key` (3), `new/developer.key` (4), `new/hub.key` (5, role SYSTEM), swapped in at phase 5 with the old ones moving to `old/` (every release script reads `signing_keys/boot.key`, so the swap keeps them working).
+- **YubiKey (owner, later):** the owner will import the keys into a YubiKey (PIV, ECDSA P-256). Two things to settle before that: (1) **an import cannot be undone and the key cannot be taken back out**, and a lost key means devices can no longer be updated (the bootloader carries the public key), so an offline copy of each encrypted key file stays, or a second YubiKey carries the same keys; (2) **`purrstrap` signs from PEM files only** (`keys sign --key FILE`): signing with a YubiKey needs a signer backend (PIV through PKCS#11 or `ykman`, the PIN and a touch per signature), which is a small piece of work to do before the first release that relies on it. Nothing here changes the device side: a signature is an ECDSA P-256 signature whoever makes it.
+
+**Rotation phase 2 done (owner, 2026-11-06 night): the three new key pairs are generated** (P-256, password-protected PEM, in `signing_keys/new/`, mode 0600): `boot.key` **id 3**, role BOOT, fingerprint `f9a8394b1c35c9ad`; `developer.key` **id 4**, role DEVELOPER, fingerprint `2e440f43318becab`; `hub.key` **id 5**, role SYSTEM, fingerprint `adffd25c4d51651a`. Each passphrase is the owner's, was given to its own `keys generate` command and is written nowhere (checked: no copy in the repository, the scratch folder or the hub repository). Each key was proved by signing a test image with it and verifying that with its public half. The nightly key (id 6) is not generated: it is a CI secret for the dev channel and waits for the CI. **Nothing uses the new keys yet:** the old keys (ids 1 and 2) still sign every release, the compiled-in bag is unchanged, the hub has no keys. Next: phase 3 (a key-update request signed with the OLD boot key adds the new keys to the override slots of a device, no reflash), then phase 4 (bootloader 0.5.0 with the new public keys beside the old, flashed by cable to the T-Deck Plus, VM images rebuilt). **Still open:** the offline copy of the private key files (not yet made; the owner's medium) and the YubiKey import (later; see above).
+
+**Rotation phase 3 run on the VM (owner, 2026-11-06 night; headless emulator, scratch images; nothing on a device, nothing published):** the overlap works as designed.
+- **Overlap image:** a VM image whose **trust block, signed by the OLD boot key, carries the three new public keys** (`keys trust-block --add-keys 3:boot:...,4:developer:...,5:system:...`) and whose boot package, kernel, loader and KittenOS are signed by the **NEW boot key (id 3)**: the **unchanged bootloader 0.4.0** said `slot @0x1e0000: ok`, `bootpkg 0.3.1 loaded (key id 3, ok)` and booted the kernel; the kernel then loaded a **shell signed by the NEW hub key (id 5, system role)** (`shell w10m loaded`, `w10m: shell up`). So the new keys reach a device with no reflash, for the bootloader and for the OS's own verification.
+- **Control:** the same images **without** the new keys in the trust block: every slot is `no-key` and `REFUSED (no-key): enforce does not launch an unverified slot`. So a device that misses this step cannot start anything signed by the new keys (as the phases above warn); the old-key images still boot (I1: old-key slots with the keys added, shell signed by the old key: loads).
+- **Tooling:** `tools/vm/mkimage_dbg.sh` now takes `SLOT_KEY`, `SLOT_KEY_ID` and `PURRSTRAP_SLOT_PASSWORD` (the slots are signed by that key; the trust block always by the compiled-in boot key, whose passphrase is `PURRSTRAP_KEY_PASSWORD`) and `ADD_KEYS`. Passphrases only in the environment of those commands.
+- **A bug found on the way, not understood:** some images (new-key slots, the kernel build of that moment) failed the **payload hash of the 436 KB shell file** (`bad-hash`) 4 times out of 4, while the same file, same root and the same kernel sources passed in other images and after a rebuild; a debug build with extra logging passed. The file itself verifies on the host. The root file system has **no lock** (`LFS_THREADSAFE` off, no mutex in `purr_fs`), and a read of a file that size takes seconds, so another task using the file system during the read can leave wrong bytes without an error. **Safeguard added:** the shell loader and the compatibility check now check the file's own payload hash as soon as the bytes are in memory and **read the file again (up to three times, with a log line)** before calling it damaged. Not explained: what the other task was; worth finding (a file system lock is the real fix and touches every user of `purr_fs`).
+- **Not done:** the VM images and the T-Deck Plus have not been given the key update for real (that is the next step for the owner's devices: a trust block carrying the keys, written to `purrcfg` by a signed update or in the images I build); phase 4 (bootloader 0.5.0 with the new public keys compiled in beside the old, a cable flash).
+
+**Rotation phase 4 built and run on the VM (owner, 2026-11-06 night; headless emulator; nothing on a device, nothing published):**
+- **Compiled-in keys:** `purrstrap keys export-public` added the three new public keys to `PurrOS/components/coreos/keys/` (`boot_3`, `developer_4`, `system_5` as raw `.pub.bin`, public data) and regenerated `purr_default_keys.c`: **ids 1 boot, 2 developer, 3 boot, 4 developer, 5 system** (the bag is built by id, so the old keys stay; the bag holds 16). The same file goes into the bootloader and every kernel profile, so they all rebuilt with it (device kernel 1,928,224 bytes, loader 1,501,920, KittenOS 1,561,312, VM 1,620,368; the C host tests pass).
+- **Bootloader 0.5.0** (`PURR_BOOTLOADER_VERSION` 0x00050000): built in a scratch build directory, 35,760 bytes of the 40,960 the region allows; copy at `out/hw/bootloader-0.5.0.bin`. The old keys are still accepted until 0.6.0.
+- **Run (bootloader 0.5.0 + a kernel with the five keys):** (A) the end state: **trust block signed by the NEW boot key (id 3)**, boot package, kernel, loader and KittenOS signed by id 3, **no keys added in the trust block**: `secure_mode: enforce (signed trust block)`, `slot ok`, `bootpkg loaded (key id 3, ok)`, the shell signed by the new hub key (id 5) loaded and came up; (B) the OLD boot key for trust block and slots: unchanged behaviour, boots. `tools/vm/mkimage_dbg.sh` takes `TRUST_KEY` and `PURRSTRAP_TRUST_PASSWORD` for the trust block key.
+- **What flashing 0.5.0 on the owner's T-Deck Plus does (nothing else changes):** only the bootloader (flash 0x0, 0xA000 bytes) is replaced; the partition table, trust block, boot package, kernel and data stay; the device keeps working with the old-key trust block and slots and now also accepts the new keys at boot. Its kernel (1.0.31/1.0.30 on the device) does NOT know the new keys until a rebuilt kernel is installed, so a trust block signed by the new key would be read by the old kernel as unsigned: **the order is: (1) bootloader 0.5.0 by cable; (2) a release built with the five keys but still SIGNED BY THE OLD KEYS, installed on every device and VM; (3) only then phase 5: re-sign everything with the new keys and sign the trust block with the new boot key; (4) revoke the old keys and flash 0.6.0.**
+
+**Rotation step 1 and 2 (owner, 2026-11-07):**
+- **Bootloader 0.5.0 flashed to the owner's T-Deck Plus by cable** (only flash 0x0 up to the partition table; esptool verified the hash; the sha256 of the file matched the build). Nothing else on the device was touched. The device now accepts the three new public keys at boot beside the old ones; its kernel still does not know them.
+- **1.0.32 published to the dev server** (kernel, KittenOS and loader built with the five compiled-in keys, ids 1-5, **signed by the OLD boot key id 1**; the bootloader entry stays 0.4.0 because a bootloader reaches a device by cable, the system modules, drivers and the 1.0.30 picture packs unchanged). 25 files checked against the live server, no mismatch. The folder it replaced is kept in `out/ota/recovery-1.0.31-android`. The owner installs it by OTA and tries the hybrid state (new bootloader, old-key signatures, five-key kernel) before phase 5.
+- **Follow-up (not in 1.0.32, so that release stays a clean test of the hybrid phase): a bootloader update from KittenOS in stage 2 of the setup.** The swap code exists (`bootloader_swap`, `netinstall bootloader`) and is off (`PURR_BOOTLOADER_OTA 0`) because ESP-IDF aborts any erase of flash 0x0 (see "Bootloader swap" above). Plan: `CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED=y` in `sdkconfig.profile.recovery` only; `PURR_BOOTLOADER_OTA 1`; extra guards in stage 2 (battery above about 50 percent or a charger connected; the new bootloader downloaded, signature checked and newer than the running one before flash 0x0 is touched); test first with a 0.5.1 bootloader on a device with the cable at hand. Reason it matters: phase 6 (0.6.0 without the old keys) would then reach devices without a cable.

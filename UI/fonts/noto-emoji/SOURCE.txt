@@ -1,0 +1,37 @@
+Noto Emoji (monochrome outline emoji) 3.002, subset for PURR OS
+===============================================================
+
+Upstream:   Google Fonts repository, https://github.com/google/fonts , folder ofl/notoemoji
+            (the family is built from https://github.com/googlefonts/emoji-bw, release v3.000, per METADATA.pb there)
+            Commit used: 8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5 (2026-03-12)
+File:       https://raw.githubusercontent.com/google/fonts/8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5/ofl/notoemoji/NotoEmoji%5Bwght%5D.ttf
+            NotoEmoji[wght].ttf, 1,982,596 bytes, variable weight 300-700, font version 3.002
+            sha256 de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551
+Licence:    SIL Open Font License 1.1, no Reserved Font Name. OFL.txt is copied unchanged from the same commit
+            (sha256 500bb1ccf43df7bbb522112f9133a52b16e1c35e809632f5d8609b179152de5b).
+Copyright:  Copyright 2013 Google LLC
+Downloaded: 2026-11-06
+
+Steps (fonttools 4.60.2):
+
+  1. Fix the weight at the regular master (Tiny TTF draws the default outlines and ignores variations, so the
+     variation tables would be dead weight):
+       python3 -m fontTools.varLib.instancer "NotoEmoji[wght].ttf" wght=400 -o NotoEmoji-400.ttf
+     (886,628 bytes for all 1,489 code points)
+
+  2. Subset to the core set listed in core-set.txt (414 code points, 415 glyphs with .notdef):
+       python3 -m fontTools.subset NotoEmoji-400.ttf --unicodes-file=core-set.txt \
+         --layout-features= --no-hinting --name-IDs='*' --notdef-outline \
+         --drop-tables+=GSUB,GPOS,STAT,vhea,vmtx,gasp,GDEF --output-file=NotoEmoji-core.ttf
+
+Result: NotoEmoji-core.ttf, 191,612 bytes, sha256 b755ca74c4bdc5c9e2fafc4f82ae5a4f817ab31eb758056d2cac136eca01ab87.
+
+The core set (core-set.txt has the groups with comments): all faces and cat faces, gestures, hearts, hands, a few
+animals (cat, dog, paws), weather and nature, food and drink, the objects the shells talk about (phone, mail, folder,
+lock, battery, bell, speaker, tools), symbols (ticks, crosses, warning, arrows, media controls, coloured circles and
+squares), a few places and sport items, ZWJ and the variation selector. Flags, skin-tone modifiers, keycaps, regional
+indicators and the long tail of the full set are left out. Tiny TTF does not shape ZWJ sequences, so a family or
+profession emoji would show as its parts; those sequences are not in the set.
+
+The subset keeps the font names and the copyright and licence strings in the `name` table.
+The subset is a modified version of the Software under OFL 1.1 section 2; no Reserved Font Name is declared.

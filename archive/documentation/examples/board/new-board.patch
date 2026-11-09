@@ -1,0 +1,144 @@
+--- a/PurrOS/components/kernel/Kconfig
++++ b/PurrOS/components/kernel/Kconfig
+@@ -12,6 +12,9 @@
+ 
+         config PURR_BOARD_CYD_24C
+             bool "CYD 2.4C (ESP32-2432S024C)"
++
++        config PURR_BOARD_MYBOARD
++            bool "My board (generic ESP32-S3 dev kit)"
+     endchoice
+ 
+ endmenu
+--- a/PurrOS/components/kernel/CMakeLists.txt
++++ b/PurrOS/components/kernel/CMakeLists.txt
+@@ -16,6 +16,9 @@
+ if(CONFIG_PURR_BOARD_TDECK_PLUS)
+     list(APPEND srcs "boards/tdeck_plus.c")
+ endif()
++if(CONFIG_PURR_BOARD_MYBOARD)
++    list(APPEND srcs "boards/myboard.c")
++endif()
+ 
+ idf_component_register(SRCS ${srcs}
+                        INCLUDE_DIRS "include"
+--- a/purrstrap/scripts/coreos.py
++++ b/purrstrap/scripts/coreos.py
+@@ -13,7 +13,7 @@
+ IDF_VERSION = "5.3.5"
+ # A board decides the chip. Adding a board means adding a row here and a folder of
+ # settings files in PurrOS/.
+-BOARDS = {"tdeck_plus": "esp32s3", "cyd_24c": "esp32"}
++BOARDS = {"tdeck_plus": "esp32s3", "cyd_24c": "esp32", "myboard": "esp32s3"}
+ PROFILES = ("minimal", "recovery", "full")
+ PROJECT_DIR = "PurrOS"
+ 
+--- a/purrstrap/scripts/modules.py
++++ b/purrstrap/scripts/modules.py
+@@ -18,7 +18,8 @@
+ 
+ # board -> (cross compiler prefix, chip id). Reuses coreos.py's mapping conventions.
+ BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
+-          "cyd_24c": ("xtensa-esp32-elf", pimg.CHIP_ESP32)}
++          "cyd_24c": ("xtensa-esp32-elf", pimg.CHIP_ESP32),
++          "myboard": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3)}
+ 
+ # name -> MOD_* subtype (purr_abi.h / purr_keybag.c's purr_role_may_sign).
+ # "coreos" added 2026-09-29 (PurrOS/SPEC.md section 6): the relocatable-module mechanism is
+--- a/purrstrap/scripts/bootpkg.py
++++ b/purrstrap/scripts/bootpkg.py
+@@ -15,7 +15,8 @@
+ 
+ PKG_DIR = "bootpkg"
+ # board -> (compiler prefix, chip id, linker script). Chip ids are esp_chip_id_t values.
+-BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld")}
++BOARDS = {"tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
++          "myboard": ("xtensa-esp32s3-elf", 9, "esp32s3.ld")}
+ VERSION = "0.1.0"
+ 
+ # Re-exported under their original names: purrstrap/tests/test_bootpkg.py reads these.
+--- a/bootpkg/src/pkg_hw.c
++++ b/bootpkg/src/pkg_hw.c
+@@ -10,22 +10,27 @@
+ 
+ static inline void pin_hi(int p)
+ {
++    if (p < 0) return;
+     if (p < 32) REG(0x08) = 1u << p; else REG(0x14) = 1u << (p - 32);
+ }
+ static inline void pin_lo(int p)
+ {
++    if (p < 0) return;
+     if (p < 32) REG(0x0C) = 1u << p; else REG(0x18) = 1u << (p - 32);
+ }
+ static inline void pin_drive(int p)         /* output enable on */
+ {
++    if (p < 0) return;
+     if (p < 32) REG(0x24) = 1u << p; else REG(0x30) = 1u << (p - 32);
+ }
+ static inline void pin_release(int p)       /* output enable off */
+ {
++    if (p < 0) return;
+     if (p < 32) REG(0x28) = 1u << p; else REG(0x34) = 1u << (p - 32);
+ }
+ static inline int pin_read(int p)
+ {
++    if (p < 0) return 1;                    /* an absent pin reads as released (high) */
+     return p < 32 ? (int)((REG(0x3C) >> p) & 1u) : (int)((REG(0x40) >> (p - 32)) & 1u);
+ }
+ 
+@@ -238,6 +243,10 @@
+ 
+ char hw_key(void)
+ {
++    if (PIN_KBD_SDA < 0) {                  /* no keyboard on this board */
++        s_kbd_ok = 0;
++        return 0;
++    }
+     i2c_start();
+     if (!i2c_write((KBD_ADDR << 1) | 1)) {
+         i2c_stop();
+@@ -255,22 +264,32 @@
+ void hw_init(const purr_boot_services_t *svc)
+ {
+     g = svc;
+-    svc->gpio_setup(PIN_POWER, PURR_GPIO_OUT);
+-    pin_hi(PIN_POWER);
+-    hw_delay_ms(50);                        /* nothing on the rail answers before this */
+-
+-    svc->gpio_setup(PIN_IDLE_A, PURR_GPIO_OUT);
+-    svc->gpio_setup(PIN_IDLE_B, PURR_GPIO_OUT);
+-    pin_hi(PIN_IDLE_A);
+-    pin_hi(PIN_IDLE_B);
++    if (PIN_POWER >= 0) {
++        svc->gpio_setup(PIN_POWER, PURR_GPIO_OUT);
++        pin_hi(PIN_POWER);
++        hw_delay_ms(50);                    /* nothing on the rail answers before this */
++    }
++
++    if (PIN_IDLE_A >= 0) {
++        svc->gpio_setup(PIN_IDLE_A, PURR_GPIO_OUT);
++        pin_hi(PIN_IDLE_A);
++    }
++    if (PIN_IDLE_B >= 0) {
++        svc->gpio_setup(PIN_IDLE_B, PURR_GPIO_OUT);
++        pin_hi(PIN_IDLE_B);
++    }
+ 
+     svc->gpio_setup(PIN_MOSI, PURR_GPIO_OUT);
+     svc->gpio_setup(PIN_SCLK, PURR_GPIO_OUT);
+     svc->gpio_setup(PIN_CS, PURR_GPIO_OUT);
+     svc->gpio_setup(PIN_DC, PURR_GPIO_OUT);
+-    svc->gpio_setup(PIN_BACKLIGHT, PURR_GPIO_OUT);
+-    svc->gpio_setup(PIN_KBD_SDA, PURR_GPIO_OPEN_DRAIN);
+-    svc->gpio_setup(PIN_KBD_SCL, PURR_GPIO_OPEN_DRAIN);
++    if (PIN_BACKLIGHT >= 0) {
++        svc->gpio_setup(PIN_BACKLIGHT, PURR_GPIO_OUT);
++    }
++    if (PIN_KBD_SDA >= 0) {
++        svc->gpio_setup(PIN_KBD_SDA, PURR_GPIO_OPEN_DRAIN);
++        svc->gpio_setup(PIN_KBD_SCL, PURR_GPIO_OPEN_DRAIN);
++    }
+     pin_hi(PIN_CS);
+     pin_hi(PIN_DC);
+ }

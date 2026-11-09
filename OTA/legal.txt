@@ -1,0 +1,33 @@
+# The legal stuff & cool people. Shown on the recovery screen (and later in Settings > About).
+# Lines that start with # are notes for whoever edits this file and are not shown.
+# Edit the text below, rebuild, and the new text is what people read. Plain text only; keep lines short paragraphs.
+
+PURR OS
+Copyright the PURR OS authors. Free software under the GNU General Public License, version 3 or later. You may copy, change and share it under that licence. There is no warranty. The licence text is in the LICENSE file of the source.
+
+WINDOWS 10 MOBILE STYLE SHELL
+The look of the shell is modelled on windows-10-mobile-lvgl by Felix Biego (https://github.com/fbiego/windows-10-mobile-lvgl), under the MIT licence, and uses its artwork unchanged for now. Some of that artwork (the Windows and Lumia imagery) is not Felix Biego's to license and is placeholder art only. Windows and Lumia are trademarks of Microsoft. This project is not affiliated with or endorsed by Microsoft.
+
+LVGL
+The graphics library, MIT licence. https://lvgl.io
+
+MONTSERRAT
+The type used by the shell, by Julieta Ulanovsky and others, SIL Open Font License 1.1, as shipped with LVGL.
+
+UNSCII
+The pixel type of the boot screens, by Viznut. Public domain.
+
+ESP-IDF
+Espressif's development framework, Apache License 2.0. https://github.com/espressif/esp-idf
+
+MBED TLS
+Secure connections, Apache License 2.0 (or GPL 2.0 or later). https://github.com/Mbed-TLS/mbedtls
+
+LITTLEFS
+The filesystem, BSD 3-clause licence, by Arm Limited and contributors. https://github.com/littlefs-project/littlefs
+
+MICRO-ECC
+Signature checks, BSD 2-clause licence, by Kenneth MacKay. https://github.com/kmackay/micro-ecc
+
+THANK YOU
+To everyone who wrote, tested, reported and shared the pieces above.

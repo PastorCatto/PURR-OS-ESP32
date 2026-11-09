@@ -2,7 +2,7 @@
 
 /* No libc: this also runs in the boot package, which links none. */
 
-purr_key_t purr_key_from_char(char c)
+purr_menu_key_t purr_key_from_char(char c)
 {
     switch (c) {
     case 'w': case 'W': return PURR_KEY_UP;
@@ -38,11 +38,20 @@ void purr_menu_init(purr_menu_t *m, const purr_menu_part_t *parts, int nparts, i
             add_entry(m, parts[i].label, i);
         }
     }
+    m->timeout_ms = PURR_MENU_TIMEOUT_MS;
     if (m->count == 0) {
         m->no_boot_options = 1;
         add_entry(m, "Internet recovery", -1);
     } else {
         m->counting = 1;
+        m->default_sel = m->selected;
+    }
+}
+
+void purr_menu_add_restart(purr_menu_t *m)
+{
+    if (m->count < PURR_MENU_MAX_ENTRIES) {
+        add_entry(m, "Restart", -2);
     }
 }
 
@@ -56,7 +65,7 @@ int purr_menu_seconds_left(const purr_menu_t *m)
     if (!m->counting) {
         return -1;
     }
-    uint32_t left = m->elapsed_ms >= PURR_MENU_TIMEOUT_MS ? 0 : PURR_MENU_TIMEOUT_MS - m->elapsed_ms;
+    uint32_t left = m->elapsed_ms >= m->timeout_ms ? 0 : m->timeout_ms - m->elapsed_ms;
     return (int)((left + 999) / 1000);
 }
 
@@ -64,7 +73,9 @@ static purr_menu_result_t choose(const purr_menu_t *m)
 {
     purr_menu_result_t r = {PURR_MENU_ACT_NONE, -1};
     int part = m->entries[m->selected].part;
-    if (part < 0) {
+    if (part == -2) {
+        r.action = PURR_MENU_ACT_RESTART;
+    } else if (part < 0) {
         r.action = PURR_MENU_ACT_INTERNET_RECOVERY;
     } else {
         r.action = PURR_MENU_ACT_BOOT;
@@ -73,7 +84,7 @@ static purr_menu_result_t choose(const purr_menu_t *m)
     return r;
 }
 
-purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_key_t key)
+purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_menu_key_t key)
 {
     purr_menu_result_t none = {PURR_MENU_ACT_NONE, -1};
 
@@ -84,7 +95,7 @@ purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_key_t key
     }
 
     if (key != PURR_KEY_NONE) {
-        m->counting = 0;   /* a keypress means someone is here: no auto-boot */
+        m->elapsed_ms = 0;   /* a keypress means someone is here: the idle timer starts over */
     }
     if (key == PURR_KEY_UP && m->selected > 0) {
         m->selected--;
@@ -95,7 +106,8 @@ purr_menu_result_t purr_menu_step(purr_menu_t *m, uint32_t dt_ms, purr_key_t key
     }
 
     m->elapsed_ms += dt_ms;
-    if (m->counting && m->elapsed_ms >= PURR_MENU_TIMEOUT_MS) {
+    if (m->counting && m->elapsed_ms >= m->timeout_ms) {
+        m->selected = m->default_sel;                 /* nobody answered: the default, not whatever was highlighted last */
         return choose(m);
     }
     return none;

@@ -1,0 +1,107 @@
+[
+ {
+  "key": "power.screen_timeout",
+  "help": "seconds of no input before the screen turns off",
+  "values": "5-3600|never",
+  "admin": false,
+  "file": "PurrOS/main/purr_power_plat.c"
+ },
+ {
+  "key": "power.lightsleep",
+  "help": "let the CPU light-sleep while the screen is off (needs real hardware)",
+  "values": "on|off",
+  "admin": true,
+  "file": "PurrOS/main/purr_power_plat.c"
+ },
+ {
+  "key": "time.zone",
+  "help": "time zone for the clock and dates",
+  "values": "a name from `settings` or a POSIX TZ string",
+  "admin": true,
+  "file": "PurrOS/main/purr_settings.c"
+ },
+ {
+  "key": "time.clock24",
+  "help": "24-hour clock",
+  "values": "on|off",
+  "admin": false,
+  "file": "PurrOS/main/purr_settings.c"
+ },
+ {
+  "key": "login.autologin",
+  "help": "account that signs in at boot with no password (a user name, or off)",
+  "values": "<user>|off",
+  "admin": true,
+  "file": "PurrOS/main/purr_settings.c"
+ },
+ {
+  "key": "security.enforce",
+  "help": "refuse unsigned or altered system images at boot (next boot)",
+  "values": "on|off",
+  "admin": true,
+  "file": "PurrOS/main/purr_settings.c"
+ },
+ {
+  "key": "security.devmode",
+  "help": "developer mode: boot with a warning instead of refusing (next boot)",
+  "values": "on|off",
+  "admin": true,
+  "file": "PurrOS/main/purr_settings.c"
+ },
+ {
+  "key": "dev.unsigned_apps",
+  "help": "run unsigned apps from your own folder; needs developer mode active this boot",
+  "values": "on|off",
+  "admin": true,
+  "file": "PurrOS/main/purr_settings.c"
+ },
+ {
+  "key": "display.brightness",
+  "help": "backlight",
+  "values": "1-255",
+  "admin": false,
+  "file": "PurrOS/main/purr_w10m.c"
+ },
+ {
+  "key": "display.rotation",
+  "help": "screen orientation in degrees",
+  "values": "0|90|180|270",
+  "admin": false,
+  "file": "PurrOS/main/purr_w10m.c"
+ },
+ {
+  "key": "ui.shell",
+  "help": "which shell starts (next boot)",
+  "values": "w10m|nav|card_shell",
+  "admin": true,
+  "file": "PurrOS/main/purr_w10m.c"
+ },
+ {
+  "key": "theme.accent",
+  "help": "accent colour (yours; saved per user)",
+  "values": "Lime Green Emerald Teal Cyan Cobalt Indigo Violet Pink Magenta Crimson Red Orange Amber Yellow Brown Olive Steel Mauve Taupe",
+  "admin": false,
+  "file": "PurrOS/main/purr_w10m_theme.c"
+ },
+ {
+  "key": "theme.base",
+  "help": "light or dark background",
+  "values": "dark|light",
+  "admin": false,
+  "file": "PurrOS/main/purr_w10m_theme.c"
+ },
+ {
+  "key": "theme.transparency",
+  "help": "see-through status bar and sheets",
+  "values": "on|off",
+  "admin": false,
+  "file": "PurrOS/main/purr_w10m_theme.c"
+ },
+ {
+  "key": "theme.tile_opacity",
+  "help": "how solid the start tiles are",
+  "values": "40-255",
+  "admin": false,
+  "file": "PurrOS/main/purr_w10m_theme.c"
+ }
+]

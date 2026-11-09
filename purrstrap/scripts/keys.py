@@ -8,7 +8,6 @@ Uses the `cryptography` package, a requirement of this subscript alone.
 
 import getpass
 import glob
-import hashlib
 import os
 import struct
 import sys
@@ -16,13 +15,20 @@ import sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 
+from lib import image as pimg
+from lib import purrcfg as pcfg
 from lib.model import Action, Param, Script
 
-# Layout of purr_image_header_t (PurrOS/components/coreos/include/purr_abi.h). Keep in sync.
-IMAGE_MAGIC = 0x50555252
-HEADER_FORMAT = "<IBHHBBH32s12s12sII32s64s"
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-SIGNED_LEN = HEADER_SIZE - 64                      # everything before the signature field
+# The container layout lives in lib/image.py, shared with bootpkg and coreos. Aliased here
+# under their original names, since other modules (test_keys.py) reference them this way.
+IMAGE_MAGIC = pimg.MAGIC
+HEADER_FORMAT = pimg.HEADER_FORMAT
+HEADER_SIZE = pimg.HEADER_SIZE
+SIGNED_LEN = pimg.SIGNED_LEN
+sha256 = pimg.sha256
+parse_header = pimg.parse_header
+header_fields = pimg.header_fields
+is_purr_image = pimg.is_purr_image
 
 ROLES = {"boot": 1, "system": 2, "owner": 3, "developer": 4, "vendor": 5}
 
@@ -77,36 +83,19 @@ def der_sig_to_raw(der_sig):
     return r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
 
-def sha256(data):
-    return hashlib.sha256(data).digest()
-
-
-def parse_header(buf):
-    return struct.unpack(HEADER_FORMAT, buf[:HEADER_SIZE])
-
-
-def header_fields(h):
-    (magic, ver, hsize, chip, itype, key_id, flags, name, version, min_boot,
-     payload_off, payload_size, payload_hash, sig) = h
-    return {
-        "magic": magic, "header_version": ver, "header_size": hsize, "chip_id": chip,
-        "image_type": itype, "key_id": key_id, "flags": flags,
-        "name": name.rstrip(b"\0").decode("ascii", "replace"),
-        "version": version.rstrip(b"\0").decode("ascii", "replace"),
-        "min_boot_version": min_boot.rstrip(b"\0").decode("ascii", "replace"),
-        "payload_offset": payload_off, "payload_size": payload_size,
-        "payload_sha256": payload_hash, "signature": sig,
-    }
-
-
-def is_purr_image(data):
-    return len(data) >= 4 and struct.unpack_from("<I", data, 0)[0] == IMAGE_MAGIC
-
-
 # -- generate --------------------------------------------------------------
-def generate(ctx, role, out, key_id):
+def generate(ctx, role, out, key_id, force=False):
     if role not in ROLES:
         ctx.error(f"unknown role {role!r}. Known roles: {', '.join(ROLES)}")
+        return 1
+    key_path = os.path.join(out, f"{role}.key")
+    pub_path = os.path.join(out, f"{role}.pub")
+    # F-19: this used to overwrite an existing key pair with no warning -- the old private
+    # key (and anything only it could sign for) is gone the moment the new file lands,
+    # with no undo. --force is the explicit, typed-out way to mean it.
+    if not force and (os.path.exists(key_path) or os.path.exists(pub_path)):
+        ctx.error(f"{key_path} already exists. Pass --force to replace it (and its "
+                 "matching .pub) -- anything only the old key could sign for is lost.")
         return 1
     pw = get_password(ctx, f"Password for the new {role} key: ", confirm=True)
     if pw is None:
@@ -117,8 +106,6 @@ def generate(ctx, role, out, key_id):
 
     private_key = ec.generate_private_key(ec.SECP256R1())
     os.makedirs(out, exist_ok=True)
-    key_path = os.path.join(out, f"{role}.key")
-    pub_path = os.path.join(out, f"{role}.pub")
 
     with open(key_path, "wb") as fh:
         fh.write(private_key.private_bytes(
@@ -230,6 +217,16 @@ def sign(ctx, key, key_id, image_in, image_out):
     fields[PAYLOAD_SHA_IX] = sha256(payload)
     if key_id is not None:
         fields[KEY_ID_IX] = key_id & 0xFF
+
+    # F-19: id 0 means "no key" to the device (purr_keybag.c) -- it refuses any image whose
+    # header carries it. Signing one anyway used to succeed silently and produce a container
+    # the device would reject with no clue why; this catches it at the only point that knows
+    # a real id was never supplied, not just whatever --key-id happened to default to.
+    if fields[KEY_ID_IX] == 0:
+        ctx.error("key id 0 means \"no key\" to the device -- it would reject this image. "
+                 "Pass --key-id matching the id this key was exported under "
+                 "(keys export-public).")
+        return 1
 
     fields[SIG_IX] = b"\0" * 64                  # the signature covers everything before it
     unsigned_header = struct.pack(HEADER_FORMAT, *fields)
@@ -344,6 +341,77 @@ def inspect(ctx, path):
     return 1
 
 
+# -- trust block -------------------------------------------------------
+def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys, out, installed=False, force_loader=False, dev_recovery=False, force_recovery=False, auto_reinstall=False):
+    """Build a purrcfg partition image carrying a SIGNED trust block (plan3.md): the secure mode,
+    the development-mode lock, revocations and override keys, signed with a boot-role key. Flash
+    it at the purrcfg partition (or hand it to the device's `trust apply`) to set the device's
+    policy before it ever boots. The unsigned parts (--dev-mode, --tighten) are included too, for
+    development boards; the device treats them as it treats any unsigned write: they can only
+    tighten, or relax enforce to warn through development mode."""
+    pw = get_password(ctx, f"Password for {key}: ")
+    if pw is None:
+        return 1
+    try:
+        with open(key, "rb") as fh:
+            private_key = serialization.load_pem_private_key(fh.read(), pw.encode())
+    except (OSError, ValueError, TypeError) as e:
+        ctx.error(f"could not load {key}: {e}")
+        return 1
+
+    revoked = 0
+    for part in [p for p in revoke.replace(" ", "").split(",") if p]:
+        if not part.isdigit() or not 0 <= int(part) <= 31:
+            ctx.error(f"--revoke wants key ids 0-31 separated by commas, got {part!r}")
+            return 1
+        revoked |= 1 << int(part)
+
+    slots = []
+    for part in [p for p in add_keys.replace(" ", "").split(",") if p]:
+        try:
+            key_id, role, pub_path = part.split(":", 2)
+            if not 1 <= int(key_id) <= 31:
+                raise ValueError("key id must be 1-31")
+            if role not in pcfg.ROLE_IDS:
+                raise ValueError(f"role must be one of {', '.join(pcfg.ROLE_IDS)}")
+            pub = load_public_key(pub_path)
+            slots.append(pcfg.key_slot(int(key_id), pcfg.ROLE_IDS[role], raw_pub(pub)))
+        except (ValueError, OSError) as e:
+            ctx.error(f"--add-keys wants id:role:pubkeyfile, got {part!r}: {e}")
+            return 1
+    if len(slots) > pcfg.KEY_SLOTS:
+        ctx.error(f"at most {pcfg.KEY_SLOTS} override keys")
+        return 1
+
+    secure_mode = pcfg.SECURE[mode]
+    trust_flags = pcfg.TRUSTF_DEV_LOCKED if dev_locked else 0
+    signed = pcfg.trust_signed_bytes(secure_mode, trust_flags, revoked, pcfg.keys_blob(slots))
+    der_sig = private_key.sign(sha256(signed), ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+    cfg = pcfg.build_cfg(secure_mode=secure_mode, trust_flags=trust_flags, revoked=revoked,
+                         slots=slots,
+                         flags=((0 if installed else pcfg.CFGF_FRESH) | (pcfg.CFGF_DEV_MODE if dev_mode else 0) |
+                                (pcfg.CFGF_FORCE_LOADER if force_loader else 0) |
+                                (pcfg.CFGF_DEV_RECOVERY if dev_recovery else 0) |
+                                (pcfg.CFGF_FORCE_RECOVERY if force_recovery else 0) |
+                                (pcfg.CFGF_AUTO_REINSTALL if auto_reinstall else 0)),
+                         tighten=pcfg.SECURE[tighten], seq=1, trust_sig=der_sig_to_raw(der_sig))
+    dest = out or "purrcfg.bin"
+    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(pcfg.partition_image(cfg))
+    ctx.ok(f"{dest}: signed trust block, mode {mode}"
+           f"{', development mode LOCKED' if dev_locked else ''}"
+           f"{', development mode ON' if dev_mode else ''}"
+           f"{'' if installed else ', FRESH (never reached a healthy boot)'}"
+           f"{f', {len(slots)} override key(s)' if slots else ''}"
+           f"{f', revokes {revoke}' if revoke else ''}")
+    ctx.info("flash it at the purrcfg partition (0xF000 on the current layout); the device's "
+             "version floors, boot count and one-shot flags start fresh")
+    ctx.info("only a boot-role key is trusted to sign this: a block signed by any other key "
+             "is ignored by the device")
+    return 0
+
+
 # -- wiring ------------------------------------------------------------
 def _sign(ctx, key, image, out, key_id):
     return sign(ctx, key, key_id if key_id else None, image, out or None)
@@ -360,7 +428,10 @@ SCRIPT = Script(
                params=(Param("role", "choice", required=True, choices=tuple(ROLES),
                              help="who the key speaks for"),
                        Param("out", "path", required=True, help="directory to write the key files into"),
-                       Param("key_id", "int", default=0, help="the key id to remember it by (0-31)"))),
+                       Param("key_id", "int", default=0, help="the key id to remember it by (0-31)"),
+                       Param("force", "bool", default=False,
+                             help="replace an existing key pair of this role -- anything only "
+                                  "the old key could sign for is lost"))),
         Action("export-public", "Export a public key", export_public,
                help="write one key's raw bytes and regenerate the default key bag from "
                     "everything already exported to --out",
@@ -379,6 +450,33 @@ SCRIPT = Script(
                help="check a PURR image's payload hash and signature",
                params=(Param("key", "path", required=True, help="a public key file, or 64 raw bytes"),
                        Param("image", "path", required=True, help="the image to check"))),
+        Action("trust-block", "Build a signed purrcfg", trust_block,
+               help="build a purrcfg partition image with a signed trust block (secure mode, "
+                    "development-mode lock, revocations, override keys)",
+               params=(Param("key", "path", required=True,
+                             help="the BOOT-role private key that signs the block"),
+                       Param("mode", "choice", default="warn", choices=tuple(pcfg.SECURE),
+                             help="the signed secure mode (off, warn, enforce)"),
+                       Param("dev_locked", "bool", default=False,
+                             help="a production device: development mode is refused outright"),
+                       Param("dev_mode", "bool", default=False,
+                             help="start with development mode ON (unsigned; a development board)"),
+                       Param("installed", "bool", default=False,
+                             help="the image already holds a working system: do not set FRESH (it is on by default)"),
+                       Param("dev_recovery", "bool", default=False,
+                             help="let recovery pull from a local dev server (honoured only while development mode is on)"),
+                       Param("auto_reinstall", "bool", default=False,
+                             help="the recovery loader runs unattended and installs by itself (for a test device or the VM)"),
+                       Param("force_recovery", "bool", default=False,
+                             help="boot KittenOS once (a one-shot request, for a test device or the VM)"),
+                       Param("force_loader", "bool", default=False,
+                             help="boot the recovery loader once (a one-shot request, for a test device or the VM)"),
+                       Param("tighten", "choice", default="off", choices=tuple(pcfg.SECURE),
+                             help="an unsigned floor on the mode (can only tighten)"),
+                       Param("revoke", "str", default="", help="key ids to revoke, e.g. 3,5"),
+                       Param("add_keys", "str", default="",
+                             help="override keys, id:role:pubkeyfile, comma separated"),
+                       Param("out", "path", default="", help="output file (default: purrcfg.bin)"))),
         Action("inspect", "Inspect", inspect,
                help="show a key or a PURR image's header",
                params=(Param("path", "path", required=True, help="the file to look at"),)),

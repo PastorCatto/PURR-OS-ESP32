@@ -7,14 +7,22 @@ import shlex
 import shutil
 from dataclasses import dataclass
 
+from lib import image as pimg
 from lib.model import Action, Param, Script
 
 IDF_VERSION = "5.3.5"
 # A board decides the chip. Adding a board means adding a row here and a folder of
 # settings files in PurrOS/.
-BOARDS = {"tdeck_plus": "esp32s3", "cyd_24c": "esp32"}
+BOARDS = {"tdeck": "esp32s3", "tdeck_plus": "esp32s3", "cyd_24c": "esp32", "waveshare154": "esp32s3"}
 PROFILES = ("minimal", "recovery", "full")
 PROJECT_DIR = "PurrOS"
+
+# Chip name (as BOARDS gives it) -> the numeric chip id purr_abi.h uses.
+CHIP_IDS = {"esp32s3": pimg.CHIP_ESP32S3, "esp32": pimg.CHIP_ESP32}
+# profile -> (image type, the name embedded in the header). Only profiles meant to be
+# fetched and installed as a PURR image are here; "minimal" (the recovery loader itself)
+# is flashed directly, never downloaded, so it has no packaged form.
+PACKAGE_KIND = {"recovery": (pimg.IMG_RECOVERY, "kittenos"), "full": (pimg.IMG_OS, "purros")}
 
 
 # -- finding ESP-IDF ---------------------------------------------------
@@ -81,6 +89,11 @@ def find_idf(env=None, home=None, windows=None, which=None):
             root = os.path.dirname(script)
             name = os.path.basename(os.path.dirname(root)).lstrip("v")
             return Idf("export", root, script, _read_version(root) or name)
+        # the other common layout: ~/esp/esp-idf-v5.3.5/export.sh (or ~/esp/esp-idf/export.sh)
+        for script in sorted(glob.glob(os.path.join(home, "esp", "esp-idf*", "export.sh"))):
+            root = os.path.dirname(script)
+            name = os.path.basename(root)[len("esp-idf"):].lstrip("-v")
+            return Idf("export", root, script, _read_version(root) or name)
     return None
 
 
@@ -116,24 +129,42 @@ def child_env(env=None):
             if not k.upper().startswith(("MSYS", "MINGW"))}
 
 
-def build_dir_name(board, profile):
-    return f"build/{board}-{profile}"
+# A flavor changes how the same board and profile are built, through one more settings overlay
+# (PurrOS/sdkconfig.flavor.<name>). "standard" is no overlay. "vm": no radio, a W5500 Ethernet
+# controller instead (plan4.md), for running in the emulator.
+FLAVORS = ("standard", "vm")
 
 
-def idf_args(board, profile):
-    d = build_dir_name(board, profile)
-    defaults = ";".join(("sdkconfig.defaults", f"sdkconfig.board.{board}",
-                         f"sdkconfig.profile.{profile}"))
+# The official shell compiled into an image (plan7.md): the Windows 10 Mobile style one (no overlay) or the Android 2.2 style one.
+SHELLS = ("w10m", "android")
+
+
+def build_dir_name(board, profile, flavor="standard", shell="w10m"):
+    return f"build/{board}-{profile}" + ("" if flavor == "standard" else f"-{flavor}") + ("" if shell == "w10m" else f"-{shell}")
+
+
+def idf_args(board, profile, flavor="standard", shell="w10m"):
+    d = build_dir_name(board, profile, flavor, shell)
+    overlays = ["sdkconfig.defaults", f"sdkconfig.board.{board}", f"sdkconfig.profile.{profile}"]
+    if shell != "w10m":
+        overlays.append(f"sdkconfig.shell.{shell}")
+    if flavor != "standard":
+        overlays.append(f"sdkconfig.flavor.{flavor}")
+    defaults = ";".join(overlays)
     return ["idf.py", "-B", d, "-D", f"IDF_TARGET={BOARDS[board]}",
             "-D", f"SDKCONFIG={d}/sdkconfig",
             "-D", f"SDKCONFIG_DEFAULTS={defaults}"]
 
 
 # -- project checks ----------------------------------------------------
-def project_problems(project, board, profile):
+def project_problems(project, board, profile, flavor="standard", shell="w10m"):
     """Files the build needs that are missing, as readable strings."""
     needed = ["CMakeLists.txt", "sdkconfig.defaults", f"sdkconfig.board.{board}",
               f"sdkconfig.profile.{profile}", f"partitions/{board}.csv"]
+    if flavor != "standard":
+        needed.append(f"sdkconfig.flavor.{flavor}")
+    if shell != "w10m":
+        needed.append(f"sdkconfig.shell.{shell}")
     return [f"{PROJECT_DIR}/{n} is missing" for n in needed
             if not os.path.isfile(os.path.join(project, n))]
 
@@ -187,23 +218,50 @@ def check(ctx):
     return 1 if bad else 0
 
 
-def build(ctx, board, profile, clean):
+# The base version embedded in dev builds' version string (not the signed release version --
+# see `coreos package --version` for that). Bump by hand when it's actually worth bumping;
+# the trailing build number below is what actually changes on every build.
+DEV_VERSION_BASE = "0.2.0"
+
+
+def next_build_number(project):
+    """A counter that goes up by one every build, so a serial log's version string alone
+    says which attempt it came from. Local to this machine (PurrOS/build/ is gitignored),
+    not meant to mean anything across machines or clones."""
+    path = os.path.join(project, "build", ".build_number")
+    n = 0
+    try:
+        with open(path, encoding="utf-8") as fh:
+            n = int(fh.read().strip() or "0")
+    except (OSError, ValueError):
+        n = 0
+    n += 1
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(str(n))
+    return n
+
+
+def build(ctx, board, profile, clean, flavor="standard", shell="w10m"):
     project = _project(ctx)
-    problems = project_problems(project, board, profile)
+    problems = project_problems(project, board, profile, flavor, shell)
     if problems:
-        ctx.error(f"cannot build {board}/{profile}:")
+        ctx.error(f"cannot build {board}/{profile}{'' if flavor == 'standard' else '/' + flavor}:")
         for line in problems:
             ctx.info(f"    {line}")
         return 1
     idf = _require_idf(ctx)
     if idf is None:
         return 1
-    bdir = os.path.join(project, build_dir_name(board, profile))
+    bdir = os.path.join(project, build_dir_name(board, profile, flavor, shell))
     if clean and os.path.isdir(bdir):
         ctx.info(f"removing {bdir}")
         shutil.rmtree(bdir)
-    ctx.info(f"building {board}/{profile} into {bdir}")
-    code = ctx.run(wrap(idf, idf_args(board, profile) + ["build"]), cwd=project,
+    build_number = next_build_number(project)
+    project_ver = f"internaldirty{DEV_VERSION_BASE}-{build_number}"
+    ctx.info(f"building {board}/{profile} into {bdir} (version {project_ver})")
+    code = ctx.run(wrap(idf, idf_args(board, profile, flavor, shell) +
+                        ["-D", f"PROJECT_VER={project_ver}", "build"]), cwd=project,
                    env=child_env(),
                    log_path=os.path.join(bdir, "purrstrap-build.log"))
     if code != 0:
@@ -245,6 +303,157 @@ def size(ctx, board, profile):
                    env=child_env())
 
 
+def package(ctx, board, profile, version, out, shell="w10m"):
+    """Wrap an already-built profile's binary into an unsigned PURR image container, ready
+    for `keys sign`, so it can be published as a release asset (OTA/SPEC.md section 5)."""
+    if profile not in PACKAGE_KIND:
+        ctx.error(f"{profile}: nothing to package (it is flashed directly, never downloaded)")
+        return 1
+    project = _project(ctx)
+    bdir = os.path.join(project, build_dir_name(board, profile, "standard", shell))
+    binpath = os.path.join(bdir, "purros.bin")
+    if not os.path.isfile(binpath):
+        ctx.error(f"no build for {board}/{profile}. Run 'coreos build' first.")
+        return 1
+    with open(binpath, "rb") as fh:
+        payload = fh.read()
+
+    image_type, name = PACKAGE_KIND[profile]
+    chip_id = CHIP_IDS[BOARDS[board]]
+    image = pimg.make_image(name, version, image_type, 0, payload, chip_id)
+
+    dest = out or os.path.join(bdir, f"{name}.kitt")
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(image)
+    ctx.ok(f"{dest}: {len(image)} bytes ({name} {version}, unsigned)")
+    ctx.info(f"sign it: purrstrap keys sign --key <role>.key --image {dest} --key-id <id>")
+    return 0
+
+
+# component name -> PURR_MOD_* subtype (purr_abi.h / commands.c's s_net_install_components).
+# These are raw ESP app images (kernel) or the boot package's own blob format (bootpkg,
+# already wrapped by `bootpkg build`) -- plain opaque payload bytes either way, since
+# net_install's partition-level write path never parses the payload itself, only the
+# bootloader does, later, when it tries to boot the partition. All PURR_ROLE_BOOT-only.
+COMPONENT_KIND = {"kernel": pimg.MOD_KERNEL, "loader": pimg.MOD_LOADER, "bootloader": pimg.MOD_BOOTLOADER}
+
+
+def package_component(ctx, component, file, version, board, out):
+    """Wraps an already-built raw binary (the standalone kernel, the recovery loader) into
+    an unsigned PURR_IMG_MODULE container with the matching PURR_MOD_* subtype, ready for
+    `keys sign` -- the same partition-level shape `netinstall <component>` already expects
+    (OTA/SPEC.md section 3), so it can be published in the recovery manifest alongside
+    kittenos/coreos. Unlike `coreos package` (IMG_OS/IMG_RECOVERY, the whole system), this is
+    for the components net_install writes straight into a raw partition."""
+    if component not in COMPONENT_KIND:
+        ctx.error(f"unknown component {component!r}. Known: {', '.join(COMPONENT_KIND)}")
+        return 1
+    if not os.path.isfile(file):
+        ctx.error(f"{file}: no such file")
+        return 1
+    with open(file, "rb") as fh:
+        payload = fh.read()
+
+    chip_id = CHIP_IDS[BOARDS[board]]
+    image = pimg.make_image(component, version, pimg.IMG_MODULE, COMPONENT_KIND[component],
+                            payload, chip_id)
+
+    dest = out or f"{component}.cat"
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(image)
+    ctx.ok(f"{dest}: {len(image)} bytes ({component} {version}, unsigned)")
+    ctx.info("sign it: purrstrap keys sign --key boot.key --image "
+             f"{dest} --key-id <id>")
+    return 0
+
+
+# slot name -> (image_type, module subtype) the partition may hold, as
+# bootloader/SPEC.md section 3.1 and purr_slotverify.c define them.
+SLOT_KIND = {"kernel": (pimg.IMG_MODULE, pimg.MOD_KERNEL),
+             "kittenos": (pimg.IMG_RECOVERY, 0),
+             "loader": (pimg.IMG_MODULE, pimg.MOD_LOADER)}
+TRAILER_SIZE = 4096     # PURR_TRAILER_SIZE in purr_trailer.h
+
+
+def _partition(project, board, name):
+    """(offset, size) of a partition from the board's CSV, or None."""
+    path = os.path.join(project, "partitions", f"{board}.csv")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                cols = [c.strip() for c in line.split(",")]
+                if len(cols) >= 5 and cols[0] == name:
+                    return int(cols[3], 0), int(cols[4], 0)
+    except OSError:
+        pass
+    return None
+
+
+def slot_image(ctx, file, board, slot, out):
+    """Cut a signed kernel/kittenos/loader container into a flashable image of the whole
+    partition: the ESP app image at offset 0, erased flash, and the container header copied
+    into the last sector as the signature trailer (bootloader/SPEC.md section 3.1). For
+    development flashing with esptool; the installers (net_install, the recovery loader) write
+    the same layout themselves."""
+    if slot not in SLOT_KIND:
+        ctx.error(f"unknown slot {slot!r}. Known: {', '.join(SLOT_KIND)}")
+        return 1
+    try:
+        with open(file, "rb") as fh:
+            data = fh.read()
+    except OSError as err:
+        ctx.error(f"{file}: {err}")
+        return 1
+    if not pimg.is_purr_image(data) or len(data) < pimg.HEADER_SIZE:
+        ctx.error(f"{file}: not a PURR container")
+        return 1
+
+    f = pimg.parse_header(data)
+    chip, image_type, flags = f[3], f[4], f[6]
+    payload_offset, payload_size = f[pimg.IX_PAYLOAD_OFFSET], f[pimg.IX_PAYLOAD_SIZE]
+    want_type, want_sub = SLOT_KIND[slot]
+    if image_type != want_type or (want_type == pimg.IMG_MODULE and (flags & 0xFF) != want_sub):
+        ctx.error(f"{file}: this container is not a {slot} image (type {image_type}, "
+                  f"subtype {flags & 0xFF})")
+        return 1
+    if chip != CHIP_IDS[BOARDS[board]]:
+        ctx.error(f"{file}: built for chip id {chip}, but {board} is {BOARDS[board]}")
+        return 1
+    if payload_offset < pimg.HEADER_SIZE or payload_offset > TRAILER_SIZE or \
+            payload_offset + payload_size > len(data):
+        ctx.error(f"{file}: inconsistent payload offset/size")
+        return 1
+
+    part = _partition(_project(ctx), board, slot)
+    if part is None:
+        ctx.error(f"no {slot} partition in {PROJECT_DIR}/partitions/{board}.csv")
+        return 1
+    offset, size = part
+    if payload_size > size - TRAILER_SIZE:
+        ctx.error(f"the image ({payload_size} bytes) does not fit the {slot} partition "
+                  f"({size - TRAILER_SIZE} bytes once the {TRAILER_SIZE}-byte trailer is reserved)")
+        return 1
+
+    payload = data[payload_offset:payload_offset + payload_size]
+    trailer = data[:pimg.HEADER_SIZE]
+    blob = payload + b"\xff" * (size - TRAILER_SIZE - len(payload)) + \
+        trailer + b"\xff" * (TRAILER_SIZE - len(trailer))
+    assert len(blob) == size
+
+    dest = out or f"{slot}_slot.bin"
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    with open(dest, "wb") as fh:
+        fh.write(blob)
+    signed = any(f[pimg.IX_SIGNATURE])
+    ctx.ok(f"{dest}: {size} bytes for the {slot} partition at {offset:#x} "
+           f"({'signed' if signed else 'UNSIGNED: sign it first with keys sign'})")
+    ctx.info(f"flash it with: python -m esptool --chip {BOARDS[board]} write_flash {offset:#x} {dest}")
+    return 0
+
+
 _BOARD = Param("board", "choice", default="tdeck_plus", choices=tuple(BOARDS),
                help="the board to build for (it decides the chip)")
 _PROFILE = Param("profile", "choice", default="full", choices=PROFILES,
@@ -261,11 +470,45 @@ SCRIPT = Script(
                help="build one board and profile",
                params=(_BOARD, _PROFILE,
                        Param("clean", "bool", default=False,
-                             help="delete the build directory first"))),
+                             help="delete the build directory first"),
+                       Param("flavor", "choice", default="standard", choices=FLAVORS,
+                             help="standard, or vm: no radio, a W5500 Ethernet controller instead"),
+                       Param("shell", "choice", default="w10m", choices=SHELLS,
+                             help="the official shell to compile in: w10m or android"))),
         Action("clean", "Clean", clean,
                help="delete one build directory", params=(_BOARD, _PROFILE)),
         Action("size", "Size", size,
                help="show memory use of an existing build",
                params=(_BOARD, _PROFILE)),
+        Action("package", "Package", package,
+               help="wrap a built recovery/full binary into an unsigned PURR image, ready to sign",
+               params=(_BOARD, _PROFILE,
+                       Param("version", "str", required=True, help='e.g. "1.2.0"'),
+                       Param("out", "path", default="",
+                             help="output file (default: <board>-<profile> build dir)"),
+                       Param("shell", "choice", default="w10m", choices=SHELLS,
+                             help="the shell the build was made with"))),
+        Action("package-component", "Package a partition-level component", package_component,
+               help="wrap a built kernel/loader binary into an unsigned PURR_IMG_MODULE, "
+                    "ready to sign",
+               params=(Param("component", "choice", required=True,
+                             choices=tuple(COMPONENT_KIND),
+                             help="which component this file is"),
+                       Param("file", "path", required=True,
+                             help="the already-built raw binary to wrap"),
+                       Param("version", "str", required=True, help='e.g. "1.2.0"'),
+                       _BOARD,
+                       Param("out", "path", default="",
+                             help="output file (default: <component>.cat)"))),
+        Action("slot-image", "Cut a flashable slot image", slot_image,
+               help="turn a signed kernel/kittenos/loader container into a whole-partition "
+                    "image with its signature trailer, for esptool",
+               params=(Param("file", "path", required=True,
+                             help="the signed container (.cat / .kitt)"),
+                       _BOARD,
+                       Param("slot", "choice", required=True, choices=tuple(SLOT_KIND),
+                             help="which partition it is for"),
+                       Param("out", "path", default="",
+                             help="output file (default: <slot>_slot.bin)"))),
     ),
 )

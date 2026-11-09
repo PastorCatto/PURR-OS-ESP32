@@ -1,0 +1,68 @@
+/*
+ * purr_recovery_src.h - where recovery pulls its images from: the official server (the Kconfig URLs), or, when the bootloader
+ * allowed it, an SDK server on the local network that the owner picked and confirmed on the recovery setup page.
+ *
+ * The bootloader's DEV_RECOVERY flag is the gate (purr_abi.h): it only takes effect in development mode, and reaches here as
+ * PURR_SECST_DEVREC in the hand-off. Without it every function here answers "the official server" and a saved choice is
+ * ignored. Either way the images are checked against the boot key before anything is written.
+ */
+#ifndef PURR_RECOVERY_SRC_H
+#define PURR_RECOVERY_SRC_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "purr_lan_discover.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* 1 if the bootloader allowed a dev server for recovery on this boot. */
+int purr_recovery_dev_allowed(void);
+
+/* Asks the server at base (a purr_repo.h-approved local address) for its recovery manifest and checks it has PURR OS for this
+ * board. 0 if so; else -1 and msg says why, in plain words. msg also says what it found when it is fine. Blocks: a worker task. */
+int purr_recovery_verify(const char *base, char *msg, size_t cap);
+
+/* 1 if the bootloader's secure state says developer mode is on. */
+int purr_recovery_dev_mode(void);
+
+/* 1 if the source in use is a relay (a computer running broken-kitten-recovery, discovered with an id starting "relay-"). */
+int purr_recovery_source_is_relay(void);
+
+/* May a server with this discovery id be used for recovery? A relay in any secure mode, a developer's server only when the bootloader
+ * allowed one. The images are checked by the device whichever it is. */
+int purr_recovery_server_allowed(const char *id);
+
+/* Use this server from now on (remembered for the next boot), or NULL for the official one. Ignored unless allowed. */
+void purr_recovery_use(const purr_lan_server_t *server);
+
+/* Emergency mode: the official server could not be used. If the bootloader allowed a dev server, look for one on the local network, check it
+ * has recovery files for this device and use it from now on (not remembered across boots unless the owner picked it on the setup page).
+ * 0 if one was found and is now the source; -1 if not allowed or nothing usable answered. Blocks for a few seconds: a worker task. */
+int purr_recovery_emergency(void);
+
+/* The files to fetch. Returned pointers stay valid until the next call to the same function. */
+const char *purr_recovery_manifest_url(void);
+const char *purr_recovery_modules_url(void);
+const char *purr_recovery_legal_url(void);
+
+/* The chosen dev server's name, or NULL when using the official server. */
+const char *purr_recovery_source_name(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+/* The official source: the compiled default, or what a signed move file (purr_move.h, plan8.md) set. A dev server does not change these. */
+const char *purr_recovery_official_manifest_url(void);
+const char *purr_recovery_official_modules_url(void);
+int purr_recovery_official_moved(void);                  /* 1 if a move is in force */
+uint32_t purr_recovery_move_seq(void);
+void purr_recovery_move_clear(void);                     /* back to the compiled default (the seq is kept) */
+/* Asks the official server for moved.txt next to the manifest it uses now (the network must be up) and follows it if it is signed and valid. Returns 1 if the source
+ * changed (message gets the text to show the user), 0 otherwise (no file, not valid, or a dev server in use). */
+int purr_recovery_check_moved(char *message, size_t cap);
+
+#endif /* PURR_RECOVERY_SRC_H */

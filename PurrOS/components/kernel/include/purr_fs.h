@@ -35,9 +35,10 @@ typedef struct {
     purr_bd_t bd;
     uint8_t read_buf[PURR_FS_CACHE];
     uint8_t prog_buf[PURR_FS_CACHE];
-    uint8_t look_buf[32];
+    uint8_t look_buf[64];                  /* 512 blocks per pass: the root file system is about 2,800 blocks since flash map v2 */
     uint8_t file_buf[PURR_FS_CACHE];      /* one file open at a time */
     int mounted;
+    int poisoned;                         /* a read failed for good: the next operation remounts first (see purr_fs.c, bd_read); 2 = unmounted, mount pending */
 } purr_fs_t;
 
 /* Mount an existing filesystem. Fails on a blank or damaged device: it never formats. */
@@ -59,15 +60,62 @@ int purr_fs_list(purr_fs_t *fs, const char *path, purr_fs_list_fn cb, void *ctx)
 typedef int (*purr_fs_read_fn)(void *ctx, const void *data, uint32_t len);
 int purr_fs_read(purr_fs_t *fs, const char *path, purr_fs_read_fn cb, void *ctx);
 
+/* A whole small file into buf (NUL-terminated; cap includes the NUL), trying up to three times, so one transient failure is absorbed. Returns:
+ *   0   read; *len is the length
+ *   1   the file does not exist (the only case that means "nothing saved yet")
+ *   -1  it exists, or the file system is not usable, but it could not be read (an I/O error, or it does not fit in buf)
+ * A caller that treats -1 as "empty" and later saves destroys the real file (an account list, the Wi-Fi networks and the settings were once lost that way,
+ * plan7.md): on -1, keep what you have, change nothing and say so. */
+int purr_fs_slurp(purr_fs_t *fs, const char *path, void *buf, uint32_t cap, uint32_t *len);
+
+/* Like purr_fs_write(), but what was in the file (when it reads cleanly and is under 8 KB) is first kept as path.bak. */
+int purr_fs_write_kept(purr_fs_t *fs, const char *path, const void *data, uint32_t len);
+
 /* Create or replace a file. The old contents stay until the new file is closed. */
 int purr_fs_write(purr_fs_t *fs, const char *path, const void *data, uint32_t len);
 
+/* Adds to the end of a file, creating it if there is none. */
+int purr_fs_append(purr_fs_t *fs, const char *path, const void *data, uint32_t len);
+/* Up to cap bytes from offset (*got of them); *total is the file's size. */
+int purr_fs_read_at(purr_fs_t *fs, const char *path, uint32_t offset, void *buf, uint32_t cap, uint32_t *got, uint32_t *total);
 int purr_fs_mkdir(purr_fs_t *fs, const char *path);
 int purr_fs_remove(purr_fs_t *fs, const char *path);      /* a file or an empty directory */
 int purr_fs_rename(purr_fs_t *fs, const char *from, const char *to);
 int purr_fs_stat(purr_fs_t *fs, const char *path, int *is_dir, uint32_t *size);
 
 const char *purr_fs_strerror(int err);
+
+/*
+ * File ownership (documentation/FINDINGS.md F-10, PurrOS/components/coreos/SPEC.md 4.2):
+ * one LittleFS custom attribute per path, {owner_uid, mode}. mode is two bits -- there are
+ * no groups, so nothing richer is meaningful. Root (uid 0) and an admin acting on their own
+ * behalf always have full access regardless of mode; that check is account-aware and lives
+ * above this layer (commands.c), not here.
+ */
+#define PURR_FS_MODE_OREAD  (1u << 0)   /* others besides the owner may read */
+#define PURR_FS_MODE_OWRITE (1u << 1)   /* others besides the owner may write */
+
+/* Not a LittleFS error -- the account-aware layer above returns this when ownership
+ * refuses an access; purr_fs_strerror() still turns it into words since callers use that
+ * for every fs_* error uniformly, this one included. Chosen to not collide with any
+ * LFS_ERR_* value above (EACCES's usual POSIX number, -13, is free here). */
+#define PURR_FS_ERR_DENIED (-13)
+
+typedef struct {
+    uint8_t owner_uid;    /* 0 = root */
+    uint8_t mode;         /* PURR_FS_MODE_* bits */
+} purr_fs_owner_t;
+
+/* The owner/mode stored on exactly this path. LFS_ERR_NOATTR if this exact path has none
+ * of its own -- see purr_fs_effective_owner, which walks up to find one. */
+int purr_fs_get_owner(purr_fs_t *fs, const char *path, purr_fs_owner_t *out);
+
+/* Sets (or replaces) the owner/mode stored on exactly this path. */
+int purr_fs_set_owner(purr_fs_t *fs, const char *path, const purr_fs_owner_t *owner);
+
+/* path's own owner/mode if set, otherwise the nearest ancestor directory's, otherwise
+ * {0, 0} (root, no outside access) if nothing up to "/" has one set. Always fills *out. */
+void purr_fs_effective_owner(purr_fs_t *fs, const char *path, purr_fs_owner_t *out);
 
 /* The flash partition named `label` as a block device (device only, src/purr_fs_flash.c). */
 int purr_fs_flash_bd(const char *label, purr_bd_t *bd);

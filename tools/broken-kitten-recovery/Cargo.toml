@@ -1,0 +1,18 @@
+[package]
+name = "broken-kitten-recovery"
+version = "0.1.0"
+edition = "2021"
+description = "Downloads the official PURR OS recovery images, checks them against the official keys, and serves them to a device on the local network"
+license = "MIT"
+
+[dependencies]
+sha2 = "0.10"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+ureq = "2"
+socket2 = { version = "0.5", features = ["all"] }
+if-addrs = "0.13"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

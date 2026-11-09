@@ -59,7 +59,7 @@ def tui(ctx, entries) -> int:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    ctx = Context(os.path.dirname(TOOL_DIR), TOOL_DIR)
+    ctx = Context(os.environ.get("PURR_REPO_ROOT") or os.path.dirname(TOOL_DIR), TOOL_DIR)
     entries = discover(os.path.join(TOOL_DIR, "scripts"))
     if argv:
         return cli.main(argv, ctx, entries)

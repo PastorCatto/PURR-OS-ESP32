@@ -1,23 +1,25 @@
 /* The root filesystem's block device: a flash partition. */
 #include "esp_partition.h"
 
+#include "purr_io.h"
+
 #include "purr_fs.h"
 
 #define BLOCK 4096
 
 static int fl_read(void *ctx, uint32_t block, uint32_t off, void *buf, uint32_t size)
 {
-    return esp_partition_read(ctx, block * BLOCK + off, buf, size) == ESP_OK ? 0 : -1;
+    return purr_io_partition_read(ctx, block * BLOCK + off, buf, size) == ESP_OK ? 0 : -1;
 }
 
 static int fl_prog(void *ctx, uint32_t block, uint32_t off, const void *buf, uint32_t size)
 {
-    return esp_partition_write(ctx, block * BLOCK + off, buf, size) == ESP_OK ? 0 : -1;
+    return purr_io_partition_write(ctx, block * BLOCK + off, buf, size) == ESP_OK ? 0 : -1;
 }
 
 static int fl_erase(void *ctx, uint32_t block)
 {
-    return esp_partition_erase_range(ctx, block * BLOCK, BLOCK) == ESP_OK ? 0 : -1;
+    return purr_io_partition_erase_range(ctx, block * BLOCK, BLOCK) == ESP_OK ? 0 : -1;
 }
 
 int purr_fs_flash_bd(const char *label, purr_bd_t *bd)

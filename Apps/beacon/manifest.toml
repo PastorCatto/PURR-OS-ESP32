@@ -1,0 +1,26 @@
+name = "beacon"
+version = "1.0.0"
+description = "Wakes the device every 30 seconds, does a little work, and lets it sleep again (the Meshtastic loop, without a radio)"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "beacon_entry"
+
+[catcalls]
+console = "1.0"
+ui = "1.0"
+power = "1.0"
+
+[permissions]
+requests = ["wake-alarm", "keep-awake"]
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 8192
+threads = 1
+background = true
+saves_state = false
+
+[display]
+name = "Beacon"
+icon = ""

@@ -1,0 +1,2616 @@
+/*
+ * purr_w10m.c - a Windows 10 Mobile style shell (purr_w10m.h, plan7.md).
+ *
+ * Everything here runs on the UI service task, the only place LVGL may be called from. The
+ * entry points that other tasks use (purr_w10m_start, purr_w10m_set_orientation) hop over with
+ * purr_ui_service_run().
+ *
+ * Layout: one packing routine places tiles on a grid whose short side holds three cells. In
+ * landscape that is three rows that scroll sideways; in portrait it is three columns that scroll
+ * downwards. A change of orientation re-runs the same routine, so there is one layout to keep
+ * right, not two.
+ */
+#include "purr_brand.h"
+#include "esp_attr.h"
+#include "purr_w10m.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lvgl.h"
+#include "sdkconfig.h"
+
+#include "commands.h"
+#include "login.h"
+#include "purr_appmgr.h"
+#include "purr_battery.h"
+#include "purr_catrt.h"
+#include "purr_catrt_game.h"
+#include "purr_catrt_ui.h"
+#include "purr_console.h"
+#include "purr_kernel.h"
+#include "purr_settings.h"
+#include "purr_ui_config.h"
+#include "purr_lvgl.h"
+#include "purr_ui_assets.h"
+#include "purr_power_plat.h"
+#include "purr_ui_service.h"
+#include "purr_notify.h"
+#include "purr_shell.h"
+#include "purr_w10m_priv.h"
+#include "purr_wallpaper.h"
+#include "purr_resetnote_os.h"
+#include "purr_sysupdate.h"
+#include "purr_w10m_theme.h"
+
+static void lock_on_sleep(int on);
+
+static const char *TAG = "w10m";
+
+/* ---------------------------------------------------------------- geometry */
+
+#define STATUS_H     18                 /* the status strip, always on top */
+#define CELL         70                 /* one small tile, in pixels */
+#define GAP          4
+#define PITCH        (CELL + GAP)
+#define PAD          6                  /* around the tile grid */
+#define SHORT_CELLS  3                  /* cells across the short side */
+#define MAX_TILES    40
+
+/* The palette and the look live in purr_w10m_theme.c. */
+
+/* ---------------------------------------------------------------- assets as LVGL images */
+
+typedef struct {
+    char name[24];
+    lv_image_dsc_t dsc;
+    int ok;
+} img_slot_t;
+
+static EXT_RAM_BSS_ATTR img_slot_t s_imgs[128];
+static int s_nimgs;
+
+/* The original art, as exported: LVGL native RGB565, or RGB565 with a separate alpha plane. The
+ * pixels stay in the mapped flash partition; only this small descriptor is built. NULL if the
+ * asset is missing, in which case callers draw without it. */
+static const lv_image_dsc_t *img(const char *name)
+{
+    for (int i = 0; i < s_nimgs; i++) {
+        if (strcmp(s_imgs[i].name, name) == 0) {
+            return s_imgs[i].ok ? &s_imgs[i].dsc : NULL;
+        }
+    }
+    if (s_nimgs >= (int)(sizeof(s_imgs) / sizeof(s_imgs[0]))) {
+        return NULL;
+    }
+    img_slot_t *s = &s_imgs[s_nimgs++];
+    snprintf(s->name, sizeof(s->name), "%s", name);
+    const purr_asset_t *a = purr_ui_assets_find(name);
+    if (a == NULL) {
+        s->ok = 0;
+        return NULL;
+    }
+    int alpha = a->color_format == PURR_ASSET_RGB565A8;
+    s->dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    s->dsc.header.cf = alpha ? LV_COLOR_FORMAT_RGB565A8 : LV_COLOR_FORMAT_RGB565;
+    s->dsc.header.flags = 0;
+    s->dsc.header.w = a->width;
+    s->dsc.header.h = a->height;
+    s->dsc.header.stride = (uint32_t)a->width * 2;
+    s->dsc.data_size = (uint32_t)a->width * a->height * (alpha ? 3 : 2);
+    s->dsc.data = (const uint8_t *)a->pixels;
+    s->ok = 1;
+    return &s->dsc;
+}
+
+/* ---------------------------------------------------------------- tiles */
+
+typedef struct {
+    char name[PURR_APP_NAME_LEN];
+    const char *icon;                   /* asset name, or NULL for a letter tile */
+    const char *live;                   /* a live tile's art, or NULL */
+    int wide;                           /* 1 = two cells wide */
+    int vertical;                       /* live tile flips vertically (else horizontally) */
+    int system;                         /* built into the shell: 1 = Settings, 2 = the Developer Portal */
+    int dev;                            /* a developer app (devapps folder, or unsigned): shown with a DEV mark */
+} tile_def_t;
+
+/* What the start screen shows: the shell's own Settings, then every app installed for the signed-in
+ * user that verifies. Filled by load_defs(); there are no placeholder tiles. */
+static tile_def_t s_tile_defs[MAX_TILES];
+static int s_ndefs;
+#define N_TILE_DEFS s_ndefs
+
+typedef struct {
+    lv_obj_t *obj;
+    const tile_def_t *def;
+    int cx, cy;                         /* cell position, set by the packer */
+} tile_t;
+
+static tile_t s_tiles[MAX_TILES];
+static int s_ntiles;
+
+/* ---------------------------------------------------------------- the shell's objects */
+
+static lv_obj_t *s_wall;                /* the wallpaper, behind everything */
+static lv_obj_t *s_shade;               /* a dark veil over it so the tiles read */
+static lv_obj_t *s_start;               /* the scrolling start screen */
+static lv_obj_t *s_status;              /* the status strip */
+static lv_obj_t *s_clock;
+static lv_obj_t *s_busy_msg;            /* what the strip says while something works */
+static lv_obj_t *s_busy_dot[5];         /* the five dots that run along the strip's lower edge */
+static int s_busy_state;                /* 0 idle, 1 working, 2 showing "Done" */
+static lv_timer_t *s_busy_done_timer;
+static lv_obj_t *s_batt, *s_batt_body, *s_batt_fill, *s_batt_nub;     /* the battery icon in the strip, hidden when there is no reading */
+static lv_obj_t *s_status_dev;          /* "DEV" / "UNSIGNED OK" badge while developer mode is active */
+static lv_obj_t *s_net;
+static lv_obj_t *s_allapps;             /* the round button at the end of the tiles */
+static lv_obj_t *s_allapps_circle, *s_allapps_arrow, *s_allapps_label;
+
+static int disp_w(void) { return (int)lv_display_get_horizontal_resolution(NULL); }
+static int disp_h(void) { return (int)lv_display_get_vertical_resolution(NULL); }
+static int is_landscape(void) { return disp_w() >= disp_h(); }
+
+const lv_image_dsc_t *w10m_img(const char *name) { return img(name); }
+int w10m_disp_w(void) { return disp_w(); }
+int w10m_disp_h(void) { return disp_h(); }
+
+#define accent() purr_theme_accent_color()
+
+/* ---------------------------------------------------------------- the tile packer */
+
+/* Places each tile on the first free spot, scanning along the short side first: down the rows in
+ * landscape (so the screen fills column by column and scrolls sideways) and across the columns in
+ * portrait. A wide tile needs two free cells side by side across the short side's axis, so it
+ * takes a whole row slot in landscape. */
+static int occupied(const uint8_t *grid, int cols, int rows, int cx, int cy)
+{
+    if (cx < 0 || cy < 0 || cx >= cols || cy >= rows) {
+        return 1;
+    }
+    return grid[cy * cols + cx];
+}
+
+static void pack_tiles(void)
+{
+    static uint8_t grid[16 * 16];
+    memset(grid, 0, sizeof(grid));
+    int land = is_landscape();
+    int cols = land ? 14 : SHORT_CELLS;       /* the long side is as long as it needs to be */
+    int rows = land ? SHORT_CELLS : 14;
+    if (cols > 16) cols = 16;
+    if (rows > 16) rows = 16;
+
+    for (int i = 0; i < s_ntiles; i++) {
+        tile_t *t = &s_tiles[i];
+        int w = t->def->wide ? 2 : 1;
+        int placed = 0;
+        /* major axis = the long side, minor = the short side */
+        int major_n = land ? cols : rows;
+        int minor_n = land ? rows : cols;
+        for (int maj = 0; maj < major_n && !placed; maj++) {
+            for (int min = 0; min < minor_n && !placed; min++) {
+                int cx = land ? maj : min;
+                int cy = land ? min : maj;
+                int ok = 1;
+                for (int k = 0; k < w && ok; k++) {
+                    /* a wide tile spreads across x in both orientations (it is wide on screen) */
+                    ok = !occupied(grid, cols, rows, cx + k, cy);
+                }
+                if (ok) {
+                    for (int k = 0; k < w; k++) {
+                        grid[cy * cols + cx + k] = 1;
+                    }
+                    t->cx = cx;
+                    t->cy = cy;
+                    placed = 1;
+                }
+            }
+        }
+        if (!placed) {
+            t->cx = t->cy = -1;
+        }
+    }
+}
+
+/* The round "All apps" button goes straight after the last tile: past the last column in
+ * landscape (centred between the rows), under the last row in portrait. It scrolls with the tiles,
+ * so reaching the end of them is how you find it. */
+static void position_allapps(void)
+{
+    if (s_allapps == NULL) {
+        return;
+    }
+    int maxcx = -1, maxcy = -1;
+    for (int i = 0; i < s_ntiles; i++) {
+        const tile_t *t = &s_tiles[i];
+        if (t->cx < 0) {
+            continue;
+        }
+        int w = t->def->wide ? 2 : 1;
+        if (t->cx + w - 1 > maxcx) maxcx = t->cx + w - 1;
+        if (t->cy > maxcy) maxcy = t->cy;
+    }
+    if (is_landscape()) {
+        lv_obj_set_size(s_allapps, 64, SHORT_CELLS * PITCH - GAP);
+        lv_obj_set_pos(s_allapps, PAD + (maxcx + 1) * PITCH + 4, PAD);
+        lv_obj_align(s_allapps_circle, LV_ALIGN_CENTER, 0, -8);
+        lv_label_set_text(s_allapps_arrow, LV_SYMBOL_RIGHT);
+        lv_obj_align(s_allapps_label, LV_ALIGN_CENTER, 0, 24);
+    } else {
+        lv_obj_set_size(s_allapps, SHORT_CELLS * PITCH - GAP, 52);
+        lv_obj_set_pos(s_allapps, PAD, PAD + (maxcy + 1) * PITCH + 4);
+        lv_obj_align(s_allapps_circle, LV_ALIGN_LEFT_MID, 8, 0);
+        lv_label_set_text(s_allapps_arrow, LV_SYMBOL_DOWN);
+        lv_obj_align(s_allapps_label, LV_ALIGN_LEFT_MID, 62, 0);
+    }
+}
+
+static void position_tiles(void)
+{
+    for (int i = 0; i < s_ntiles; i++) {
+        tile_t *t = &s_tiles[i];
+        if (t->cx < 0) {
+            lv_obj_add_flag(t->obj, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        lv_obj_remove_flag(t->obj, LV_OBJ_FLAG_HIDDEN);
+        int w = t->def->wide ? CELL * 2 + GAP : CELL;
+        lv_obj_set_size(t->obj, w, CELL);
+        lv_obj_set_pos(t->obj, PAD + t->cx * PITCH, PAD + t->cy * PITCH);
+    }
+    position_allapps();
+}
+
+/* ---------------------------------------------------------------- building the tiles */
+
+/* The runtime's `open` can wait on the app's own start-up callback, so it is never called on the UI
+ * task: a short task makes the request and reports back through the control center. */
+typedef struct {
+    char name[PURR_APP_NAME_LEN];
+} open_job_t;
+
+static void open_task(void *arg)
+{
+    open_job_t *j = arg;
+    char line[PURR_APP_NAME_LEN + 8], out[160];
+    snprintf(line, sizeof(line), "%s %s", purr_catrt_slot_of(j->name) >= 0 ? "focus" : "open", j->name);     /* a running app comes to the front: a second tap must not start a second copy */
+    out[0] = '\0';
+    int rc = purr_catrt_dispatch(line, out, sizeof(out));
+    if (rc != 0) {
+        char msg[200];
+        snprintf(msg, sizeof(msg), "%s", out[0] ? out : "could not start");
+        purr_w10m_notify(j->name, msg);
+    }
+    free(j);
+    vTaskDelete(NULL);
+}
+
+static void open_def(const tile_def_t *d)
+{
+    if (d->system == 2) {
+        w10m_devportal_open();
+        return;
+    }
+    if (d->system) {
+        w10m_settings_open();
+        return;
+    }
+    open_job_t *j = malloc(sizeof(*j));
+    if (j == NULL) {
+        return;
+    }
+    snprintf(j->name, sizeof(j->name), "%s", d->name);
+    if (xTaskCreate(open_task, "w10m-open", 4096, j, 4, NULL) != pdPASS) {
+        free(j);
+    }
+}
+
+static void tile_clicked(lv_event_t *e)
+{
+    tile_t *t = lv_event_get_user_data(e);
+    ESP_LOGI(TAG, "tile '%s' tapped", t->def->name);
+    open_def(t->def);
+}
+
+static lv_obj_t *make_tile(lv_obj_t *parent, tile_t *t)
+{
+    const tile_def_t *d = t->def;
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_remove_style_all(o);
+    purr_theme_apply(o, PURR_TH_TILE);
+    lv_obj_set_style_radius(o, 0, 0);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(o, tile_clicked, LV_EVENT_CLICKED, t);
+    /* a touch dims the tile a little, as the original does (the tile style carries that) */
+
+    const lv_image_dsc_t *icon = d->icon ? img(d->icon) : NULL;
+    if (icon != NULL) {
+        lv_obj_t *im = lv_image_create(o);
+        lv_image_set_src(im, icon);
+        lv_obj_align(im, LV_ALIGN_CENTER, 0, -6);
+        lv_obj_remove_flag(im, LV_OBJ_FLAG_CLICKABLE);
+    } else {
+        lv_obj_t *l = lv_label_create(o);
+        char c[2] = {d->name[0], 0};
+        lv_label_set_text(l, c);
+        lv_obj_set_style_text_font(l, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(l, lv_color_white(), 0);
+        lv_obj_align(l, LV_ALIGN_CENTER, 0, -6);
+    }
+    if (d->dev) {
+        lv_obj_t *mark = lv_label_create(o);
+        lv_label_set_text(mark, "DEV");
+        lv_obj_set_style_text_font(mark, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(mark, lv_color_hex(0xFFB900), 0);
+        lv_obj_align(mark, LV_ALIGN_TOP_RIGHT, -3, 1);
+    }
+    lv_obj_t *name = lv_label_create(o);
+    lv_label_set_text(name, d->name);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(name, lv_color_white(), 0);
+    lv_obj_align(name, LV_ALIGN_BOTTOM_LEFT, 4, -3);
+    return o;
+}
+
+static void relayout(void);
+static void theme_changed(void);
+static void make_tiles(void);
+static void apps_refresh(void);
+static void lock_show(void);
+static void list_layout(void);
+static void list_move(int open);
+static void lock_layout(void);
+static void bfu_layout(void);
+
+/* ---------------------------------------------------------------- the status strip */
+
+/* 24-hour or 12-hour, from the time.clock24 setting (Settings > Time & Language). */
+static void fmt_hm(const struct tm *tm, char *buf, size_t cap)
+{
+    if (purr_settings_kv_int("time.clock24", 1)) {
+        snprintf(buf, cap, "%02d:%02d", tm->tm_hour, tm->tm_min);
+    } else {
+        int h = tm->tm_hour % 12;
+        snprintf(buf, cap, "%d:%02d %s", h == 0 ? 12 : h, tm->tm_min, tm->tm_hour < 12 ? "AM" : "PM");
+    }
+}
+
+/* The Windows Phone / Lumia status bar: the system icons in a row at the right, the battery last before the clock, which is the far right. */
+#define BATT_W 15                       /* the fill's width at 100 % */
+#define BATT_RED 0xE51400               /* 20 % or less */
+
+static void battery_icon_build(lv_obj_t *parent)
+{
+    s_batt = lv_obj_create(parent);
+    lv_obj_remove_style_all(s_batt);
+    lv_obj_set_size(s_batt, 22, 10);
+    lv_obj_clear_flag(s_batt, LV_OBJ_FLAG_SCROLLABLE);
+    s_batt_body = lv_obj_create(s_batt);
+    lv_obj_remove_style_all(s_batt_body);
+    lv_obj_set_size(s_batt_body, 19, 10);
+    lv_obj_set_pos(s_batt_body, 0, 0);
+    lv_obj_clear_flag(s_batt_body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_border_width(s_batt_body, 1, 0);
+    lv_obj_set_style_border_opa(s_batt_body, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_batt_body, 1, 0);
+    s_batt_fill = lv_obj_create(s_batt_body);
+    lv_obj_remove_style_all(s_batt_fill);
+    lv_obj_set_pos(s_batt_fill, 1, 1);
+    lv_obj_set_size(s_batt_fill, BATT_W, 6);
+    lv_obj_set_style_bg_opa(s_batt_fill, LV_OPA_COVER, 0);
+    s_batt_nub = lv_obj_create(s_batt);
+    lv_obj_remove_style_all(s_batt_nub);
+    lv_obj_set_size(s_batt_nub, 2, 4);
+    lv_obj_set_pos(s_batt_nub, 19, 3);
+    lv_obj_set_style_bg_opa(s_batt_nub, LV_OPA_COVER, 0);
+    lv_obj_add_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void battery_icon_set(int pct)
+{
+    lv_color_t c = pct <= 20 ? lv_color_hex(BATT_RED) : lv_color_white();
+    int w = pct * BATT_W / 100;
+    lv_obj_set_width(s_batt_fill, w < 1 ? 1 : (w > BATT_W ? BATT_W : w));
+    lv_obj_set_style_bg_color(s_batt_fill, c, 0);
+    lv_obj_set_style_bg_color(s_batt_nub, c, 0);
+    lv_obj_set_style_border_color(s_batt_body, c, 0);
+}
+
+/* ---------------------------------------------------------------- the status bar while something works
+ *
+ * Windows Phone's own numbers (its indeterminate progress bar): five 4 px dots in the accent colour, each starting 200 ms after the one before. A dot
+ * rushes over the first third of the width in 0.5 s (an ease-out), crawls through the middle third in 1.5 s, and rushes out over the last third in 0.5 s,
+ * 2.5 s in all, then is gone. The run repeats every 4.4 s. */
+
+#define BUSY_DOTS 5
+#define BUSY_CYCLE_MS 4400
+#define BUSY_STEP_MS 200
+#define BUSY_SPAN_MS 2500
+#define BUSY_DOT 4
+#define BUSY_MARGIN 12
+
+/* 1 - (e^(1-x) - 1) / (e - 1), in thousandths, at x = 0, 1/16 ... 1: the exponential ease-out (exponent 1) the original uses. */
+static const uint16_t k_ease_out[17] = {0, 96, 186, 270, 350, 425, 495, 561, 622, 681, 735, 787, 835, 880, 923, 962, 1000};
+
+static int ease_out(int x)                      /* x and the result in thousandths */
+{
+    if (x <= 0) {
+        return 0;
+    }
+    if (x >= 1000) {
+        return 1000;
+    }
+    int i = x * 16 / 1000, frac = x * 16 - i * 1000;
+    return k_ease_out[i] + ((int)k_ease_out[i + 1] - (int)k_ease_out[i]) * frac / 1000;
+}
+
+static int dot_progress(int t)                  /* how far along the width a dot is t ms after it began, in thousandths */
+{
+    if (t < 500) {
+        return 330 * ease_out(t * 2) / 1000;
+    }
+    if (t < 2000) {
+        return 330 + 330 * (t - 500) / 1500;
+    }
+    return 660 + 340 * ease_out((t - 2000) * 2) / 1000;
+}
+
+static void busy_anim_cb(void *var, int32_t v)
+{
+    (void)var;
+    int range = lv_obj_get_width(s_status) - 2 * BUSY_MARGIN - BUSY_DOT;
+    for (int i = 0; i < BUSY_DOTS; i++) {
+        int local = v - i * BUSY_STEP_MS;
+        if (local >= 0 && local < BUSY_SPAN_MS) {
+            lv_obj_set_x(s_busy_dot[i], BUSY_MARGIN + dot_progress(local) * range / 1000);
+            lv_obj_remove_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void busy_fade_cb(void *var, int32_t v)  /* v 0 = the icons, 255 = the message */
+{
+    (void)var;
+    lv_obj_set_style_opa(s_busy_msg, (lv_opa_t)v, 0);
+    if (s_net != NULL) {
+        lv_obj_set_style_opa(s_net, (lv_opa_t)(255 - v), 0);
+    }
+    if (s_batt != NULL) {
+        lv_obj_set_style_opa(s_batt, (lv_opa_t)(255 - v), 0);
+    }
+}
+
+static void busy_fade(int to_message)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_busy_msg);
+    lv_anim_set_exec_cb(&a, busy_fade_cb);
+    lv_anim_set_values(&a, lv_obj_get_style_opa(s_busy_msg, 0), to_message ? 255 : 0);
+    lv_anim_set_duration(&a, 180);
+    lv_anim_start(&a);
+}
+
+static lv_timer_t *s_banner_timer;      /* a message is holding the strip (5 seconds) */
+static char s_busy_text[64];            /* the words of the work in progress, put back after a banner */
+static int s_banner_busy;               /* work was in progress when the banner took over */
+
+static void busy_start_anim(void)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_busy_msg);
+    lv_anim_set_exec_cb(&a, busy_anim_cb);
+    lv_anim_set_values(&a, 0, BUSY_CYCLE_MS);
+    lv_anim_set_duration(&a, BUSY_CYCLE_MS);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_linear);
+    lv_anim_start(&a);
+}
+
+static void busy_done_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_busy_done_timer = NULL;                   /* a one-shot timer deletes itself */
+    s_busy_state = 0;
+    busy_fade(0);
+}
+
+static void banner_end_cb(lv_timer_t *t)
+{
+    (void)t;
+    s_banner_timer = NULL;
+    lv_obj_set_style_text_color(s_busy_msg, lv_color_white(), 0);
+    if (s_banner_busy && s_busy_state == 1) {   /* the work is still going: its words and dots come back */
+        lv_label_set_text(s_busy_msg, s_busy_text);
+        busy_start_anim();
+    } else {
+        s_busy_state = 0;
+        busy_fade(0);
+    }
+    s_banner_busy = 0;
+}
+
+/* Any status, error or new notification takes over the strip for 5 seconds (an error in amber). A second one replaces the first and restarts
+ * the five seconds. Work in progress pauses behind it and comes back. */
+void w10m_banner(const char *msg, int bad)
+{
+    if (s_status == NULL || s_busy_msg == NULL || msg == NULL || msg[0] == '\0') {
+        return;
+    }
+    if (s_busy_done_timer != NULL) {
+        lv_timer_delete(s_busy_done_timer);
+        s_busy_done_timer = NULL;
+    }
+    if (s_banner_timer != NULL) {
+        lv_timer_delete(s_banner_timer);
+        s_banner_timer = NULL;
+    } else {
+        s_banner_busy = s_busy_state == 1;
+    }
+    if (s_busy_state == 1) {
+        lv_anim_delete(s_busy_msg, busy_anim_cb);
+        for (int i = 0; i < BUSY_DOTS; i++) {
+            lv_obj_add_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    lv_label_set_text(s_busy_msg, msg);
+    lv_obj_set_style_text_color(s_busy_msg, bad ? lv_color_hex(0xFFB900) : lv_color_white(), 0);
+    if (s_busy_state == 0) {
+        busy_fade(1);
+    }
+    if (s_busy_state != 1) {
+        s_busy_state = 2;
+    }
+    s_banner_timer = lv_timer_create(banner_end_cb, 5000, NULL);
+    lv_timer_set_repeat_count(s_banner_timer, 1);
+}
+
+typedef struct {
+    char msg[96];
+    int bad;
+} banner_req_t;
+
+static void *banner_ui(void *arg)
+{
+    banner_req_t *r = arg;
+    w10m_banner(r->msg, r->bad);
+    return NULL;
+}
+
+/* The same from any task (an app's catcall, a worker). */
+void w10m_banner_post(const char *msg, int bad)
+{
+    banner_req_t r = {.bad = bad};
+    snprintf(r.msg, sizeof(r.msg), "%s", msg != NULL ? msg : "");
+    purr_ui_service_run(banner_ui, &r, NULL);
+}
+
+void w10m_busy_begin(const char *msg)
+{
+    if (s_status == NULL || s_busy_msg == NULL) {
+        return;
+    }
+    if (s_busy_done_timer != NULL) {            /* another action started during the "Done" */
+        lv_timer_delete(s_busy_done_timer);
+        s_busy_done_timer = NULL;
+    }
+    if (s_banner_timer != NULL) {               /* a new action cuts a banner short */
+        lv_timer_delete(s_banner_timer);
+        s_banner_timer = NULL;
+        lv_obj_set_style_text_color(s_busy_msg, lv_color_white(), 0);
+        s_banner_busy = 0;
+    }
+    snprintf(s_busy_text, sizeof(s_busy_text), "%s", msg != NULL && msg[0] ? msg : "Working...");
+    lv_label_set_text(s_busy_msg, s_busy_text);
+    for (int i = 0; i < BUSY_DOTS; i++) {
+        lv_obj_set_style_bg_color(s_busy_dot[i], purr_theme_accent_color(), 0);
+    }
+    if (s_busy_state != 1) {
+        busy_start_anim();
+    }
+    if (s_busy_state == 0) {
+        busy_fade(1);
+    }
+    s_busy_state = 1;
+}
+
+void w10m_busy_end(void)
+{
+    if (s_busy_state != 1) {
+        return;
+    }
+    if (s_banner_timer != NULL) {               /* a banner is on the strip: let it finish, the work is over */
+        s_banner_busy = 0;
+        s_busy_state = 2;
+        return;
+    }
+    lv_anim_delete(s_busy_msg, busy_anim_cb);
+    for (int i = 0; i < BUSY_DOTS; i++) {
+        lv_obj_add_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_label_set_text(s_busy_msg, "Done");
+    s_busy_state = 2;
+    s_busy_done_timer = lv_timer_create(busy_done_cb, 500, NULL);
+    lv_timer_set_repeat_count(s_busy_done_timer, 1);
+}
+
+static void busy_build(lv_obj_t *parent)
+{
+    s_busy_msg = lv_label_create(parent);
+    lv_obj_set_style_text_font(s_busy_msg, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_busy_msg, lv_color_white(), 0);
+    lv_label_set_long_mode(s_busy_msg, LV_LABEL_LONG_DOT);               /* a long message is cut off with "..." */
+    lv_obj_set_width(s_busy_msg, 240);
+    lv_obj_align(s_busy_msg, LV_ALIGN_LEFT_MID, 6, -2);
+    lv_obj_set_style_opa(s_busy_msg, LV_OPA_TRANSP, 0);
+    for (int i = 0; i < BUSY_DOTS; i++) {
+        s_busy_dot[i] = lv_obj_create(parent);
+        lv_obj_remove_style_all(s_busy_dot[i]);
+        lv_obj_set_size(s_busy_dot[i], BUSY_DOT, BUSY_DOT);
+        lv_obj_set_pos(s_busy_dot[i], BUSY_MARGIN, STATUS_H - BUSY_DOT);
+        lv_obj_set_style_bg_opa(s_busy_dot[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(s_busy_dot[i], purr_theme_accent_color(), 0);
+        lv_obj_remove_flag(s_busy_dot[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(s_busy_dot[i], LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* The icons in a row from the left (network, then battery when there is a reading); the clock alone at the far right. There is no user name in the strip. */
+static void status_layout(void)
+{
+    lv_obj_update_layout(s_status);
+    lv_obj_align(s_clock, LV_ALIGN_RIGHT_MID, -6, 0);
+    int x = 6;
+    if (s_net != NULL) {
+        int w = lv_obj_get_width(s_net), vw = w * 160 / 256;           /* the icon is drawn at 160/256 of its size, around its middle */
+        lv_obj_align(s_net, LV_ALIGN_LEFT_MID, x - (w - vw) / 2, 0);
+        x += vw + 8;
+    }
+    if (s_batt != NULL && !lv_obj_has_flag(s_batt, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_align(s_batt, LV_ALIGN_LEFT_MID, x, 0);
+    }
+}
+
+static void clock_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    char notice[64];
+    if (purr_catrt_take_notice(notice, sizeof(notice))) {      /* the runtime closed an app for room, or refused a service */
+        w10m_banner(notice, 0);
+    }
+    time_t now = time(NULL);
+    char buf[12];
+    if (now > 1000000000) {
+        struct tm tm;
+        localtime_r(&now, &tm);
+        fmt_hm(&tm, buf, sizeof(buf));
+    } else {
+        snprintf(buf, sizeof(buf), "--:--");     /* the clock has not been set */
+    }
+    lv_label_set_text(s_clock, buf);
+    if (s_batt != NULL) {
+        int pct;
+        if (purr_battery_get(&pct, NULL)) {
+            battery_icon_set(pct);
+            lv_obj_remove_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    status_layout();
+}
+
+void w10m_dev_badge_update(void)
+{
+    if (s_status_dev == NULL) {
+        return;
+    }
+    if (purr_security_unsigned_apps_allowed()) {
+        lv_label_set_text(s_status_dev, "UNSIGNED APPS OK");
+        lv_obj_remove_flag(s_status_dev, LV_OBJ_FLAG_HIDDEN);
+    } else if (purr_security_dev_active()) {
+        lv_label_set_text(s_status_dev, "DEV");
+        lv_obj_remove_flag(s_status_dev, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_status_dev, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void build_status(void)
+{
+    lv_obj_t *top = lv_layer_top();
+    s_status = lv_obj_create(top);
+    lv_obj_remove_style_all(s_status);
+    lv_obj_set_size(s_status, LV_PCT(100), STATUS_H);
+    lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 0);
+    purr_theme_apply(s_status, PURR_TH_STRIP);
+    lv_obj_clear_flag(s_status, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_clock = lv_label_create(s_status);
+    lv_obj_set_style_text_font(s_clock, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_clock, lv_color_white(), 0);
+    lv_obj_align(s_clock, LV_ALIGN_RIGHT_MID, -6, 0);
+
+    battery_icon_build(s_status);
+    busy_build(s_status);
+
+    const lv_image_dsc_t *net = img("wifi_icon");
+    if (net != NULL) {
+        s_net = lv_image_create(s_status);
+        lv_image_set_src(s_net, net);
+        lv_image_set_scale(s_net, 160);          /* the icons are drawn for a bigger panel */
+        lv_obj_align(s_net, LV_ALIGN_LEFT_MID, 6, 0);
+    }
+    s_status_dev = lv_label_create(s_status);
+    lv_obj_set_style_text_font(s_status_dev, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_status_dev, lv_color_hex(0xFFB900), 0);
+    lv_obj_align(s_status_dev, LV_ALIGN_CENTER, 0, 0);
+    w10m_dev_badge_update();
+
+    clock_tick(NULL);
+    lv_timer_create(clock_tick, 1000, NULL);
+}
+
+/* ---------------------------------------------------------------- the control center
+ *
+ * The notification panel of the original: a full-screen sheet you pull down from the top. A clock
+ * on top, the quick-action tiles, then the notifications. Tiles for things this hardware or OS
+ * cannot do yet (cellular, Bluetooth, airplane mode, hotspot, VPN, location) are drawn dimmed and
+ * do nothing, rather than pretending to work. */
+
+#define CC_ACTION_H   48
+#define CC_PER_ROW_LANDSCAPE 5          /* tiles shown while collapsed, and per row when expanded */
+#define CC_PER_ROW_PORTRAIT  4
+#define CC_MAX_NOTES  8
+
+static lv_obj_t *s_cc;                  /* the sheet */
+static lv_obj_t *s_cc_time, *s_cc_date;
+static lv_obj_t *s_cc_actions;          /* the tile grid */
+static lv_obj_t *s_cc_notes;            /* the notification list */
+static lv_obj_t *s_cc_empty;            /* "no new notifications" */
+static lv_obj_t *s_cc_clear;            /* "Clear all" */
+static lv_obj_t *s_cc_expand;           /* the expand / collapse button */
+static lv_obj_t *s_cc_expand_lbl;
+static lv_obj_t *s_cc_lock;             /* "Lock" */
+static int s_cc_expanded;               /* 0 = one row of tiles, 1 = all of them */
+static lv_obj_t *s_cc_handle;           /* grab bar along the bottom edge: drag up to close */
+static int s_cc_h, s_cc_open;
+static int s_press_y0, s_dragged, s_from_open;
+static int s_brightness_step = 3;       /* index into s_brightness_levels */
+static const uint8_t s_brightness_levels[] = {40, 110, 180, 255};
+
+typedef struct {
+    const char *name;
+    const char *icon;
+    int enabled;                        /* 0 = not supported here yet: shown dimmed, does nothing */
+    int checkable;
+    int on;
+    void (*act)(int on);
+    lv_obj_t *obj;
+    lv_obj_t *label;
+} quick_t;
+
+static void act_brightness(int on);
+static void act_rotate(int on);
+static void act_settings(int on);
+static void act_tasks(int on);
+static void cc_move(int open);
+
+static quick_t s_quick[] = {
+    {"Network",    "wifi_ic",       1, 1, 1, NULL,           NULL, NULL},
+    {"Brightness", "brightness_ic", 1, 0, 0, act_brightness, NULL, NULL},
+    {"Rotate",     NULL,            1, 0, 0, act_rotate,     NULL, NULL},
+    {"Tasks",      NULL,            1, 0, 0, act_tasks,      NULL, NULL},
+    {"Settings",   "settings_ic",   1, 0, 0, act_settings,   NULL, NULL},
+    {"Airplane",   "airplane_ic",   0, 1, 0, NULL,           NULL, NULL},
+    {"Cellular",   "cellular_ic",   0, 1, 0, NULL,           NULL, NULL},
+    {"Bluetooth",  "bluetooth_ic",  0, 1, 0, NULL,           NULL, NULL},
+    {"Battery",    "battery_ic",    0, 1, 0, NULL,           NULL, NULL},
+    {"Hotspot",    "hotspot_ic",    0, 1, 0, NULL,           NULL, NULL},
+    {"VPN",        "vpn_ic",        0, 1, 0, NULL,           NULL, NULL},
+    {"Location",   "location_ic",   0, 1, 0, NULL,           NULL, NULL},
+};
+#define N_QUICK ((int)(sizeof(s_quick) / sizeof(s_quick[0])))
+
+static int s_brightness = 255;
+
+void w10m_set_brightness(int level)
+{
+    level = level < 1 ? 1 : (level > 255 ? 255 : level);
+    s_brightness = level;
+    const purr_display_v2_t *d = purr_kernel_display();
+    if (d != NULL && d->set_brightness != NULL) {
+        d->set_brightness((uint8_t)level);
+    }
+}
+
+int w10m_get_brightness(void) { return s_brightness; }
+
+void w10m_save_display(void)
+{
+    char v[12];
+    snprintf(v, sizeof(v), "%d", s_brightness);
+    purr_settings_kv_set("display.brightness", v);
+}
+
+static void act_brightness(int on)
+{
+    (void)on;
+    s_brightness_step = (s_brightness_step + 1) % (int)sizeof(s_brightness_levels);
+    w10m_set_brightness(s_brightness_levels[s_brightness_step]);
+    ESP_LOGI(TAG, "brightness %d", s_brightness_levels[s_brightness_step]);
+}
+
+static void act_rotate(int on)
+{
+    (void)on;
+    int next = (purr_lvgl_get_rotation() + 90) % 360;
+    w10m_apply_orientation(next);
+}
+
+static void act_settings(int on)
+{
+    (void)on;
+    cc_move(0);
+    w10m_settings_open();
+}
+
+static void act_tasks(int on)
+{
+    (void)on;
+    cc_move(0);
+    w10m_tasks_open();                                              /* the task manager: every running app, its memory, an End button */
+}
+
+static void quick_refresh(quick_t *q)
+{
+    if (q->obj == NULL) {
+        return;
+    }
+    lv_color_t bg = (q->enabled && q->checkable && q->on) ? accent()
+                  : (q->enabled ? lv_color_hex(0x404040) : lv_color_hex(0x262626));
+    lv_obj_set_style_bg_color(q->obj, bg, 0);
+    lv_obj_set_style_opa(q->obj, q->enabled ? LV_OPA_COVER : LV_OPA_50, 0);
+}
+
+static void quick_clicked(lv_event_t *e)
+{
+    quick_t *q = lv_event_get_user_data(e);
+    if (!q->enabled) {
+        return;
+    }
+    if (q->checkable) {
+        q->on = !q->on;
+    }
+    if (q->act) {
+        q->act(q->on);
+    }
+    quick_refresh(q);
+}
+
+static void theme_changed(void)
+{
+    for (int i = 0; i < N_QUICK; i++) {
+        quick_refresh(&s_quick[i]);
+    }
+}
+
+static void cc_clock_refresh(void)
+{
+    time_t now = time(NULL);
+    if (now > 1000000000) {
+        struct tm tm;
+        localtime_r(&now, &tm);
+        char tb[12], db[24];
+        fmt_hm(&tm, tb, sizeof(tb));
+        strftime(db, sizeof(db), "%a %d %b", &tm);
+        lv_label_set_text(s_cc_time, tb);
+        lv_label_set_text(s_cc_date, db);
+    } else {
+        lv_label_set_text(s_cc_time, "--:--");
+        lv_label_set_text(s_cc_date, "clock not set");
+    }
+}
+
+static void cc_anim_y_cb(void *obj, int32_t v) { lv_obj_set_y((lv_obj_t *)obj, v); }
+
+static void cc_anim_done(lv_anim_t *a)
+{
+    (void)a;
+    if (!s_cc_open) {
+        lv_obj_add_flag(s_cc, LV_OBJ_FLAG_HIDDEN);       /* nothing to draw while it is shut */
+    }
+}
+
+static void cc_move(int open)
+{
+    s_cc_open = open;
+    if (open) {
+        cc_clock_refresh();
+        lv_obj_remove_flag(s_cc, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_cc);
+    lv_anim_set_exec_cb(&a, cc_anim_y_cb);
+    lv_anim_set_values(&a, lv_obj_get_y(s_cc), open ? 0 : -s_cc_h);
+    lv_anim_set_duration(&a, 220);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, cc_anim_done);
+    lv_anim_start(&a);
+}
+
+/* One handler for both grab areas (the status strip pulls it down, the bottom bar pushes it up):
+ * the sheet follows the finger, and on release it settles open or shut depending on how far it
+ * went. A touch that never moved toggles it. */
+static void cc_drag_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *in = lv_indev_active();
+    if (in == NULL) {
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    if (code == LV_EVENT_PRESSED) {
+        lv_anim_delete(s_cc, cc_anim_y_cb);
+        s_press_y0 = p.y;
+        s_dragged = 0;
+        s_from_open = s_cc_open;
+    } else if (code == LV_EVENT_PRESSING) {
+        int dy = p.y - s_press_y0;
+        if (dy > 5 || dy < -5) {
+            s_dragged = 1;
+        }
+        if (s_dragged) {
+            int base = s_from_open ? 0 : -s_cc_h;
+            int y = base + dy;
+            if (y > 0) y = 0;
+            if (y < -s_cc_h) y = -s_cc_h;
+            lv_obj_remove_flag(s_cc, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_y(s_cc, y);
+        }
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (!s_dragged) {
+            if (code == LV_EVENT_RELEASED) {
+                cc_move(!s_from_open);
+            }
+        } else {
+            int y = lv_obj_get_y(s_cc);
+            cc_move(s_from_open ? (y > -s_cc_h / 3) : (y > -s_cc_h * 2 / 3));
+        }
+    }
+}
+
+/* Notifications: newest on top, tap one to dismiss it. Called on the UI task. */
+static void note_clicked(lv_event_t *e)
+{
+    lv_obj_t *n = lv_event_get_target(e);
+    lv_obj_delete(n);
+    if (lv_obj_get_child_count(s_cc_notes) == 0) {
+        lv_obj_remove_flag(s_cc_empty, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void add_note(const char *title, const char *text)
+{
+    while (lv_obj_get_child_count(s_cc_notes) >= CC_MAX_NOTES) {
+        lv_obj_delete(lv_obj_get_child(s_cc_notes, lv_obj_get_child_count(s_cc_notes) - 1));
+    }
+    lv_obj_t *n = lv_obj_create(s_cc_notes);
+    lv_obj_remove_style_all(n);
+    lv_obj_set_width(n, LV_PCT(100));
+    lv_obj_set_height(n, LV_SIZE_CONTENT);
+    purr_theme_apply(n, PURR_TH_SURFACE);
+    purr_theme_apply(n, PURR_TH_ACCENT_BORDER);
+    lv_obj_set_style_pad_all(n, 5, 0);
+    lv_obj_set_style_pad_row(n, 1, 0);
+    lv_obj_set_flex_flow(n, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_flag(n, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(n, note_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *a = lv_label_create(n);
+    lv_label_set_text(a, title);
+    lv_obj_set_style_text_font(a, &lv_font_montserrat_12, 0);
+    purr_theme_apply(a, PURR_TH_TEXT);
+    lv_obj_t *b = lv_label_create(n);
+    lv_label_set_text(b, text);
+    lv_label_set_long_mode(b, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(b, LV_PCT(100));
+    lv_obj_set_style_text_font(b, &lv_font_montserrat_12, 0);
+    purr_theme_apply(b, PURR_TH_DIM);
+    lv_obj_move_to_index(n, 0);
+    lv_obj_add_flag(s_cc_empty, LV_OBJ_FLAG_HIDDEN);
+    char line[96];
+    snprintf(line, sizeof(line), "%s: %s", title, text);          /* a new notification takes the strip for 5 seconds */
+    w10m_banner(line, 0);
+}
+
+typedef struct {
+    char title[32], text[96];
+} note_req_t;
+
+static void *note_ui(void *arg)
+{
+    note_req_t *r = arg;
+    if (s_cc_notes != NULL) {
+        add_note(r->title, r->text);
+    }
+    return NULL;
+}
+
+static void *apps_changed_ui(void *arg)
+{
+    (void)arg;
+    w10m_apps_changed();
+    return NULL;
+}
+
+void w10m_apps_changed_post(void)
+{
+    purr_ui_service_run(apps_changed_ui, NULL, NULL);
+}
+
+void w10m_note_post(const char *title, const char *text)
+{
+    note_req_t r;
+    snprintf(r.title, sizeof(r.title), "%s", title != NULL ? title : "");
+    snprintf(r.text, sizeof(r.text), "%s", text != NULL ? text : "");
+    purr_ui_service_run(note_ui, &r, NULL);
+}
+
+static void clear_notes(lv_event_t *e)
+{
+    (void)e;
+    lv_obj_clean(s_cc_notes);
+    lv_obj_remove_flag(s_cc_empty, LV_OBJ_FLAG_HIDDEN);
+}
+
+static int cc_per_row(void)
+{
+    return is_landscape() ? CC_PER_ROW_LANDSCAPE : CC_PER_ROW_PORTRAIT;
+}
+
+static void cc_layout(void)
+{
+    int w = disp_w(), h = disp_h();
+    s_cc_h = h;
+    lv_obj_set_size(s_cc, w, h);
+    lv_obj_set_y(s_cc, s_cc_open ? 0 : -h);
+    if (!s_cc_open) {
+        lv_obj_add_flag(s_cc, LV_OBJ_FLAG_HIDDEN);
+    }
+    /* below the status strip: the clock and date on the left, the expand button on the right, the
+     * tile grid, the notification list, and the handle along the bottom */
+    int top = STATUS_H + 2;
+    lv_obj_align(s_cc_time, LV_ALIGN_TOP_LEFT, 8, top);
+    lv_obj_align(s_cc_date, LV_ALIGN_TOP_LEFT, 10, top + 32);
+    lv_obj_align(s_cc_expand, LV_ALIGN_TOP_RIGHT, -4, top + 6);
+    lv_obj_align_to(s_cc_lock, s_cc_expand, LV_ALIGN_OUT_LEFT_MID, -2, 0);
+
+    /* Collapsed it shows one row; expanded, every tile, in rows of the same length. The tile width
+     * is worked out from the row length so a row always fills the width exactly. */
+    int per_row = cc_per_row();
+    int visible = s_cc_expanded ? N_QUICK : (per_row < N_QUICK ? per_row : N_QUICK);
+    int tile_w = (w - 8 - (per_row - 1) * 4) / per_row;
+    for (int i = 0; i < N_QUICK; i++) {
+        quick_t *q = &s_quick[i];
+        lv_obj_set_size(q->obj, tile_w, CC_ACTION_H);
+        if (i < visible) {
+            lv_obj_remove_flag(q->obj, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(q->obj, LV_OBJ_FLAG_HIDDEN);        /* hidden objects leave the flex flow */
+        }
+    }
+    int rows = (visible + per_row - 1) / per_row;
+    int grid_h = rows * (CC_ACTION_H + 4) - 4;
+    lv_obj_set_size(s_cc_actions, w - 8, grid_h);
+    lv_obj_align(s_cc_actions, LV_ALIGN_TOP_MID, 0, top + 52);
+    lv_label_set_text(s_cc_expand_lbl, s_cc_expanded ? LV_SYMBOL_UP : LV_SYMBOL_DOWN);
+
+    int notes_top = top + 52 + grid_h + 18;
+    int notes_h = h - notes_top - 16;
+    if (notes_h < 20) notes_h = 20;
+    lv_obj_set_size(s_cc_notes, w - 8, notes_h);
+    lv_obj_align(s_cc_notes, LV_ALIGN_TOP_MID, 0, notes_top);
+    lv_obj_align(s_cc_empty, LV_ALIGN_TOP_MID, 0, notes_top + 4);
+    lv_obj_align(s_cc_clear, LV_ALIGN_TOP_RIGHT, -8, notes_top - 14);
+    lv_obj_set_size(s_cc_handle, w, 16);
+    lv_obj_align(s_cc_handle, LV_ALIGN_BOTTOM_MID, 0, 0);
+}
+
+static void lock_clicked(lv_event_t *e)
+{
+    (void)e;
+    lock_show();
+}
+
+static void expand_clicked(lv_event_t *e)
+{
+    (void)e;
+    s_cc_expanded = !s_cc_expanded;
+    cc_layout();
+}
+
+static void build_cc(void)
+{
+    s_cc = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_cc);
+    purr_theme_apply(s_cc, PURR_TH_SHEET);
+    lv_obj_clear_flag(s_cc, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_cc, LV_OBJ_FLAG_CLICKABLE);       /* it swallows touches meant for what is beneath */
+    lv_obj_add_flag(s_cc, LV_OBJ_FLAG_HIDDEN);
+
+    s_cc_time = lv_label_create(s_cc);
+    lv_obj_set_style_text_font(s_cc_time, &lv_font_montserrat_28, 0);
+    purr_theme_apply(s_cc_time, PURR_TH_TEXT);
+    s_cc_date = lv_label_create(s_cc);
+    lv_obj_set_style_text_font(s_cc_date, &lv_font_montserrat_12, 0);
+    purr_theme_apply(s_cc_date, PURR_TH_DIM);
+
+    s_cc_expand = lv_obj_create(s_cc);
+    lv_obj_remove_style_all(s_cc_expand);
+    lv_obj_set_size(s_cc_expand, 40, 36);
+    lv_obj_add_flag(s_cc_expand, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_cc_expand, expand_clicked, LV_EVENT_CLICKED, NULL);
+    s_cc_expand_lbl = lv_label_create(s_cc_expand);
+    lv_label_set_text(s_cc_expand_lbl, LV_SYMBOL_DOWN);
+    purr_theme_apply(s_cc_expand_lbl, PURR_TH_TEXT);
+    lv_obj_align(s_cc_expand_lbl, LV_ALIGN_CENTER, 0, 0);
+
+    s_cc_lock = lv_label_create(s_cc);
+    lv_label_set_text(s_cc_lock, "Lock");
+    lv_obj_set_style_text_font(s_cc_lock, &lv_font_montserrat_14, 0);
+    purr_theme_apply(s_cc_lock, PURR_TH_ACCENT_TEXT);
+    lv_obj_add_flag(s_cc_lock, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(s_cc_lock, 10);
+    lv_obj_add_event_cb(s_cc_lock, lock_clicked, LV_EVENT_CLICKED, NULL);
+
+    s_cc_actions = lv_obj_create(s_cc);
+    lv_obj_remove_style_all(s_cc_actions);
+    lv_obj_clear_flag(s_cc_actions, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(s_cc_actions, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_style_pad_row(s_cc_actions, 4, 0);
+    lv_obj_set_style_pad_column(s_cc_actions, 4, 0);
+    for (int i = 0; i < N_QUICK; i++) {
+        quick_t *q = &s_quick[i];
+        q->obj = lv_obj_create(s_cc_actions);
+        lv_obj_remove_style_all(q->obj);
+        lv_obj_set_size(q->obj, 56, CC_ACTION_H);
+        lv_obj_set_style_bg_opa(q->obj, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(q->obj, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(q->obj, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(q->obj, quick_clicked, LV_EVENT_CLICKED, q);
+        const lv_image_dsc_t *ic = q->icon ? img(q->icon) : NULL;
+        if (ic != NULL) {
+            lv_obj_t *im = lv_image_create(q->obj);
+            lv_image_set_src(im, ic);
+            lv_obj_align(im, LV_ALIGN_TOP_MID, 0, 4);
+            lv_obj_remove_flag(im, LV_OBJ_FLAG_CLICKABLE);
+        } else {
+            lv_obj_t *l = lv_label_create(q->obj);
+            lv_label_set_text(l, strcmp(q->name, "Tasks") == 0 ? LV_SYMBOL_LIST : LV_SYMBOL_REFRESH);
+            lv_obj_set_style_text_color(l, lv_color_white(), 0);
+            lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 5);
+        }
+        q->label = lv_label_create(q->obj);
+        lv_label_set_text(q->label, q->name);
+        lv_obj_set_style_text_font(q->label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(q->label, lv_color_white(), 0);
+        lv_obj_align(q->label, LV_ALIGN_BOTTOM_MID, 0, -2);
+        quick_refresh(q);
+    }
+
+    s_cc_notes = lv_obj_create(s_cc);
+    lv_obj_remove_style_all(s_cc_notes);
+    lv_obj_set_flex_flow(s_cc_notes, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_cc_notes, 3, 0);
+    lv_obj_set_scrollbar_mode(s_cc_notes, LV_SCROLLBAR_MODE_OFF);
+    s_cc_clear = lv_label_create(s_cc);
+    lv_label_set_text(s_cc_clear, "Clear all");
+    lv_obj_set_style_text_font(s_cc_clear, &lv_font_montserrat_12, 0);
+    purr_theme_apply(s_cc_clear, PURR_TH_ACCENT_TEXT);
+    lv_obj_add_flag(s_cc_clear, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_cc_clear, clear_notes, LV_EVENT_CLICKED, NULL);
+    s_cc_empty = lv_label_create(s_cc);
+    lv_label_set_text(s_cc_empty, "No new notifications");
+    lv_obj_set_style_text_font(s_cc_empty, &lv_font_montserrat_12, 0);
+    purr_theme_apply(s_cc_empty, PURR_TH_DIM);
+
+    s_cc_handle = lv_obj_create(s_cc);
+    lv_obj_remove_style_all(s_cc_handle);
+    lv_obj_add_flag(s_cc_handle, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *bar = lv_obj_create(s_cc_handle);
+    lv_obj_remove_style_all(bar);
+    lv_obj_set_size(bar, 40, 3);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x808080), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_align(bar, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_cc_handle, cc_drag_cb, LV_EVENT_ALL, NULL);
+
+    /* the status strip is the other grab area; the sheet itself is created after the strip, so
+     * the strip's own children still draw above it (build_status runs after this) */
+    lv_obj_add_event_cb(s_status, cc_drag_cb, LV_EVENT_ALL, NULL);
+    lv_obj_add_flag(s_status, LV_OBJ_FLAG_CLICKABLE);
+
+    cc_layout();
+    add_note(PURR_BRAND_PRODUCT, "Control center ready. Pull down from the top edge, or tap the clock.");
+}
+
+/* ---------------------------------------------------------------- the app list
+ *
+ * All apps, alphabetical with a letter heading for each run, reached from the round button at the
+ * end of the start screen. It slides in from the right over the start screen and back out with
+ * the arrow in its header. */
+
+static lv_obj_t *s_list;                /* the whole view */
+static lv_obj_t *s_list_head;
+static lv_obj_t *s_list_body;           /* the scrolling rows */
+static int s_list_open;
+
+static int ci_cmp(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        int x = (*a >= 'A' && *a <= 'Z') ? *a + 32 : *a;
+        int y = (*b >= 'A' && *b <= 'Z') ? *b + 32 : *b;
+        if (x != y) {
+            return x - y;
+        }
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+static void list_row_clicked(lv_event_t *e)
+{
+    const tile_def_t *d = lv_event_get_user_data(e);
+    ESP_LOGI(TAG, "app list: '%s' tapped", d->name);
+    open_def(d);
+    list_move(0);
+}
+
+static void list_x_cb(void *obj, int32_t v) { lv_obj_set_x((lv_obj_t *)obj, v); }
+
+static void list_anim_done(lv_anim_t *a)
+{
+    (void)a;
+    if (!s_list_open) {
+        lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void list_move(int open)
+{
+    s_list_open = open;
+    if (open) {
+        lv_obj_remove_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_scroll_to(s_list_body, 0, 0, LV_ANIM_OFF);
+    }
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_list);
+    lv_anim_set_exec_cb(&a, list_x_cb);
+    lv_anim_set_values(&a, lv_obj_get_x(s_list), open ? 0 : disp_w());
+    lv_anim_set_duration(&a, 200);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, list_anim_done);
+    lv_anim_start(&a);
+}
+
+static void list_back_clicked(lv_event_t *e)
+{
+    (void)e;
+    list_move(0);
+}
+
+static void allapps_clicked(lv_event_t *e)
+{
+    (void)e;
+    list_move(1);
+}
+
+static void fill_list(void);
+
+static void build_list(void)
+{
+    s_list = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(s_list);
+    purr_theme_apply(s_list, PURR_TH_SHEET);
+    lv_obj_clear_flag(s_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_list, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+
+    s_list_head = lv_obj_create(s_list);
+    lv_obj_remove_style_all(s_list_head);
+    lv_obj_set_height(s_list_head, 30);
+    lv_obj_add_flag(s_list_head, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_list_head, list_back_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *arrow = lv_label_create(s_list_head);
+    lv_label_set_text(arrow, LV_SYMBOL_LEFT);
+    purr_theme_apply(arrow, PURR_TH_TEXT);
+    lv_obj_align(arrow, LV_ALIGN_LEFT_MID, 8, 0);
+    lv_obj_t *title = lv_label_create(s_list_head);
+    lv_label_set_text(title, "Apps");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    purr_theme_apply(title, PURR_TH_TEXT);
+    lv_obj_align(title, LV_ALIGN_LEFT_MID, 34, 0);
+
+    s_list_body = lv_obj_create(s_list);
+    lv_obj_remove_style_all(s_list_body);
+    lv_obj_set_flex_flow(s_list_body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_list_body, 2, 0);
+    lv_obj_set_style_pad_hor(s_list_body, 8, 0);
+    lv_obj_set_scrollbar_mode(s_list_body, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scroll_dir(s_list_body, LV_DIR_VER);
+
+    fill_list();
+    list_layout();
+}
+
+/* The rows, alphabetical, with a letter heading for each run. Run again when the apps change. */
+static void fill_list(void)
+{
+    lv_obj_clean(s_list_body);
+    int order[MAX_TILES];
+    int n = 0;
+    for (int i = 0; i < N_TILE_DEFS && n < MAX_TILES; i++) {
+        order[n++] = i;
+    }
+    for (int i = 1; i < n; i++) {                   /* a small insertion sort: a dozen names */
+        int k = order[i], j = i - 1;
+        while (j >= 0 && ci_cmp(s_tile_defs[order[j]].name, s_tile_defs[k].name) > 0) {
+            order[j + 1] = order[j];
+            j--;
+        }
+        order[j + 1] = k;
+    }
+    char last = 0;
+    for (int i = 0; i < n; i++) {
+        const tile_def_t *d = &s_tile_defs[order[i]];
+        char letter = d->name[0];
+        if (letter >= 'a' && letter <= 'z') {
+            letter = (char)(letter - 32);
+        }
+        if (letter != last) {
+            last = letter;
+            lv_obj_t *h = lv_label_create(s_list_body);
+            char txt[2] = {letter, 0};
+            lv_label_set_text(h, txt);
+            lv_obj_set_style_text_font(h, &lv_font_montserrat_16, 0);
+            purr_theme_apply(h, PURR_TH_ACCENT_TEXT);
+            lv_obj_set_style_pad_top(h, 4, 0);
+        }
+        lv_obj_t *row = lv_obj_create(s_list_body);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), 34);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        purr_theme_apply(row, PURR_TH_ROW_PRESSED);
+        lv_obj_add_event_cb(row, list_row_clicked, LV_EVENT_CLICKED, (void *)d);
+        lv_obj_t *chip = lv_obj_create(row);
+        lv_obj_remove_style_all(chip);
+        lv_obj_set_size(chip, 30, 30);
+        purr_theme_apply(chip, PURR_TH_ACCENT_BG);
+        lv_obj_align(chip, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_remove_flag(chip, LV_OBJ_FLAG_CLICKABLE);
+        const lv_image_dsc_t *ic = d->icon ? img(d->icon) : NULL;
+        if (ic != NULL) {
+            lv_obj_t *im = lv_image_create(chip);
+            lv_image_set_src(im, ic);
+            lv_image_set_scale(im, 224);                 /* the icons are drawn a little large */
+            lv_obj_align(im, LV_ALIGN_CENTER, 0, 0);
+        }
+        lv_obj_t *nm = lv_label_create(row);
+        lv_label_set_text(nm, d->name);
+        purr_theme_apply(nm, PURR_TH_TEXT);
+        lv_obj_align(nm, LV_ALIGN_LEFT_MID, 40, 0);
+    }
+}
+
+static void list_layout(void)
+{
+    int w = disp_w(), h = disp_h();
+    lv_obj_set_size(s_list, w, h - STATUS_H);
+    lv_obj_set_pos(s_list, s_list_open ? 0 : w, STATUS_H);
+    lv_obj_set_size(s_list_head, w, 30);
+    lv_obj_align(s_list_head, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_size(s_list_body, w, h - STATUS_H - 30);
+    lv_obj_align(s_list_body, LV_ALIGN_TOP_LEFT, 0, 30);
+    if (!s_list_open) {
+        lv_obj_add_flag(s_list, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* ---------------------------------------------------------------- shared by the two sign-in screens */
+
+static int s_signed_in;                 /* someone has signed in since boot: the BFU screen is done */
+static lv_obj_t *wp_image(lv_obj_t *parent, const char *asset)
+{
+    lv_obj_t *w = lv_image_create(parent);
+    const lv_image_dsc_t *d = img(asset);
+    if (d != NULL) {
+        lv_image_set_src(w, d);
+        lv_image_set_inner_align(w, LV_IMAGE_ALIGN_CENTER);
+    }
+    lv_obj_remove_flag(w, LV_OBJ_FLAG_CLICKABLE);
+    return w;
+}
+
+/* ---------------------------------------------------------------- the lock screen
+ *
+ * The Windows 10 Mobile lock screen, used from the second unlock on: the wallpaper, the time and
+ * date, and "swipe up to unlock". It is only a lock, not a sign-in: the first unlock of a boot is
+ * the sign-in screen below, and what is on the device stays signed in behind this. */
+
+static lv_obj_t *s_lock;
+static lv_obj_t *s_lock_wall, *s_lock_time, *s_lock_date, *s_lock_hint, *s_lock_notes;
+static int s_lock_on;
+static int s_lock_y0, s_lock_drag;
+
+static void lock_y_cb(void *obj, int32_t v) { lv_obj_set_y((lv_obj_t *)obj, v); }
+
+static void lock_anim_done(lv_anim_t *a)
+{
+    (void)a;
+    if (!s_lock_on) {
+        lv_obj_add_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void lock_anim(int to, int ms)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_lock);
+    lv_anim_set_exec_cb(&a, lock_y_cb);
+    lv_anim_set_values(&a, lv_obj_get_y(s_lock), to);
+    lv_anim_set_duration(&a, ms);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, lock_anim_done);
+    lv_anim_start(&a);
+}
+
+static void lock_clock_refresh(void)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    time_t now = time(NULL);
+    if (now > 1000000000) {
+        struct tm tm;
+        localtime_r(&now, &tm);
+        char tb[12], db[32];
+        fmt_hm(&tm, tb, sizeof(tb));
+        strftime(db, sizeof(db), "%A, %d %B", &tm);
+        lv_label_set_text(s_lock_time, tb);
+        lv_label_set_text(s_lock_date, db);
+    } else {
+        lv_label_set_text(s_lock_time, "--:--");
+        lv_label_set_text(s_lock_date, "Clock not set");
+    }
+}
+
+static void lock_drag_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_indev_t *in = lv_indev_active();
+    if (in == NULL) {
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(in, &p);
+    int h = disp_h();
+    if (code == LV_EVENT_PRESSED) {
+        lv_anim_delete(s_lock, lock_y_cb);
+        s_lock_y0 = p.y;
+        s_lock_drag = 0;
+    } else if (code == LV_EVENT_PRESSING) {
+        int dy = p.y - s_lock_y0;
+        if (dy < -4) {
+            s_lock_drag = 1;
+        }
+        if (s_lock_drag) {
+            lv_obj_set_y(s_lock, dy < 0 ? dy : 0);       /* follows the finger, upwards only */
+        }
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (s_lock_drag && lv_obj_get_y(s_lock) < -h / 4) {
+            s_lock_on = 0;
+            lock_anim(-h, 200);                          /* off the top, and the start screen is there */
+        } else if (s_lock_drag) {
+            lock_anim(0, 180);                           /* not far enough: falls back */
+        } else if (code == LV_EVENT_RELEASED) {
+            lock_anim(-18, 90);                          /* a tap only nudges: it needs a swipe */
+        }
+    }
+}
+
+static void lock_nudge_back_cb(lv_timer_t *t)
+{
+    if (s_lock_on && lv_obj_get_y(s_lock) < 0 && lv_obj_get_y(s_lock) > -30) {
+        lock_anim(0, 120);
+    }
+    (void)t;
+}
+
+/* The notifications on the lock screen, in the Lumia (Windows Phone 8) manner: no panel, the lines sit straight on the wallpaper, each led by a small flat square in the accent colour;
+ * a title in white and one line under it in light grey. Three at most. */
+static void lock_notes_refresh(void)
+{
+    if (s_lock == NULL || s_lock_notes == NULL) {
+        return;
+    }
+    lv_obj_clean(s_lock_notes);
+    int n = purr_notify_count();
+    for (int i = 0; i < 3 && i < n; i++) {
+        char t[32], x[64];
+        if (purr_notify_get(i, t, sizeof(t), x, sizeof(x)) != 0) {
+            break;
+        }
+        lv_obj_t *row = lv_obj_create(s_lock_notes);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(row, 8, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *sq = lv_obj_create(row);
+        lv_obj_remove_style_all(sq);
+        lv_obj_set_size(sq, 22, 22);
+        lv_obj_set_style_bg_color(sq, purr_theme_accent_color(), 0);
+        lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(sq, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *g = lv_label_create(sq);
+        lv_label_set_text(g, LV_SYMBOL_BELL);
+        lv_obj_set_style_text_font(g, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(g, lv_color_white(), 0);
+        lv_obj_center(g);
+        lv_obj_t *col = lv_obj_create(row);
+        lv_obj_remove_style_all(col);
+        lv_obj_set_size(col, disp_w() - 14 - 14 - 30, LV_SIZE_CONTENT);
+        lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+        lv_obj_remove_flag(col, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *a = lv_label_create(col);
+        lv_label_set_text(a, t);
+        lv_label_set_long_mode(a, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(a, LV_PCT(100));
+        lv_obj_set_style_text_font(a, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(a, lv_color_white(), 0);
+        lv_obj_t *b = lv_label_create(col);
+        lv_label_set_text(b, x);
+        lv_label_set_long_mode(b, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_set_style_text_font(b, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(b, lv_color_hex(0xDDDDDD), 0);
+    }
+    if (n > 0) {
+        lv_obj_remove_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* A notification arrived (purr_notify.c, on the UI task): the banner as before, and the lock screen's lines. */
+void purr_shell_notified(const char *title, const char *text)
+{
+    char line[96];
+    snprintf(line, sizeof(line), "%s: %s", title, text);
+    w10m_banner(line, 0);
+    lock_notes_refresh();
+}
+
+static void build_lock(void)
+{
+    s_lock = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_lock);
+    lv_obj_set_style_bg_color(s_lock, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_lock, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_lock, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_lock, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
+    s_lock_wall = wp_image(s_lock, purr_wallpaper_asset(PURR_WP_LOCK));
+    lv_obj_t *veil = lv_obj_create(s_lock);
+    lv_obj_remove_style_all(veil);
+    lv_obj_set_size(veil, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(veil, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(veil, LV_OPA_30, 0);
+    lv_obj_remove_flag(veil, LV_OBJ_FLAG_CLICKABLE);
+
+    s_lock_time = lv_label_create(s_lock);
+    lv_obj_set_style_text_font(s_lock_time, &lv_font_montserrat_40, 0);
+    lv_obj_set_style_text_color(s_lock_time, lv_color_white(), 0);
+    s_lock_date = lv_label_create(s_lock);
+    lv_obj_set_style_text_font(s_lock_date, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(s_lock_date, lv_color_white(), 0);
+    s_lock_hint = lv_label_create(s_lock);
+    lv_label_set_text(s_lock_hint, LV_SYMBOL_UP "  Swipe up to unlock");
+    lv_obj_set_style_text_font(s_lock_hint, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_lock_hint, lv_color_hex(0xDDDDDD), 0);
+
+    s_lock_notes = lv_obj_create(s_lock);
+    lv_obj_remove_style_all(s_lock_notes);
+    lv_obj_set_flex_flow(s_lock_notes, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(s_lock_notes, 6, 0);
+    lv_obj_remove_flag(s_lock_notes, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_lock_notes, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_event_cb(s_lock, lock_drag_cb, LV_EVENT_ALL, NULL);
+    lv_timer_create(lock_nudge_back_cb, 400, NULL);
+    lock_layout();
+}
+
+static void lock_layout(void)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    int w = disp_w(), h = disp_h();
+    lv_obj_set_size(s_lock, w, h);
+    lv_obj_set_pos(s_lock, 0, s_lock_on ? 0 : -h);
+    lv_obj_set_size(s_lock_wall, w, h);
+    lv_obj_align(s_lock_wall, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_size(s_lock_notes, w - 28, LV_SIZE_CONTENT);
+    lv_obj_align(s_lock_notes, LV_ALIGN_TOP_LEFT, 14, 30);
+    lv_obj_align(s_lock_time, LV_ALIGN_BOTTOM_LEFT, 14, -52);
+    lv_obj_align(s_lock_date, LV_ALIGN_BOTTOM_LEFT, 16, -30);
+    lv_obj_align(s_lock_hint, LV_ALIGN_BOTTOM_MID, 0, -6);
+    if (!s_lock_on) {
+        lv_obj_add_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
+    }
+    lock_clock_refresh();
+}
+
+static void lock_show(void)
+{
+    w10m_tasks_close();
+    s_lock_on = 1;
+    lock_clock_refresh();
+    lock_notes_refresh();
+    lv_obj_remove_flag(s_lock, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_y(s_lock, 0);
+    if (s_cc_open) {
+        cc_move(0);
+    }
+    if (s_list_open) {
+        list_move(0);
+    }
+}
+
+/* ---------------------------------------------------------------- the sign-in screen (BFU)
+ *
+ * Before the first unlock of a boot, the Windows 10 sign-in screen: a round avatar, the title, a
+ * user name field and a password field with an arrow. Nothing else is reachable until it succeeds,
+ * and nothing is started for a user before then (the runtime's exec-once apps wait for it too).
+ * It is the same screen every time, "Other user": a name and a password. */
+
+static lv_obj_t *s_bfu;
+static lv_obj_t *s_bfu_wall, *s_bfu_avatar, *s_bfu_title, *s_bfu_user, *s_bfu_pass, *s_bfu_go,
+                *s_bfu_msg;
+static lv_group_t *s_bfu_group;
+static int s_bfu_busy;
+
+/* The account list, as Windows 10's sign-in screen has it: down the left side (a strip along the bottom of a tall screen), the chosen account in the middle with its
+ * password. The last row is "Other user", which shows the name field. */
+#define BFU_ROW_H   38
+#define BFU_SIDE_W  116
+#define BFU_STRIP_H 56
+static lv_obj_t *s_bfu_panel, *s_bfu_ver;
+static lv_obj_t *s_bfu_rows[PURR_USER_MAX + 1];
+static int s_bfu_nrows, s_bfu_sel = -1, s_bfu_other;
+static char s_bfu_name[PURR_USER_NAME_LEN];             /* the chosen account; empty while "Other user" is chosen */
+
+typedef struct {
+    char name[PURR_USER_NAME_LEN];
+    char pass[64];
+    purr_login_result_t result;
+    uint32_t wait_s;
+} signin_job_t;
+
+static void bfu_set_busy(int busy)
+{
+    s_bfu_busy = busy;
+    if (busy) {
+        lv_obj_add_state(s_bfu_user, LV_STATE_DISABLED);
+        lv_obj_add_state(s_bfu_pass, LV_STATE_DISABLED);
+    } else {
+        lv_obj_remove_state(s_bfu_user, LV_STATE_DISABLED);
+        lv_obj_remove_state(s_bfu_pass, LV_STATE_DISABLED);
+    }
+    for (int i = 0; i < s_bfu_nrows; i++) {
+        if (busy) {
+            lv_obj_add_state(s_bfu_rows[i], LV_STATE_DISABLED);
+        } else {
+            lv_obj_remove_state(s_bfu_rows[i], LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void bfu_say(const char *text, uint32_t color)
+{
+    lv_label_set_text(s_bfu_msg, text);
+    lv_obj_set_style_text_color(s_bfu_msg, lv_color_hex(color), 0);
+}
+
+static void *signin_done_cb(void *arg)
+{
+    signin_job_t *j = arg;
+    bfu_set_busy(0);
+    if (j->result == PURR_LOGIN_OK) {
+        s_signed_in = 1;
+        lv_textarea_set_text(s_bfu_user, "");
+        lv_textarea_set_text(s_bfu_pass, "");
+        lv_obj_add_flag(s_bfu, LV_OBJ_FLAG_HIDDEN);
+        lv_indev_t *kb = purr_lvgl_keypad();
+        if (kb != NULL) {
+            lv_indev_set_group(kb, NULL);                 /* the keyboard is free for apps again */
+        }
+        ESP_LOGI(TAG, "signed in as %s", j->name);
+        purr_theme_load_user(j->name);
+        purr_session_started();
+        apps_refresh();
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Signed in as %s.", j->name);
+        add_note(PURR_BRAND_PRODUCT, msg);
+        char why[400];
+        if (purr_resetnote_pending(NULL, 0, why, sizeof(why))) {
+            add_note("Your data was reset", why);        /* until it is dismissed in Settings > About */
+        }
+        char dn[PURR_USER_NAME_LEN];
+        if (purr_login_default_account(dn, sizeof(dn)) && strcmp(j->name, dn) == 0) {
+            add_note("Change the default password", "This account uses the password MEOW. Change it in Settings > Accounts.");
+        }
+    } else if (j->result == PURR_LOGIN_WAIT) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Too many tries. Wait %u s.", (unsigned)j->wait_s);
+        bfu_say(msg, 0xFFB900);
+        lv_textarea_set_text(s_bfu_pass, "");
+    } else {
+        bfu_say("The user name or password is incorrect.", 0xFFB900);
+        lv_textarea_set_text(s_bfu_pass, "");
+        lv_group_focus_obj(s_bfu_pass);
+    }
+    memset(j, 0, sizeof(*j));
+    free(j);
+    return NULL;
+}
+
+/* The password check is a long PBKDF2 hash, so it runs on its own task and the screen stays live. */
+static void signin_task(void *arg)
+{
+    signin_job_t *j = arg;
+    j->result = purr_login_try(j->name, j->pass, &j->wait_s);
+    memset(j->pass, 0, sizeof(j->pass));
+    purr_ui_service_run(signin_done_cb, j, NULL);        /* frees j on the UI task */
+    vTaskDelete(NULL);
+}
+
+static void bfu_submit(void)
+{
+    if (s_bfu_busy) {
+        return;
+    }
+    const char *name = s_bfu_sel == s_bfu_other ? lv_textarea_get_text(s_bfu_user) : s_bfu_name;
+    const char *pass = lv_textarea_get_text(s_bfu_pass);
+    if (name[0] == '\0') {
+        lv_group_focus_obj(s_bfu_user);
+        return;
+    }
+    signin_job_t *j = calloc(1, sizeof(*j));
+    if (j == NULL) {
+        bfu_say("Out of memory.", 0xFFB900);
+        return;
+    }
+    snprintf(j->name, sizeof(j->name), "%s", name);
+    snprintf(j->pass, sizeof(j->pass), "%s", pass);
+    bfu_set_busy(1);
+    bfu_say("Signing in...", 0xFFFFFF);
+    if (xTaskCreate(signin_task, "signin", 6144, j, 4, NULL) != pdPASS) {
+        bfu_set_busy(0);
+        bfu_say("Could not start the sign-in.", 0xFFB900);
+        free(j);
+    }
+}
+
+static void bfu_user_ready(lv_event_t *e)                 /* Enter in the name field */
+{
+    (void)e;
+    lv_group_focus_obj(s_bfu_pass);
+}
+
+static void bfu_pass_ready(lv_event_t *e)                 /* Enter in the password field */
+{
+    (void)e;
+    bfu_submit();
+}
+
+static void bfu_go_clicked(lv_event_t *e)
+{
+    (void)e;
+    bfu_submit();
+}
+
+static void bfu_avatar_draw(lv_obj_t *circle)
+{
+    /* a person drawn with two shapes: a ring for the head and an arc for the shoulders */
+    lv_obj_t *head = lv_obj_create(circle);
+    lv_obj_remove_style_all(head);
+    lv_obj_set_size(head, 26, 26);
+    lv_obj_set_style_radius(head, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(head, 3, 0);
+    lv_obj_set_style_border_color(head, lv_color_white(), 0);
+    lv_obj_align(head, LV_ALIGN_CENTER, 0, -12);
+    lv_obj_remove_flag(head, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *body = lv_arc_create(circle);
+    lv_obj_set_size(body, 52, 52);
+    lv_arc_set_bg_angles(body, 205, 335);
+    lv_obj_set_style_arc_width(body, 3, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(body, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(body, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_remove_style(body, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(body, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_align(body, LV_ALIGN_CENTER, 0, 22);
+}
+
+static lv_obj_t *bfu_field(lv_obj_t *parent, const char *placeholder, int password, int light)
+{
+    lv_obj_t *ta = lv_textarea_create(parent);
+    lv_textarea_set_one_line(ta, true);
+    lv_textarea_set_placeholder_text(ta, placeholder);
+    lv_textarea_set_password_mode(ta, password);
+    lv_textarea_set_max_length(ta, password ? 63 : PURR_USER_NAME_LEN - 1);
+    lv_obj_set_style_radius(ta, 0, 0);
+    lv_obj_set_style_text_font(ta, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_pad_all(ta, 4, 0);
+    lv_obj_set_scrollbar_mode(ta, LV_SCROLLBAR_MODE_OFF);
+    if (light) {                                        /* the user name: white, dark text */
+        lv_obj_set_style_bg_color(ta, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(ta, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(ta, 1, 0);
+        lv_obj_set_style_border_color(ta, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_color(ta, lv_color_black(), 0);
+        lv_obj_set_style_text_color(ta, lv_color_hex(0x707070), LV_PART_TEXTAREA_PLACEHOLDER);
+    } else {                                            /* the password: dark and translucent */
+        lv_obj_set_style_bg_color(ta, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(ta, LV_OPA_50, 0);
+        lv_obj_set_style_border_width(ta, 1, 0);
+        lv_obj_set_style_border_color(ta, lv_color_hex(0xDDDDDD), 0);
+        lv_obj_set_style_text_color(ta, lv_color_white(), 0);
+        lv_obj_set_style_text_color(ta, lv_color_hex(0xC8C8C8), LV_PART_TEXTAREA_PLACEHOLDER);
+    }
+    return ta;
+}
+
+/* Everything in the middle of the screen: the avatar, the chosen name, the fields. The name field is only there for "Other user". */
+static void bfu_place(void)
+{
+    int w = disp_w();
+    int land = is_landscape();
+    int side = land ? BFU_SIDE_W : 0;
+    int cw = w - side;
+    int cx = side + cw / 2;
+    int av = 72;
+    int fw = cw - 20 < 196 ? cw - 20 : 196;
+    int other = s_bfu_sel == s_bfu_other;
+    int top = land ? 6 : 40;
+    int fy = top + av + 2 + 34;
+    lv_obj_set_size(s_bfu_avatar, av, av);
+    lv_obj_align(s_bfu_avatar, LV_ALIGN_TOP_LEFT, cx - av / 2, top);
+    lv_obj_set_width(s_bfu_title, cw - 16);
+    lv_obj_set_style_text_align(s_bfu_title, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_bfu_title, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_bfu_title, LV_ALIGN_TOP_LEFT, side + 8, top + av + 2);
+    if (other) {
+        lv_obj_remove_flag(s_bfu_user, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_size(s_bfu_user, fw, 26);
+        lv_obj_align(s_bfu_user, LV_ALIGN_TOP_LEFT, cx - fw / 2, fy);
+    } else {
+        lv_obj_add_flag(s_bfu_user, LV_OBJ_FLAG_HIDDEN);                 /* hidden objects do not take the keyboard's focus */
+    }
+    int py = other ? fy + 30 : fy;
+    lv_obj_set_size(s_bfu_pass, fw - 26, 26);
+    lv_obj_align(s_bfu_pass, LV_ALIGN_TOP_LEFT, cx - fw / 2, py);
+    lv_obj_set_size(s_bfu_go, 26, 26);
+    lv_obj_align_to(s_bfu_go, s_bfu_pass, LV_ALIGN_OUT_RIGHT_MID, 0, 0);
+    lv_obj_set_width(s_bfu_msg, fw);
+    lv_obj_align(s_bfu_msg, LV_ALIGN_TOP_LEFT, cx - fw / 2, py + 32);
+}
+
+static void bfu_row_paint(int i)
+{
+    lv_obj_t *r = s_bfu_rows[i];
+    int on = i == s_bfu_sel;
+    lv_obj_set_style_bg_opa(r, on ? LV_OPA_30 : LV_OPA_TRANSP, 0);
+    lv_obj_t *bar = lv_obj_get_child(r, 0);
+    if (on) {
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* Chooses an account (or "Other user"). A tap or Enter also moves on to the password; the trackball only moves the choice. */
+static void bfu_select(int i, int move_focus)
+{
+    const purr_user_list_t *ul = purr_login_users();
+    if (i < 0 || i > s_bfu_other) {
+        return;
+    }
+    s_bfu_sel = i;
+    for (int k = 0; k < s_bfu_nrows; k++) {
+        bfu_row_paint(k);
+    }
+    if (i == s_bfu_other || i >= ul->count) {
+        s_bfu_name[0] = '\0';
+        lv_label_set_text(s_bfu_title, "Other user");
+    } else {
+        snprintf(s_bfu_name, sizeof(s_bfu_name), "%s", ul->users[i].name);
+        lv_label_set_text(s_bfu_title, s_bfu_name);
+    }
+    lv_textarea_set_text(s_bfu_pass, "");
+    bfu_place();
+    if (move_focus) {
+        lv_group_focus_obj(i == s_bfu_other ? s_bfu_user : s_bfu_pass);
+    }
+}
+
+static void bfu_row_event(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        bfu_select(i, 1);
+    } else if (i != s_bfu_sel) {
+        bfu_select(i, 0);                                                /* FOCUSED: the trackball moved the choice */
+    }
+}
+
+/* One row per account and a last one for "Other user". Rebuilt whenever the screen is laid out (a rotation changes the shape of the list). */
+static void bfu_rebuild_rows(void)
+{
+    int land = is_landscape();
+    const purr_user_list_t *ul = purr_login_users();
+    int n = ul->count < PURR_USER_MAX ? ul->count : PURR_USER_MAX;
+    lv_obj_clean(s_bfu_panel);
+    s_bfu_nrows = 0;
+    s_bfu_other = n;
+    for (int i = 0; i <= n; i++) {
+        const char *nm = i < n ? ul->users[i].name : "Other user";
+        lv_obj_t *r = lv_obj_create(s_bfu_panel);
+        lv_obj_remove_style_all(r);
+        lv_obj_set_size(r, land ? LV_PCT(100) : 58, land ? BFU_ROW_H : BFU_STRIP_H - 4);
+        lv_obj_clear_flag(r, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(r, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(r, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_opa(r, LV_OPA_20, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(r, LV_OPA_20, LV_STATE_FOCUSED);
+        lv_obj_t *bar = lv_obj_create(r);                                /* child 0: the accent edge of the chosen row */
+        lv_obj_remove_style_all(bar);
+        lv_obj_set_style_bg_color(bar, purr_theme_accent_color(), 0);
+        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_t *c = lv_obj_create(r);                                  /* the small round avatar with the first letter */
+        lv_obj_remove_style_all(c);
+        lv_obj_set_size(c, 26, 26);
+        lv_obj_set_style_radius(c, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_color(c, lv_color_hex(0x6B6B6B), 0);
+        lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(c, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_t *lt = lv_label_create(c);
+        char ini[2] = {i < n ? (nm[0] >= 'a' && nm[0] <= 'z' ? (char)(nm[0] - 32) : (nm[0] ? nm[0] : '?')) : '+', 0};
+        lv_label_set_text(lt, ini);
+        lv_obj_set_style_text_font(lt, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lt, lv_color_white(), 0);
+        lv_obj_center(lt);
+        lv_obj_t *lb = lv_label_create(r);
+        lv_label_set_text(lb, nm);
+        lv_label_set_long_mode(lb, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(lb, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(lb, lv_color_white(), 0);
+        lv_obj_remove_flag(lb, LV_OBJ_FLAG_CLICKABLE);
+        if (land) {
+            lv_obj_set_size(bar, 3, LV_PCT(100));
+            lv_obj_align(bar, LV_ALIGN_LEFT_MID, 0, 0);
+            lv_obj_align(c, LV_ALIGN_LEFT_MID, 8, 0);
+            lv_obj_set_size(lb, BFU_SIDE_W - 46, 16);                    /* a fixed height, so a long name ends in dots instead of wrapping */
+            lv_obj_align(lb, LV_ALIGN_LEFT_MID, 40, 0);
+        } else {
+            lv_obj_set_size(bar, LV_PCT(100), 3);
+            lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+            lv_obj_align(c, LV_ALIGN_TOP_MID, 0, 4);
+            lv_obj_set_width(lb, 54);
+            lv_obj_set_style_text_align(lb, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_align(lb, LV_ALIGN_BOTTOM_MID, 0, -8);
+        }
+        lv_obj_add_event_cb(r, bfu_row_event, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_event_cb(r, bfu_row_event, LV_EVENT_FOCUSED, (void *)(intptr_t)i);
+        s_bfu_rows[s_bfu_nrows++] = r;
+    }
+    lv_group_remove_obj(s_bfu_user);                                     /* the rows come first in the keyboard's order, then the fields */
+    lv_group_remove_obj(s_bfu_pass);
+    for (int i = 0; i < s_bfu_nrows; i++) {
+        lv_group_add_obj(s_bfu_group, s_bfu_rows[i]);
+    }
+    lv_group_add_obj(s_bfu_group, s_bfu_user);
+    lv_group_add_obj(s_bfu_group, s_bfu_pass);
+}
+
+static void build_bfu(void)
+{
+    s_bfu = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(s_bfu);
+    lv_obj_set_style_bg_color(s_bfu, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_bfu, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_bfu, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_bfu, LV_OBJ_FLAG_CLICKABLE);      /* nothing beneath it can be touched */
+
+    s_bfu_wall = wp_image(s_bfu, purr_wallpaper_asset(PURR_WP_SIGNIN));
+    lv_obj_t *veil = lv_obj_create(s_bfu);
+    lv_obj_remove_style_all(veil);
+    lv_obj_set_size(veil, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(veil, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(veil, LV_OPA_20, 0);
+    lv_obj_remove_flag(veil, LV_OBJ_FLAG_CLICKABLE);
+
+    s_bfu_avatar = lv_obj_create(s_bfu);
+    lv_obj_remove_style_all(s_bfu_avatar);
+    lv_obj_set_style_radius(s_bfu_avatar, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_bfu_avatar, lv_color_hex(0x6B6B6B), 0);
+    lv_obj_set_style_bg_opa(s_bfu_avatar, LV_OPA_COVER, 0);
+    lv_obj_set_style_clip_corner(s_bfu_avatar, true, 0);
+    lv_obj_clear_flag(s_bfu_avatar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(s_bfu_avatar, LV_OBJ_FLAG_CLICKABLE);
+    bfu_avatar_draw(s_bfu_avatar);
+
+    s_bfu_panel = lv_obj_create(s_bfu);                  /* the account list, filled by bfu_layout */
+    lv_obj_remove_style_all(s_bfu_panel);
+    lv_obj_set_style_bg_color(s_bfu_panel, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_bfu_panel, LV_OPA_40, 0);
+    lv_obj_set_style_pad_row(s_bfu_panel, 2, 0);
+    lv_obj_set_style_pad_column(s_bfu_panel, 2, 0);
+    lv_obj_set_scrollbar_mode(s_bfu_panel, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_remove_flag(s_bfu_panel, LV_OBJ_FLAG_CLICKABLE);
+
+    s_bfu_title = lv_label_create(s_bfu);
+    lv_label_set_text(s_bfu_title, "Other user");
+    lv_obj_set_style_text_font(s_bfu_title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_bfu_title, lv_color_white(), 0);
+
+    s_bfu_user = bfu_field(s_bfu, "User name", 0, 1);
+    s_bfu_pass = bfu_field(s_bfu, "Password", 1, 0);
+    lv_obj_add_event_cb(s_bfu_user, bfu_user_ready, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(s_bfu_pass, bfu_pass_ready, LV_EVENT_READY, NULL);
+
+    s_bfu_go = lv_obj_create(s_bfu);                    /* the arrow, at the right of the password */
+    lv_obj_remove_style_all(s_bfu_go);
+    lv_obj_set_style_bg_color(s_bfu_go, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_bfu_go, LV_OPA_30, 0);
+    lv_obj_set_style_bg_opa(s_bfu_go, LV_OPA_60, LV_STATE_PRESSED);
+    lv_obj_add_flag(s_bfu_go, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_bfu_go, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_bfu_go, bfu_go_clicked, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ar = lv_label_create(s_bfu_go);
+    lv_label_set_text(ar, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(ar, lv_color_white(), 0);
+    lv_obj_align(ar, LV_ALIGN_CENTER, 0, 0);
+
+    s_bfu_msg = lv_label_create(s_bfu);
+    lv_label_set_text(s_bfu_msg, "");
+    lv_obj_set_style_text_font(s_bfu_msg, &lv_font_montserrat_12, 0);
+    lv_label_set_long_mode(s_bfu_msg, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_bfu_msg, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* the hardware keyboard types into whichever field has focus; Tab moves between them */
+    s_bfu_group = lv_group_create();
+    lv_group_add_obj(s_bfu_group, s_bfu_user);
+    lv_group_add_obj(s_bfu_group, s_bfu_pass);
+    lv_indev_t *kb = purr_lvgl_keypad();
+    if (kb != NULL) {
+        lv_indev_set_group(kb, s_bfu_group);
+    }
+    bfu_layout();
+    lv_group_focus_obj(s_bfu_sel == s_bfu_other ? s_bfu_user : s_bfu_pass);
+    char dn[PURR_USER_NAME_LEN], reset[96];
+    if (purr_login_store_unreadable()) {                 /* the most important thing to say: the accounts are there, they just could not be read */
+        bfu_say("Can't read the account list. Your files are safe. Restart to try again.", 0xFFB900);
+    } else if (purr_resetnote_pending(reset, sizeof(reset), NULL, 0)) {
+        bfu_say(reset, 0xFFB900);                        /* why data was wiped or replaced: shown until it is dismissed in Settings > About */
+    } else if (purr_login_default_account(dn, sizeof(dn))) {
+        bfu_say("Default account: MEOW, password MEOW. Change it in Settings.", 0xFFB900);
+    }
+    char kv[16], ov[16], line[48];                       /* which system this is, small, in the corner (the About page has the same) */
+    purr_sysupdate_versions(kv, ov);
+    snprintf(line, sizeof(line), PURR_BRAND_PRODUCT " %s", kv);
+    s_bfu_ver = lv_label_create(s_bfu);
+    lv_label_set_text(s_bfu_ver, line);
+    lv_obj_set_style_text_font(s_bfu_ver, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_bfu_ver, lv_color_hex(0xDDDDDD), 0);
+    lv_obj_align(s_bfu_ver, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
+}
+
+static void bfu_layout(void)
+{
+    if (s_bfu == NULL) {
+        return;
+    }
+    int w = disp_w(), h = disp_h();
+    int land = is_landscape();
+    lv_obj_set_size(s_bfu, w, h);
+    lv_obj_set_pos(s_bfu, 0, 0);
+    lv_obj_set_size(s_bfu_wall, w, h);
+    lv_obj_align(s_bfu_wall, LV_ALIGN_TOP_LEFT, 0, 0);
+    if (land) {
+        lv_obj_set_size(s_bfu_panel, BFU_SIDE_W, h);
+        lv_obj_set_pos(s_bfu_panel, 0, 0);
+        lv_obj_set_flex_flow(s_bfu_panel, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_scroll_dir(s_bfu_panel, LV_DIR_VER);
+        lv_obj_set_style_pad_top(s_bfu_panel, 12, 0);
+        lv_obj_set_style_pad_left(s_bfu_panel, 0, 0);
+    } else {
+        lv_obj_set_size(s_bfu_panel, w, BFU_STRIP_H);
+        lv_obj_set_pos(s_bfu_panel, 0, h - BFU_STRIP_H);
+        lv_obj_set_flex_flow(s_bfu_panel, LV_FLEX_FLOW_ROW);
+        lv_obj_set_scroll_dir(s_bfu_panel, LV_DIR_HOR);
+        lv_obj_set_style_pad_top(s_bfu_panel, 2, 0);
+        lv_obj_set_style_pad_left(s_bfu_panel, 4, 0);
+    }
+    bfu_rebuild_rows();
+    if (s_bfu_sel < 0 || s_bfu_sel > s_bfu_other) {                      /* the first time: the default account if there is one, else the first */
+        char dn[PURR_USER_NAME_LEN];
+        const purr_user_list_t *ul = purr_login_users();
+        int pick = 0;
+        if (purr_login_default_account(dn, sizeof(dn))) {
+            for (int i = 0; i < ul->count && i < PURR_USER_MAX; i++) {
+                if (strcmp(ul->users[i].name, dn) == 0) {
+                    pick = i;
+                }
+            }
+        }
+        bfu_select(ul->count > 0 ? pick : s_bfu_other, 0);
+    } else {
+        bfu_select(s_bfu_sel, 0);                                        /* the same choice again, repainted for the new shape */
+    }
+}
+
+/* ---------------------------------------------------------------- the start screen */
+
+static void size_for_orientation(void)
+{
+    int w = disp_w(), h = disp_h();
+    lv_obj_set_size(s_wall, w, h);
+    lv_obj_align(s_wall, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_size(s_shade, w, h);
+    lv_obj_align(s_shade, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_size(s_start, w, h - STATUS_H);
+    lv_obj_align(s_start, LV_ALIGN_TOP_LEFT, 0, STATUS_H);
+    lv_obj_set_scroll_dir(s_start, is_landscape() ? LV_DIR_HOR : LV_DIR_VER);
+}
+
+static void relayout(void)
+{
+    size_for_orientation();
+    pack_tiles();
+    position_tiles();
+    lv_obj_scroll_to(s_start, 0, 0, LV_ANIM_OFF);
+    if (s_cc != NULL) {
+        cc_layout();
+    }
+    if (s_list != NULL) {
+        list_layout();
+    }
+    w10m_settings_layout();
+    w10m_devportal_layout();
+    purr_catrt_ui_layout();
+    lock_layout();
+    bfu_layout();
+}
+
+/* The shell's Settings, then the installed apps that verify (an unsigned app is never listed, so it
+ * can never be started from here either). */
+static void load_defs(void)
+{
+    static purr_app_registry_t reg;                  /* ~1.6 KB: not for the UI task's stack */
+    s_ndefs = 0;
+    tile_def_t *d = &s_tile_defs[s_ndefs++];
+    memset(d, 0, sizeof(*d));
+    snprintf(d->name, sizeof(d->name), "Settings");
+    d->icon = "wp_settings";
+    d->system = 1;
+
+    memset(&reg, 0, sizeof(reg));
+    if (purr_login_current()->name[0] != '\0') {
+        purr_apps_scan_current_user(&reg);
+    }
+    for (int i = 0; i < reg.count && s_ndefs < MAX_TILES; i++) {
+        const purr_app_entry_t *a = &reg.apps[i];
+        /* an unsigned app is listed only while developer mode allows unsigned apps (they are in this user's
+         * own folder, which is all the scan looks at) */
+        if (!a->chip_ok || !(a->verified || purr_security_unsigned_apps_allowed()) ||
+            strcmp(a->name, "Settings") == 0) {
+            continue;
+        }
+        d = &s_tile_defs[s_ndefs++];
+        memset(d, 0, sizeof(*d));
+        snprintf(d->name, sizeof(d->name), "%s", a->name);
+        d->dev = !a->verified;
+    }
+
+    /* Developer mode: the Developer Portal is an app of its own on the Home screen, and what it installed
+     * (the devapps folder) is listed with a DEV mark. A developer app wins over an installed one of the
+     * same name, as it does when it is opened. */
+    if (purr_security_dev_active() && purr_login_current()->name[0] != '\0' && s_ndefs < MAX_TILES) {
+        d = &s_tile_defs[s_ndefs++];
+        memset(d, 0, sizeof(*d));
+        snprintf(d->name, sizeof(d->name), "Developer Portal");
+        d->system = 2;
+        d->dev = 1;
+        memset(&reg, 0, sizeof(reg));
+        purr_devapps_scan(&reg);
+        for (int i = 0; i < reg.count; i++) {
+            const purr_app_entry_t *a = &reg.apps[i];
+            if (!a->chip_ok || !(a->verified || purr_security_unsigned_apps_allowed())) {
+                continue;
+            }
+            tile_def_t *slot = NULL;
+            for (int k = 0; k < s_ndefs; k++) {
+                if (strcmp(s_tile_defs[k].name, a->name) == 0) {
+                    slot = &s_tile_defs[k];
+                }
+            }
+            if (slot == NULL && s_ndefs < MAX_TILES) {
+                slot = &s_tile_defs[s_ndefs++];
+            }
+            if (slot != NULL) {
+                memset(slot, 0, sizeof(*slot));
+                snprintf(slot->name, sizeof(slot->name), "%s", a->name);
+                slot->dev = 1;
+            }
+        }
+    }
+}
+
+static void make_tiles(void)
+{
+    s_ntiles = 0;
+    for (int i = 0; i < s_ndefs && i < MAX_TILES; i++) {
+        tile_t *t = &s_tiles[s_ntiles++];
+        memset(t, 0, sizeof(*t));
+        t->def = &s_tile_defs[i];
+        t->obj = make_tile(s_start, t);
+    }
+}
+
+/* Re-reads the installed apps and rebuilds the tiles and the app list. UI task only. */
+static void apps_refresh(void)
+{
+    for (int i = 0; i < s_ntiles; i++) {
+        lv_obj_delete(s_tiles[i].obj);
+    }
+    load_defs();
+    make_tiles();
+    if (s_list_body != NULL) {
+        fill_list();
+    }
+    relayout();
+}
+
+static void *build_cb(void *arg)
+{
+    (void)arg;
+    purr_theme_init();
+    int saved_b = purr_settings_kv_int("display.brightness", 255);
+    w10m_set_brightness(saved_b < 1 ? 255 : saved_b);
+    int saved_r = purr_settings_kv_int("display.rotation", -1);
+    if (saved_r >= 0 && saved_r <= 270 && saved_r % 90 == 0) {
+        purr_lvgl_set_rotation(saved_r);            /* before anything is laid out */
+    }
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_wall = lv_image_create(scr);
+    const lv_image_dsc_t *wp = img(purr_wallpaper_asset(PURR_WP_START));
+    if (wp != NULL) {
+        lv_image_set_src(s_wall, wp);
+        lv_image_set_inner_align(s_wall, LV_IMAGE_ALIGN_CENTER);   /* cropped to the screen, not scaled */
+    }
+    lv_obj_remove_flag(s_wall, LV_OBJ_FLAG_CLICKABLE);
+
+    s_shade = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_shade);
+    lv_obj_set_style_bg_color(s_shade, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_shade, LV_OPA_60, 0);
+    lv_obj_remove_flag(s_shade, LV_OBJ_FLAG_CLICKABLE);
+
+    s_start = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_start);
+    lv_obj_set_scrollbar_mode(s_start, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_pad_all(s_start, 0, 0);
+
+    s_ntiles = 0;
+    load_defs();
+    make_tiles();
+
+    /* the all-apps button, after the tiles */
+    s_allapps = lv_obj_create(s_start);
+    lv_obj_remove_style_all(s_allapps);
+    lv_obj_clear_flag(s_allapps, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_allapps, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_allapps, allapps_clicked, LV_EVENT_CLICKED, NULL);
+    s_allapps_circle = lv_obj_create(s_allapps);
+    lv_obj_remove_style_all(s_allapps_circle);
+    lv_obj_set_size(s_allapps_circle, 40, 40);
+    lv_obj_set_style_radius(s_allapps_circle, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_allapps_circle, 2, 0);
+    lv_obj_set_style_border_color(s_allapps_circle, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(s_allapps_circle, lv_color_white(), LV_STATE_PRESSED);
+    lv_obj_remove_flag(s_allapps_circle, LV_OBJ_FLAG_CLICKABLE);
+    s_allapps_arrow = lv_label_create(s_allapps_circle);
+    lv_label_set_text(s_allapps_arrow, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_color(s_allapps_arrow, lv_color_white(), 0);
+    lv_obj_align(s_allapps_arrow, LV_ALIGN_CENTER, 0, 0);
+    s_allapps_label = lv_label_create(s_allapps);
+    lv_label_set_text(s_allapps_label, "All apps");
+    lv_obj_set_style_text_font(s_allapps_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(s_allapps_label, lv_color_white(), 0);
+
+    s_signed_in = purr_login_current()->name[0] != '\0';   /* a session already exists (first-time setup) */
+
+    build_list();
+    w10m_settings_build();
+    w10m_devportal_build();
+    build_lock();                       /* beneath the status strip, which stays visible over it */
+    build_status();
+    build_cc();
+    build_bfu();                        /* last, so it covers everything until someone signs in */
+    purr_theme_on_change(theme_changed);
+    if (purr_login_autologin_used()) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "Signed in automatically as %s (developer mode).", purr_login_current()->name);
+        add_note(PURR_BRAND_PRODUCT, msg);
+    }
+    if (s_signed_in) {
+        purr_theme_load_user(purr_login_current()->name);
+        lv_obj_add_flag(s_bfu, LV_OBJ_FLAG_HIDDEN);
+        lv_indev_t *kb = purr_lvgl_keypad();
+        if (kb != NULL) {
+            lv_indev_set_group(kb, NULL);
+        }
+    }
+    relayout();
+    ESP_LOGI(TAG, "shell up: %dx%d, %d tiles, accent %s", disp_w(), disp_h(), s_ntiles,
+             purr_theme_accent_at(purr_theme_accent())->name);
+    return NULL;
+}
+
+#if CONFIG_PURR_W10M_ROTATE_DEMO
+static void rotate_demo(void *arg)
+{
+    (void)arg;
+    int deg = 0;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(9000));
+        deg = (deg + 90) % 360;
+        purr_w10m_set_orientation(deg);
+    }
+}
+#endif
+
+/* ---------------------------------------------------------------- settings by key (display, shell) */
+
+static int bright_get(char *o, size_t c) { snprintf(o, c, "%d", s_brightness); return 0; }
+
+static int bright_set(const char *v, char *e, size_t c)
+{
+    int n = atoi(v);
+    if (n < 1 || n > 255) {
+        snprintf(e, c, "expected 1-255");
+        return -1;
+    }
+    w10m_set_brightness(n);
+    w10m_save_display();
+    return 0;
+}
+
+static int rot_get(char *o, size_t c) { snprintf(o, c, "%d", purr_lvgl_get_rotation()); return 0; }
+
+static int rot_set(const char *v, char *e, size_t c)
+{
+    int n = atoi(v);
+    if (n < 0 || n > 270 || n % 90 != 0) {
+        snprintf(e, c, "expected 0, 90, 180 or 270");
+        return -1;
+    }
+    if (purr_w10m_set_orientation(n) != ESP_OK) {
+        snprintf(e, c, "the screen is not running");
+        return -1;
+    }
+    return 0;
+}
+
+static int shell_get(char *o, size_t c)
+{
+    return purr_shell_mode_get(o, c);
+}
+
+static int shell_set(const char *v, char *e, size_t c)
+{
+    return purr_shell_mode_set(v, e, c);                /* takes effect at the next start */
+}
+
+static const purr_setting_t s_w10m_keys[] = {
+    {"display.brightness", "backlight", "1-255", 0, bright_get, bright_set},
+    {"display.rotation", "screen orientation in degrees", "0|90|180|270", 0, rot_get, rot_set},
+    {"ui.shell", "which shell starts (next boot)", "builtin|<id>|nav|card_shell", 1, shell_get, shell_set},
+};
+
+void w10m_place_sheet(lv_obj_t *sheet)
+{
+    /* The lock screen, sign-in, control center and status strip are on the top layer, which is always above the screen. The
+     * sheets (Settings, the portal, an app window) are children of the screen, so the newest on top is all that is needed.
+     * (This used to move the sheet to the lock screen's INDEX, which counts a different layer's children: it buried every app
+     * window under the start screen.) */
+    lv_obj_move_foreground(sheet);
+}
+
+/* The wallpaper choice is device-wide (purr_wallpaper.h), so this shell only draws it: on a change, each surface that exists swaps its picture. */
+static void wall_set_src(lv_obj_t *obj, purr_wp_surface_t surface)
+{
+    const lv_image_dsc_t *d = obj != NULL ? img(purr_wallpaper_asset(surface)) : NULL;
+    if (d != NULL) {
+        lv_image_set_src(obj, d);
+        lv_image_set_inner_align(obj, LV_IMAGE_ALIGN_CENTER);
+    }
+}
+
+static void *wallpaper_apply_cb(void *arg)
+{
+    (void)arg;
+    wall_set_src(s_wall, PURR_WP_START);
+    wall_set_src(s_lock_wall, PURR_WP_LOCK);
+    wall_set_src(s_bfu_wall, PURR_WP_SIGNIN);
+    return NULL;
+}
+
+/* Called from whichever task changed the choice: the Settings app (the UI task itself) or the `settings` command (another task). */
+static void wallpaper_changed(void)
+{
+    if (strcmp(pcTaskGetName(NULL), "ui_service") == 0) {
+        wallpaper_apply_cb(NULL);
+    } else {
+        purr_ui_service_run(wallpaper_apply_cb, NULL, NULL);
+    }
+}
+
+esp_err_t purr_w10m_start(void)
+{
+    /* No swipe up from the bottom edge: it fought the notification tray (owner, 2026-11-03). The task manager opens from the Tasks tile in the control center
+     * (act_tasks); purr_lvgl_set_edge_swipe() still works if a gesture is wanted again. */
+    purr_lvgl_set_scroll_handler(purr_catrt_ui_scroll);              /* the trackball scrolls the app window on screen */
+    purr_wallpaper_set_listener(wallpaper_changed);
+    purr_wallpaper_register();
+    purr_catrt_ui_init();
+    purr_catrt_game_init();
+    purr_power_sys_set_repaint(purr_ui_service_repaint);              /* the panel sleeps with the screen; wake draws the current picture first */
+    purr_power_sys_set_screen_hook(lock_on_sleep);                    /* and it locks when the screen goes off (security.lock_on_sleep, on unless set to 0) */
+    w10m_perm_init();
+    purr_console_set_muted(1);                      /* the text console must not paint over the shell */
+    for (size_t i = 0; i < sizeof(s_w10m_keys) / sizeof(s_w10m_keys[0]); i++) {
+        purr_settings_register(&s_w10m_keys[i]);
+    }
+    esp_err_t e = purr_ui_service_run(build_cb, NULL, NULL);
+#if CONFIG_PURR_W10M_ROTATE_DEMO
+    if (e == ESP_OK) {
+        xTaskCreate(rotate_demo, "w10m-rot", 3072, NULL, 3, NULL);
+    }
+#endif
+    return e;
+}
+
+void w10m_apply_orientation(int degrees)
+{
+    w10m_tasks_close();
+    if (purr_lvgl_set_rotation(degrees) == 0) {
+        relayout();
+        ESP_LOGI(TAG, "orientation %d: %dx%d", degrees, disp_w(), disp_h());
+        char v[8];
+        snprintf(v, sizeof(v), "%d", degrees);
+        purr_settings_kv_set("display.rotation", v);
+    }
+}
+
+static void *orient_cb(void *arg)
+{
+    int deg = (int)(intptr_t)arg;
+    if (purr_lvgl_set_rotation(deg) != 0) {
+        return (void *)(intptr_t)-1;
+    }
+    w10m_apply_orientation(deg);                    /* relayout, and remember it */
+    return NULL;
+}
+
+esp_err_t purr_w10m_set_orientation(int degrees)
+{
+    void *r = NULL;
+    esp_err_t e = purr_ui_service_run(orient_cb, (void *)(intptr_t)degrees, &r);
+    if (e != ESP_OK) {
+        return e;
+    }
+    return r == NULL ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+
+typedef struct {
+    char title[40];
+    char text[120];
+} note_args_t;
+
+void w10m_apps_changed(void)
+{
+    if (s_start != NULL) {
+        apps_refresh();
+    }
+}
+
+static void *refresh_cb(void *arg)
+{
+    (void)arg;
+    if (s_start != NULL) {
+        apps_refresh();
+    }
+    return NULL;
+}
+
+esp_err_t purr_w10m_refresh_apps(void)
+{
+    return purr_ui_service_run(refresh_cb, NULL, NULL);
+}
+
+static void *notify_cb(void *arg)
+{
+    const note_args_t *n = arg;
+    if (s_cc_notes != NULL) {
+        add_note(n->title, n->text);
+    }
+    return NULL;
+}
+
+esp_err_t purr_w10m_notify(const char *title, const char *text)
+{
+    note_args_t n;
+    snprintf(n.title, sizeof(n.title), "%s", title ? title : "");
+    snprintf(n.text, sizeof(n.text), "%s", text ? text : "");
+    return purr_ui_service_run(notify_cb, &n, NULL);
+}
+
+static void *lock_cb(void *arg)
+{
+    (void)arg;
+    if (s_lock != NULL && s_signed_in) {
+        lock_show();
+    }
+    return NULL;
+}
+
+int w10m_is_locked(void)
+{
+    return s_lock_on || !s_signed_in;
+}
+
+esp_err_t purr_w10m_lock(void)
+{
+    return purr_ui_service_run(lock_cb, NULL, NULL);
+}
+
+static void lock_on_sleep(int on)
+{
+    if (!on && purr_settings_kv_int("security.lock_on_sleep", 1)) {
+        purr_w10m_lock();
+    }
+}

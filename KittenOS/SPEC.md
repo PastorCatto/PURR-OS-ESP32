@@ -53,15 +53,22 @@ boot package (`../bootloader/SPEC.md` section 9). Entries are open (section 7). 
 
 ## 4. What it does
 
+- **Checks the root filesystem on every boot,** before anything else touches it -- loading
+  AppManager from `/boot`, applying a staged swap, or the network-install/auto-restore below.
+  If `root` doesn't mount as valid LittleFS (blank, freshly flashed, or corrupt), KittenOS
+  formats it and proceeds as freshly installed: no AppManager, no staged files yet, rather than
+  treating a blank partition as some other kind of failure. *(Not yet built.)*
 - **Applies updates by swapping files** (`../PurrOS/SPEC.md` section 6.1): renames the
   current file to `.bak`, renames the staged `.new` file into place, restarts the normal
   system, and rolls back if it does not come up healthy.
 - **On monolithic boards, writes the whole packed image** into the single raw slot, from an
   SD card file, and keeps no rollback copy. If the update came over Wi-Fi, the running
   system downloaded it to the SD card first. Its own UI for this comes later.
-- **Builds the system over Wi-Fi** during a network install: downloads the kernel, CoreOS,
-  AppManager, the runtimes, the boot package and the board's driver pack, and formats the
-  filesystem (`../Install/SPEC.md`). Modular boards only.
+- **Builds the system over Wi-Fi,** during a deliberate network install or an automatic
+  restore handed off from the recovery loader (`../RecoveryLoader/SPEC.md` section 2.1):
+  downloads the kernel, CoreOS, AppManager, the runtimes, the boot package, the board's driver
+  pack and the apps from the app repo (`../Install/SPEC.md`, `../OTA/SPEC.md` section 8).
+  Modular boards only. Relies on the filesystem check above rather than formatting separately.
 - **Adds and removes mini-apps** through AppManager when that file is available.
 - **Runs the command-line shell,** with the same commands as PURR OS where they apply.
 - **Diagnostics:** the boot report, the system log, and the state of `purrcfg`.
@@ -80,7 +87,10 @@ Every user-facing feature needs a fallback. Starting the system goes through the
 4. If KittenOS itself is missing, damaged or fails verification, the bootloader starts the
    recovery loader on modular boards, which downloads a new KittenOS.
 5. If that fails too, or the board has no loader, the bootloader prints a prompt on the
-   serial console.
+   serial console -- unless the `boot_fail_count` ladder has already climbed past its second
+   threshold (`../bootloader/SPEC.md` section 6), in which case step 4 runs the recovery
+   loader's silent auto mode instead, which restores `kernel`/`kittenos`/`bootpkg` as needed
+   rather than just KittenOS (`../RecoveryLoader/SPEC.md` section 2.1; not yet built).
 
 The boot package has its own fallback: if it is missing, invalid or crashed the last boot,
 the bootloader skips the menu.

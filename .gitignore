@@ -1,0 +1,75 @@
+# Build artifacts
+build/
+build_*/
+dist/
+
+# Intermediate build scratch — never committed
+GHReleases/
+baked/
+prebuilt/
+cattobaked/
+rel/
+
+# releases/ IS tracked — distributable flash.bin artifacts per version
+
+# Scratch build workspace
+tmp/
+
+# purrstrap device config (local paths/ports)
+.purrstrap
+CoreOS/build/
+CoreOS/build_*/
+CoreOS/sdkconfig
+CoreOS/sdkconfig.old
+CoreOS/dependencies.lock
+# Device sdkconfig_* source files ARE tracked — only ignore IDF-generated sdkconfig
+
+# IDF managed components — fetched at build time, not stored in VCS
+CoreOS/managed_components/
+PurrOS/managed_components/
+PurrOS/dependencies.lock
+
+# SDK config (contains local paths/ports, not for VCS)
+Builder/purr_build.cfg
+Builder/purr_sdk.cfg
+SDK/purr_sdk.cfg
+
+# Root-level scratch files (anchored to repo root only)
+/CMakeLists.txt
+/main.cpp
+/purr_api.h
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Local virtualenv for the asset converters (source/assets/icons/convert_icons.py
+# and wallpapers/convert_wallpaper.py). Host-specific and rebuildable — see
+# convert_icons.py's header for the exact package set, including the Windows
+# svglib/pycairo path and the cairocffi trap.
+.iconvenv/
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+.claude/
+signing_keys/
+# a private key or certificate anywhere else by mistake (tracked third-party test data under archive/ is not affected)
+*.key
+*.pem
+
+# parser fuzzer output (PurrOS/components/coreos/test/host/fuzz)
+PurrOS/components/coreos/test/host/fuzz/build/
+PurrOS/components/coreos/test/host/fuzz/crash-*.bin
+
+# local build outputs and signed test packages (tools/vm)
+out/
+repos/*/keys/
+
+# The assistant's working notes and hand-offs (kept out of the repository)
+/Claude/
+/CLAUDE.md

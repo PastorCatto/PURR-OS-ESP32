@@ -93,7 +93,7 @@ static uint32_t build(const spec_t *s, uint8_t *out)
 
 static purr_verify_env_t env_for(uint16_t chip)
 {
-    purr_verify_env_t e = {chip, &g_bag, &purr_crypto_uecc, PURR_VERSION(1, 0, 0), 0, 0};
+    purr_verify_env_t e = {chip, &g_bag, &purr_crypto_uecc, PURR_VERSION(1, 0, 0), 0, 0, NULL};
     return e;
 }
 
@@ -370,6 +370,73 @@ static void test_io_and_unterminated(void)
     CHECK_EQ(VERIFY(e, img, n, NULL), PURR_V_OK);    /* "1.2.3-abcdex" still parses as 1.2.3 */
 }
 
+/* ---- the optional payload hash (hardware SHA in the bootloader): same answers, and only used
+ *      for whole-word payloads ---- */
+static int g_hw_start, g_hw_finish, g_hw_bytes;
+static purr_sha256_t g_hw_ctx;
+
+static void *hw_start(void)
+{
+    g_hw_start++;
+    purr_sha256_init(&g_hw_ctx);
+    return &g_hw_ctx;
+}
+static void hw_update(void *h, const void *data, size_t len)
+{
+    CHECK_EQ(len % 4, 0);                    /* the hardware block takes whole words only */
+    g_hw_bytes += (int)len;
+    purr_sha256_update(h, data, len);
+}
+static void hw_finish(void *h, uint8_t digest[32])
+{
+    g_hw_finish++;
+    purr_sha256_final(h, digest);
+}
+static const purr_hash_t g_hw_hash = {hw_start, hw_update, hw_finish};
+
+static void test_payload_hash_hook(void)
+{
+    purr_verify_env_t e = env_for(PURR_CHIP_ESP32S3);
+    e.payload_hash = &g_hw_hash;
+
+    /* a payload that is a whole number of words goes through the hook, and verifies */
+    spec_t os = good_os();                   /* payload 1500 bytes */
+    uint32_t n = build(&os, img);
+    g_hw_start = g_hw_finish = g_hw_bytes = 0;
+    CHECK_EQ(VERIFY(e, img, n, NULL), PURR_V_OK);
+    CHECK_EQ(g_hw_start, 1);
+    CHECK_EQ(g_hw_finish, 1);
+    CHECK_EQ(g_hw_bytes, 1500);
+
+    /* a corrupted payload is still caught, through the hook */
+    img[sizeof(purr_image_header_t) + 700] ^= 0x01;
+    g_hw_start = g_hw_finish = 0;
+    CHECK_EQ(VERIFY(e, img, n, NULL), PURR_V_BAD_HASH);
+    CHECK_EQ(g_hw_start, 1);
+    CHECK_EQ(g_hw_finish, 1);
+
+    /* a payload that is not a whole number of words falls back to the software hash */
+    os.payload_len = 1501;
+    n = build(&os, img);
+    g_hw_start = g_hw_finish = 0;
+    CHECK_EQ(VERIFY(e, img, n, NULL), PURR_V_OK);
+    CHECK_EQ(g_hw_start, 0);
+
+    /* a flash error part-way through still releases the hardware block */
+    os.payload_len = 1500;
+    n = build(&os, img);
+    g_hw_start = g_hw_finish = 0;
+    mem_t m = {img, n, 3, 0};                /* the 4th read fails, mid-hash */
+    CHECK_EQ(purr_image_verify(&e, mem_read, &m, n, NULL), PURR_V_IO_ERROR);
+    CHECK_EQ(g_hw_start, 1);
+    CHECK_EQ(g_hw_finish, 1);
+
+    /* an empty payload */
+    os.payload_len = 0;
+    n = build(&os, img);
+    CHECK_EQ(VERIFY(e, img, n, NULL), PURR_V_OK);
+}
+
 int main(void)
 {
     setup_keys();
@@ -380,5 +447,6 @@ int main(void)
     test_keys();
     test_hash_and_signature();
     test_io_and_unterminated();
+    test_payload_hash_hook();
     TK_DONE("test_verify");
 }

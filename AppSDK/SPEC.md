@@ -1,5 +1,17 @@
 # AppSDK spec (draft 0.1)
 
+**Partly built, 2026-10-18.** `Apps/hello/hello_app.c` (AppRuntime/SPEC.md's chunk C/D/E) is
+still bare C against `purr_app_abi.h` directly, built by hand with `modules build --kind app`
+-- it predates this slice and stays as the original loader smoke test. What's now real: a
+`purrstrap apps` subscript (`new`, `build`), one starter template
+(`AppSDK/templates/unprivileged/`), and the TOML manifest format (section 5), reusing
+`modules.py`'s own compile/relocate/pack pipeline rather than a second implementation.
+Confirmed end to end on the host toolchain: `apps new` scaffolds a project, `apps build` reads
+its manifest and produces a real, correctly relocated `.cat` (not yet signed or run on
+hardware). Still not built: the mini-library (section 2), privilege enforcement, the other
+four templates, and the `package`/`verify`/`inspect`/`install` actions (AppManager/SPEC.md
+section 6).
+
 What a developer needs to write, build and package a `.cat` app. The format of
 the `.cat` file itself is a separate chunk (`../AppManager/SPEC.md` section 3
 holds the outline). Running apps is the runtime's job (`../AppRuntime/SPEC.md`).
@@ -84,21 +96,49 @@ permission covers which catcall) is its own chunk, Permissions.
 
 ## 5. The manifest
 
-The description file in each app project. The build tool copies it into the `.cat`
-header. Fields:
+The description file in each app project, `manifest.toml` at the project root. **Decided**
+2026-10-18 (section 10 used to leave the format open): **TOML**, since purrstrap now requires
+Python 3.11+ (`tomllib`, stdlib, read-only parsing is all the build side needs). This also
+matches the Hyprland-style `key = value` config philosophy already proven for `/ui/cardshell.conf`.
 
-- name, version, and a short description
-- class: unprivileged or privileged
-- kind: daemon, command-line app, or UI app
-- the SDK version it was built with
-- the catcalls it needs, with minimum versions
-- the permissions it requests (including device administrator)
-- stack size and heap size, and how many threads it needs if more than the default
-- whether it may run in the background
-- whether it saves state
-- an optional display name and icon
+```toml
+name = "myapp"
+version = "0.1.0"
+description = "A short description"
+class = "unprivileged"        # or "privileged"
+kind = "command-line"         # "daemon" | "command-line" | "ui"
+sdk_version = "0.1.0"
+entry = "myapp_entry"         # the C symbol the core calls to enter the app
 
-The file format is not decided (section 9).
+[catcalls]
+console = "1.0"
+
+[permissions]
+requests = []                 # e.g. ["device_admin"]
+
+[runtime]
+stack_bytes = 8192
+heap_bytes = 16384
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "My App"
+icon = ""
+```
+
+**What actually reaches the signed `.cat` today, and what doesn't yet.** `purr_abi.h`'s
+`purr_image_header_t` (`lib/image.py`'s `HEADER_FORMAT`) only has room for `name[32]` and
+`version[12]` — it predates this spec and is shared by every image kind (OS, recovery, module,
+app), not just apps. `purrstrap apps build` reads the whole manifest and uses `name`/`version`
+to build the image exactly as `modules.py build --kind app` already does, and validates the
+rest (class, permissions, catcalls, runtime limits) at build time, but **does not yet embed
+them in the binary** — there is nothing on the install/run side to enforce them yet either
+(Permissions chunk, AppManager's install-time checks). Embedding the full manifest is a
+follow-up once that enforcement exists to actually consume it, not a v1 requirement. This
+keeps today's slice inside the existing container format instead of also taking on a
+CatFormat/`purr_abi.h` change.
 
 ## 6. Starter templates
 
@@ -144,9 +184,8 @@ versioned copy, so there is one source of truth.
 
 - **Toolchain.** Does a developer need the ESP-IDF Xtensa toolchain installed, or
   does the SDK provide one? Where do the SDK versions come from?
-- **Manifest format.** TOML is pleasant to write, but Python reads it only from
-  3.11 (`tomllib`), and purrstrap targets 3.9. JSON works everywhere but is less
-  friendly.
+- ~~**Manifest format.**~~ **Decided** 2026-10-18: TOML (section 5). purrstrap's minimum
+  Python version is raised to 3.11 for `tomllib` (`purrstrap/SPEC.md` section 1).
 - **Standard containers.** Whether the toolchain's own C++ headers work with SDK
   supplied error handlers, or a small embedded container library is needed. A build
   check, not a decision.

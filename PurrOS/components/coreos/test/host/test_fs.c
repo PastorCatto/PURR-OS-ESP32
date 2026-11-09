@@ -331,6 +331,108 @@ static void test_format_erases(void)
     CHECK_EQ(l.n, 0);
 }
 
+/* ---------------------------------------------------------------- ownership (F-10) */
+
+static void test_owner_get_set(void)
+{
+    blank();
+    purr_bd_t b = bd();
+    purr_fs_format(&fs, &b);
+    purr_fs_mkdir(&fs, "/etc");
+    purr_fs_write(&fs, "/etc/shadow", "x", 1);
+
+    purr_fs_owner_t o;
+    CHECK_EQ(purr_fs_get_owner(&fs, "/etc/shadow", &o), LFS_ERR_NOATTR);   /* nothing set yet */
+
+    purr_fs_owner_t want = {0, 0};
+    CHECK_EQ(purr_fs_set_owner(&fs, "/etc/shadow", &want), 0);
+    CHECK_EQ(purr_fs_get_owner(&fs, "/etc/shadow", &o), 0);
+    CHECK_EQ(o.owner_uid, 0);
+    CHECK_EQ(o.mode, 0);
+
+    purr_fs_owner_t replace = {7, PURR_FS_MODE_OREAD};
+    CHECK_EQ(purr_fs_set_owner(&fs, "/etc/shadow", &replace), 0);          /* replaces, not adds */
+    CHECK_EQ(purr_fs_get_owner(&fs, "/etc/shadow", &o), 0);
+    CHECK_EQ(o.owner_uid, 7);
+    CHECK_EQ(o.mode, PURR_FS_MODE_OREAD);
+
+    /* A path that doesn't exist at all is a different error from "exists, no attribute". */
+    CHECK_EQ(purr_fs_get_owner(&fs, "/nope", &o), LFS_ERR_NOENT);
+}
+
+static void test_owner_survives_unmount(void)
+{
+    blank();
+    purr_bd_t b = bd();
+    purr_fs_format(&fs, &b);
+    purr_fs_write(&fs, "/f", "x", 1);
+    purr_fs_owner_t want = {3, PURR_FS_MODE_OWRITE};
+    purr_fs_set_owner(&fs, "/f", &want);
+    purr_fs_unmount(&fs);
+
+    CHECK_EQ(purr_fs_mount(&fs, &b), 0);
+    purr_fs_owner_t o;
+    CHECK_EQ(purr_fs_get_owner(&fs, "/f", &o), 0);
+    CHECK_EQ(o.owner_uid, 3);
+    CHECK_EQ(o.mode, PURR_FS_MODE_OWRITE);
+}
+
+static void test_effective_owner_walks_up(void)
+{
+    blank();
+    purr_bd_t b = bd();
+    purr_fs_format(&fs, &b);
+    purr_fs_mkdir(&fs, "/home");
+    purr_fs_mkdir(&fs, "/home/alice");
+    purr_fs_mkdir(&fs, "/home/alice/apps");
+    purr_fs_write(&fs, "/home/alice/apps/thing.txt", "x", 1);
+
+    /* Nothing set anywhere yet: defaults to root, no outside access. */
+    purr_fs_owner_t o;
+    purr_fs_effective_owner(&fs, "/home/alice/apps/thing.txt", &o);
+    CHECK_EQ(o.owner_uid, 0);
+    CHECK_EQ(o.mode, 0);
+
+    /* Setting it on /home/alice alone covers everything under it -- the file and the
+     * intermediate /apps directory both inherit, neither has an attribute of its own. */
+    purr_fs_owner_t alice = {5, 0};
+    purr_fs_set_owner(&fs, "/home/alice", &alice);
+    purr_fs_effective_owner(&fs, "/home/alice/apps/thing.txt", &o);
+    CHECK_EQ(o.owner_uid, 5);
+    purr_fs_effective_owner(&fs, "/home/alice/apps", &o);
+    CHECK_EQ(o.owner_uid, 5);
+
+    /* A file with its OWN attribute overrides whatever its ancestors say. */
+    purr_fs_owner_t other = {9, PURR_FS_MODE_OREAD};
+    purr_fs_set_owner(&fs, "/home/alice/apps/thing.txt", &other);
+    purr_fs_effective_owner(&fs, "/home/alice/apps/thing.txt", &o);
+    CHECK_EQ(o.owner_uid, 9);
+    CHECK_EQ(o.mode, PURR_FS_MODE_OREAD);
+
+    /* A sibling under the same parent, with nothing of its own, still inherits from
+     * /home/alice, not from its sibling's override. */
+    purr_fs_write(&fs, "/home/alice/apps/other.txt", "y", 1);
+    purr_fs_effective_owner(&fs, "/home/alice/apps/other.txt", &o);
+    CHECK_EQ(o.owner_uid, 5);
+}
+
+static void test_effective_owner_root_itself(void)
+{
+    blank();
+    purr_bd_t b = bd();
+    purr_fs_format(&fs, &b);
+
+    purr_fs_owner_t o;
+    purr_fs_effective_owner(&fs, "/anything", &o);     /* nothing set anywhere -- fail closed */
+    CHECK_EQ(o.owner_uid, 0);
+    CHECK_EQ(o.mode, 0);
+
+    purr_fs_owner_t want = {0, PURR_FS_MODE_OREAD};
+    CHECK_EQ(purr_fs_set_owner(&fs, "/", &want), 0);   /* "/" itself can carry an attribute */
+    purr_fs_effective_owner(&fs, "/anything-else", &o);
+    CHECK_EQ(o.mode, PURR_FS_MODE_OREAD);
+}
+
 int main(void)
 {
     test_mount_and_format();
@@ -341,5 +443,9 @@ int main(void)
     test_big_file_and_persistence();
     test_full_disk();
     test_format_erases();
+    test_owner_get_set();
+    test_owner_survives_unmount();
+    test_effective_owner_walks_up();
+    test_effective_owner_root_itself();
     TK_DONE("test_fs");
 }

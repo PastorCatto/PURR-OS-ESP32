@@ -1,0 +1,35 @@
+# T-Deck (original, no Plus): ESP32-S3, 16 MB quad flash, 8 MB PSRAM. The same module and partition layout as the T-Deck Plus; the only known
+# hardware difference is that it has no GPS. Keep the settings below in step with sdkconfig.board.tdeck_plus.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/tdeck.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions/tdeck.csv"
+CONFIG_PURR_BOARD_TDECK=y
+
+# The N16R8 module's PSRAM is Octal SPI. Needed for the recovery loader, which downloads
+# a KittenOS image into PSRAM before verifying and writing it (RecoveryLoader/SPEC.md).
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# LVGL (purr_lvgl.c/purr_ui_config.c): the color-LCD boards only, see PurrOS/main/CMakeLists.txt's
+# own comment on why. The larger built-in fonts back the UI config's "scale" property
+# (purr_ui_config.h) -- 14 (the default) always exists without asking.
+# LVGL takes its memory from the system heap (which falls back to PSRAM) instead of a fixed pool:
+# the shell has far more widgets than the 64 KB default pool holds, and a full pool makes
+# lv_*_create return NULL.
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_40=y
+
+# The shell planted in /ui/mode.conf on first boot: the Windows 10 Mobile style one (plan7.md).
+# Edit /ui/mode.conf to card_shell, nav or w10m to switch.
+CONFIG_PURR_UI_DEFAULT_MODE="w10m"
+
+# Internal RAM is scarce once Wi-Fi is up: TLS buffers and mid-size allocations (4 KB and up) go to PSRAM; DMA and Wi-Fi keep internal.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y

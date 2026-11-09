@@ -1,0 +1,4 @@
+# myboard: ESP32-S3, 8 MB quad flash. Its own partition table (the shared one is the 16 MB T-Deck layout).
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_myboard.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions_myboard.csv"

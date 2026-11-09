@@ -1,33 +1,120 @@
-#include "commands.h"
+﻿#include "commands.h"
 
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
+#include <unistd.h>
 
+#include "purr_io.h"
+#include "purr_brand.h"
+#include "esp_cache.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_mmu_map.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "login.h"
+#include "purr_app_abi.h"
+#include "purr_appmgr.h"
+#include "purr_kernel_table.h"   /* the prototype kernel<->CoreOS boundary -- see s_kernel_table */
+#include "purr_module.h"
+#include "purr_module_abi.h"
+#include "purr_relocate.h"
+#include "purr_shellhdr.h"
+#if CONFIG_PURR_PROFILE_FULL
+#include "purr_shell_abi.h"
+#endif
 #include "purr_cfgstore.h"
+#include "purr_swap.h"
+#include "purr_bootimg.h"
+#include "purr_bootupdate.h"
 #include "purr_console.h"
+#include "purr_crypto_mbedtls.h"
+#include "purr_driver.h"
+#include "purr_driver_bus.h"
+#include "purr_fetch.h"
+#include "purr_catrt.h"
+#include "purr_catrt_storage.h"
+#include "purr_catrt_files.h"
+#include "purr_catrt_msg.h"
+#include "purr_catrt_devices.h"
+#include "purr_store.h"
+
+/* The Store (repositories, receipts) is part of the full system only: the recovery profile and the loader have no use for it and no room. */
+#if CONFIG_PURR_PROFILE_FULL
+#define STORE_VOUCHES(path, rb, len) purr_store_vouches(path, rb, len)
+#define STORE_MARK_VOUCHED(reg, root) purr_store_mark_vouched(reg, root)
+#define STORE_INIT() purr_catrt_store_init()
+#else
+#define STORE_VOUCHES(path, rb, len) 0
+#define STORE_MARK_VOUCHED(reg, root) ((void)0)
+#define STORE_INIT() ((void)0)
+#endif
+#include "purr_settings.h"
+#include "purr_power_plat.h"
+#include "purr_hwscan_plat.h"
+#include "purr_drvcmds.h"
+#include "purr_hwsetup.h"
+#include "purr_notify.h"
+#include "purr_recovery_src.h"
+#include "purr_catrt_power.h"
+#include "purr_runtime.h"
 #include "purr_fs.h"
-#include "purr_net.h"
-#include "purr_wifi.h"
 #include "purr_kernel.h"
+#include "purr_resetnote.h"
+#include "purr_resetnote_os.h"
+#include "purr_slot_trailer.h"
+#include "purr_trust_os.h"
+#include "purr_lvgl.h"
+#include "purr_manifest.h"
+#include "purr_menu.h"
+#include "purr_net.h"
+#include "purr_netsettle.h"
+#include "purr_netrec.h"
+#include "purr_util.h"
+#include "purr_verify.h"
+#include "purr_wifi.h"
+
+extern const purr_key_t purr_default_keys[];
+extern const size_t purr_default_keys_count;
+
+#if CONFIG_IDF_TARGET_ESP32S3
+#define NET_INSTALL_CHIP PURR_CHIP_ESP32S3
+#else
+#define NET_INSTALL_CHIP PURR_CHIP_ESP32
+#endif
 
 #define VERSION "0.1.0"
 
+/* Where real modules (Modules/SPEC.md) live on the root filesystem. */
+#define PURR_MODULES_DIR "/system"
+/* Where prototype kernel-table modules (purr_kernel_table.h) live -- a separate folder from
+ * PURR_MODULES_DIR, kept apart on purpose so the two boundaries stay conceptually distinct. */
+#define PURR_KERNELMODS_DIR "/kernelmods"
+/* Where loadable driver modules live (Drivers/SPEC.md section 1: "Drivers are files in
+ * /boot/drivers"). A third, separate folder from the two above for the same reason they're
+ * separate from each other -- a different trust/ABI boundary (purr_driver_bus_table_t, not
+ * purr_core_table_t or purr_kernel_table_t). */
+#define PURR_DRIVERS_DIR "/boot/drivers"
+
 #if CONFIG_PURR_PROFILE_RECOVERY
-#define SYSTEM_NAME  "KittenOS"
+#define SYSTEM_NAME  PURR_BRAND_RECOVERY
 #define PROFILE_NAME "recovery"
 #elif CONFIG_PURR_PROFILE_MINIMAL
 #define SYSTEM_NAME  "PURR Loader"
 #define PROFILE_NAME "minimal"
 #else
-#define SYSTEM_NAME  "PURR OS"
+#define SYSTEM_NAME  PURR_BRAND_PRODUCT
 #define PROFILE_NAME "full"
 #endif
 
@@ -39,6 +126,37 @@ const char *purr_system_name(void)
 /* ---------------------------------------------------------------- filesystem */
 
 static purr_fs_t s_fs;
+
+/* Forward-declared here so purr_appmgr's fs view (used by the app-management section just
+ * below) can exist before it; the actual bodies live with the rest of the kernel table's
+ * fs_* wrappers, further down this file. */
+static int kernel_table_fs_list(const char *path, purr_fs_list_fn cb, void *ctx);
+static int kernel_table_fs_read(const char *path, purr_fs_read_fn cb, void *ctx);
+static int kernel_table_fs_write(const char *path, const void *data, uint32_t len);
+static int kernel_table_fs_mkdir(const char *path);
+static int kernel_table_fs_remove(const char *path);
+static int kernel_table_fs_rename(const char *from, const char *to);
+static int kernel_table_fs_stat(const char *path, int *is_dir, uint32_t *size);
+
+/* Forward-declared for the same reason: app_format/fs_format/reboot_system/net_install/
+ * net_forget below all need the shared admin check (F-10), defined with the accounts
+ * cluster further down. */
+static int require_admin(purr_cli_t *cli);
+
+/* purr_appmgr's own view of the filesystem (purr_appmgr.h's purr_appmgr_fs_t): the exact same
+ * underlying calls the kernel table's fs_* entries make, just gathered under the smaller
+ * interface purr_appmgr.c actually depends on now that it no longer touches purr_fs_t
+ * directly (found needing this while building it as a relocatable module,
+ * PurrOS/SPEC.md section 6). */
+static const purr_appmgr_fs_t s_appmgr_fs = {
+    .list = kernel_table_fs_list,
+    .read = kernel_table_fs_read,
+    .write = kernel_table_fs_write,
+    .mkdir = kernel_table_fs_mkdir,
+    .remove = kernel_table_fs_remove,
+    .rename = kernel_table_fs_rename,
+    .stat = kernel_table_fs_stat,
+};
 
 static void fail(purr_cli_t *cli, const char *what, int err)
 {
@@ -61,6 +179,138 @@ static int need_fs(purr_cli_t *cli)
     return 0;
 }
 
+purr_fs_t *purr_login_fs(void)
+{
+    return &s_fs;
+}
+
+/* ---------------------------------------------------------------- file ownership (F-10) */
+
+/* Defined with the accounts cluster, further down; forward-declared so the one shared
+ * admin boolean has a single definition both fs_allowed() and the destructive-command
+ * checks build on. */
+static int is_admin(void);
+
+/* Root's uid is always 0; an admin who hasn't su'd still has their own real uid, which is
+ * what matters for "do they own this file" (su'ing to root bypasses ownership entirely via
+ * fs_allowed() below, same as is_admin() already treats admin as root-equivalent for the
+ * accounts cluster). */
+static uint8_t current_uid(void)
+{
+    return purr_login_is_root() ? 0 : purr_login_current()->uid;
+}
+
+/* Does the current session have `need` (PURR_FS_MODE_OREAD or _OWRITE) access to `path`,
+ * given its effective owner (purr_fs_effective_owner walks up to the nearest ancestor with
+ * one set, defaulting to root/no-access -- PurrOS/components/coreos/SPEC.md 4.2)? Root and
+ * an admin acting on their own behalf always do. */
+static int fs_allowed(const char *path, uint8_t need)
+{
+    if (is_admin()) {
+        return 1;
+    }
+    purr_fs_owner_t owner;
+    purr_fs_effective_owner(&s_fs, path, &owner);
+    if (owner.owner_uid == current_uid()) {
+        return 1;
+    }
+    return (owner.mode & need) != 0;
+}
+
+/* A newly created path (one with no owner of its own yet) belongs to whoever is creating
+ * it, root included -- so e.g. a standard user writing a new file somewhere they already
+ * have write access leaves a real trail, and an admin/root-created system file is root's. */
+static void fs_claim(const char *path)
+{
+    purr_fs_owner_t owner = {current_uid(), 0};
+    purr_fs_set_owner(&s_fs, path, &owner);
+}
+
+/* The fixed baseline (PurrOS/components/coreos/SPEC.md 4.2): every path the OS itself
+ * depends on, root-owned, checked and corrected on every mount. /system and /kernelmods
+ * are world-read since every account's shell lists and runs from them; /boot is world-
+ * closed, it only ever holds in-progress component swaps (purr_swap.h); /etc/shadow and
+ * /etc/wifi hold secrets, no outside access at all. */
+static const struct { const char *path; uint8_t mode; } s_fs_baseline[] = {
+    {"/etc",        PURR_FS_MODE_OREAD},
+    {"/etc/passwd", PURR_FS_MODE_OREAD},
+    {"/etc/shadow", 0},
+    {"/etc/wifi",   0},
+    {"/boot",       0},
+    {"/system",     PURR_FS_MODE_OREAD},
+    {"/kernelmods", PURR_FS_MODE_OREAD},
+    {"/home",       PURR_FS_MODE_OREAD},
+};
+
+/* Checks every baseline path's actual attribute against what it should be and corrects a
+ * mismatch, then reads it back to confirm the correction took (the same verify-after-write
+ * pattern purr_net_install_run already uses for a downloaded image) -- self-heal and, on a
+ * device that has never seen this feature, first-time migration are the same pass: "missing"
+ * and "wrong" are the same case here. A path that doesn't exist yet is skipped; it gets
+ * claimed (fs_claim(), above) whenever something first creates it. A real correction (the
+ * attribute existed and was wrong, not just missing) is logged -- that's tamper/corruption
+ * evidence, a first-time migration is expected and silent. */
+static void fs_check_baseline(purr_cli_t *cli)
+{
+    for (size_t i = 0; i < sizeof(s_fs_baseline) / sizeof(s_fs_baseline[0]); i++) {
+        const char *path = s_fs_baseline[i].path;
+        uint8_t mode = s_fs_baseline[i].mode;
+        purr_fs_owner_t cur;
+        int e = purr_fs_get_owner(&s_fs, path, &cur);
+        if (e == LFS_ERR_NOENT) {
+            continue;
+        }
+        if (e == 0 && cur.owner_uid == 0 && cur.mode == mode) {
+            continue;
+        }
+        purr_fs_owner_t want = {0, mode};
+        purr_fs_set_owner(&s_fs, path, &want);
+        purr_fs_owner_t check;
+        if (purr_fs_get_owner(&s_fs, path, &check) != 0 ||
+            check.owner_uid != 0 || check.mode != mode) {
+            purr_cli_printf(cli, "permissions: could not fix %s\n", path);
+        } else if (e == 0) {
+            purr_cli_printf(cli, "permissions: corrected %s (was owner %u mode %u)\n",
+                            path, (unsigned)cur.owner_uid, (unsigned)cur.mode);
+        }
+    }
+}
+
+/* Existing per-user files are not on the fixed baseline above -- a device upgrading to this
+ * feature assigns each /home/<name> to that account by the name itself (Users/SPEC.md 2.1),
+ * so the one-time migration is seamless for ordinary account data. Only an entry that has no
+ * owner attribute AT ALL gets one; an already-owned or already-orphaned (no matching
+ * account) home is left exactly as it is. */
+static void migrate_home_entry(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)ctx;
+    (void)size;
+    if (!is_dir) {
+        return;
+    }
+    char path[48];
+    snprintf(path, sizeof(path), "/home/%s", name);
+    purr_fs_owner_t cur;
+    if (purr_fs_get_owner(&s_fs, path, &cur) != LFS_ERR_NOATTR) {
+        return;
+    }
+    purr_user_t *u = purr_user_list_find(purr_login_users(), name);
+    if (u == NULL) {
+        return;        /* no matching account -- stays root-only, fail-closed */
+    }
+    purr_fs_owner_t owner = {u->uid, 0};
+    purr_fs_set_owner(&s_fs, path, &owner);
+}
+
+/* F-10: NOT called from purr_fs_setup() -- that runs before login.c has loaded the account
+ * list (purr_fs_setup happens at boot before any login; purr_login_users() would see an
+ * empty list), so this is exposed instead and called once accounts are actually loaded
+ * (commands.h). */
+void purr_fs_permissions_migrate(void)
+{
+    purr_fs_list(&s_fs, "/home", migrate_home_entry, NULL);
+}
+
 void purr_fs_setup(purr_cli_t *cli)
 {
     purr_bd_t bd;
@@ -69,138 +319,515 @@ void purr_fs_setup(purr_cli_t *cli)
         return;
     }
     int e = purr_fs_mount(&s_fs, &bd);
+#if CONFIG_PURR_PROFILE_RECOVERY
+    /* KittenOS checks this before anything else touches root (KittenOS/SPEC.md section 4): a
+     * blank or damaged filesystem -- a freshly flashed device, most often -- gets formatted
+     * automatically instead of leaving the device stuck asking a human to run "format --yes"
+     * before KittenOS can even start restoring the rest of the system. purr_fs_mount()
+     * deliberately never formats on its own (purr_fs.h), so this is the one place that does,
+     * and only in the profile whose whole job is bringing a device back from nothing.
+     *
+     * documentation/FINDINGS.md F-37, fixed 2026-10-01: this used to format on ANY mount
+     * failure, including a transient I/O error or an out-of-memory, or a partly corrupt
+     * filesystem LittleFS could still have recovered from on its own -- wiping accounts, apps,
+     * modules and saved Wi-Fi with no prompt, for something that wasn't actually "blank or
+     * damaged". Retrying once first absorbs a one-off transient failure; formatting only on
+     * LFS_ERR_CORRUPT keeps the destructive path to what the comment above always claimed it
+     * was for. A genuinely blank (never-formatted) device also reports LFS_ERR_CORRUPT here
+     * (no superblock to find), so that case still formats as before. */
+    if (e != 0) {
+        e = purr_fs_mount(&s_fs, &bd);        /* one retry before giving up on a clean mount */
+    }
+    if (e == LFS_ERR_CORRUPT) {
+        /* Say WHY before the data goes (the reason survives the wipe: it is kept outside the data partition). A blank, never-formatted partition is just a new
+         * device and needs no warning; one with a superblock (or any bytes in its first two blocks) held data. */
+        uint8_t head[16];
+        int had_data = 0;
+        for (uint32_t blk = 0; blk < 2 && blk < bd.block_count && !had_data; blk++) {
+            if (bd.read(bd.ctx, blk, 0, head, sizeof(head)) == 0) {
+                for (size_t i = 0; i < sizeof(head); i++) {
+                    if (head[i] != 0xFF) {
+                        had_data = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (had_data) {
+            purr_resetnote_record(PURR_RESET_AUTO_FORMAT, e, 1);
+        }
+        purr_cli_printf(cli, "root: not mounted (%s), formatting...\n", purr_fs_strerror(e));
+        e = purr_fs_format(&s_fs, &bd);
+        if (e != 0) {
+            purr_cli_printf(cli, "root: format failed (%s)\n", purr_fs_strerror(e));
+        }
+    }
+#endif
     if (e == 0) {
         uint32_t used = 0, total = 0;
         purr_fs_usage(&s_fs, &used, &total);
         purr_cli_printf(cli, "root: mounted, %uK of %uK used\n",
                         (unsigned)(used * 4), (unsigned)(total * 4));
+        fs_check_baseline(cli);       /* F-10: self-heal + first-time migration, every mount */
     } else {
         purr_cli_printf(cli, "root: not mounted (%s)\nrun: format --yes\n", purr_fs_strerror(e));
     }
 }
 
-static void print_entry(void *ctx, const char *name, int is_dir, uint32_t size)
-{
-    purr_cli_t *cli = ctx;
-    if (is_dir) {
-        purr_cli_printf(cli, "  %s/\n", name);
-    } else {
-        purr_cli_printf(cli, "  %-20s %u\n", name, (unsigned)size);
-    }
-}
+/* ls/cat/mkdir/rm/mv/write/df/format used to be inline here -- they're now
+ * Modules/coreos/fs_module.c, the second real slice ported onto the prototype kernel table
+ * (purr_kernel_table.h's fs_* entries, right below). fail()/abs_path()/need_fs() stay here:
+ * appinstall/appremove/appformat/plantmodules/etc. still use them directly, unconverted. */
 
-static int cmd_ls(purr_cli_t *cli, int argc, char **argv)
-{
-    if (!need_fs(cli)) return 1;
-    char path[80];
-    int e = purr_fs_list(&s_fs, abs_path(argc > 1 ? argv[1] : "/", path, sizeof(path)), print_entry, cli);
-    if (e < 0) { fail(cli, argc > 1 ? argv[1] : "/", e); return 1; }
-    return 0;
-}
+/* ---------------------------------------------------------------- apps */
+/*
+ * Apps live per-user now (Users/SPEC.md), at "/home/<name>/apps" on the shared root
+ * filesystem -- not a dedicated partition (that partition existed for one session and is
+ * gone; see the partition CSVs). Every command below scans/adds/removes under the CURRENT
+ * logged-in user's own home, via purr_appmgr's root parameter.
+ */
+#define APP_SCRATCH_CAP (512 * 1024)
+static uint8_t *s_app_scratch;                /* allocated on first use; apps is rarely touched */
 
-static int show(void *ctx, const void *data, uint32_t len)
+static uint8_t *app_scratch(void)
 {
-    purr_cli_t *cli = ctx;
-    const uint8_t *p = data;
-    for (uint32_t i = 0; i < len; i++) {
-        if (p[i] == '\n' || (p[i] >= 0x20 && p[i] < 0x7F)) {
-            cli->put(cli->put_ctx, (char)p[i]);
-        } else if (p[i] != '\r') {
-            cli->put(cli->put_ctx, '.');          /* binary: show a dot */
+    if (s_app_scratch == NULL) {
+        s_app_scratch = heap_caps_malloc(APP_SCRATCH_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_app_scratch == NULL) {
+            s_app_scratch = malloc(APP_SCRATCH_CAP);
         }
     }
-    return 0;
+    return s_app_scratch;
 }
 
-static int cmd_cat(purr_cli_t *cli, int argc, char **argv)
+/* "/home/<name>/apps", built fresh each time from whoever is logged in right now -- never
+ * cached, since the logged-in user can change between calls (su, logout/login). */
+static void user_apps_root(char *out, size_t outcap, const char *username)
 {
-    if (argc < 2) { purr_cli_puts(cli, "usage: cat <file>\n"); return 1; }
-    if (!need_fs(cli)) return 1;
-    char path[80];
-    int e = purr_fs_read(&s_fs, abs_path(argv[1], path, sizeof(path)), show, cli);
-    if (e < 0) { fail(cli, argv[1], e); return 1; }
-    purr_cli_puts(cli, "\n");
-    return 0;
+    snprintf(out, outcap, "/home/%s/apps", username);
 }
 
-static int cmd_mkdir(purr_cli_t *cli, int argc, char **argv)
+/* Creates /home, /home/<name> and /home/<name>/apps if they don't already exist. purr_fs_mkdir
+ * on an existing directory is just an error this ignores; LittleFS needs each level to exist
+ * before the next can be created, so these go one at a time, outermost first. */
+static void ensure_user_home(const char *username)
 {
-    if (argc < 2) { purr_cli_puts(cli, "usage: mkdir <dir>\n"); return 1; }
-    if (!need_fs(cli)) return 1;
-    char path[80];
-    int e = purr_fs_mkdir(&s_fs, abs_path(argv[1], path, sizeof(path)));
-    if (e < 0) { fail(cli, argv[1], e); return 1; }
-    return 0;
-}
+    purr_fs_mkdir(&s_fs, "/home");
+    char home[48];
+    snprintf(home, sizeof(home), "/home/%s", username);
+    purr_fs_mkdir(&s_fs, home);
+    char apps[64];
+    user_apps_root(apps, sizeof(apps), username);
+    purr_fs_mkdir(&s_fs, apps);
 
-static int cmd_rm(purr_cli_t *cli, int argc, char **argv)
-{
-    if (argc < 2) { purr_cli_puts(cli, "usage: rm <file or empty dir>\n"); return 1; }
-    if (!need_fs(cli)) return 1;
-    char path[80];
-    int e = purr_fs_remove(&s_fs, abs_path(argv[1], path, sizeof(path)));
-    if (e < 0) { fail(cli, argv[1], e); return 1; }
-    return 0;
-}
-
-static int cmd_mv(purr_cli_t *cli, int argc, char **argv)
-{
-    if (argc < 3) { purr_cli_puts(cli, "usage: mv <from> <to>\n"); return 1; }
-    if (!need_fs(cli)) return 1;
-    char a[80], b[80];
-    int e = purr_fs_rename(&s_fs, abs_path(argv[1], a, sizeof(a)), abs_path(argv[2], b, sizeof(b)));
-    if (e < 0) { fail(cli, argv[1], e); return 1; }
-    return 0;
-}
-
-static int cmd_write(purr_cli_t *cli, int argc, char **argv)
-{
-    if (argc < 3) { purr_cli_puts(cli, "usage: write <file> <text...>\n"); return 1; }
-    if (!need_fs(cli)) return 1;
-    char path[80], text[PURR_CLI_LINE];
-    text[0] = '\0';
-    for (int i = 2; i < argc; i++) {
-        size_t used = strlen(text);
-        snprintf(text + used, sizeof(text) - used, "%s%s", i > 2 ? " " : "", argv[i]);
+    /* F-10: the owner has to be set the moment the directory exists, not just at the next
+     * boot's baseline/migration pass (purr_fs_setup()) -- otherwise a brand-new account's own
+     * home is briefly only as accessible as /home's inherited (root, world-read) rule: too
+     * open to every other user, and not even writable by the account it belongs to. Cheap and
+     * idempotent, so it's fine to repeat on every call, not just the one that actually creates
+     * the directory. */
+    purr_user_t *u = purr_user_list_find(purr_login_users(), username);
+    if (u != NULL) {
+        purr_fs_owner_t owner = {u->uid, 0};
+        purr_fs_set_owner(&s_fs, home, &owner);
     }
-    strncat(text, "\n", sizeof(text) - strlen(text) - 1);
-    int e = purr_fs_write(&s_fs, abs_path(argv[1], path, sizeof(path)), text, (uint32_t)strlen(text));
-    if (e < 0) { fail(cli, argv[1], e); return 1; }
-    return 0;
 }
 
-static int cmd_df(purr_cli_t *cli, int argc, char **argv)
+/* Replaces the old dedicated apps-partition mount: ensures every already-registered user has
+ * a home+apps folder, and cleans up any cut install left over from last time, for each of
+ * them. Called once at boot, after purr_fs_setup (this needs the root filesystem, not a
+ * separate one). */
+void purr_apps_setup(purr_cli_t *cli)
 {
-    (void)argc; (void)argv;
+    if (!purr_fs_mounted(&s_fs)) {
+        purr_cli_puts(cli, "apps: no root filesystem mounted\n");
+        return;
+    }
+    purr_user_list_t *users = purr_login_users();
+    int n = 0;
+    for (int i = 0; users != NULL && i < users->count; i++) {
+        ensure_user_home(users->users[i].name);
+        char root[64];
+        user_apps_root(root, sizeof(root), users->users[i].name);
+        purr_appmgr_recover(&s_appmgr_fs, root);
+        n++;
+    }
+    purr_cli_printf(cli, "apps: ready (%d user home%s)\n", n, n == 1 ? "" : "s");
+}
+
+static purr_appmgr_env_t apps_env(purr_cfg_t *cfg_out)
+{
+    purr_flash_t fl;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, cfg_out, NULL) < 0) {
+        purr_cfg_defaults(cfg_out);
+    }
+    /* The callers pass cfg_out to the app manager for decisions only, never store it, so it
+     * becomes the effective view in place (purr_trust_os.h): the app manager then reads the real
+     * secure_mode, and only override keys a valid signature vouched for. */
+    os_cfg_view(cfg_out, cfg_out);
+    static purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, cfg_out);
+    purr_appmgr_env_t env = {NET_INSTALL_CHIP, &bag, &purr_crypto_mbedtls};
+    return env;
+}
+
+/* cmd_apps used to live here. It's now Modules/appmanager/apps_module.c, the first real
+ * command ported out of the monolith and into an actual loaded module -- see
+ * Modules/SPEC.md. core_table_apps_scan() (near the module loader, further down this file)
+ * is what it calls through the core table instead of touching purr_appmgr directly. */
+
+/* appinfo/appinstall/appremove/appformat used to be inline commands here -- they're now
+ * Modules/coreos/appmgr_module.c, the fourth real slice ported onto the prototype kernel
+ * table. Like netinstall/fs_format, each stays one opaque, cli-aware kernel_table_app_*
+ * function: they touch the signing key bag (purr_appmgr_scan/add/remove verify against it)
+ * and the raw per-user apps filesystem, neither of which a module is ever handed. Bodies are
+ * unchanged from the old inline commands, just taking their name/file argument as a plain
+ * parameter instead of parsing argv themselves. */
+
+static int kernel_table_app_info(purr_cli_t *cli, const char *name)
+{
     if (!need_fs(cli)) return 1;
-    uint32_t used, total;
-    int e = purr_fs_usage(&s_fs, &used, &total);
-    if (e < 0) { fail(cli, "df", e); return 1; }
-    purr_cli_printf(cli, "root: %uK used of %uK (%u blocks free)\n", (unsigned)(used * 4),
-                    (unsigned)(total * 4), (unsigned)(total - used));
-    return 0;
-}
-
-static int cmd_format(purr_cli_t *cli, int argc, char **argv)
-{
-    if (argc < 2 || strcmp(argv[1], "--yes") != 0) {
-        purr_cli_puts(cli, "this erases everything on the root filesystem.\nrun: format --yes\n");
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_app_registry_t reg;
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, &reg);
+    const purr_app_entry_t *e = purr_appmgr_find(&reg, name);
+    if (e == NULL) {
+        purr_cli_printf(cli, "appinfo: no such app '%s'\n", name);
         return 1;
     }
-    purr_bd_t bd;
-    if (purr_fs_flash_bd("root", &bd) != 0) {
-        purr_cli_puts(cli, "root: no such partition\n");
-        return 1;
-    }
-    purr_cli_puts(cli, "formatting...\n");
-    purr_console_flush();
-    purr_fs_unmount(&s_fs);
-    int e = purr_fs_format(&s_fs, &bd);
-    if (e < 0) { fail(cli, "format", e); return 1; }
-    purr_cli_puts(cli, "done.\n");
+    purr_cli_printf(cli, "name:     %s\n", e->name);
+    purr_cli_printf(cli, "version:  %s\n", e->version);
+    purr_cli_printf(cli, "size:     %uK\n", (unsigned)(e->size / 1024));
+    purr_cli_printf(cli, "chip:     %s\n", e->chip_ok ? "matches this device" : "WRONG for this device");
+    purr_cli_printf(cli, "verified: %s (signer role %u)\n", e->verified ? "yes" : "no", (unsigned)e->signer_role);
     return 0;
 }
 
+typedef struct {
+    uint8_t *buf;
+    uint32_t cap, len;
+} appinstall_read_ctx_t;
+
+static int appinstall_accumulate(void *vctx, const void *data, uint32_t n)
+{
+    appinstall_read_ctx_t *c = vctx;
+    if (c->len + n > c->cap) {
+        return -1;
+    }
+    memcpy(c->buf + c->len, data, n);
+    c->len += n;
+    return 0;
+}
+
+static int is_url(const char *s)
+{
+    return strncmp(s, "http://", 7) == 0 || strncmp(s, "https://", 8) == 0;
+}
+
+static int kernel_table_app_install(purr_cli_t *cli, const char *file_or_url)
+{
+    if (!need_fs(cli)) return 1;
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    ensure_user_home(purr_login_current()->name); /* in case this user was created after boot */
+
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        purr_cli_puts(cli, "appinstall: out of memory\n");
+        return 1;
+    }
+
+    /* Scan first, while `scratch` is free to use for reading each existing app; the
+     * result is what add() needs to apply the update-must-be-newer rule. */
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    if (purr_security_unsigned_apps_allowed()) {
+        cfg.secure_mode = PURR_SECURE_OFF;          /* the app manager's accept-unsigned rule */
+    }
+    purr_app_registry_t reg;
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);
+
+    /* Now read the package to install into the same buffer, either from a URL (there is
+     * no other way onto the device yet, with no MTP transport built) or from root. */
+    uint32_t len = 0;
+    if (is_url(file_or_url)) {
+        purr_cli_printf(cli, "fetching %s...\n", file_or_url);
+        purr_console_flush();
+        size_t got = 0;
+        esp_err_t err = purr_fetch_into(file_or_url, scratch, APP_SCRATCH_CAP, &got);
+        if (err != ESP_OK) {
+            purr_cli_printf(cli, "appinstall: fetch failed (%s)\n", esp_err_to_name(err));
+            return 1;
+        }
+        len = (uint32_t)got;
+    } else {
+        char path[80];
+        appinstall_read_ctx_t rc = {scratch, APP_SCRATCH_CAP, 0};
+        int e = purr_fs_read(&s_fs, abs_path(file_or_url, path, sizeof(path)), appinstall_accumulate, &rc);
+        if (e < 0) {
+            fail(cli, file_or_url, e);
+            return 1;
+        }
+        len = rc.len;
+    }
+
+    purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, len);
+    if (r != PURR_APP_OK) {
+        purr_cli_printf(cli, "appinstall: %s\n", purr_app_result_name(r));
+        return 1;
+    }
+    purr_cli_puts(cli, "installed\n");
+    return 0;
+}
+
+static int kernel_table_app_remove(purr_cli_t *cli, const char *name)
+{
+    if (!need_fs(cli)) return 1;
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    if (purr_appmgr_remove(&s_appmgr_fs, root, name) != 0) {
+        purr_cli_printf(cli, "appremove: no such app '%s'\n", name);
+        return 1;
+    }
+    purr_cli_printf(cli, "%s removed\n", name);
+    return 0;
+}
+
+/* The same install and remove the shell commands do, without a prompt, for the Settings app: one
+ * place for the rules, `msg` says what happened. Both run on the caller's task and use the shared
+ * scratch buffer, so call them from a worker, one at a time. */
+int purr_apps_install(const char *file_or_url, char *msg, size_t cap)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        snprintf(msg, cap, "the filesystem is not mounted");
+        return -1;
+    }
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    ensure_user_home(purr_login_current()->name);
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        snprintf(msg, cap, "out of memory");
+        return -1;
+    }
+    static purr_app_registry_t reg;                 /* ~1.6 KB: not for a small task stack */
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    if (purr_security_unsigned_apps_allowed()) {
+        cfg.secure_mode = PURR_SECURE_OFF;          /* developer mode, unsigned apps switched on */
+    }
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);
+    uint32_t len = 0;
+    if (is_url(file_or_url)) {
+        size_t got = 0;
+        esp_err_t err = purr_fetch_into(file_or_url, scratch, APP_SCRATCH_CAP, &got);
+        if (err != ESP_OK) {
+            snprintf(msg, cap, "could not fetch it (%s)", esp_err_to_name(err));
+            return -1;
+        }
+        len = (uint32_t)got;
+    } else {
+        char path[80];
+        appinstall_read_ctx_t rc = {scratch, APP_SCRATCH_CAP, 0};
+        if (purr_fs_read(&s_fs, abs_path(file_or_url, path, sizeof(path)), appinstall_accumulate, &rc) < 0) {
+            snprintf(msg, cap, "could not read %s", file_or_url);
+            return -1;
+        }
+        len = rc.len;
+    }
+    purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, len);
+    if (r != PURR_APP_OK) {
+        snprintf(msg, cap, "%s", purr_app_result_name(r));
+        return -1;
+    }
+    snprintf(msg, cap, "installed");
+    return 0;
+}
+
+/* ---------------------------------------------------------------- the developer folder */
+
+static void user_devapps_root(char *out, size_t cap, const char *username)
+{
+    snprintf(out, cap, "/home/%s/devapps", username);
+}
+
+static void ensure_devapps_root(void)
+{
+    char home[48], root[64];
+    snprintf(home, sizeof(home), "/home/%s", purr_login_current()->name);
+    purr_fs_mkdir(&s_fs, "/home");
+    purr_fs_mkdir(&s_fs, home);
+    user_devapps_root(root, sizeof(root), purr_login_current()->name);
+    purr_fs_mkdir(&s_fs, root);
+}
+
+void purr_devapps_scan(purr_app_registry_t *out_reg)
+{
+    memset(out_reg, 0, sizeof(*out_reg));
+    if (!purr_fs_mounted(&s_fs) || !purr_security_dev_active() || purr_login_current()->name[0] == '\0') {
+        return;
+    }
+    ensure_devapps_root();
+    char root[64];
+    user_devapps_root(root, sizeof(root), purr_login_current()->name);
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, out_reg);
+}
+
+int purr_devapps_remove(const char *name)
+{
+    if (!purr_fs_mounted(&s_fs) || !purr_security_dev_active() || name == NULL || name[0] == '\0' ||
+        strchr(name, '/') != NULL) {
+        return -1;
+    }
+    char root[64];
+    user_devapps_root(root, sizeof(root), purr_login_current()->name);
+    return purr_appmgr_remove(&s_appmgr_fs, root, name) == 0 ? 0 : -1;
+}
+
+int purr_devapps_install_url(const char *url, const purr_repo_app_t *app, char *msg, size_t cap)
+{
+    if (!purr_fs_mounted(&s_fs) || !purr_security_dev_active()) {
+        snprintf(msg, cap, "developer mode is not active this boot");
+        return -1;
+    }
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        snprintf(msg, cap, "out of memory");
+        return -1;
+    }
+    ensure_devapps_root();
+    char root[64];
+    user_devapps_root(root, sizeof(root), purr_login_current()->name);
+    static purr_app_registry_t reg;                 /* ~1.6 KB: not for a small task stack */
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);   /* before the download reuses the buffer */
+    if (purr_security_unsigned_apps_allowed()) {
+        cfg.secure_mode = PURR_SECURE_OFF;          /* the app manager's accept-unsigned rule */
+    }
+    size_t got = 0;
+    esp_err_t err = purr_fetch_local_into(url, scratch, APP_SCRATCH_CAP, &got);
+    if (err != ESP_OK) {
+        snprintf(msg, cap, "could not download it (%s)", esp_err_to_name(err));
+        return -1;
+    }
+    purr_repo_pkg_result_t chk = purr_repo_check_package(app, scratch, got);
+    if (chk != PURR_REPO_PKG_OK) {
+        snprintf(msg, cap, "the download does not match the server's index (%s)", purr_repo_pkg_result_name(chk));
+        return -1;
+    }
+    purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, (uint32_t)got);
+    if (r != PURR_APP_OK) {
+        snprintf(msg, cap, "%s", purr_app_result_name(r));
+        return -1;
+    }
+    snprintf(msg, cap, "installed");
+    return 0;
+}
+
+const purr_keybag_t *purr_os_keybag(void)
+{
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    return env.bag;
+}
+
+int purr_apps_install_vouched(const uint8_t *data, size_t len, const char *name, const char *repo_id, const char *idx8, const char *sha_hex, char *msg, size_t cap)
+{
+    if (!purr_fs_mounted(&s_fs) || purr_login_current()->name[0] == '\0') {
+        snprintf(msg, cap, "sign in first");
+        return -1;
+    }
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    ensure_user_home(purr_login_current()->name);
+    purr_fs_mkdir(&s_fs, root);
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        snprintf(msg, cap, "out of memory");
+        return -1;
+    }
+    static purr_app_registry_t reg;
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);    /* before the package is copied over the buffer */
+    cfg.secure_mode = PURR_SECURE_OFF;               /* the repository's signed index stands for the package; the receipt is what the loader checks */
+    if (len > APP_SCRATCH_CAP) {
+        snprintf(msg, cap, "the package is too big");
+        return -1;
+    }
+    memcpy(scratch, data, len);
+    purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, (uint32_t)len);
+    if (r != PURR_APP_OK) {
+        snprintf(msg, cap, "%s", purr_app_result_name(r));
+        return -1;
+    }
+    char path[120], rc[160];
+    snprintf(path, sizeof(path), "%s/%s/receipt", root, name);
+    int n = snprintf(rc, sizeof(rc), "repo=%s\nidx=%s\nsha=%s\n", repo_id, idx8, sha_hex);
+    if (purr_fs_write(&s_fs, path, rc, (uint32_t)n) < 0) {
+        purr_appmgr_remove(&s_appmgr_fs, root, name);
+        snprintf(msg, cap, "could not save the receipt");
+        return -1;
+    }
+    snprintf(msg, cap, "installed");
+    return 0;
+}
+
+int purr_apps_remove(const char *name)
+{
+    if (!purr_fs_mounted(&s_fs) || name == NULL || name[0] == '\0' || strchr(name, '/') != NULL) {
+        return -1;
+    }
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    return purr_appmgr_remove(&s_appmgr_fs, root, name) == 0 ? 0 : -1;
+}
+
+static int kernel_table_app_format(purr_cli_t *cli)
+{
+    if (!require_admin(cli)) return 1;        /* F-10 */
+    if (!need_fs(cli)) return 1;
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+
+    /* Apps now live on the SHARED root filesystem, alongside every other user, logins, and
+     * /system -- a raw low-level format here would erase everything on the device, not just
+     * apps. This removes only what purr_appmgr itself put under this user's own apps root. */
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_app_registry_t reg;
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, &reg);
+    int removed = 0;
+    for (int i = 0; i < reg.count; i++) {
+        if (purr_appmgr_remove(&s_appmgr_fs, root, reg.apps[i].name) == 0) {
+            removed++;
+        }
+    }
+    purr_cli_printf(cli, "removed %d app(s).\n", removed);
+    return 0;
+}
+
+/* Defined further down, right after load_relocatable_file() (which it calls and which is
+ * itself defined much later in this file, near the module loader). Forward-declared here so
+ * it can be wired into s_kernel_table below without reordering the whole "app management"
+ * section around one function. */
+static int kernel_table_app_run(purr_cli_t *cli, const char *name);
+
+/* Defined much later, right after load_kernelmods_from() (which load_one_driver_file() reuses
+ * load_relocatable_file() alongside) -- forward-declared so it can go in the command table
+ * below without moving the driver-loading proof code out of its natural neighborhood. */
+static int cmd_testdriverload(purr_cli_t *cli, int argc, char **argv);
+
+/* Same neighborhood/reasoning as cmd_testdriverload's own forward declaration above -- this
+ * one tests the real kbd_i2c driver module against live hardware instead of a harmless
+ * no-op driver. */
+static int cmd_testkbdmodule(purr_cli_t *cli, int argc, char **argv);
 
 /* ---------------------------------------------------------------- Wi-Fi */
 
@@ -208,47 +835,3979 @@ void purr_net_setup(purr_cli_t *cli)
 {
     esp_err_t e = purr_net_init(&s_fs);
     if (e != ESP_OK) {
-        purr_cli_printf(cli, "wifi: did not start (%s)\n", esp_err_to_name(e));
+        purr_cli_printf(cli, "%s: did not start (%s)\n", purr_net_wired() ? "ethernet" : "wifi",
+                        esp_err_to_name(e));
     }
+    purr_net_settle_start();                    /* devices flagged to wait for Wi-Fi (the LoRa radio) bind once it has settled */
 }
 
-static int cmd_net(purr_cli_t *cli, int argc, char **argv)
+static int purr_net_install_run(purr_cli_t *cli, const char *component);
+
+/* Shows "Install PURR OS now?" with a Yes/No choice, reusing purr_menu.c's selection and
+ * auto-boot-countdown engine exactly the way bootpkg's own boot menu does (pkg_main.c) --
+ * two fake "boot entries" instead of partitions, both always bootable -- rather than a
+ * second, from-scratch menu engine for one screen. purr_kernel_key() (purr_kernel.h) is
+ * already the single input source that reads either a real keyboard or (on a board with
+ * none, via purr_board_t's btn_boot_pin/btn_pwr_pin) the two buttons, so this works
+ * identically on both without this function knowing which it has. Defaults to Yes once the
+ * countdown runs out with no input -- preserving today's fully-unattended behavior for a
+ * device nobody is watching -- so an attended one is the only case that can actually say no.
+ * Returns 1 for yes, 0 for no. */
+static int confirm_install(purr_cli_t *cli)
 {
-    (void)argc; (void)argv;
-    purr_net_status_t st;
-    purr_net_status(&st);
-    if (st.connected) {
-        purr_cli_printf(cli, "wifi:    %s (%d dBm)\n", st.ssid, st.rssi);
-        purr_cli_printf(cli, "ip:      %s\n", st.ip);
+    purr_menu_part_t parts[2] = {
+        {.label = "Yes", .bootable = 1},
+        {.label = "No",  .bootable = 1},
+    };
+    purr_menu_t m;
+    purr_menu_init(&m, parts, 2, 0);   /* Yes preferred/default */
+
+    int last_sel = -1, last_secs = -1;
+    purr_menu_result_t r = {PURR_MENU_ACT_NONE, -1};
+    while (r.action == PURR_MENU_ACT_NONE) {
+        int secs = purr_menu_seconds_left(&m);
+        if (m.selected != last_sel || secs != last_secs) {
+            purr_console_clear();
+            purr_cli_puts(cli, "Install " PURR_BRAND_PRODUCT " now?\n"
+                               "(fetches kernel + modules over the saved network)\n\n");
+            purr_cli_printf(cli, "%s Yes\n", m.selected == 0 ? ">" : " ");
+            purr_cli_printf(cli, "%s No\n", m.selected == 1 ? ">" : " ");
+            if (secs >= 0) {
+                purr_cli_printf(cli, "\ndefaulting to Yes in %d... any key/button stops\n", secs);
+            }
+            purr_console_flush();
+            last_sel = m.selected;
+            last_secs = secs;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+        r = purr_menu_step(&m, 50, purr_key_from_char(purr_kernel_key()));
+    }
+    return r.index == 0;
+}
+
+/* Whether the kernel slot holds an image and no reset has marked it bad. The recovery loader installs the kernel itself now; KittenOS only
+ * fetches it when it is missing (a loader from before that change restored KittenOS alone). */
+int purr_kernel_installed(void)
+{
+    const esp_partition_t *kp = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    uint8_t first = 0;
+    return kp != NULL && purr_io_partition_read(kp, 0, &first, 1) == ESP_OK && first == 0xE9 && !purr_slot_marked_bad(kp);
+}
+
+/* Whether a recovery install is waiting to continue, without clearing the request. */
+int purr_stage2_pending(void)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return 0;
+    }
+    return (cfg.flags & PURR_CFGF_CONTINUE_INSTALL) != 0;
+}
+
+/* Stage 2 of recovery (PURR_CFGF_CONTINUE_INSTALL, purr_abi.h): called once every boot, right
+ * after Wi-Fi starts and before this boot's normal login/shell loop; a no-op unless the flag
+ * is actually set (checked and cleared here, the same one-shot shape every other purrcfg flag
+ * already uses), so it's safe to call unconditionally. A freshly-installed KittenOS has no
+ * saved networks of its own yet (the root filesystem was just formatted), so this reuses the
+ * one network already proven to work -- the same recovery network record the loader itself
+ * just connected with (`purr_netrec_load`/`purr_net_connect`, the identical calls
+ * `recovery_loader.c` makes) -- rather than leaving the device sitting at a normal login
+ * prompt as if this were an ordinary first boot, with kernel/the modules still missing
+ * (Install/SPEC.md step 3: "KittenOS... downloads the rest"). Best-effort throughout: any
+ * failure here just means the device comes up without kernel/modules installed yet, same as
+ * before this existed -- never fatal to booting. */
+void purr_continue_install(purr_cli_t *cli)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return;                                    /* nothing stored, so nothing to continue */
+    }
+    if (!purr_cfg_take_flag(&cfg, PURR_CFGF_CONTINUE_INSTALL)) {
+        return;
+    }
+    if (purr_cfg_store(&fl, &cfg) != 0) {
+        ESP_LOGW("stage2", "purrcfg: could not clear the continue-install request");
+    }
+
+    purr_cli_puts(cli, "continuing installation (stage 2)...\n");
+    purr_console_flush();
+
+    if (purr_net_wired()) {
+        /* No remembered network on a wire: it has an address or it does not. */
+        purr_cli_puts(cli, "stage 2: waiting for the wired link and an address...\n");
+        purr_console_flush();
+        if (purr_net_connect("", "", 30000) != ESP_OK) {
+            purr_cli_puts(cli, "stage 2: no wired link or address, skipping\n");
+            return;
+        }
     } else {
-        purr_cli_puts(cli, "wifi:    not connected\n");
+        char ssid[PURR_NETREC_SSID_LEN] = "", pass[PURR_NETREC_PASS_LEN] = "";
+        if (purr_netrec_load(ssid, pass) != 0) {
+            purr_cli_puts(cli, "stage 2: no saved recovery network, skipping. Get online, then run: netinstall modules\n");
+            return;
+        }
+        purr_cli_printf(cli, "stage 2: connecting to %s...\n", ssid);
+        purr_console_flush();
+        if (purr_net_connect(ssid, pass, 15000) != ESP_OK) {
+            purr_cli_puts(cli, "stage 2: could not connect, skipping. Get online, then run: netinstall modules\n");
+            return;
+        }
+    }
+
+    /* Keyboard boards keep today's fully-silent, fully-automatic behavior exactly as it
+     * was -- this screen exists only because a keyboardless board (waveshare154) has no
+     * other way to say no to an unattended install. purr_device_handle (purr_kernel.h) is
+     * NULL when no keyboard device is even registered on this board, not merely when one
+     * failed to answer -- the right test for "does this board have one at all". */
+    if (purr_device_handle("keyboard") == NULL && !confirm_install(cli)) {
+        purr_console_clear();
+        purr_cli_puts(cli, "stage 2: install declined\n");
+        purr_console_flush();
+        return;
+    }
+
+    purr_console_clear();
+    if (!purr_kernel_installed()) {
+        purr_net_install_run(cli, "kernel");
+    }
+    purr_net_install_run(cli, "modules");
+    purr_net_install_run(cli, "ui_w10m");              /* the picture packs of both shells, if the release carries them: the kernel's shell is not known here */
+    purr_net_install_run(cli, "ui_android");
+    purr_stage2_step(cli, 2);                          /* the bootloader, if the server has a newer one */
+}
+
+/* Stage 2 for the setup wizard (oobe_firstboot.c): the same installs as purr_continue_install(), one step at a time and without the
+ * text prompts. take_pending says whether a recovery install is waiting to be continued (and clears the request); step 0 is the
+ * kernel, step 1 the modules. The cli's output is the caller's to keep or throw away. */
+int purr_stage2_take_pending(void)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        return 0;
+    }
+    if (!purr_cfg_take_flag(&cfg, PURR_CFGF_CONTINUE_INSTALL)) {
+        return 0;
+    }
+    if (purr_cfg_store(&fl, &cfg) != 0) {
+        ESP_LOGW("stage2", "purrcfg: could not clear the continue-install request");
+    }
+    return 1;
+}
+
+int purr_stage2_step(purr_cli_t *cli, int step)
+{
+    if (step == 2) {                                    /* the bootloader: staged, then swapped in at once, with a backup; restarts the device when it does */
+        int r = purr_net_install_run(cli, "bootloader");
+        if (r == 0) {
+            purr_swap_setup(cli);
+        }
+        return r;
+    }
+    if (step == 3) {                                    /* the picture packs of both shells, if the release carries them */
+        int a = purr_net_install_run(cli, "ui_w10m");
+        int b = purr_net_install_run(cli, "ui_android");
+        return a != 0 ? a : b;
+    }
+    return purr_net_install_run(cli, step == 0 ? "kernel" : "modules");
+}
+
+/* ---------------------------------------------------------------- net install */
+
+typedef struct {
+    const uint8_t *base;
+    size_t size;
+} install_mem_ctx_t;
+
+static int install_mem_read(void *ctx, uint32_t offset, void *buf, uint32_t len)
+{
+    install_mem_ctx_t *m = ctx;
+    if ((uint64_t)offset + len > m->size) {
+        return -1;
+    }
+    memcpy(buf, m->base + offset, len);
+    return 0;
+}
+
+/* Resolves `name` against the directory `base_url` sits in, same as the recovery loader. */
+static void resolve_manifest_url(const char *base_url, const char *name, char *out, size_t cap)
+{
+    const char *slash = strrchr(base_url, '/');
+    size_t dir_len = slash ? (size_t)(slash - base_url) + 1 : 0;
+    if (dir_len >= cap) {
+        dir_len = 0;
+    }
+    memcpy(out, base_url, dir_len);
+    snprintf(out + dir_len, cap - dir_len, "%s", name);
+}
+
+/* The partition-level components net_install can write: a raw esp_partition erase+write,
+ * verified as PURR_IMG_MODULE with the subtype below. purr_role_may_sign() (purr_keybag.c)
+ * requires PURR_ROLE_BOOT for every one of these -- the same trust tier as the boot package
+ * itself -- so this table can never be used to smuggle a SYSTEM-signed image into a boot-critical
+ * slot.
+ *
+ * File-staged components (CoreOS, AppManager, the runtimes, the drivers bundle) go through
+ * LittleFS's /boot <name>.new staging instead (OTA/SPEC.md section 3), not this table -- that
+ * path isn't built yet.
+ *
+ * kittenos is deliberately never on this list: only the recovery loader's own
+ * install_kittenos() (recovery_loader.c) may write the kittenos partition, from the one profile
+ * (minimal) that never runs alongside a general shell. That keeps the fallback tier safe from
+ * whatever is running above it, including a compromised or buggy full/recovery-profile system. */
+typedef struct {
+    const char *name;             /* net_install's component argument, and the manifest's */
+    uint8_t     subtype;          /* PURR_MOD_* -- image_type is always PURR_IMG_MODULE */
+    const char *partition_label;  /* esp_partition label to erase + write */
+} net_install_component_t;
+
+static const net_install_component_t s_net_install_components[] = {
+    {"kernel",  PURR_MOD_KERNEL,  "kernel"},
+    {"loader",  PURR_MOD_LOADER,  "loader"},
+    {"bootpkg", PURR_MOD_BOOTPKG, "bootpkg"},
+    /* A shell's picture pack is a FILE in LittleFS now (/ui/<shell>/pack.bin, plan1.md "Flash map v2"), written by install_ui_pack() below, so there is no partition. */
+    {"ui_w10m", PURR_MOD_UIASSETS, NULL},
+    {"ui_android", PURR_MOD_UIASSETS, NULL},
+};
+
+static int is_ui_pack(const char *component)
+{
+    return strcmp(component, "ui_w10m") == 0 || strcmp(component, "ui_android") == 0;
+}
+
+/* File-staged components (PurrOS/SPEC.md section 6.1, purr_swap.h): CoreOS, AppManager, the
+ * runtimes and the drivers bundle actually live as files in /boot, so net_install stages
+ * <name>.new there and asks KittenOS to do the swap on the next boot, instead of writing a
+ * partition directly. purr_role_may_sign() still requires PURR_ROLE_BOOT for coreos, same tier
+ * as kernel/loader/bootpkg; appmanager/runtime/devbundle need PURR_ROLE_SYSTEM
+ * (purr_keybag.c) -- net_install doesn't pick the role, purr_image_verify() already enforces
+ * whichever one the subtype demands. */
+typedef struct {
+    const char *name;
+    uint8_t     subtype;      /* PURR_MOD_* -- image_type is always PURR_IMG_MODULE */
+    uint8_t     comp_id;      /* PURR_COMP_* -- purrcfg's update.target and floors[] key */
+} net_install_staged_t;
+
+static const net_install_staged_t s_net_install_staged[] = {
+    {"coreos",     PURR_MOD_COREOS,     PURR_COMP_COREOS},
+    {"appmanager", PURR_MOD_APPMANAGER, PURR_COMP_APPMANAGER},
+    {"runtime",    PURR_MOD_RUNTIME,    PURR_COMP_RUNTIME},
+    {"devbundle",  PURR_MOD_DEVBUNDLE,  PURR_COMP_DEVBUNDLE},
+    {"bootloader", PURR_MOD_BOOTLOADER, PURR_COMP_BOOTLOADER},      /* staged here, written to flash 0x0 by KittenOS's swap with a backup (bootloader_swap) */
+};
+
+/* The current version floor for a component, or 0 if none is set yet (purr_cfg_t.floors,
+ * purr_abi.h). Linear scan of 8 slots, not worth a better structure. */
+static uint32_t find_floor(const purr_cfg_t *cfg, uint8_t comp_id)
+{
+    for (int i = 0; i < PURR_FLOOR_SLOTS; i++) {
+        if (cfg->floors[i].component == comp_id) {
+            return cfg->floors[i].version;
+        }
     }
     return 0;
 }
 
-static int cmd_wifi_scan(purr_cli_t *cli)
+/* Raises comp_id's floor to version, into an empty slot or the component's existing one.
+ * Silently does nothing if every slot is already used by a different component -- floors are
+ * never removed, so this should not happen with only 8 real components to track. */
+static void raise_floor(purr_cfg_t *cfg, uint8_t comp_id, uint32_t version)
 {
-    purr_cli_puts(cli, "scanning...\n");
-    purr_console_flush();
-    purr_net_ap_t aps[16];
-    int n = 0;
-    esp_err_t e = purr_net_scan(aps, 16, &n);
-    if (e != ESP_OK) {
-        purr_cli_printf(cli, "scan failed: %s\n", esp_err_to_name(e));
+    int free_slot = -1;
+    for (int i = 0; i < PURR_FLOOR_SLOTS; i++) {
+        if (cfg->floors[i].component == comp_id) {
+            if (version > cfg->floors[i].version) {
+                cfg->floors[i].version = version;
+            }
+            return;
+        }
+        if (free_slot < 0 && cfg->floors[i].component == 0) {
+            free_slot = i;
+        }
+    }
+    if (free_slot >= 0) {
+        cfg->floors[free_slot].component = comp_id;
+        cfg->floors[free_slot].version = version;
+    }
+}
+
+/* Verifies a downloaded image as a file-staged component and stages it (PurrOS/SPEC.md section
+ * 6.1, step 1-3: stage, verify, request). Writes /boot/<name>.new, records the request in
+ * purrcfg (state REQUESTED) and sets FORCE_RECOVERY so the next reboot goes to KittenOS, which
+ * does the actual swap (purr_swap_setup(), below). Never touches the file's final name itself
+ * -- that rename is KittenOS's job alone, so a compromised or buggy full-profile session can
+ * stage a bad file but can never make it live. */
+static int stage_file_component(purr_cli_t *cli, const char *component,
+                                const net_install_staged_t *staged,
+                                const uint8_t *image, size_t image_len)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        purr_cli_puts(cli, "no filesystem mounted (run: format --yes)\n");
         return 1;
     }
-    int shown = n > 16 ? 16 : n;
-    for (int i = 0; i < shown; i++) {
-        purr_cli_printf(cli, "  %-32s %4d dBm  %s\n", aps[i].ssid, aps[i].rssi,
-                        aps[i].open ? "open" : "secured");
+
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
     }
-    if (n > shown) {
-        purr_cli_printf(cli, "  (%d more not shown)\n", n - shown);
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {
+        .chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0,
+        .version_floor = find_floor(&cfg, staged->comp_id),
+        .enforce_floor = (view.secure_mode == PURR_SECURE_ENFORCE),
+    };
+    install_mem_ctx_t rdctx = {image, image_len};
+    purr_image_header_t hdr;
+    purr_verify_result_t vr = purr_image_verify(&env, install_mem_read, &rdctx, (uint32_t)image_len, &hdr);
+
+    if (hdr.magic != PURR_IMAGE_MAGIC || hdr.image_type != PURR_IMG_MODULE ||
+        PURR_FLAGS_SUBTYPE(hdr.flags) != staged->subtype) {
+        purr_cli_printf(cli, "not a %s image\n", component);
+        return 1;
+    }
+    if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
+        purr_cli_printf(cli, "verification failed: %s\n", purr_verify_name(vr));
+        return 1;
+    }
+    if (vr != PURR_V_OK) {
+        purr_cli_printf(cli, "unverified (%s), accepted because secure mode is off\n",
+                        purr_verify_name(vr));
+    }
+
+    uint32_t version = 0;
+    purr_version_parse(hdr.version, sizeof(hdr.version), &version);
+
+    char path[48];
+    snprintf(path, sizeof(path), "/boot/%s.new", purr_swap_filename(staged->comp_id));
+    purr_fs_mkdir(&s_fs, "/boot");   /* ignore the error if it already exists */
+    if (purr_fs_write(&s_fs, path, image, image_len) != 0) {
+        purr_cli_printf(cli, "could not stage %s\n", path);
+        return 1;
+    }
+
+    cfg.update.target = staged->comp_id;
+    cfg.update.state = PURR_UPD_REQUESTED;
+    cfg.update.attempts = 0;
+    cfg.update.version = version;
+    purr_cfg_set_flag(&cfg, PURR_CFGF_FORCE_RECOVERY);
+    if (purr_cfg_store(&fl, &cfg) != 0) {
+        purr_cli_puts(cli, "purrcfg: could not record the update request\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s %s staged. Run: reboot\n", component, hdr.version);
+    return 0;
+}
+
+static int purr_net_install_modules(purr_cli_t *cli);
+
+/* Installs a component from the recovery manifest (Install/SPEC.md's network install, run from
+ * an already-working system instead of the recovery loader). Defaults to "kernel" when called
+ * with no component name.
+ *
+ * Stays a core-only function, never called directly by a module: it touches purr_fs_t, the
+ * signing key bag, and raw esp_partition/OTA APIs, exactly what Modules/SPEC.md's
+ * domain-level-only rule keeps out of a module's reach. The netinstall module
+ * (Modules/netinstall/netinstall_module.c) reaches it only through the single opaque
+ * core_table_net_install() wrapper below. */
+static int sha_feed(void *ctx, const void *data, uint32_t len)
+{
+    purr_sha256_update((purr_sha256_t *)ctx, data, len);
+    return 0;
+}
+
+/* Writes a shell's picture pack as /ui/<shell>/pack.bin (the component is ui_<shell>). The container's signature was checked by the caller; the pack carries its own
+ * CRC, which the UI checks again at start. Skips the write when the same pack is already there, and reads the file back to compare before saying it worked. */
+static int install_ui_pack(purr_cli_t *cli, const char *component, const char *version, const uint8_t *pack, uint32_t len, const uint8_t *want_hash)
+{
+    purr_fs_t *fs = purr_login_fs();
+    if (fs == NULL || !purr_fs_mounted(fs)) {
+        purr_cli_puts(cli, "the file system is not available, so the picture pack cannot be installed\n");
+        return 1;
+    }
+    char dir[32], path[48];
+    snprintf(dir, sizeof(dir), "/ui/%s", component + 3);              /* ui_w10m -> /ui/w10m */
+    snprintf(path, sizeof(path), "%s/pack.bin", dir);
+    uint8_t hd[PURR_SHA256_LEN];
+    purr_sha256_t hs;
+    purr_sha256_init(&hs);
+    if (purr_fs_read(fs, path, sha_feed, &hs) == 0) {
+        purr_sha256_final(&hs, hd);
+        if (memcmp(hd, want_hash, sizeof(hd)) == 0) {
+            purr_cli_printf(cli, "%s %s is already installed\n", component, version);
+            return 0;
+        }
+    }
+    purr_fs_mkdir(fs, "/ui");                                          /* ignored if they exist */
+    purr_fs_mkdir(fs, dir);
+    purr_cli_printf(cli, "writing %s...\n", path);
+    purr_console_flush();
+    if (purr_fs_write_kept(fs, path, pack, len) != 0) {
+        purr_cli_puts(cli, "write failed\n");
+        return 1;
+    }
+    purr_sha256_init(&hs);
+    if (purr_fs_read(fs, path, sha_feed, &hs) != 0) {
+        purr_cli_puts(cli, "read-back failed\n");
+        return 1;
+    }
+    purr_sha256_final(&hs, hd);
+    if (memcmp(hd, want_hash, sizeof(hd)) != 0) {
+        purr_cli_puts(cli, "read-back hash mismatch: the write did not take\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s %s installed. It takes effect at the next start.\n", component, version);
+    return 0;
+}
+
+static int purr_net_install_run(purr_cli_t *cli, const char *component)
+{
+    if (strcmp(component, "modules") == 0) {
+        return purr_net_install_modules(cli);
+    }
+
+    purr_cli_printf(cli, "netinstall: %s\n", component);
+    purr_console_flush();
+
+    purr_net_status_t st;
+    purr_net_status(&st);
+    if (!st.connected) {
+        purr_cli_puts(cli, "not connected. run: wifi connect <ssid> [password]\n");
+        return 1;
+    }
+
+    purr_cli_puts(cli, "fetching the recovery manifest...\n");
+    purr_console_flush();
+    uint8_t *manifest_buf = NULL;
+    size_t manifest_len = 0;
+    if (purr_fetch_alloc(purr_recovery_manifest_url(), &manifest_buf, &manifest_len,
+                         32 * 1024) != ESP_OK) {
+        purr_cli_puts(cli, "could not fetch the manifest\n");
+        return 1;
+    }
+    purr_manifest_t man;
+    purr_manifest_parse(&man, (const char *)manifest_buf, manifest_len);
+    free(manifest_buf);
+
+    const purr_manifest_entry_t *entry = purr_manifest_find(&man, component, CONFIG_IDF_TARGET,
+                                                             purr_board()->name);
+    if (entry == NULL && is_ui_pack(component)) {                    /* a release need not carry a picture pack: that is not a failure */
+        purr_cli_puts(cli, "no UI pack in this release\n");
+        return 0;
+    }
+    if (entry == NULL) {
+        purr_cli_printf(cli, "no %s entry for this board in the manifest\n", component);
+        return 1;
+    }
+    purr_cli_printf(cli, "found %s %s (%u bytes)\n", component, entry->version, (unsigned)entry->size);
+
+    if (strcmp(component, "bootloader") == 0 && !PURR_BOOTLOADER_OTA) {
+        purr_cli_puts(cli, "bootloader updates over the air are turned off; the bootloader is left as it is\n");
+        return 0;
+    }
+    if (strcmp(component, "bootloader") == 0) {                /* only ever replace the running bootloader with a newer one */
+        purr_handoff_t hh;
+        uint32_t want = 0, have = purr_kernel_handoff(&hh) == 0 ? hh.bootloader_version : 0;
+        purr_version_parse(entry->version, strlen(entry->version), &want);
+        if (have == 0) {                                       /* no version from the running bootloader: nothing says the one on offer is newer */
+            purr_cli_puts(cli, "the running bootloader's version is unknown, so it is left as it is\n");
+            return 0;
+        }
+        if (want <= have) {
+            purr_cli_printf(cli, "the bootloader is up to date (%u.%u.%u)\n", (unsigned)(have >> 24), (unsigned)((have >> 16) & 0xFF),
+                            (unsigned)(have & 0xFFFF));
+            return 0;
+        }
+    }
+
+    char image_url[256];
+    resolve_manifest_url(purr_recovery_manifest_url(), entry->file, image_url, sizeof(image_url));
+    purr_cli_printf(cli, "downloading %s...\n", entry->file);
+    purr_console_flush();
+
+    uint8_t *image = NULL;
+    size_t image_len = 0;
+    size_t max_len = is_ui_pack(component) ? 5 * 1024 * 1024 : 2 * 1024 * 1024;                 /* a picture pack is limited to 5 MB */
+    if (is_ui_pack(component) && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < (size_t)entry->size + 4096) {
+        /* The pack is downloaded into one block of PSRAM and checked before anything is erased; say so plainly if there is no such block (apps running). */
+        purr_cli_printf(cli, "not enough free memory for the %u byte pack (largest block %u). Close apps or restart, then run: netinstall %s\n",
+                        (unsigned)entry->size, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT), component);
+        return 1;
+    }
+    esp_err_t fe = purr_fetch_alloc_checked(image_url, &image, &image_len, max_len, entry->size, entry->sha256);       /* three tries, each checked */
+    if (fe != ESP_OK) {
+        purr_cli_puts(cli, fe == ESP_ERR_INVALID_SIZE || fe == ESP_ERR_INVALID_CRC ? "download does not match the manifest (size or hash)\n" : "download failed\n");
+        return 1;
+    }
+    uint8_t got_hash[PURR_SHA256_LEN];
+    purr_sha256(image, image_len, got_hash);
+
+    purr_cli_puts(cli, "verifying...\n");
+    purr_console_flush();
+
+    const net_install_component_t *comp = NULL;
+    for (size_t i = 0; i < sizeof(s_net_install_components) / sizeof(s_net_install_components[0]); i++) {
+        if (strcmp(component, s_net_install_components[i].name) == 0) {
+            comp = &s_net_install_components[i];
+            break;
+        }
+    }
+    if (comp == NULL) {
+        const net_install_staged_t *staged = NULL;
+        for (size_t i = 0; i < sizeof(s_net_install_staged) / sizeof(s_net_install_staged[0]); i++) {
+            if (strcmp(component, s_net_install_staged[i].name) == 0) {
+                staged = &s_net_install_staged[i];
+                break;
+            }
+        }
+        if (staged != NULL) {
+            int r = stage_file_component(cli, component, staged, image, image_len);
+            free(image);
+            return r;
+        }
+        free(image);
+        purr_cli_printf(cli, "netinstall: unknown component '%s'\n", component);
+        return 1;
+    }
+
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {
+        .chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
+    };
+    install_mem_ctx_t rdctx = {image, image_len};
+    purr_image_header_t hdr;
+    purr_verify_result_t vr = purr_image_verify(&env, install_mem_read, &rdctx, (uint32_t)image_len, &hdr);
+
+    if (hdr.magic != PURR_IMAGE_MAGIC || hdr.image_type != PURR_IMG_MODULE ||
+        PURR_FLAGS_SUBTYPE(hdr.flags) != comp->subtype) {
+        free(image);
+        purr_cli_printf(cli, "not a %s image\n", component);
+        return 1;
+    }
+    if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
+        free(image);
+        purr_cli_printf(cli, "verification failed: %s\n", purr_verify_name(vr));
+        return 1;
+    }
+    if (vr != PURR_V_OK) {
+        purr_cli_printf(cli, "unverified (%s), accepted because secure mode is off\n",
+                        purr_verify_name(vr));
+    }
+
+    if (is_ui_pack(component)) {                       /* a picture pack is a file in LittleFS, not a partition */
+        int r = install_ui_pack(cli, component, hdr.version, image + hdr.payload_offset, hdr.payload_size, hdr.payload_sha256);
+        free(image);
+        return r;
+    }
+    const esp_partition_t *slot = esp_partition_find_first(ESP_PARTITION_TYPE_ANY,
+                                                            ESP_PARTITION_SUBTYPE_ANY,
+                                                            comp->partition_label);
+    if (slot == NULL) {
+        free(image);
+        purr_cli_printf(cli, "no %s partition on this board\n", comp->partition_label);
+        return 1;
+    }
+    /* documentation/FINDINGS.md F-13, fixed 2026-10-01: the boot package's own partition must
+     * hold the WHOLE signed container, not just the payload -- purr_bootpkg.c's load_package()
+     * reads and verifies a purr_image_header_t directly from the partition's own start, the
+     * same way the module/kernelmod loaders do for a file. kernel and loader are plain ESP app
+     * images with no such header, so they still get just the payload, same as before. Writing
+     * the stripped payload into bootpkg's slot (the old behavior, for every component alike)
+     * left the bootloader unable to find a PURR image there at all ("no PURR image (partition
+     * empty?)"), quietly removing the boot menu on the very next boot. */
+    int whole_container = (comp->subtype == PURR_MOD_BOOTPKG);
+    const uint8_t *write_data = whole_container ? image : (image + hdr.payload_offset);
+    uint32_t write_len = whole_container ? (uint32_t)image_len : hdr.payload_size;
+    const uint8_t *verify_hash = whole_container ? got_hash : hdr.payload_sha256;
+
+    /* kernel and loader also carry a signature trailer in the partition's last sector
+     * (bootloader/SPEC.md section 3.1), so the image has to leave that sector free. */
+    if (whole_container ? write_len > slot->size : !purr_slot_trailer_fits(slot, write_len)) {
+        free(image);
+        purr_cli_printf(cli, "the image is bigger than the %s partition\n", comp->partition_label);
+        return 1;
+    }
+
+    purr_cli_printf(cli, "writing to %s...\n", comp->partition_label);
+    purr_console_flush();
+    if (purr_io_partition_erase_range(slot, 0, slot->size) != ESP_OK ||
+        purr_io_partition_write(slot, 0, write_data, write_len) != ESP_OK) {
+        free(image);
+        purr_cli_puts(cli, "write failed\n");
+        return 1;
+    }
+
+    /* Read back and compare, rather than trust the write. */
+    uint8_t chunk[512];
+    purr_sha256_t sha;
+    uint8_t digest[PURR_SHA256_LEN];
+    purr_sha256_init(&sha);
+    for (uint32_t off = 0; off < write_len; off += sizeof(chunk)) {
+        uint32_t n = write_len - off;
+        if (n > sizeof(chunk)) {
+            n = sizeof(chunk);
+        }
+        if (purr_io_partition_read(slot, off, chunk, n) != ESP_OK) {
+            free(image);
+            purr_cli_puts(cli, "read-back failed\n");
+            return 1;
+        }
+        purr_sha256_update(&sha, chunk, n);
+    }
+    purr_sha256_final(&sha, digest);
+    free(image);
+    if (memcmp(digest, verify_hash, sizeof(digest)) != 0) {
+        purr_cli_puts(cli, "read-back hash mismatch: the write did not take\n");
+        return 1;
+    }
+
+    /* The signature trailer (bootloader/SPEC.md section 3.1): the signed container header,
+     * copied into the partition's last sector, so the bootloader can verify this slot. The
+     * boot package is the exception -- it holds the whole container from offset 0. Then check
+     * the result exactly the way the bootloader will. */
+    if (!whole_container) {
+        if (purr_slot_trailer_write(slot, &hdr) != 0) {
+            purr_cli_puts(cli, "could not write the signature trailer\n");
+            return 1;
+        }
+        purr_verify_result_t tv = purr_slot_trailer_check(&env, slot, PURR_IMG_MODULE, comp->subtype);
+        if (tv != PURR_V_OK) {
+            if (view.secure_mode != PURR_SECURE_OFF) {
+                purr_cli_printf(cli, "installed, but the bootloader would reject it: %s\n",
+                                purr_verify_name(tv));
+                return 1;
+            }
+            purr_cli_printf(cli, "no valid signature trailer (%s); fine while secure mode is off\n",
+                            purr_verify_name(tv));
+        }
+    }
+
+    /* There is no boot-target selection step: the PURR bootloader picks kernel, kittenos or
+     * loader itself (bootloader/SPEC.md section 6) and the `otadata` partition that
+     * esp_ota_set_boot_partition() writes was dropped from the layout on 2026-10-25 -- nothing
+     * read it. The write above, with its signature trailer, is the whole install. */
+    purr_cli_printf(cli, "%s %s installed. Run: reboot\n", component, hdr.version);
+    return 0;
+}
+
+/* `netinstall modules` (OTA/SPEC.md sections 3 and 6.1): fetches the module index, a
+ * separate, smaller manifest from the recovery one above, and installs every entry that
+ * matches this chip/board straight to /system or /kernelmods, no staging/swap dance -- unlike
+ * the components above, a bad write here can't brick anything (the module loader already
+ * quarantines a bad file gracefully, Modules/SPEC.md section 7.1), so there's nothing a
+ * rollback would protect. This is the real replacement for plant_temp_modules()'s embedded-
+ * firmware stand-in (PurrOS/components/coreos/SPEC.md section 10): once this is in regular
+ * use, that automatic call goes away. */
+static int purr_net_install_modules(purr_cli_t *cli)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        purr_cli_puts(cli, "no filesystem mounted (run: format --yes)\n");
+        return 1;
+    }
+    purr_net_status_t st;
+    purr_net_status(&st);
+    if (!st.connected) {
+        purr_cli_puts(cli, "not connected. run: wifi connect <ssid> [password]\n");
+        return 1;
+    }
+
+    purr_cli_puts(cli, "fetching the module index...\n");
+    purr_console_flush();
+    uint8_t *idx_buf = NULL;
+    size_t idx_len = 0;
+    if (purr_fetch_alloc(purr_recovery_modules_url(), &idx_buf, &idx_len, 32 * 1024) != ESP_OK) {
+        purr_cli_puts(cli, "could not fetch the module index\n");
+        return 1;
+    }
+    purr_manifest_t idx;
+    purr_manifest_parse(&idx, (const char *)idx_buf, idx_len);
+    free(idx_buf);
+
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {
+        .chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
+    };
+
+    purr_fs_mkdir(&s_fs, PURR_MODULES_DIR);
+    purr_fs_mkdir(&s_fs, PURR_KERNELMODS_DIR);
+
+    int installed = 0, skipped = 0, failed = 0;
+    for (int i = 0; i < idx.count; i++) {
+        const purr_manifest_entry_t *e = &idx.entries[i];
+        int is_module = strcmp(e->type, "module") == 0;
+        int is_kernelmod = strcmp(e->type, "kernelmod") == 0;
+        if (!is_module && !is_kernelmod) {
+            continue;                                   /* not a module-index-shaped entry */
+        }
+        if ((strcmp(e->chip, "any") != 0 && strcmp(e->chip, CONFIG_IDF_TARGET) != 0) ||
+            (strcmp(e->board, "any") != 0 && strcmp(e->board, purr_board()->name) != 0)) {
+            skipped++;
+            continue;
+        }
+
+        char url[256];
+        resolve_manifest_url(purr_recovery_modules_url(), e->file, url, sizeof(url));
+        purr_cli_printf(cli, "fetching %s...\n", e->component);
+        purr_console_flush();
+        uint8_t *data = NULL;
+        size_t data_len = 0;
+        if (purr_fetch_alloc(url, &data, &data_len, 256 * 1024) != ESP_OK) {
+            purr_cli_printf(cli, "%s: download failed\n", e->component);
+            failed++;
+            continue;
+        }
+        uint8_t got_hash[PURR_SHA256_LEN];
+        purr_sha256(data, data_len, got_hash);
+        if (data_len != e->size || memcmp(got_hash, e->sha256, PURR_SHA256_LEN) != 0) {
+            free(data);
+            purr_cli_printf(cli, "%s: does not match the index (size or hash)\n", e->component);
+            failed++;
+            continue;
+        }
+
+        install_mem_ctx_t rdctx = {data, data_len};
+        purr_image_header_t hdr;
+        purr_verify_result_t vr = purr_image_verify(&env, install_mem_read, &rdctx, (uint32_t)data_len, &hdr);
+        if (hdr.magic != PURR_IMAGE_MAGIC || hdr.image_type != PURR_IMG_MODULE) {
+            free(data);
+            purr_cli_printf(cli, "%s: not a module image\n", e->component);
+            failed++;
+            continue;
+        }
+        if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
+            free(data);
+            purr_cli_printf(cli, "%s: verification failed (%s)\n", e->component, purr_verify_name(vr));
+            failed++;
+            continue;
+        }
+
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%s.cat", is_module ? PURR_MODULES_DIR : PURR_KERNELMODS_DIR,
+                e->component);
+        if (purr_fs_write(&s_fs, path, data, data_len) != 0) {
+            free(data);
+            purr_cli_printf(cli, "%s: could not write %s\n", e->component, path);
+            failed++;
+            continue;
+        }
+        free(data);
+        purr_cli_printf(cli, "%s %s installed to %s\n", e->component, hdr.version, path);
+        installed++;
+    }
+
+    purr_cli_printf(cli, "modules: %d installed, %d skipped (chip/board), %d failed\n",
+                    installed, skipped, failed);
+    return failed != 0;
+}
+
+/* version/info/parts/echo/clear/reboot/purrcfg used to be inline commands here -- they're
+ * now folded into Modules/coreos/sysinfo_module.c alongside mem/uptime (the fifth and last
+ * sweep of the built-in table). version/info/parts/purrcfg are read-only display commands
+ * with no reason to decompose into structured data, so each kernel_table_print_* just prints
+ * directly onto `cli`, same as net_install/fs_format's own progress messages. reboot touches
+ * the raw purrcfg partition (a one-shot boot-target flag), so it stays one opaque call too. */
+
+static void kernel_table_print_version(purr_cli_t *cli)
+{
+    purr_cli_printf(cli, "%s %s (%s profile)\n", SYSTEM_NAME, VERSION, PROFILE_NAME);
+}
+
+static void kernel_table_print_info(purr_cli_t *cli)
+{
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    purr_display_info_t di = {0};
+    const purr_display_v2_t *d = purr_kernel_display();
+    if (d) {
+        d->get_info(&di);
+    }
+    purr_cli_printf(cli, "system:  %s %s\n", SYSTEM_NAME, VERSION);
+    purr_cli_printf(cli, "board:   %s\n", purr_board()->name);
+    purr_cli_printf(cli, "chip:    %s rev %d.%d, %d cores\n", CONFIG_IDF_TARGET,
+                    chip.revision / 100, chip.revision % 100, chip.cores);
+    purr_cli_printf(cli, "display: %s %dx%d\n", d ? di.name : "none", di.width, di.height);
+    purr_cli_printf(cli, "idf:     %s\n", esp_get_idf_version());
+}
+
+static void kernel_table_print_parts(purr_cli_t *cli)
+{
+    purr_cli_puts(cli, "name      type sub offset   size\n");
+    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    for (; it != NULL; it = esp_partition_next(it)) {
+        const esp_partition_t *p = esp_partition_get(it);
+        purr_cli_printf(cli, "%-9s %-4s %02x  %06x  %uK\n", p->label,
+                        p->type == ESP_PARTITION_TYPE_APP ? "app" : "data",
+                        (unsigned)p->subtype, (unsigned)p->address, (unsigned)(p->size / 1024));
+    }
+    esp_partition_iterator_release(it);
+}
+
+static void kernel_table_console_clear(void) { purr_console_clear(); }
+
+/* Load purrcfg, or say why not. */
+static int load_cfg(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg)
+{
+    if (purr_cfgstore_open(fl) != 0) {
+        purr_cli_puts(cli, "purrcfg: no such partition\n");
+        return -1;
+    }
+    int r = purr_cfg_load(fl, cfg, NULL);
+    if (r < 0) {
+        purr_cli_puts(cli, "purrcfg: read error\n");
+        return -1;
+    }
+    return r;                                     /* 0 = read, 1 = blank, defaults used */
+}
+
+/* Raises cfg's floor for the component the running app partition is, to that slot's verified
+ * version. Returns 1 if cfg changed. Only kernel, kittenos and loader slots carry a trailer. */
+static int raise_running_slot_floor(purr_cfg_t *cfg)
+{
+    const esp_partition_t *run = esp_ota_get_running_partition();
+    if (run == NULL) {
+        return 0;
+    }
+    uint8_t comp, type, subtype;
+    if (strcmp(run->label, "kernel") == 0) {
+        comp = PURR_COMP_KERNEL; type = PURR_IMG_MODULE; subtype = PURR_MOD_KERNEL;
+    } else if (strcmp(run->label, "kittenos") == 0) {
+        comp = PURR_COMP_KITTENOS; type = PURR_IMG_RECOVERY; subtype = 0;
+    } else if (strcmp(run->label, "loader") == 0) {
+        comp = PURR_COMP_LOADER; type = PURR_IMG_MODULE; subtype = PURR_MOD_LOADER;
+    } else {
+        return 0;
+    }
+
+    purr_image_header_t hdr;
+    uint32_t version = 0;
+    if (purr_slot_trailer_header(run, &hdr) != 0 ||
+        purr_version_parse(hdr.version, sizeof(hdr.version), &version) != 0 ||
+        version <= find_floor(cfg, comp)) {
+        return 0;                                  /* no trailer, or nothing to raise */
+    }
+
+    purr_cfg_t view;
+    os_cfg_view(cfg, &view);                       /* cfg is stored by the caller: decide from a view */
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {
+        .chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
+    };
+    if (purr_slot_trailer_check(&env, run, type, subtype) != PURR_V_OK) {
+        return 0;                                  /* an unverified slot never raises a floor */
+    }
+    raise_floor(cfg, comp, version);
+    return 1;
+}
+
+void purr_mark_boot_healthy(purr_cli_t *cli)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (load_cfg(cli, &fl, &cfg) < 0) {
+        return;                                    /* load_cfg already said why */
+    }
+    int changed = 0;
+    if (cfg.boot_fail_count != 0) {
+        cfg.boot_fail_count = 0;
+        changed = 1;
+    }
+#if !CONFIG_PURR_PROFILE_RECOVERY && !CONFIG_PURR_PROFILE_MINIMAL
+    if (cfg.flags & PURR_CFGF_FRESH) {                  /* the full OS reached a healthy boot: no longer a first run */
+        cfg.flags &= ~PURR_CFGF_FRESH;
+        changed = 1;
+    }
+#endif
+    /* Confirm a pending system-file update (PurrOS/SPEC.md section 6.1, step 6): reaching
+     * healthy after KittenOS's swap means the new file actually works. Raise its version
+     * floor -- a downgrade past this point needs an explicit override -- and close out the
+     * update. purr_swap_setup() (KittenOS's side, this file) is the only thing that ever sets
+     * UNCONFIRMED, so this only fires right after a swap, never on an ordinary boot. */
+    if (cfg.update.state == PURR_UPD_UNCONFIRMED) {
+        raise_floor(&cfg, cfg.update.target, cfg.update.version);
+        cfg.update.state = PURR_UPD_CONFIRMED;
+        changed = 1;
+    }
+    /* The slot we are running from has just reached healthy, so its version is confirmed on this
+     * device: raise that component's floor to it (bootloader/SPEC.md section 6 step 6), so an
+     * older, validly signed image can no longer be booted in enforce mode. The version comes from
+     * the slot's signature trailer and is used ONLY if the trailer verifies right now -- never
+     * from an unchecked header. The cheap version test goes first so the verify (a hash over the
+     * whole slot) only runs on the boot that would actually raise the floor. */
+    if (raise_running_slot_floor(&cfg)) {
+        changed = 1;
+    }
+    if (!changed) {
+        return;                                    /* nothing to record */
+    }
+    if (purr_cfg_store(&fl, &cfg) != 0) {
+        purr_cli_puts(cli, "purrcfg: could not record the healthy boot\n");
+    }
+}
+
+typedef struct { uint8_t *buf; uint32_t cap; uint32_t got; } read_all_ctx_t;
+
+static int read_all_cb(void *ctx, const void *data, uint32_t len)
+{
+    read_all_ctx_t *c = ctx;
+    if (c->got + len > c->cap) {
+        return -1;
+    }
+    memcpy(c->buf + c->got, data, len);
+    c->got += len;
+    return 0;
+}
+
+/* ---------------------------------------------------------------- the bootloader swap (bootloader/SPEC.md section 9.2)
+ *
+ * The bootloader is the one component with no spare copy, so it gets the strictest handling. KittenOS (never the full system) does it, in this
+ * order, and stops at the first thing that is wrong:
+ *   1. the staged file (/boot/bootloader.kitt.new) is verified again: signature (the boot key only), the bootloader subtype, then the payload
+ *      itself (purr_bootimg_check: an ESP32-S3 image whose own SHA-256 matches, which the ROM insists on);
+ *   2. enough power (no battery reading, or 50 percent);
+ *   3. a BACKUP: the whole bootloader area as it is now is saved to /boot/bootloader.bak and read back, byte for byte, before anything is changed;
+ *   4. the write (only sectors that differ, last to first, read back); if the read-back is wrong the backup is written straight back;
+ *   5. the update is recorded UNCONFIRMED and the device restarts. Reaching a healthy boot confirms it (purr_mark_boot_healthy). If it never does,
+ *      the failure ladder brings KittenOS back and, after three tries, the swap rolls back to the backup.
+ * What no software can undo: power lost during step 4 (well under a second) leaves a board that needs the USB flasher. */
+#define BL_NEW "/boot/bootloader.kitt.new"
+#define BL_BAK "/boot/bootloader.bak"
+
+static int bl_read_file(const char *path, uint8_t **out, uint32_t *len)
+{
+    int is_dir;
+    uint32_t sz;
+    if (purr_fs_stat(&s_fs, path, &is_dir, &sz) != 0 || is_dir || sz == 0 || sz > 64 * 1024) {
+        return -1;
+    }
+    uint8_t *b = malloc(sz);
+    if (b == NULL) {
+        return -1;
+    }
+    read_all_ctx_t rd = {b, sz, 0};
+    if (purr_fs_read(&s_fs, path, read_all_cb, &rd) != 0 || rd.got != sz) {
+        free(b);
+        return -1;
+    }
+    *out = b;
+    *len = sz;
+    return 0;
+}
+
+static void bl_done(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg, uint8_t state, const char *msg, int restart)
+{
+    cfg->update.state = state;
+    cfg->update.attempts = 0;
+    purr_cfg_take_flag(cfg, PURR_CFGF_FORCE_RECOVERY);          /* staging asked for KittenOS once; that is this boot */
+    purr_cfg_store(fl, cfg);
+    purr_cli_printf(cli, "bootloader: %s\n", msg);
+    purr_console_flush();
+    if (restart) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
+}
+
+static void bootloader_swap(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg, purr_swap_action_t action)
+{
+    uint8_t *cur = malloc(PURR_BOOTIMG_MAX);
+    if (cur == NULL) {
+        purr_cli_puts(cli, "bootloader: out of memory\n");
+        return;
+    }
+    if (purr_bootupdate_read(cur, PURR_BOOTIMG_MAX) != 0) {
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, "could not read the current bootloader; nothing was changed", 0);
+        return;
+    }
+
+    if (action == PURR_SWAP_ROLLBACK) {
+        uint8_t *bak = NULL;
+        uint32_t n = 0;
+        if (bl_read_file(BL_BAK, &bak, &n) != 0 || n != PURR_BOOTIMG_MAX || bak[0] != 0xE9) {
+            free(bak);
+            free(cur);
+            bl_done(cli, fl, cfg, PURR_UPD_FAILED, "the new bootloader did not come up healthy, and there is no usable backup", 0);
+            return;
+        }
+        purr_cli_puts(cli, "bootloader: the new one did not come up healthy; putting the old one back\n");
+        purr_console_flush();
+        int r = purr_bootupdate_write(bak, n);
+        free(bak);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, r == 0 ? "the old bootloader is back" : "putting the old bootloader back FAILED: use the USB flasher", 1);
+        return;
+    }
+
+    /* DO_SWAP, or RESUME_MOVE after a restart in the middle of one. */
+    if (action == PURR_SWAP_RESUME_MOVE) {                /* counted before anything is tried: purr_swap_decide() stops resuming after a few, so a write that cannot finish does not loop */
+        cfg->update.attempts++;
+        purr_cfg_store(fl, cfg);
+    }
+    uint8_t *file = NULL;
+    uint32_t flen = 0;
+    if (bl_read_file(BL_NEW, &file, &flen) != 0) {
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, "the staged bootloader is missing; giving up on the update", 0);
+        return;
+    }
+    purr_cfg_t view;
+    os_cfg_view(cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {
+        .chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
+    };
+    install_mem_ctx_t rdctx = {file, flen};
+    purr_image_header_t hdr;
+    purr_verify_result_t vr = purr_image_verify(&env, install_mem_read, &rdctx, flen, &hdr);
+    const char *why = NULL;
+    if (hdr.magic != PURR_IMAGE_MAGIC || hdr.image_type != PURR_IMG_MODULE || PURR_FLAGS_SUBTYPE(hdr.flags) != PURR_MOD_BOOTLOADER) {
+        why = "the staged file is not a bootloader image";
+    } else if (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF) {
+        why = purr_verify_name(vr);
+    } else if (vr != PURR_V_OK && vr != PURR_V_NO_KEY && vr != PURR_V_ROLE_MISMATCH && vr != PURR_V_BAD_SIGNATURE) {
+        why = purr_verify_name(vr);                       /* secure mode off tolerates an unsigned image, never a damaged or wrong one */
+    } else if ((uint64_t)hdr.payload_offset + hdr.payload_size > flen) {
+        why = "the staged file is cut short";
+    } else {
+        why = purr_bootimg_check(file + hdr.payload_offset, hdr.payload_size, PURR_BOOTIMG_CHIP_ESP32S3);
+    }
+    if (why != NULL) {
+        char m[96];
+        snprintf(m, sizeof(m), "refused: %s", why);
+        free(file);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, m, 0);
+        return;
+    }
+    const uint8_t *payload = file + hdr.payload_offset;
+    size_t plen = hdr.payload_size;
+
+    if (memcmp(cur, payload, plen) == 0) {                /* already in flash: a swap that finished but was cut off before it was recorded */
+        free(file);
+        free(cur);
+        purr_fs_remove(&s_fs, BL_NEW);
+        bl_done(cli, fl, cfg, PURR_UPD_UNCONFIRMED, "the new bootloader is in place; restarting to confirm it", 1);
+        return;
+    }
+
+    char pw[96];
+    if (!purr_bootupdate_power_ok(pw, sizeof(pw))) {
+        free(file);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, pw, 0);
+        return;
+    }
+
+    /* The backup: everything below the partition table, saved and read back before anything changes. */
+    purr_fs_mkdir(&s_fs, "/boot");
+    uint8_t *check = NULL;
+    uint32_t cn = 0;
+    if (purr_fs_write(&s_fs, BL_BAK, cur, PURR_BOOTIMG_MAX) != 0 || bl_read_file(BL_BAK, &check, &cn) != 0 ||
+        cn != PURR_BOOTIMG_MAX || memcmp(check, cur, PURR_BOOTIMG_MAX) != 0) {
+        free(check);
+        free(file);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, "could not save a backup of the current bootloader; nothing was changed", 0);
+        return;
+    }
+    free(check);
+
+    cfg->update.state = PURR_UPD_MOVING;
+    purr_cfg_store(fl, cfg);                              /* recorded before the write, for crash safety */
+    purr_cli_printf(cli, "bootloader: backup saved; writing %s...\n", hdr.version);
+    purr_console_flush();
+    if (purr_bootupdate_write(payload, plen) != 0) {
+        int back = purr_bootupdate_write(cur, PURR_BOOTIMG_MAX);   /* straight back, from memory */
+        free(file);
+        free(cur);
+        bl_done(cli, fl, cfg, PURR_UPD_FAILED, back == 0 ? "the write did not check out; the old bootloader was put back"
+                                                          : "the write did not check out and the old one could not be put back: use the USB flasher", 1);
+        return;
+    }
+    free(file);
+    free(cur);
+    purr_fs_remove(&s_fs, BL_NEW);
+    bl_done(cli, fl, cfg, PURR_UPD_UNCONFIRMED, "installed; restarting to confirm it", 1);
+}
+
+/* KittenOS's side of PurrOS/SPEC.md section 6.1: acts on a pending system-file update that
+ * stage_file_component() (above) recorded in purrcfg. Reboots (never returns) whenever it
+ * actually did something; returns normally when there's nothing to do, so KittenOS's boot
+ * continues into its own shell as usual. Only meaningful called from the recovery profile
+ * (main.c) -- the normal system never writes any update state but NONE/CONFIRMED, so calling
+ * this there would just be a no-op, but it's KittenOS's job by design (section 6.1: "KittenOS
+ * performs the swap. It is never overwritten in normal use, so it can safely replace anything
+ * else"). */
+void purr_swap_setup(purr_cli_t *cli)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (load_cfg(cli, &fl, &cfg) < 0) {
+        return;
+    }
+    purr_swap_action_t action = purr_swap_decide(&cfg.update, 3);
+    if (action == PURR_SWAP_NOTHING) {
+        return;
+    }
+    if (!purr_fs_mounted(&s_fs)) {
+        purr_cli_puts(cli, "swap: no filesystem mounted, cannot act on the pending update\n");
+        return;
+    }
+
+    if (cfg.update.target == PURR_COMP_BOOTLOADER && !PURR_BOOTLOADER_OTA) {      /* a request left by an earlier build: dropped, never acted on */
+        cfg.update.state = PURR_UPD_FAILED;
+        cfg.update.attempts = 0;
+        purr_cfg_store(&fl, &cfg);
+        purr_cli_puts(cli, "swap: bootloader updates over the air are turned off; the pending one is dropped\n");
+        return;
+    }
+    if (cfg.update.target == PURR_COMP_BOOTLOADER &&
+        (action == PURR_SWAP_DO_SWAP || action == PURR_SWAP_RESUME_MOVE || action == PURR_SWAP_ROLLBACK)) {
+        bootloader_swap(cli, &fl, &cfg, action);          /* flash 0x0, with a backup: not a rename of files */
+        return;
+    }
+
+    const char *name = purr_swap_filename(cfg.update.target);
+    if (name == NULL) {
+        purr_cli_puts(cli, "swap: pending update names an unknown component; giving up on it\n");
+        cfg.update.state = PURR_UPD_FAILED;
+        purr_cfg_store(&fl, &cfg);
+        return;
+    }
+    char cur[40], bak[40], neu[40], bad[40];
+    snprintf(cur, sizeof(cur), "/boot/%s", name);
+    snprintf(bak, sizeof(bak), "/boot/%s.bak", name);
+    snprintf(neu, sizeof(neu), "/boot/%s.new", name);
+    snprintf(bad, sizeof(bad), "/boot/%s.bad", name);
+
+    if (action == PURR_SWAP_ROLLBACK) {
+        purr_cli_printf(cli, "swap: %s did not come up healthy, rolling back\n", name);
+        purr_fs_remove(&s_fs, bad);             /* an older .bad, if any, loses to this one */
+        purr_fs_rename(&s_fs, cur, bad);        /* best-effort: cur may already be gone */
+        purr_fs_rename(&s_fs, bak, cur);
+        cfg.update.state = PURR_UPD_FAILED;
+        purr_cfg_store(&fl, &cfg);
+        purr_console_flush();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
+
+    if (action == PURR_SWAP_RETRY) {
+        cfg.update.attempts++;
+        purr_cli_printf(cli, "swap: %s not confirmed yet, trying again (%u/3)\n", name,
+                        (unsigned)cfg.update.attempts);
+        purr_cfg_store(&fl, &cfg);
+        purr_console_flush();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
+
+    /* DO_SWAP and RESUME_MOVE both end up here: verify again -- never trust a file just
+     * because it was verified once before landing on flash -- then do whichever renames
+     * haven't happened yet. is_bak_done distinguishes a fresh swap from one a crash caught
+     * mid-way: RESUME_MOVE means a previous attempt got as far as recording MOVING before
+     * being cut off, so the first rename may already have happened. */
+    int is_bak_done = 0;
+    if (action == PURR_SWAP_RESUME_MOVE) {
+        int is_dir;
+        uint32_t sz;
+        is_bak_done = (purr_fs_stat(&s_fs, bak, &is_dir, &sz) == 0);
+        purr_cli_printf(cli, "swap: resuming an interrupted swap of %s\n", name);
+    } else {
+        purr_cli_printf(cli, "swap: installing the staged %s\n", name);
+    }
+
+    int is_dir;
+    uint32_t new_size;
+    if (purr_fs_stat(&s_fs, neu, &is_dir, &new_size) != 0) {
+        purr_cli_printf(cli, "swap: %s is missing; giving up on the update\n", neu);
+        cfg.update.state = PURR_UPD_FAILED;
+        purr_cfg_store(&fl, &cfg);
+        return;
+    }
+    uint8_t *buf = malloc(new_size);
+    if (buf == NULL) {
+        purr_cli_puts(cli, "swap: out of memory verifying the staged file\n");
+        return;
+    }
+    read_all_ctx_t rd = {buf, new_size, 0};
+    if (purr_fs_read(&s_fs, neu, read_all_cb, &rd) != 0 || rd.got != new_size) {
+        free(buf);
+        purr_cli_printf(cli, "swap: could not read %s\n", neu);
+        return;
+    }
+
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {
+        .chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+        .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0,
+    };
+    install_mem_ctx_t rdctx = {buf, new_size};
+    purr_image_header_t hdr;
+    purr_verify_result_t vr = purr_image_verify(&env, install_mem_read, &rdctx, new_size, &hdr);
+    free(buf);
+    if (hdr.magic != PURR_IMAGE_MAGIC || (vr != PURR_V_OK && view.secure_mode != PURR_SECURE_OFF)) {
+        purr_cli_printf(cli, "swap: %s failed re-verification (%s); giving up on the update\n",
+                        neu, purr_verify_name(vr));
+        cfg.update.state = PURR_UPD_FAILED;
+        purr_cfg_store(&fl, &cfg);
+        return;
+    }
+
+    cfg.update.state = PURR_UPD_MOVING;
+    purr_cfg_store(&fl, &cfg);           /* recorded before either rename, for crash safety */
+
+    if (!is_bak_done) {
+        purr_fs_remove(&s_fs, bak);      /* a stale .bak from a much older cycle, if any */
+        purr_fs_rename(&s_fs, cur, bak); /* cur may not exist yet (first-ever install): fine */
+    }
+    if (purr_fs_rename(&s_fs, neu, cur) != 0) {
+        purr_cli_printf(cli, "swap: could not move %s into place\n", neu);
+        return;                          /* stays MOVING; the next boot resumes it */
+    }
+
+    cfg.update.state = PURR_UPD_UNCONFIRMED;
+    cfg.update.attempts = 0;
+    cfg.boot_fail_count = 0;                         /* a restart that follows an update is not a failed start (the loader does the same after a flash): it must not make the next start set the downloaded drivers aside */
+    purr_cfg_store(&fl, &cfg);
+    purr_cli_printf(cli, "swap: %s installed, restarting to confirm it\n", name);
+    purr_console_flush();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+}
+
+static void kernel_table_reboot_system(purr_cli_t *cli, const char *target)
+{
+    uint32_t flag = 0;
+    const char *what = NULL;
+    if (target != NULL && strcmp(target, "recovery") == 0) {
+        flag = PURR_CFGF_FORCE_RECOVERY;
+        what = "recovery";
+    } else if (target != NULL && strcmp(target, "loader") == 0) {
+        flag = PURR_CFGF_FORCE_LOADER;
+        what = "the recovery loader";
+    }
+    /* F-10: a plain `reboot` is harmless (any user can already power-cycle the device), but
+     * forcing recovery or the loader can hand the device to a from-scratch reinstall. */
+    if (flag != 0 && !require_admin(cli)) {
+        return;
+    }
+    if (flag != 0) {
+        /* The one-shot request: the bootloader clears it and starts the target once. */
+        purr_flash_t fl;
+        purr_cfg_t cfg;
+        if (load_cfg(cli, &fl, &cfg) < 0) {
+            return;
+        }
+        purr_cfg_set_flag(&cfg, flag);
+        if (purr_cfg_store(&fl, &cfg) != 0) {
+            purr_cli_puts(cli, "purrcfg: could not write the request\n");
+            return;
+        }
+        purr_cli_printf(cli, "restarting into %s...\n", what);
+    } else {
+        purr_cli_puts(cli, "restarting...\n");
+    }
+    purr_console_flush();
+    esp_restart();
+}
+
+static void kernel_table_print_purrcfg(purr_cli_t *cli)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    int r = load_cfg(cli, &fl, &cfg);
+    if (r < 0) {
+        return;
+    }
+    static const char *const modes[] = {"off", "warn", "enforce"};
+    purr_cli_printf(cli, "copy:        %s\n", r == 0 ? "stored" : "none yet (defaults)");
+    purr_cli_printf(cli, "seq:         %u\n", (unsigned)cfg.seq);
+    {
+        /* The effective state (purr_trust.h), then what the raw fields say. */
+        purr_trust_t tr;
+        os_trust(&cfg, &tr);
+        purr_cli_printf(cli, "secure mode: %s%s, %s trust block\n", modes[tr.mode],
+                        tr.dev ? " (DEVELOPMENT MODE)" : "",
+                        tr.signature_ok ? "signed" : "unsigned");
+        purr_cli_printf(cli, "  stored:    mode %s, tighten %s, dev flag %s, dev lock %s\n",
+                        cfg.secure_mode < 3 ? modes[cfg.secure_mode] : "?",
+                        cfg.tighten < 3 ? modes[cfg.tighten] : "?",
+                        (cfg.flags & PURR_CFGF_DEV_MODE) ? "on" : "off",
+                        (cfg.trust_flags & PURR_TRUSTF_DEV_LOCKED) ? "set" : "clear");
+    }
+    purr_cli_printf(cli, "flags:       0x%x%s\n", (unsigned)cfg.flags,
+                    (cfg.flags & PURR_CFGF_FORCE_RECOVERY) ? " (recovery requested)" : "");
+    purr_cli_printf(cli, "boot count:  %u, fails %u\n", (unsigned)cfg.boot_seq, (unsigned)cfg.boot_fail_count);
+
+    static const char *const states[] = {"none", "verified", "failed (warned)", "forced recovery",
+                                         "purrcfg default", "auto reinstall", "unchecked"};
+    purr_handoff_t h;
+    if (purr_kernel_handoff(&h) != 0) {
+        purr_cli_printf(cli, "handoff:     none (cold boot, or not the PURR bootloader)\n");
+    } else {
+        purr_cli_printf(cli, "handoff:     %s, key %u, flags used 0x%x, enforced %s%s%s, bootloader %u.%u.%u\n",
+                        h.boot_state < sizeof(states) / sizeof(states[0]) ? states[h.boot_state] : "?",
+                        (unsigned)h.key_id_used, (unsigned)h.flags_used,
+                        modes[PURR_SECST_MODE(h.secure_state) < 3 ? PURR_SECST_MODE(h.secure_state) : 1],
+                        (h.secure_state & PURR_SECST_DEV) ? " + DEVELOPMENT MODE" : "",
+                        (h.secure_state & PURR_SECST_SIGNED) ? " (signed trust block)" : "",
+                        (unsigned)(h.bootloader_version >> 16), (unsigned)((h.bootloader_version >> 8) & 0xFF),
+                        (unsigned)(h.bootloader_version & 0xFF));
+    }
+}
+
+/* ---------------------------------------------------------------- secure status and trust
+ * plan3.md "Design: trust block, development mode, secure status". The policy itself is the
+ * bootloader's (purr_trust.h); these are the ways a person reads and changes it. Tightening is
+ * allowed to any admin; the only unsigned way to loosen is development mode, which is explicit,
+ * confirmed at the keyboard, shown everywhere, and refused on a device whose signed trust block
+ * says DEV_LOCKED. Anything else that loosens needs a signed trust block (`trust apply`). */
+
+static const char *secure_mode_name(uint8_t m)
+{
+    static const char *const n[] = {"off", "warn", "enforce"};
+    return m < 3 ? n[m] : "?";
+}
+
+static void secure_print_status(purr_cli_t *cli)
+{
+    purr_secure_status_t st;
+    purr_secure_status(&st);
+    purr_cli_printf(cli, "status:        %s\n", purr_secure_level_name(st.level));
+    if (st.have_handoff) {
+        purr_cli_printf(cli, "this boot:     enforced %s%s%s, running slot %s%s\n",
+                        secure_mode_name(st.mode_at_boot), st.dev_at_boot ? " + DEVELOPMENT MODE" : "",
+                        st.signed_at_boot ? ", signed trust block" : ", unsigned trust block",
+                        st.slot_verified ? "verified" : "NOT verified",
+                        st.slot_verified ? "" : " (booted with a warning)");
+    } else {
+        purr_cli_puts(cli, "this boot:     no handoff (not the PURR bootloader, or it was lost)\n");
+    }
+    purr_cli_printf(cli, "next boot:     %s%s, %s trust block\n", secure_mode_name(st.mode_now),
+                    st.dev_now ? " + DEVELOPMENT MODE" : "", st.signed_now ? "signed" : "unsigned");
+    purr_cli_puts(cli, "(software attestation: the hardware root of trust is not enabled)\n");
+}
+
+/* Verify the signature trailer of kernel, kittenos and loader against the effective key bag.
+ * Returns how many are present but do NOT verify; prints each when verbose. */
+static int secure_check_slots(purr_cli_t *cli, int verbose)
+{
+    static const struct { const char *label; uint8_t type, subtype; } slots[] = {
+        {"kernel", PURR_IMG_MODULE, PURR_MOD_KERNEL},
+        {"kittenos", PURR_IMG_RECOVERY, 0},
+        {"loader", PURR_IMG_MODULE, PURR_MOD_LOADER},
+    };
+    purr_flash_t fl;
+    purr_cfg_t cfg, view;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    os_cfg_view(&cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {.chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls,
+                             .bootloader_version = 0, .version_floor = 0, .enforce_floor = 0};
+    int bad = 0;
+    for (size_t i = 0; i < sizeof(slots) / sizeof(slots[0]); i++) {
+        const esp_partition_t *p = esp_partition_find_first(ESP_PARTITION_TYPE_ANY,
+                                                             ESP_PARTITION_SUBTYPE_ANY, slots[i].label);
+        if (p == NULL) {
+            continue;
+        }
+        purr_verify_result_t r = purr_slot_trailer_check(&env, p, slots[i].type, slots[i].subtype);
+        if (r != PURR_V_OK) {
+            bad++;
+        }
+        if (verbose) {
+            purr_cli_printf(cli, "  %-9s %s\n", slots[i].label, purr_verify_name(r));
+        }
+    }
+    return bad;
+}
+
+/* A deliberate keypress, not a typo: Y within 15 s, anything else (or nothing) is no. */
+static int secure_confirm(purr_cli_t *cli, const char *what)
+{
+    purr_cli_printf(cli, "%s\nPress Y to confirm, anything else cancels... ", what);
+    purr_console_flush();
+    for (int i = 0; i < 750; i++) {
+        char c = purr_kernel_key();
+        if (c != 0) {
+            purr_cli_puts(cli, "\n");
+            return c == 'y' || c == 'Y';
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    purr_cli_puts(cli, "\ntimed out, cancelled\n");
+    return 0;
+}
+
+static int secure_store(purr_cli_t *cli, void (*change)(purr_cfg_t *, intptr_t), intptr_t arg)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (load_cfg(cli, &fl, &cfg) < 0) {
+        return 1;
+    }
+    change(&cfg, arg);
+    if (purr_cfg_store(&fl, &cfg) != 0) {
+        purr_cli_puts(cli, "purrcfg: could not write the change\n");
+        return 1;
     }
     return 0;
 }
 
-/* Words a person reads, not an ESP-IDF error name. */
+static void change_tighten(purr_cfg_t *cfg, intptr_t level) { cfg->tighten = (uint8_t)level; }
+static void change_dev(purr_cfg_t *cfg, intptr_t on)
+{
+    if (on) {
+        cfg->flags |= PURR_CFGF_DEV_MODE;
+    } else {
+        cfg->flags &= ~PURR_CFGF_DEV_MODE;
+    }
+}
+
+static int cmd_secure(purr_cli_t *cli, int argc, char **argv)
+{
+    const char *sub = argc > 1 ? argv[1] : "status";
+
+    if (strcmp(sub, "status") == 0) {
+        secure_print_status(cli);
+        return 0;
+    }
+    if (!require_admin(cli)) {
+        return 1;
+    }
+
+    if (strcmp(sub, "enforce") == 0) {
+        /* Never leave the device with nothing it may boot: every slot has to verify right now. */
+        purr_cli_puts(cli, "checking the boot slots first...\n");
+        if (secure_check_slots(cli, 1) != 0) {
+            purr_cli_puts(cli, "refusing: enforcing now would make the slot(s) above unbootable.\n"
+                               "reinstall them (netinstall / recovery) so they carry a valid signature.\n");
+            return 1;
+        }
+        if (!secure_confirm(cli, "Enforce from the next boot: an unsigned, tampered or older image will be\n"
+                                 "REFUSED instead of booted with a warning.")) {
+            return 1;
+        }
+        if (secure_store(cli, change_tighten, PURR_SECURE_ENFORCE) != 0) {
+            return 1;
+        }
+        purr_cli_puts(cli, "enforce is set. It applies from the next boot (reboot).\n");
+        return 0;
+    }
+    if (strcmp(sub, "relax") == 0) {
+        /* Undo the tighten floor only; a signed trust block's own mode still applies. */
+        if (secure_store(cli, change_tighten, PURR_SECURE_OFF) != 0) {
+            return 1;
+        }
+        purr_cli_puts(cli, "the tighten floor is cleared; the signed policy (or warn) applies from the next boot.\n");
+        return 0;
+    }
+    if (strcmp(sub, "dev") == 0 && argc > 2) {
+        if (strcmp(argv[2], "off") == 0) {
+            if (secure_store(cli, change_dev, 0) != 0) {
+                return 1;
+            }
+            purr_cli_puts(cli, "development mode is off. It applies from the next boot.\n");
+            return 0;
+        }
+        if (strcmp(argv[2], "on") == 0) {
+            purr_cli_puts(cli, "development mode can only be turned on from the Security tab in recovery (" PURR_BRAND_RECOVERY "):\n"
+                               "it asks for an administrator and about your data first.\n");
+            return 1;
+        }
+    }
+    purr_cli_puts(cli, "usage: secure [status]\n"
+                       "       secure enforce        (admin) enforce from the next boot\n"
+                       "       secure relax          (admin) clear the tighten floor\n"
+                       "       secure dev off        (admin) turn development mode off (turning it on is in recovery)\n");
+    return 1;
+}
+
+/* trust apply <file>: take a signed trust block (purrstrap keys trust-block) and make it the
+ * device's policy. Only the SIGNED fields are taken -- mode, dev lock, revocations, override keys
+ * and the signature itself -- and only if the signature verifies against the compiled-in boot
+ * keys. Everything else on the device (floors, boot count, flags) stays. This is the way to
+ * loosen without development mode: it needs the owner's boot key. */
+static int cmd_trust(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 3 || strcmp(argv[1], "apply") != 0) {
+        purr_cli_puts(cli, "usage: trust apply <file>   (a purrcfg image from `purrstrap keys trust-block`)\n");
+        return 1;
+    }
+    if (!require_admin(cli) || !need_fs(cli)) {
+        return 1;
+    }
+    uint8_t *buf = malloc(2 * PURR_CFG_SECTOR_SIZE);
+    if (buf == NULL) {
+        purr_cli_puts(cli, "out of memory\n");
+        return 1;
+    }
+    read_all_ctx_t rd = {buf, 2 * PURR_CFG_SECTOR_SIZE, 0};
+    if (purr_fs_read(&s_fs, argv[2], read_all_cb, &rd) != 0 || rd.got < sizeof(purr_cfg_t)) {
+        free(buf);
+        purr_cli_printf(cli, "could not read %s (a purrcfg image, at least %u bytes)\n", argv[2],
+                        (unsigned)sizeof(purr_cfg_t));
+        return 1;
+    }
+    purr_cfg_t block;
+    memcpy(&block, buf, sizeof(block));
+    free(buf);
+    if (!purr_cfg_valid(&block)) {
+        purr_cli_puts(cli, "that is not a valid purrcfg image (magic, size or checksum)\n");
+        return 1;
+    }
+    purr_trust_t bt;
+    os_trust(&block, &bt);
+    if (!bt.signature_ok) {
+        purr_cli_puts(cli, "refused: the trust block is not signed by a boot key this device trusts\n");
+        return 1;
+    }
+    if (!secure_confirm(cli, "Replace this device's signed trust policy with the one in the file?")) {
+        return 1;
+    }
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    if (load_cfg(cli, &fl, &cfg) < 0) {
+        return 1;
+    }
+    cfg.secure_mode = block.secure_mode;
+    cfg.trust_flags = block.trust_flags;
+    cfg.revoked_keys = block.revoked_keys;
+    memcpy(cfg.keys, block.keys, sizeof(cfg.keys));
+    memcpy(cfg.trust_sig, block.trust_sig, sizeof(cfg.trust_sig));
+    if (purr_cfg_store(&fl, &cfg) != 0) {
+        purr_cli_puts(cli, "purrcfg: could not write the trust block\n");
+        return 1;
+    }
+    purr_trust_t after;
+    os_trust(&cfg, &after);
+    purr_cli_printf(cli, "trust block applied: %s%s from the next boot (reboot)\n",
+                    secure_mode_name(after.mode), after.dev ? " + DEVELOPMENT MODE" : "");
+    return 0;
+}
+
+/* ---------------------------------------------------------------- accounts */
+
+static void console_puts_raw(const char *s)
+{
+    while (*s) {
+        purr_console_put(NULL, *s++);
+    }
+    purr_console_flush();
+}
+
+/* A masked line read directly from the keyboard, bypassing the shell's own line editor
+ * (which would echo it in the clear). Used for passwords typed mid-command. */
+static void read_masked_line(char *buf, size_t cap)
+{
+    size_t len = 0;
+    for (;;) {
+        char c = purr_kernel_key();
+        if (c == 0) {
+            vTaskDelay(pdMS_TO_TICKS(15));
+            continue;
+        }
+        if (c == '\r' || c == '\n') {
+            break;
+        }
+        if ((c == '\b' || c == 0x7F) && len > 0) {
+            len--;
+            console_puts_raw("\b \b");
+            continue;
+        }
+        if (c >= 0x20 && c <= 0x7E && len < cap - 1) {
+            buf[len++] = c;
+            console_puts_raw("*");
+        }
+    }
+    buf[len] = '\0';
+    console_puts_raw("\n");
+}
+
+/* whoami/id/su/passwd/useradd/userdel/usermod/logout used to be inline commands here --
+ * they're now Modules/coreos/login_module.c, the third real slice ported onto the prototype
+ * kernel table (purr_kernel_table.h's login_* entries). Unlike the filesystem sweep, every
+ * one of these except whoami/id is security-sensitive, so each stays a single opaque,
+ * cli-aware kernel_table_login_* function below (same shape as netinstall's net_install and
+ * fs_format) -- the module is just argument parsing and dispatch, never touching a password,
+ * the shadow file, or an admin check directly. Bodies are unchanged from the old inline
+ * commands, just taking their target/role as a plain parameter instead of parsing argv
+ * themselves. */
+
+/* F-10: the one shared boolean every admin-only check (accounts, and the destructive
+ * whole-device commands in the kernel/core tables below) is built on. Root and an admin
+ * acting on their own behalf both count -- same rule fs_allowed() uses for file ownership,
+ * above. */
+static int is_admin(void)
+{
+    return purr_login_is_root() || purr_login_current()->role == PURR_ROLE_USER_ADMIN;
+}
+
+static int require_admin(purr_cli_t *cli)
+{
+    if (is_admin()) {
+        return 1;
+    }
+    purr_cli_puts(cli, "only an admin can do that\n");
+    return 0;
+}
+
+static void kernel_table_login_whoami(purr_klogin_who_t *out)
+{
+    const purr_user_t *u = purr_login_current();
+    snprintf(out->name, sizeof(out->name), "%s", u->name);
+    out->uid = u->uid;
+    out->role = u->role;
+    out->is_root = purr_login_is_root();
+}
+
+static void kernel_table_login_logout(void)
+{
+    purr_login_set_root(0);
+    purr_login_request_logout();
+}
+
+/* The login gate itself (login.c), not a shell command: main.c's run_login()/run_shell() call
+ * these instead of purr_login_run()/purr_login_skip()/purr_login_take_logout() directly, same
+ * reasoning as every other login_* entry -- first-time setup and the login loop both read
+ * passwords straight off the keyboard and check them against the shadow file, exactly the kind
+ * of thing a module (or, eventually, CoreOS itself, loaded the same way) is never handed
+ * directly. Bodies are unchanged from what main.c already called. */
+static void kernel_table_login_run(void)
+{
+    purr_login_run();
+}
+
+static void kernel_table_login_skip(const char *name, purr_user_role_t role)
+{
+    purr_login_skip(name, role);
+}
+
+static int kernel_table_login_take_logout(void)
+{
+    return purr_login_take_logout();
+}
+
+/* The raw keyboard driver, same tier as console_clear/console_flush below: main.c's shell
+ * loop reads through this instead of calling purr_kernel_key() directly. */
+static char kernel_table_read_key(void)
+{
+    return purr_kernel_key();
+}
+
+/* F-02 follow-up: raw serial read/write for the optional debug module -- see
+ * purr_kernel_table.h's own comment on why this exists and why it's narrow on purpose. Plain
+ * stdio over the console's own fd, not a second driver install: ESP-IDF's console subsystem
+ * already owns the USB-Serial-JTAG peripheral (it's how every ESP_LOGI call already reaches
+ * the serial terminal), so installing usb_serial_jtag's own driver again here would conflict
+ * with that, not add a second path to the same wire. */
+static int kernel_table_serial_write(const void *buf, int len)
+{
+    int n = (int)write(fileno(stdout), buf, (size_t)len);
+    fflush(stdout);
+    return n;
+}
+
+/* FreeRTOS wants void(*)(void*) with its own task-handle out-param; the kernel table's own
+ * shape is simpler (no handle, nothing ever stops this task) since the one real caller
+ * (the debug module) just wants "run forever in the background" with nothing to tear down. */
+static int kernel_table_task_create(void (*entry)(void *arg), const char *name,
+                                    uint32_t stack_words, void *arg, int priority)
+{
+    TaskHandle_t h = NULL;
+    BaseType_t ok = xTaskCreate(entry, name, stack_words, arg, priority, &h);
+    return (ok == pdPASS && h != NULL) ? 0 : -1;
+}
+
+static int kernel_table_serial_read(void *buf, int max, int timeout_ms)
+{
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(fileno(stdin), &rfds);
+    struct timeval tv = {.tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000};
+    int r = select(fileno(stdin) + 1, &rfds, NULL, NULL, &tv);
+    if (r <= 0) {
+        /* Found live: the USB-Serial-JTAG VFS's select() does not reliably block for the
+         * full timeout -- a caller polling in a tight loop (the debug module's serial
+         * console task) never yielded long enough for the idle task to reset its own
+         * watchdog, which fired repeatedly. This guarantees a real yield every call
+         * regardless of select()'s own blocking fidelity, capped so a caller that passes a
+         * short timeout still gets a short wait, not always the full cap. */
+        TickType_t cap = pdMS_TO_TICKS(20);
+        TickType_t want = pdMS_TO_TICKS(timeout_ms > 0 ? timeout_ms : 0);
+        vTaskDelay(want < cap ? (want == 0 ? 1 : want) : cap);
+        return 0;               /* nothing arrived within the timeout -- not an error */
+    }
+    int n = (int)read(fileno(stdin), buf, (size_t)max);
+    return n < 0 ? -1 : n;
+}
+
+static int kernel_table_login_su(purr_cli_t *cli)
+{
+    if (purr_login_is_root()) {
+        purr_cli_puts(cli, "already root\n");
+        return 0;
+    }
+    if (!require_admin(cli)) {        /* F-10: one shared check, not a third inline copy */
+        return 1;
+    }
+    purr_cli_puts(cli, "password: ");
+    purr_console_flush();
+    char pass[64];
+    read_masked_line(pass, sizeof(pass));
+    int ok = purr_shadow_check(purr_login_shadow(), purr_login_current()->name, pass);
+    memset(pass, 0, sizeof(pass));
+    if (!ok) {
+        purr_cli_puts(cli, "su: incorrect password\n");
+        return 1;
+    }
+    purr_login_set_root(1);
+    return 0;
+}
+
+static int kernel_table_login_passwd(purr_cli_t *cli, const char *target_or_null)
+{
+    const char *target = target_or_null ? target_or_null : purr_login_current()->name;
+    int is_self = strcmp(target, purr_login_current()->name) == 0;
+    if (!is_self && !require_admin(cli)) {    /* F-10: one shared check, not a third inline copy */
+        return 1;
+    }
+    if (purr_user_list_find(purr_login_users(), target) == NULL) {
+        purr_cli_printf(cli, "passwd: no such user '%s'\n", target);
+        return 1;
+    }
+    if (is_self) {
+        purr_cli_puts(cli, "current password: ");
+        purr_console_flush();
+        char current[64];
+        read_masked_line(current, sizeof(current));
+        int ok = purr_shadow_check(purr_login_shadow(), target, current);
+        memset(current, 0, sizeof(current));
+        if (!ok) {
+            purr_cli_puts(cli, "passwd: incorrect password\n");
+            return 1;
+        }
+    }
+    purr_cli_puts(cli, "new password: ");
+    purr_console_flush();
+    char pass1[64], pass2[64];
+    read_masked_line(pass1, sizeof(pass1));
+    purr_cli_puts(cli, "confirm: ");
+    purr_console_flush();
+    read_masked_line(pass2, sizeof(pass2));
+    if (strcmp(pass1, pass2) != 0 || pass1[0] == '\0') {
+        memset(pass1, 0, sizeof(pass1));
+        memset(pass2, 0, sizeof(pass2));
+        purr_cli_puts(cli, "passwd: those did not match, or were empty\n");
+        return 1;
+    }
+    uint8_t salt[PURR_SALT_LEN];
+    purr_login_random_salt(salt);
+    purr_shadow_set(purr_login_shadow(), target, pass1, salt, PURR_PBKDF2_ITERATIONS);
+    memset(pass1, 0, sizeof(pass1));
+    memset(pass2, 0, sizeof(pass2));
+    if (purr_login_persist() != 0) {
+        purr_cli_puts(cli, "passwd: could not save\n");
+        return 1;
+    }
+    purr_cli_puts(cli, "password changed\n");
+    return 0;
+}
+
+static int kernel_table_login_useradd(purr_cli_t *cli, const char *name, int as_admin)
+{
+    if (!require_admin(cli)) {
+        return 1;
+    }
+    purr_user_role_t role = as_admin ? PURR_ROLE_USER_ADMIN : PURR_ROLE_USER_STANDARD;
+    uint8_t uid = purr_user_next_uid(purr_login_users());
+    int r = purr_user_list_add(purr_login_users(), name, uid, role);
+    if (r != PURR_USER_ADDED) {
+        purr_cli_printf(cli, "useradd: %s\n", r == PURR_USER_EXISTS ? "already exists" :
+                        r == PURR_USER_FULL ? "too many accounts" : "invalid name");
+        return 1;
+    }
+    purr_cli_puts(cli, "set their password:\n");
+    purr_console_flush();
+    char pass1[64], pass2[64];
+    purr_cli_puts(cli, "new password: ");
+    purr_console_flush();
+    read_masked_line(pass1, sizeof(pass1));
+    purr_cli_puts(cli, "confirm: ");
+    purr_console_flush();
+    read_masked_line(pass2, sizeof(pass2));
+    if (strcmp(pass1, pass2) != 0 || pass1[0] == '\0') {
+        memset(pass1, 0, sizeof(pass1));
+        memset(pass2, 0, sizeof(pass2));
+        purr_user_list_remove(purr_login_users(), name);
+        purr_cli_puts(cli, "useradd: those did not match, or were empty; not created\n");
+        return 1;
+    }
+    uint8_t salt[PURR_SALT_LEN];
+    purr_login_random_salt(salt);
+    purr_shadow_set(purr_login_shadow(), name, pass1, salt, PURR_PBKDF2_ITERATIONS);
+    memset(pass1, 0, sizeof(pass1));
+    memset(pass2, 0, sizeof(pass2));
+    if (purr_login_persist() != 0) {
+        purr_cli_puts(cli, "useradd: could not save\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s created (uid %u, %s)\n", name, uid, role == PURR_ROLE_USER_ADMIN ? "admin" : "standard");
+    return 0;
+}
+
+static int kernel_table_login_userdel(purr_cli_t *cli, const char *name)
+{
+    if (!require_admin(cli)) {
+        return 1;
+    }
+    if (strcmp(name, purr_login_current()->name) == 0) {
+        purr_cli_puts(cli, "userdel: cannot delete the account you are logged in as\n");
+        return 1;
+    }
+    if (purr_user_is_last_admin(purr_login_users(), name)) {
+        purr_cli_puts(cli, "userdel: refusing to remove the last admin\n");
+        return 1;
+    }
+    if (!purr_user_list_remove(purr_login_users(), name)) {
+        purr_cli_printf(cli, "userdel: no such user '%s'\n", name);
+        return 1;
+    }
+    purr_shadow_list_remove(purr_login_shadow(), name);
+    if (purr_login_persist() != 0) {
+        purr_cli_puts(cli, "userdel: could not save\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s removed\n", name);
+    return 0;
+}
+
+static int kernel_table_login_usermod(purr_cli_t *cli, const char *name, int as_admin)
+{
+    if (!require_admin(cli)) {
+        return 1;
+    }
+    purr_user_t *u = purr_user_list_find(purr_login_users(), name);
+    if (u == NULL) {
+        purr_cli_printf(cli, "usermod: no such user '%s'\n", name);
+        return 1;
+    }
+    purr_user_role_t role = as_admin ? PURR_ROLE_USER_ADMIN : PURR_ROLE_USER_STANDARD;
+    if (role == PURR_ROLE_USER_STANDARD && purr_user_is_last_admin(purr_login_users(), name)) {
+        purr_cli_puts(cli, "usermod: refusing to demote the last admin\n");
+        return 1;
+    }
+    u->role = role;
+    if (purr_login_persist() != 0) {
+        purr_cli_puts(cli, "usermod: could not save\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "%s is now %s\n", name, role == PURR_ROLE_USER_ADMIN ? "admin" : "standard");
+    return 0;
+}
+
+/* ---------------------------------------------------------------- security, without a prompt */
+
+typedef struct {
+    char *buf;
+    size_t cap, len;
+} sec_capture_t;
+
+static void sec_capture_put(void *ctx, char c)
+{
+    sec_capture_t *cp = ctx;
+    if (cp->len + 1 < cp->cap) {
+        cp->buf[cp->len++] = c == '\n' ? ' ' : c;
+        cp->buf[cp->len] = '\0';
+    }
+}
+
+static int sec_admin(char *msg, size_t cap)
+{
+    if (purr_login_is_root() || purr_login_current()->role == PURR_ROLE_USER_ADMIN) {
+        return 1;
+    }
+    snprintf(msg, cap, "only an administrator can change security settings");
+    return 0;
+}
+
+int purr_security_dev_active(void)
+{
+    static int cached = -1;                 /* constant for a boot, and the VM fallback below verifies a signature */
+    if (cached >= 0) {
+        return cached;
+    }
+    purr_handoff_t h;
+    int have = purr_kernel_handoff(&h) == 0;
+    int active = have && (h.secure_state & PURR_SECST_DEV) != 0;
+#if CONFIG_PURR_NET_ETH_W5500
+    /* The VM flavor only (never a device): the emulator's RTC memory does not survive a cold power-on, so
+     * the bootloader's handoff can be missing. Then the trust block in flash decides. The standard build
+     * has no such fallback and only ever believes the bootloader. */
+    if (!have) {
+        purr_secure_status_t st;
+        purr_secure_status(&st);
+        active = st.dev_now != 0;
+    }
+#endif
+    cached = active;
+    return active;
+}
+
+int purr_security_unsigned_apps_allowed(void)
+{
+    return purr_security_dev_active() && purr_settings_kv_int("dev.unsigned_apps", 0) == 1;
+}
+
+int purr_security_set_enforce(int on, char *msg, size_t cap)
+{
+    if (!sec_admin(msg, cap)) {
+        return -1;
+    }
+    purr_cli_t quiet;
+    sec_capture_t cp = {msg, cap, 0};
+    msg[0] = '\0';
+    purr_cli_init(&quiet, NULL, 0, sec_capture_put, &cp, "");
+    if (on) {
+        /* never leave the device with nothing it may boot: every slot has to verify right now */
+        if (secure_check_slots(&quiet, 0) != 0) {
+            snprintf(msg, cap, "a boot slot does not verify; reinstall it first, enforcing would make it unbootable");
+            return -1;
+        }
+    }
+    if (secure_store(&quiet, change_tighten, on ? PURR_SECURE_ENFORCE : PURR_SECURE_OFF) != 0) {
+        if (msg[0] == '\0') snprintf(msg, cap, "could not write the setting");
+        return -1;
+    }
+    snprintf(msg, cap, on ? "Enforcing signatures from the next boot." : "Enforce floor cleared; applies from the next boot.");
+    return 0;
+}
+
+int purr_security_set_dev(int on, char *msg, size_t cap)
+{
+    if (!sec_admin(msg, cap)) {
+        return -1;
+    }
+    purr_cli_t quiet;
+    sec_capture_t cp = {msg, cap, 0};
+    msg[0] = '\0';
+    purr_cli_init(&quiet, NULL, 0, sec_capture_put, &cp, "");
+    if (on) {                       /* weakening the bootloader is recovery's job (recovery_app.c), where the data question is asked */
+        snprintf(msg, cap, "turn developer mode on from recovery (" PURR_BRAND_RECOVERY " > Security)");
+        return -1;
+    }
+    if (secure_store(&quiet, change_dev, on ? 1 : 0) != 0) {
+        if (msg[0] == '\0') snprintf(msg, cap, "could not write the setting");
+        return -1;
+    }
+    if (!on) {
+        purr_settings_kv_set("dev.unsigned_apps", "0");      /* it cannot outlive developer mode */
+    }
+    snprintf(msg, cap, on ? "Developer mode on from the next boot." : "Developer mode off from the next boot.");
+    return 0;
+}
+
+int purr_security_set_unsigned_apps(int on, char *msg, size_t cap)
+{
+    if (!sec_admin(msg, cap)) {
+        return -1;
+    }
+    if (on && !purr_security_dev_active()) {
+        snprintf(msg, cap, "developer mode is not active this boot; turn it on and restart first");
+        return -1;
+    }
+    if (purr_settings_kv_set("dev.unsigned_apps", on ? "1" : "0") != 0) {
+        snprintf(msg, cap, "could not save");
+        return -1;
+    }
+    if (on) {
+        ESP_LOGW("security", "UNSIGNED APPS ALLOWED by %s (developer mode)", purr_login_current()->name);
+    }
+    snprintf(msg, cap, on ? "Unsigned apps may now be installed and run." : "Only signed apps will run.");
+    return 0;
+}
+
+/*
+ * cmd_plantmodules: temporary, stands in for a real transport (a modinstall-style URL fetch,
+ * or MTP once it exists -- neither exists yet). Plants the real, purrstrap-built and signed
+ * "about", "apps", "wifi", and "netinstall" modules to /system so the real loader picks them
+ * up on the next boot. Remove once modules have a real way onto the device.
+ */
+static const uint8_t s_about_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x61, 0x62, 0x6f, 0x75, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x18, 0x01, 0x00, 0x00, 0xc4, 0x5d, 0x15, 0x61, 0x52, 0x06, 0x16,
+    0x9f, 0x27, 0x79, 0x20, 0xbc, 0x73, 0x34, 0x5b, 0x7c, 0x3f, 0x64, 0x28,
+    0x7a, 0x96, 0x8a, 0xf3, 0x82, 0xfe, 0x0e, 0x79, 0x5a, 0xe1, 0x4f, 0xcf,
+    0x5a, 0xec, 0x6c, 0xb7, 0x3b, 0x8f, 0xb9, 0x42, 0x2d, 0x92, 0xb0, 0xa2,
+    0xca, 0x70, 0xf9, 0x4b, 0x4c, 0x55, 0x19, 0x7c, 0xea, 0x5b, 0xe9, 0x45,
+    0x44, 0x00, 0x71, 0x01, 0x3e, 0x06, 0xf1, 0x97, 0xd6, 0x9f, 0xf9, 0x89,
+    0xfe, 0x77, 0xe1, 0xce, 0xf9, 0x5d, 0x9d, 0x2c, 0x30, 0x2d, 0x6d, 0x60,
+    0x7d, 0x43, 0x90, 0xae, 0xa9, 0xc8, 0x87, 0x3f, 0x2a, 0x23, 0x57, 0xbc,
+    0xa9, 0xab, 0xb7, 0xd6, 0x2f, 0x24, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00,
+    0x00, 0xdc, 0x00, 0x00, 0x00, 0xe4, 0x00, 0x00, 0x00, 0xe8, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0xec, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00,
+    0x00, 0xf0, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x81, 0xfe, 0xff, 0xb1,
+    0xfc, 0xff, 0x88, 0x08, 0xad, 0x02, 0x88, 0x08, 0x0c, 0x02, 0xe0, 0x08,
+    0x00, 0x1d, 0xf0, 0x00, 0x00, 0xd8, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0xf7, 0xff, 0x29, 0x08, 0x21, 0xfd, 0xff, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x54, 0x68, 0x69, 0x73, 0x20, 0x63, 0x6f, 0x6d, 0x6d, 0x61, 0x6e,
+    0x64, 0x20, 0x69, 0x73, 0x20, 0x72, 0x75, 0x6e, 0x6e, 0x69, 0x6e, 0x67,
+    0x20, 0x66, 0x72, 0x6f, 0x6d, 0x20, 0x61, 0x20, 0x72, 0x65, 0x61, 0x6c,
+    0x20, 0x6d, 0x6f, 0x64, 0x75, 0x6c, 0x65, 0x2c, 0x20, 0x6c, 0x6f, 0x61,
+    0x64, 0x65, 0x64, 0x20, 0x66, 0x72, 0x6f, 0x6d, 0x20, 0x4c, 0x69, 0x74,
+    0x74, 0x6c, 0x65, 0x46, 0x53, 0x20, 0x61, 0x74, 0x20, 0x62, 0x6f, 0x6f,
+    0x74, 0x20, 0x2d, 0x2d, 0x20, 0x6e, 0x6f, 0x74, 0x20, 0x6c, 0x69, 0x6e,
+    0x6b, 0x65, 0x64, 0x20, 0x69, 0x6e, 0x74, 0x6f, 0x20, 0x74, 0x68, 0x65,
+    0x20, 0x66, 0x69, 0x72, 0x6d, 0x77, 0x61, 0x72, 0x65, 0x20, 0x69, 0x6d,
+    0x61, 0x67, 0x65, 0x2e, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x61, 0x62, 0x6f,
+    0x75, 0x74, 0x00, 0x00, 0x00, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x73, 0x20,
+    0x61, 0x20, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x20, 0x66, 0x72,
+    0x6f, 0x6d, 0x20, 0x61, 0x20, 0x6c, 0x6f, 0x61, 0x64, 0x65, 0x64, 0x20,
+    0x6d, 0x6f, 0x64, 0x75, 0x6c, 0x65, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00,
+    0x00, 0xe4, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa8, 0x00, 0x00,
+    0x00, 0xb0, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00,
+};
+
+static const uint8_t s_apps_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x61, 0x70, 0x70, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0xe8, 0x01, 0x00, 0x00, 0xd9, 0x42, 0xe4, 0xdb, 0xb3, 0x54, 0x10,
+    0x85, 0x14, 0x7a, 0xa4, 0x26, 0x72, 0x3e, 0x7c, 0x73, 0x78, 0x2c, 0xe7,
+    0xac, 0x74, 0x55, 0xfa, 0x5d, 0x1f, 0x1a, 0x44, 0x89, 0x09, 0xa6, 0x6a,
+    0x1e, 0x84, 0x89, 0x46, 0x45, 0x0d, 0x1b, 0x33, 0xc4, 0x7b, 0x7b, 0x5f,
+    0x09, 0x7a, 0x55, 0x91, 0x4e, 0xa6, 0x92, 0x19, 0x34, 0x16, 0x85, 0x83,
+    0x5a, 0x8b, 0xa3, 0x7c, 0x47, 0x72, 0x3c, 0x36, 0x6f, 0x1c, 0xd5, 0x01,
+    0x05, 0xa1, 0x3b, 0x8f, 0x80, 0xc3, 0x40, 0x08, 0x72, 0x0c, 0xd3, 0x48,
+    0xff, 0xd9, 0xd8, 0xe2, 0xc7, 0x4e, 0xe8, 0xd7, 0x3e, 0x73, 0xdb, 0x2b,
+    0xdd, 0x17, 0xdf, 0x15, 0x96, 0xc8, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x0c, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00,
+    0x00, 0x18, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0xc4, 0x00, 0x00,
+    0x00, 0x94, 0x01, 0x00, 0x00, 0x9c, 0x01, 0x00, 0x00, 0xa0, 0x01, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0xa4, 0x01, 0x00, 0x00, 0xd8, 0x00, 0x00,
+    0x00, 0xe4, 0x00, 0x00, 0x00, 0x70, 0x01, 0x00, 0x00, 0xf0, 0x00, 0x00,
+    0x00, 0xa8, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x14, 0x01, 0x00,
+    0x00, 0x30, 0x01, 0x00, 0x00, 0x36, 0xa1, 0x0d, 0x61, 0xfb, 0xff, 0x92,
+    0xa6, 0xa0, 0x88, 0x06, 0x1a, 0x99, 0x72, 0xc1, 0x10, 0x88, 0x28, 0x29,
+    0x09, 0xad, 0x07, 0xe0, 0x08, 0x00, 0x52, 0xd7, 0x06, 0x92, 0x25, 0x20,
+    0xcc, 0xd9, 0x88, 0x06, 0xb1, 0xf4, 0xff, 0x88, 0x08, 0xad, 0x02, 0xe0,
+    0x08, 0x00, 0x92, 0x25, 0x20, 0x2d, 0x07, 0x0c, 0x05, 0xa6, 0x19, 0x08,
+    0x31, 0xeb, 0xff, 0x41, 0xec, 0xff, 0xc6, 0x02, 0x00, 0x72, 0xd7, 0x06,
+    0xc2, 0x27, 0x21, 0x56, 0x4c, 0x04, 0xc6, 0x14, 0x00, 0xf2, 0x02, 0x32,
+    0x81, 0xe4, 0xff, 0xb2, 0x02, 0x30, 0xa1, 0xe4, 0xff, 0x98, 0x06, 0xf0,
+    0x83, 0x83, 0xb0, 0xa4, 0x83, 0xfd, 0x08, 0x82, 0xa6, 0xa0, 0xe8, 0xb2,
+    0x98, 0x19, 0x1a, 0x88, 0xa9, 0x01, 0xb1, 0xe2, 0xff, 0xa8, 0x08, 0xd2,
+    0xc2, 0x20, 0xcd, 0x02, 0xe0, 0xea, 0x41, 0xe0, 0x09, 0x00, 0x92, 0xd7,
+    0x06, 0x92, 0x29, 0x20, 0x1b, 0x55, 0x22, 0xc2, 0x34, 0x97, 0x25, 0xc0,
+    0x46, 0xec, 0xff, 0x88, 0x06, 0x92, 0xa6, 0xa0, 0x1a, 0x99, 0xb1, 0xd9,
+    0xff, 0x88, 0x18, 0xa2, 0x29, 0x00, 0xe0, 0x08, 0x00, 0x0c, 0x02, 0x1d,
+    0xf0, 0x90, 0x01, 0x00, 0x00, 0x36, 0x41, 0x00, 0x81, 0xd1, 0xff, 0x29,
+    0x08, 0x21, 0xfd, 0xff, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0x76, 0x65, 0x72,
+    0x69, 0x66, 0x69, 0x65, 0x64, 0x00, 0x00, 0x00, 0x00, 0x75, 0x6e, 0x76,
+    0x65, 0x72, 0x69, 0x66, 0x69, 0x65, 0x64, 0x00, 0x00, 0x20, 0x20, 0x28,
+    0x77, 0x72, 0x6f, 0x6e, 0x67, 0x20, 0x63, 0x68, 0x69, 0x70, 0x29, 0x00,
+    0x00, 0x6e, 0x6f, 0x20, 0x61, 0x70, 0x70, 0x73, 0x20, 0x69, 0x6e, 0x73,
+    0x74, 0x61, 0x6c, 0x6c, 0x65, 0x64, 0x0a, 0x00, 0x00, 0x20, 0x20, 0x25,
+    0x2d, 0x31, 0x36, 0x73, 0x20, 0x25, 0x2d, 0x31, 0x30, 0x73, 0x20, 0x25,
+    0x36, 0x75, 0x4b, 0x20, 0x20, 0x25, 0x73, 0x25, 0x73, 0x0a, 0x00, 0x00,
+    0x00, 0x20, 0x20, 0x28, 0x25, 0x64, 0x20, 0x61, 0x70, 0x70, 0x20, 0x66,
+    0x6f, 0x6c, 0x64, 0x65, 0x72, 0x28, 0x73, 0x29, 0x20, 0x73, 0x6b, 0x69,
+    0x70, 0x70, 0x65, 0x64, 0x3a, 0x20, 0x75, 0x6e, 0x72, 0x65, 0x61, 0x64,
+    0x61, 0x62, 0x6c, 0x65, 0x20, 0x6f, 0x72, 0x20, 0x6e, 0x6f, 0x74, 0x20,
+    0x61, 0x20, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x20, 0x70, 0x61, 0x63, 0x6b,
+    0x61, 0x67, 0x65, 0x29, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x61, 0x70, 0x70,
+    0x73, 0x00, 0x00, 0x00, 0x00, 0x6c, 0x69, 0x73, 0x74, 0x20, 0x69, 0x6e,
+    0x73, 0x74, 0x61, 0x6c, 0x6c, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x73,
+    0x00, 0x05, 0x00, 0x00, 0x00, 0x9c, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x74, 0x01, 0x00, 0x00, 0x7c, 0x01, 0x00, 0x00, 0x20, 0x00, 0x00,
+    0x00,
+};
+
+static const uint8_t s_wifi_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x77, 0x69, 0x66, 0x69, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x32,
+    0x2e, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x38, 0x06, 0x00, 0x00, 0xe8, 0x08, 0x0c, 0x17, 0x9f, 0xff, 0xe5,
+    0x6e, 0x16, 0xcc, 0xc6, 0xe9, 0x90, 0x4c, 0x77, 0xe9, 0xc7, 0x17, 0x3e,
+    0xe7, 0xef, 0x5b, 0xb9, 0x8d, 0xf0, 0x10, 0xe4, 0x80, 0xf5, 0x1a, 0x9a,
+    0x60, 0x1c, 0x13, 0x02, 0x66, 0x0a, 0x14, 0x71, 0x80, 0x26, 0xb0, 0xcd,
+    0x8e, 0x6f, 0x7c, 0x2b, 0x09, 0x26, 0x29, 0x8b, 0xc7, 0xc1, 0xcc, 0x7a,
+    0xdd, 0xdd, 0x66, 0x26, 0x76, 0x7c, 0x8f, 0xfb, 0xae, 0x1c, 0x1c, 0x42,
+    0x7a, 0xcd, 0xd6, 0xa4, 0xcb, 0xa6, 0xa4, 0x84, 0xcd, 0x35, 0xc3, 0x0f,
+    0x39, 0x1e, 0xb3, 0x4b, 0xe3, 0x1c, 0x01, 0x8f, 0x48, 0xcb, 0x34, 0x0e,
+    0xaa, 0x19, 0x44, 0x26, 0x93, 0x70, 0x03, 0x00, 0x00, 0x20, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x0c, 0x00, 0x00, 0x00, 0x58, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x00,
+    0x00, 0x60, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x68, 0x00, 0x00,
+    0x00, 0x6c, 0x00, 0x00, 0x00, 0x10, 0x01, 0x00, 0x00, 0x14, 0x01, 0x00,
+    0x00, 0x18, 0x01, 0x00, 0x00, 0x1c, 0x01, 0x00, 0x00, 0x7c, 0x01, 0x00,
+    0x00, 0x80, 0x01, 0x00, 0x00, 0x84, 0x01, 0x00, 0x00, 0x88, 0x01, 0x00,
+    0x00, 0x8c, 0x01, 0x00, 0x00, 0x90, 0x01, 0x00, 0x00, 0x94, 0x01, 0x00,
+    0x00, 0x98, 0x01, 0x00, 0x00, 0x9c, 0x01, 0x00, 0x00, 0xa0, 0x01, 0x00,
+    0x00, 0xa4, 0x01, 0x00, 0x00, 0xa8, 0x01, 0x00, 0x00, 0x6c, 0x03, 0x00,
+    0x00, 0x84, 0x05, 0x00, 0x00, 0x8c, 0x05, 0x00, 0x00, 0x90, 0x05, 0x00,
+    0x00, 0x98, 0x05, 0x00, 0x00, 0x9c, 0x05, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x94, 0x05, 0x00, 0x00, 0xa0, 0x05, 0x00, 0x00, 0xa4, 0x05, 0x00,
+    0x00, 0x80, 0x03, 0x00, 0x00, 0x98, 0x03, 0x00, 0x00, 0xa8, 0x03, 0x00,
+    0x00, 0x36, 0xc1, 0x00, 0x71, 0xfb, 0xff, 0xad, 0x01, 0x88, 0x07, 0x82,
+    0x28, 0x07, 0xe0, 0x08, 0x00, 0x98, 0x01, 0x88, 0x07, 0xac, 0x09, 0x88,
+    0x18, 0xd8, 0xa1, 0xb1, 0xf6, 0xff, 0x4b, 0xc1, 0x20, 0xa2, 0x20, 0xe0,
+    0x08, 0x00, 0x88, 0x07, 0xb1, 0xf4, 0xff, 0x88, 0x18, 0xc2, 0xc1, 0x2c,
+    0xad, 0x02, 0xe0, 0x08, 0x00, 0x86, 0x02, 0x00, 0x00, 0x88, 0x08, 0xb1,
+    0xf0, 0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x00,
+    0x00, 0xc0, 0x03, 0x00, 0x00, 0xc8, 0x03, 0x00, 0x00, 0xd0, 0x03, 0x00,
+    0x00, 0x34, 0x04, 0x00, 0x00, 0xe0, 0x03, 0x00, 0x00, 0xf8, 0x03, 0x00,
+    0x00, 0x36, 0xa1, 0x06, 0x61, 0xe3, 0xff, 0xb1, 0xfa, 0xff, 0x88, 0x06,
+    0xad, 0x02, 0x88, 0x08, 0x32, 0xa0, 0x00, 0xe0, 0x08, 0x00, 0x98, 0x06,
+    0x82, 0xa2, 0xc0, 0x8a, 0x51, 0x98, 0x39, 0x82, 0xa3, 0x20, 0x32, 0x61,
+    0xc8, 0xe2, 0xa0, 0x60, 0xdd, 0x05, 0x8a, 0xc1, 0x1c, 0x0b, 0xad, 0x01,
+    0x7d, 0x02, 0xe0, 0x09, 0x00, 0xdc, 0x1a, 0x88, 0x06, 0xb1, 0xef, 0xff,
+    0x88, 0x18, 0xad, 0x02, 0xcd, 0x05, 0xe0, 0x08, 0x00, 0x0c, 0x12, 0x46,
+    0x14, 0x00, 0xc2, 0x21, 0xc8, 0x1c, 0x05, 0x50, 0x5c, 0x43, 0xa6, 0x1c,
+    0x2c, 0x41, 0xe6, 0xff, 0x2d, 0x01, 0xe2, 0x02, 0x28, 0x98, 0x06, 0x81,
+    0xe2, 0xff, 0xd8, 0x92, 0xe0, 0x84, 0x83, 0x98, 0x19, 0xb1, 0xe4, 0xff,
+    0xcd, 0x02, 0x80, 0xe8, 0x20, 0xad, 0x07, 0x32, 0xc3, 0x01, 0xe0, 0x09,
+    0x00, 0x22, 0xc2, 0x2c, 0x57, 0x23, 0xda, 0xc2, 0x21, 0xc8, 0xc7, 0x25,
+    0x04, 0x0c, 0x02, 0x46, 0x04, 0x00, 0x88, 0x06, 0xb1, 0xdc, 0xff, 0x88,
+    0x18, 0x50, 0xcc, 0xc0, 0xad, 0x07, 0xe0, 0x08, 0x00, 0x06, 0xfa, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x10, 0x04, 0x00, 0x00, 0x1c, 0x05, 0x00,
+    0x00, 0x18, 0x04, 0x00, 0x00, 0x2c, 0x04, 0x00, 0x00, 0x36, 0xe1, 0x05,
+    0x61, 0xb7, 0xff, 0x1c, 0x0b, 0x88, 0x06, 0xad, 0x01, 0x88, 0x68, 0x22,
+    0x61, 0xb0, 0xe0, 0x08, 0x00, 0x2d, 0x0a, 0x8c, 0xea, 0x41, 0xf7, 0xff,
+    0x51, 0xf5, 0xff, 0x7d, 0x01, 0x0c, 0x03, 0xe6, 0x1a, 0x13, 0x46, 0x0c,
+    0x00, 0x88, 0x06, 0xb1, 0xf3, 0xff, 0x88, 0x08, 0xa2, 0x21, 0xb0, 0xe0,
+    0x08, 0x00, 0x46, 0x08, 0x00, 0x00, 0xd2, 0x07, 0x28, 0x98, 0x06, 0x8d,
+    0x04, 0xd0, 0x85, 0x93, 0x98, 0x19, 0xb1, 0xed, 0xff, 0xa2, 0x21, 0xb0,
+    0xcd, 0x07, 0xdd, 0x08, 0x1b, 0x33, 0xe0, 0x09, 0x00, 0x72, 0xc7, 0x2c,
+    0x37, 0x92, 0xde, 0x1d, 0xf0, 0x38, 0x04, 0x00, 0x00, 0x40, 0x04, 0x00,
+    0x00, 0x48, 0x04, 0x00, 0x00, 0x50, 0x04, 0x00, 0x00, 0x58, 0x04, 0x00,
+    0x00, 0x60, 0x04, 0x00, 0x00, 0x90, 0x04, 0x00, 0x00, 0xb8, 0x04, 0x00,
+    0x00, 0xd0, 0x04, 0x00, 0x00, 0xe4, 0x04, 0x00, 0x00, 0x00, 0x05, 0x00,
+    0x00, 0x20, 0x05, 0x00, 0x00, 0x36, 0x81, 0x01, 0xe6, 0x23, 0x11, 0x81,
+    0x93, 0xff, 0xb1, 0xf6, 0xff, 0x88, 0x08, 0xad, 0x02, 0x88, 0x08, 0xe0,
+    0x08, 0x00, 0xc6, 0x68, 0x00, 0xc8, 0x14, 0xb2, 0x0c, 0x00, 0xdc, 0x4b,
+    0x86, 0x62, 0x00, 0x82, 0x09, 0x00, 0xcc, 0x48, 0xa2, 0x0d, 0x01, 0x86,
+    0x05, 0x00, 0x1b, 0xdd, 0xa2, 0x0d, 0x00, 0x46, 0x02, 0x00, 0xd1, 0xe6,
+    0xff, 0x9d, 0x0c, 0x8d, 0x0b, 0xa2, 0xa0, 0x73, 0x1b, 0x99, 0x87, 0x1a,
+    0xdd, 0xa7, 0x98, 0x20, 0xad, 0x02, 0xa5, 0xe7, 0xff, 0x2d, 0x0a, 0x06,
+    0x5b, 0x00, 0x92, 0x08, 0x00, 0xcc, 0x69, 0x82, 0x0d, 0x01, 0xac, 0x78,
+    0x06, 0x06, 0x00, 0x1b, 0xdd, 0xa2, 0x0d, 0x00, 0xc6, 0x02, 0x00, 0x00,
+    0x00, 0xd1, 0xdb, 0xff, 0x9d, 0x0b, 0x8d, 0x0c, 0xa2, 0xa0, 0x63, 0x1b,
+    0x88, 0x97, 0x1a, 0xd9, 0xa1, 0xd8, 0xff, 0x8d, 0x0b, 0x9d, 0x0c, 0xd2,
+    0xa0, 0x66, 0x46, 0x22, 0x00, 0x81, 0x74, 0xff, 0x0b, 0x93, 0x88, 0x08,
+    0x66, 0x23, 0x0e, 0x88, 0x08, 0xb1, 0xd6, 0xff, 0xad, 0x02, 0xe0, 0x08,
+    0x00, 0x06, 0x48, 0x00, 0x00, 0x00, 0x31, 0xb2, 0xff, 0x26, 0x29, 0x01,
+    0x38, 0x34, 0x88, 0x18, 0xc8, 0x24, 0xb1, 0xd0, 0xff, 0xad, 0x02, 0xe0,
+    0x08, 0x00, 0x81, 0x68, 0xff, 0xa8, 0x24, 0x88, 0x08, 0xd2, 0xa0, 0x60,
+    0x88, 0x48, 0xcd, 0x01, 0x30, 0xb3, 0x20, 0xe0, 0x08, 0x00, 0x81, 0x63,
+    0xff, 0x88, 0x08, 0xdc, 0x0a, 0x88, 0x18, 0xb1, 0x7a, 0xff, 0xcd, 0x01,
+    0xad, 0x02, 0xe0, 0x08, 0x00, 0x06, 0x38, 0x00, 0x00, 0x00, 0x00, 0x88,
+    0x78, 0x42, 0xc1, 0x60, 0xad, 0x04, 0xe0, 0x08, 0x00, 0x81, 0x5b, 0xff,
+    0xb1, 0xc1, 0xff, 0x88, 0x08, 0xad, 0x02, 0x88, 0x18, 0xc2, 0xc4, 0x2c,
+    0xe0, 0x08, 0x00, 0x0c, 0x02, 0x86, 0x2f, 0x00, 0x00, 0x82, 0x09, 0x00,
+    0xd2, 0x0a, 0x01, 0xcc, 0x28, 0xc6, 0x01, 0x00, 0x00, 0x1b, 0xaa, 0x1b,
+    0x99, 0x87, 0x1d, 0xec, 0xd7, 0x98, 0x4a, 0x81, 0x4f, 0xff, 0x88, 0x08,
+    0x66, 0x23, 0x0c, 0x88, 0x08, 0xb1, 0xb5, 0xff, 0xad, 0x02, 0xe0, 0x08,
+    0x00, 0x06, 0x24, 0x00, 0x88, 0x58, 0xb8, 0x24, 0xad, 0x02, 0xe0, 0x08,
+    0x00, 0x56, 0x4a, 0x08, 0x81, 0x47, 0xff, 0xb1, 0xaf, 0xff, 0x88, 0x08,
+    0xad, 0x02, 0x88, 0x08, 0xe0, 0x08, 0x00, 0x0c, 0x02, 0x86, 0x1c, 0x00,
+    0x00, 0x92, 0x08, 0x00, 0xcc, 0x69, 0xd2, 0x0a, 0x01, 0xfc, 0x9d, 0x86,
+    0x06, 0x00, 0x1b, 0xaa, 0xd2, 0x0a, 0x00, 0x46, 0x02, 0x00, 0xa1, 0x9e,
+    0xff, 0x9d, 0x0b, 0x8d, 0x0c, 0xd2, 0xa0, 0x6c, 0x1b, 0x88, 0x97, 0x1d,
+    0xdb, 0x46, 0x07, 0x00, 0x00, 0xad, 0x02, 0xe5, 0xdf, 0xff, 0x46, 0xf2,
+    0xff, 0xb2, 0x08, 0x00, 0xcc, 0x6b, 0x82, 0x09, 0x01, 0xec, 0x58, 0x06,
+    0x06, 0x00, 0x1b, 0x99, 0xa2, 0x09, 0x00, 0xc6, 0x01, 0x00, 0x91, 0x93,
+    0xff, 0x8d, 0x0c, 0xa2, 0xa0, 0x73, 0x1b, 0x88, 0xb7, 0x1a, 0xdd, 0xc6,
+    0x02, 0x00, 0x00, 0xcd, 0x0b, 0xad, 0x02, 0xe5, 0xcb, 0xff, 0x46, 0xe6,
+    0xff, 0x00, 0x81, 0x29, 0xff, 0xb1, 0x93, 0xff, 0x88, 0x08, 0xad, 0x02,
+    0x88, 0x18, 0xe0, 0x08, 0x00, 0x0c, 0x12, 0x1d, 0xf0, 0x80, 0x05, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0x23, 0xff, 0x29, 0x08, 0x21, 0xfd, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x77, 0x69, 0x66, 0x69, 0x3a, 0x20, 0x20,
+    0x20, 0x20, 0x25, 0x73, 0x20, 0x28, 0x25, 0x64, 0x20, 0x64, 0x42, 0x6d,
+    0x29, 0x0a, 0x00, 0x00, 0x00, 0x69, 0x70, 0x3a, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x25, 0x73, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x77, 0x69, 0x66,
+    0x69, 0x3a, 0x20, 0x20, 0x20, 0x20, 0x6e, 0x6f, 0x74, 0x20, 0x63, 0x6f,
+    0x6e, 0x6e, 0x65, 0x63, 0x74, 0x65, 0x64, 0x0a, 0x00, 0x6f, 0x70, 0x65,
+    0x6e, 0x00, 0x00, 0x00, 0x00, 0x73, 0x65, 0x63, 0x75, 0x72, 0x65, 0x64,
+    0x00, 0x73, 0x63, 0x61, 0x6e, 0x6e, 0x69, 0x6e, 0x67, 0x2e, 0x2e, 0x2e,
+    0x0a, 0x00, 0x00, 0x00, 0x00, 0x20, 0x20, 0x25, 0x2d, 0x33, 0x32, 0x73,
+    0x20, 0x25, 0x34, 0x64, 0x20, 0x64, 0x42, 0x6d, 0x20, 0x20, 0x25, 0x73,
+    0x0a, 0x00, 0x00, 0x00, 0x00, 0x20, 0x20, 0x28, 0x25, 0x64, 0x20, 0x6d,
+    0x6f, 0x72, 0x65, 0x20, 0x6e, 0x6f, 0x74, 0x20, 0x73, 0x68, 0x6f, 0x77,
+    0x6e, 0x29, 0x0a, 0x00, 0x00, 0x28, 0x6f, 0x70, 0x65, 0x6e, 0x29, 0x00,
+    0x00, 0x6e, 0x6f, 0x20, 0x73, 0x61, 0x76, 0x65, 0x64, 0x20, 0x6e, 0x65,
+    0x74, 0x77, 0x6f, 0x72, 0x6b, 0x73, 0x0a, 0x00, 0x00, 0x20, 0x20, 0x25,
+    0x2d, 0x33, 0x32, 0x73, 0x20, 0x25, 0x73, 0x0a, 0x00, 0x73, 0x63, 0x61,
+    0x6e, 0x00, 0x00, 0x00, 0x00, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74,
+    0x00, 0x66, 0x6f, 0x72, 0x67, 0x65, 0x74, 0x00, 0x00, 0x6c, 0x69, 0x73,
+    0x74, 0x00, 0x00, 0x00, 0x00, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x00,
+    0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20, 0x77, 0x69, 0x66, 0x69,
+    0x20, 0x73, 0x63, 0x61, 0x6e, 0x7c, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63,
+    0x74, 0x7c, 0x66, 0x6f, 0x72, 0x67, 0x65, 0x74, 0x7c, 0x6c, 0x69, 0x73,
+    0x74, 0x7c, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x0a, 0x00, 0x00, 0x00,
+    0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20, 0x77, 0x69, 0x66, 0x69,
+    0x20, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74, 0x20, 0x3c, 0x73, 0x73,
+    0x69, 0x64, 0x3e, 0x20, 0x5b, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72,
+    0x64, 0x5d, 0x0a, 0x00, 0x00, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74,
+    0x69, 0x6e, 0x67, 0x20, 0x74, 0x6f, 0x20, 0x25, 0x73, 0x2e, 0x2e, 0x2e,
+    0x0a, 0x00, 0x00, 0x00, 0x00, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74,
+    0x65, 0x64, 0x2c, 0x20, 0x69, 0x70, 0x20, 0x25, 0x73, 0x0a, 0x00, 0x00,
+    0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20, 0x77, 0x69, 0x66, 0x69,
+    0x20, 0x66, 0x6f, 0x72, 0x67, 0x65, 0x74, 0x20, 0x3c, 0x73, 0x73, 0x69,
+    0x64, 0x3e, 0x0a, 0x00, 0x00, 0x66, 0x6f, 0x72, 0x67, 0x6f, 0x74, 0x74,
+    0x65, 0x6e, 0x20, 0x28, 0x69, 0x66, 0x20, 0x69, 0x74, 0x20, 0x77, 0x61,
+    0x73, 0x20, 0x73, 0x61, 0x76, 0x65, 0x64, 0x29, 0x0a, 0x00, 0x00, 0x00,
+    0x00, 0x77, 0x69, 0x66, 0x69, 0x3a, 0x20, 0x75, 0x6e, 0x6b, 0x6e, 0x6f,
+    0x77, 0x6e, 0x20, 0x73, 0x75, 0x62, 0x63, 0x6f, 0x6d, 0x6d, 0x61, 0x6e,
+    0x64, 0x20, 0x27, 0x25, 0x73, 0x27, 0x0a, 0x00, 0x00, 0x77, 0x69, 0x66,
+    0x69, 0x00, 0x00, 0x00, 0x00, 0x73, 0x63, 0x61, 0x6e, 0x7c, 0x63, 0x6f,
+    0x6e, 0x6e, 0x65, 0x63, 0x74, 0x7c, 0x66, 0x6f, 0x72, 0x67, 0x65, 0x74,
+    0x7c, 0x6c, 0x69, 0x73, 0x74, 0x7c, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73,
+    0x00, 0x6e, 0x65, 0x74, 0x00, 0x63, 0x6f, 0x6e, 0x6e, 0x65, 0x63, 0x74,
+    0x69, 0x6f, 0x6e, 0x20, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x00, 0x00,
+    0x00, 0x05, 0x00, 0x00, 0x00, 0x8c, 0x05, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x40, 0x05, 0x00, 0x00, 0x48, 0x05, 0x00, 0x00, 0xac, 0x01, 0x00,
+    0x00, 0x68, 0x05, 0x00, 0x00, 0x6c, 0x05, 0x00, 0x00, 0x10, 0x00, 0x00,
+    0x00,
+};
+
+static const uint8_t s_netinstall_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x6e, 0x65, 0x74, 0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0xec, 0x00, 0x00, 0x00, 0x78, 0x1b, 0x4c, 0x46, 0x3c, 0x76, 0x70,
+    0x99, 0x0e, 0x13, 0xd9, 0xdd, 0x0a, 0xe7, 0x65, 0xb4, 0x74, 0x8b, 0x02,
+    0x37, 0xad, 0x5f, 0xd6, 0x95, 0xeb, 0x58, 0xbf, 0xa3, 0xcd, 0xcf, 0x6b,
+    0xb2, 0xa5, 0x78, 0xbd, 0x31, 0xfd, 0x5d, 0xae, 0xb8, 0x25, 0x94, 0xdc,
+    0x1c, 0x8a, 0x89, 0xbe, 0x47, 0x1b, 0x2c, 0x0e, 0xce, 0x51, 0x27, 0x05,
+    0xf1, 0x1e, 0xa6, 0x28, 0x66, 0x16, 0x7a, 0x13, 0xba, 0x51, 0x12, 0xb4,
+    0x42, 0x21, 0x1b, 0x10, 0x01, 0x2c, 0x0d, 0x4b, 0xf2, 0x6e, 0xfa, 0x81,
+    0xee, 0xf7, 0x44, 0x01, 0x07, 0x10, 0x11, 0x0a, 0x70, 0xce, 0xac, 0xdd,
+    0xee, 0x19, 0x37, 0x10, 0x8b, 0x34, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00,
+    0x00, 0xb0, 0x00, 0x00, 0x00, 0xb8, 0x00, 0x00, 0x00, 0xbc, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0xc4, 0x00, 0x00,
+    0x00, 0x44, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x81, 0xfd, 0xff, 0xad,
+    0x02, 0x88, 0x08, 0xe6, 0x23, 0x0f, 0x88, 0x08, 0xb1, 0xfb, 0xff, 0x22,
+    0xa0, 0x01, 0xe0, 0x08, 0x00, 0x86, 0x02, 0x00, 0x00, 0x00, 0x88, 0x88,
+    0xb8, 0x14, 0xe0, 0x08, 0x00, 0x2d, 0x0a, 0x1d, 0xf0, 0xac, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0xf2, 0xff, 0x29, 0x08, 0x21, 0xfd, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20,
+    0x6e, 0x65, 0x74, 0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x20, 0x3c,
+    0x6b, 0x65, 0x72, 0x6e, 0x65, 0x6c, 0x7c, 0x6c, 0x6f, 0x61, 0x64, 0x65,
+    0x72, 0x7c, 0x62, 0x6f, 0x6f, 0x74, 0x70, 0x6b, 0x67, 0x7c, 0x6d, 0x6f,
+    0x64, 0x75, 0x6c, 0x65, 0x73, 0x3e, 0x0a, 0x00, 0x00, 0x6e, 0x65, 0x74,
+    0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x00, 0x00, 0x69, 0x6e, 0x73,
+    0x74, 0x61, 0x6c, 0x6c, 0x20, 0x3c, 0x63, 0x6f, 0x6d, 0x70, 0x6f, 0x6e,
+    0x65, 0x6e, 0x74, 0x3e, 0x20, 0x6f, 0x76, 0x65, 0x72, 0x20, 0x74, 0x68,
+    0x65, 0x20, 0x6e, 0x65, 0x74, 0x77, 0x6f, 0x72, 0x6b, 0x00, 0x00, 0x00,
+    0x00, 0x05, 0x00, 0x00, 0x00, 0xb8, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x78, 0x00, 0x00, 0x00, 0x84, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00,
+};
+
+static const uint8_t s_sysinfo_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x73, 0x79, 0x73, 0x69, 0x6e, 0x66, 0x6f, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x44, 0x07, 0x00, 0x00, 0x2e, 0x9b, 0x1e, 0x39, 0x96, 0xaa, 0xae,
+    0xb9, 0x92, 0x7d, 0xc0, 0x5b, 0x7f, 0x25, 0x82, 0x70, 0x8b, 0xc3, 0xd1,
+    0x21, 0x67, 0x46, 0x67, 0x0e, 0xba, 0x85, 0x68, 0xef, 0x17, 0x8d, 0x7e,
+    0x99, 0x14, 0xbd, 0x34, 0x51, 0x38, 0x7a, 0xa3, 0xe7, 0xf2, 0xcb, 0xe9,
+    0x70, 0xb8, 0x68, 0xe8, 0xc4, 0x4d, 0x2a, 0x05, 0x89, 0xb6, 0x18, 0x86,
+    0x10, 0x55, 0x49, 0x06, 0xf3, 0xfa, 0x65, 0xfe, 0x04, 0x7a, 0xcd, 0xe4,
+    0x4f, 0xc8, 0x21, 0x14, 0xec, 0xb3, 0xdc, 0xd0, 0x34, 0x0e, 0x69, 0x98,
+    0xd7, 0x02, 0x10, 0x72, 0x6c, 0x67, 0x61, 0xf6, 0xb7, 0xe8, 0x5b, 0x23,
+    0xca, 0xf1, 0xdc, 0xc4, 0xd7, 0x18, 0x02, 0x00, 0x00, 0x1f, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x60, 0x00, 0x00, 0x00, 0xfc, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    0x00, 0x04, 0x01, 0x00, 0x00, 0x08, 0x01, 0x00, 0x00, 0x68, 0x01, 0x00,
+    0x00, 0x6c, 0x01, 0x00, 0x00, 0x70, 0x01, 0x00, 0x00, 0x14, 0x02, 0x00,
+    0x00, 0x24, 0x06, 0x00, 0x00, 0x2c, 0x06, 0x00, 0x00, 0x30, 0x06, 0x00,
+    0x00, 0x38, 0x06, 0x00, 0x00, 0x3c, 0x06, 0x00, 0x00, 0x44, 0x06, 0x00,
+    0x00, 0x48, 0x06, 0x00, 0x00, 0x50, 0x06, 0x00, 0x00, 0x54, 0x06, 0x00,
+    0x00, 0x5c, 0x06, 0x00, 0x00, 0x60, 0x06, 0x00, 0x00, 0x68, 0x06, 0x00,
+    0x00, 0x6c, 0x06, 0x00, 0x00, 0x74, 0x06, 0x00, 0x00, 0x78, 0x06, 0x00,
+    0x00, 0x80, 0x06, 0x00, 0x00, 0x84, 0x06, 0x00, 0x00, 0x8c, 0x06, 0x00,
+    0x00, 0x90, 0x06, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x34, 0x06, 0x00,
+    0x00, 0x40, 0x06, 0x00, 0x00, 0x4c, 0x06, 0x00, 0x00, 0x58, 0x06, 0x00,
+    0x00, 0x64, 0x06, 0x00, 0x00, 0x70, 0x06, 0x00, 0x00, 0x7c, 0x06, 0x00,
+    0x00, 0x88, 0x06, 0x00, 0x00, 0x94, 0x06, 0x00, 0x00, 0x98, 0x06, 0x00,
+    0x00, 0x70, 0x04, 0x00, 0x00, 0x98, 0x04, 0x00, 0x00, 0x36, 0x61, 0x00,
+    0x71, 0xfc, 0xff, 0x88, 0x07, 0xa8, 0x48, 0x62, 0x28, 0x01, 0xe0, 0x0a,
+    0x00, 0x88, 0x07, 0xa9, 0x01, 0xa8, 0x58, 0xe0, 0x0a, 0x00, 0xc8, 0x01,
+    0xb1, 0xf7, 0xff, 0xdd, 0x0a, 0xad, 0x02, 0xe0, 0x06, 0x00, 0x88, 0x07,
+    0xa8, 0x78, 0xe0, 0x0a, 0x00, 0x6d, 0x0a, 0x9c, 0x3a, 0x88, 0x07, 0xa8,
+    0x68, 0x78, 0x18, 0xe0, 0x0a, 0x00, 0xb1, 0xf0, 0xff, 0xcd, 0x0a, 0xdd,
+    0x06, 0xad, 0x02, 0xe0, 0x07, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x89, 0x88, 0x88, 0x88, 0xc5, 0xb3, 0xa2, 0x91, 0xb4, 0x04, 0x00,
+    0x00, 0x40, 0x42, 0x0f, 0x00, 0x36, 0x41, 0x00, 0x71, 0xe5, 0xff, 0x82,
+    0x27, 0x00, 0xa2, 0x28, 0x08, 0xe0, 0x0a, 0x00, 0xc1, 0xfb, 0xff, 0xd2,
+    0xa0, 0x00, 0xa5, 0x1a, 0x00, 0x81, 0xf6, 0xff, 0xc1, 0xf6, 0xff, 0x80,
+    0x9a, 0xa2, 0xe8, 0x07, 0x90, 0x95, 0x41, 0x80, 0x89, 0xa2, 0xc0, 0xb9,
+    0x11, 0x80, 0x85, 0x41, 0xc0, 0xd8, 0x11, 0x90, 0xbb, 0xc0, 0xc0, 0xca,
+    0xa2, 0x80, 0xdd, 0xc0, 0xf8, 0x1e, 0xe0, 0x8b, 0x11, 0xe0, 0xdd, 0x11,
+    0xb1, 0xed, 0xff, 0x80, 0xea, 0xc0, 0xd0, 0xd9, 0xc0, 0xad, 0x02, 0xc0,
+    0xcb, 0x41, 0xe0, 0x0f, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x36, 0x41, 0x00,
+    0x81, 0xcf, 0xff, 0xad, 0x02, 0x88, 0x08, 0x0c, 0x02, 0x82, 0x28, 0x20,
+    0xe0, 0x08, 0x00, 0x1d, 0xf0, 0x36, 0x41, 0x00, 0x81, 0xca, 0xff, 0xad,
+    0x02, 0x88, 0x08, 0x0c, 0x02, 0x82, 0x28, 0x21, 0xe0, 0x08, 0x00, 0x1d,
+    0xf0, 0x36, 0x41, 0x00, 0x81, 0xc5, 0xff, 0xad, 0x02, 0x88, 0x08, 0x0c,
+    0x02, 0x82, 0x28, 0x22, 0xe0, 0x08, 0x00, 0x1d, 0xf0, 0xc8, 0x04, 0x00,
+    0x00, 0x0c, 0x05, 0x00, 0x00, 0xcc, 0x04, 0x00, 0x00, 0xd4, 0x04, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x71, 0xbc, 0xff, 0xe6, 0x23, 0x04, 0x46, 0x0a,
+    0x00, 0x00, 0x00, 0x88, 0x07, 0xc1, 0xf9, 0xff, 0x88, 0x18, 0x61, 0xf6,
+    0xff, 0x4b, 0x44, 0x0c, 0x15, 0xd8, 0x04, 0xb1, 0xf6, 0xff, 0xad, 0x02,
+    0x1b, 0x55, 0xe0, 0x08, 0x00, 0x57, 0x13, 0x0a, 0x88, 0x07, 0x4b, 0x44,
+    0x88, 0x18, 0xcd, 0x06, 0x46, 0xf9, 0xff, 0x88, 0x07, 0xb1, 0xf1, 0xff,
+    0x88, 0x08, 0xad, 0x02, 0xe0, 0x08, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0xaa, 0xff, 0x0c, 0x02, 0x88, 0x08, 0x82,
+    0x28, 0x24, 0xe0, 0x08, 0x00, 0x1d, 0xf0, 0x00, 0x00, 0xd8, 0x04, 0x00,
+    0x00, 0xe4, 0x04, 0x00, 0x00, 0xec, 0x04, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0xad, 0x02, 0x66, 0x23, 0x58, 0xc8, 0x14, 0xd2, 0x0c, 0x00, 0xdc, 0x7d,
+    0xc6, 0x14, 0x00, 0x00, 0x00, 0x82, 0x09, 0x00, 0xcc, 0x48, 0xe2, 0x0b,
+    0x01, 0xc6, 0x05, 0x00, 0x1b, 0xbb, 0xe2, 0x0b, 0x00, 0x86, 0x02, 0x00,
+    0x00, 0xb1, 0xf3, 0xff, 0x8d, 0x0d, 0x9d, 0x0c, 0xe2, 0xa0, 0x72, 0x1b,
+    0x99, 0x87, 0x1e, 0xdc, 0xe7, 0x18, 0x3e, 0x81, 0xef, 0xff, 0x92, 0xa0,
+    0x6c, 0x46, 0x05, 0x00, 0x00, 0xd2, 0x0c, 0x00, 0xcc, 0x9d, 0x82, 0x08,
+    0x01, 0xb1, 0xeb, 0xff, 0xac, 0x98, 0x46, 0x04, 0x00, 0x92, 0x08, 0x01,
+    0x1b, 0x88, 0x1b, 0xcc, 0xd7, 0x19, 0xe5, 0x06, 0x01, 0x00, 0x0c, 0x0b,
+    0xa6, 0x23, 0x15, 0x81, 0x89, 0xff, 0xb1, 0xe4, 0xff, 0x88, 0x08, 0x0c,
+    0x12, 0x88, 0x08, 0xe0, 0x08, 0x00, 0x06, 0x04, 0x00, 0x00, 0xb1, 0xde,
+    0xff, 0x81, 0x84, 0xff, 0x0c, 0x02, 0x88, 0x08, 0x82, 0x28, 0x25, 0xe0,
+    0x08, 0x00, 0x1d, 0xf0, 0x00, 0x36, 0x41, 0x00, 0x81, 0x7f, 0xff, 0xad,
+    0x02, 0x88, 0x08, 0x0c, 0x02, 0x82, 0x28, 0x23, 0xe0, 0x08, 0x00, 0x1d,
+    0xf0, 0x20, 0x06, 0x00, 0x00, 0x36, 0x41, 0x00, 0x81, 0x79, 0xff, 0x29,
+    0x08, 0x21, 0xfd, 0xff, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x9d, 0x03, 0xbd, 0x02, 0xad, 0x02, 0x8d, 0x04, 0x3d, 0x05, 0x2d, 0x09,
+    0x56, 0xa5, 0x15, 0x47, 0xb9, 0x2e, 0x90, 0xf4, 0x40, 0x9c, 0x09, 0x00,
+    0x19, 0x40, 0x00, 0x84, 0xa1, 0x00, 0x19, 0x40, 0xb0, 0x22, 0x81, 0x00,
+    0x19, 0x40, 0x00, 0xab, 0xa1, 0x80, 0xd0, 0xf5, 0xd0, 0x92, 0xe2, 0x80,
+    0xc0, 0xf4, 0xd0, 0x22, 0xc2, 0x20, 0xec, 0x82, 0x10, 0x40, 0x40, 0xa0,
+    0x99, 0x81, 0xc6, 0x32, 0x00, 0xcc, 0x94, 0x0c, 0x1a, 0x40, 0x8a, 0xc2,
+    0xa0, 0xf8, 0x40, 0x86, 0x03, 0x00, 0xc0, 0xf4, 0x40, 0xcc, 0x6c, 0x40,
+    0x99, 0xc0, 0x0c, 0x13, 0x06, 0x27, 0x00, 0xad, 0x0c, 0xc2, 0xca, 0xe0,
+    0x00, 0x1a, 0x40, 0x00, 0x88, 0xa1, 0xc0, 0xc0, 0x60, 0x00, 0x0c, 0x40,
+    0x90, 0x30, 0x91, 0x80, 0xe0, 0xf5, 0x00, 0x1a, 0x40, 0x00, 0x99, 0xa1,
+    0x00, 0x0c, 0x40, 0xb0, 0xc0, 0x91, 0x00, 0x1a, 0x40, 0x00, 0xab, 0xa1,
+    0x80, 0xd0, 0xf4, 0xe0, 0xb3, 0xe2, 0xe0, 0x33, 0xc2, 0x90, 0xcc, 0x20,
+    0x30, 0xfd, 0x82, 0x10, 0x40, 0x40, 0xc0, 0xbb, 0x81, 0xf7, 0xbb, 0x1d,
+    0x8a, 0xbb, 0xf7, 0xbb, 0x0c, 0x80, 0x9b, 0x62, 0x0b, 0x99, 0x90, 0x90,
+    0x60, 0x90, 0x90, 0x74, 0xcc, 0x59, 0x0b, 0x33, 0x86, 0x01, 0x00, 0x00,
+    0x00, 0x32, 0xc3, 0xfe, 0x8a, 0xbb, 0xf0, 0xbb, 0xc0, 0xe0, 0x9b, 0xe2,
+    0xe0, 0xbb, 0xc2, 0x00, 0x99, 0x11, 0xc0, 0xc0, 0xf4, 0xb0, 0xdd, 0x82,
+    0xc0, 0x99, 0x20, 0xd7, 0xb9, 0x1c, 0x8a, 0x99, 0xd7, 0xb9, 0x0d, 0x80,
+    0xc9, 0x62, 0x0b, 0xcc, 0xc0, 0xc0, 0x60, 0xc0, 0xc0, 0x74, 0x56, 0x4c,
+    0x00, 0x0b, 0xbb, 0x06, 0x01, 0x00, 0xb2, 0xcb, 0xfe, 0x8a, 0x99, 0x00,
+    0x33, 0x11, 0xd0, 0x99, 0xc0, 0xb0, 0x33, 0x20, 0x80, 0xd0, 0xf5, 0xd0,
+    0x29, 0xc2, 0x80, 0xc0, 0xf4, 0xd0, 0xb9, 0xe2, 0x20, 0xec, 0x82, 0x10,
+    0x40, 0x40, 0xa0, 0x9b, 0x81, 0xe7, 0xb9, 0x1d, 0x8a, 0x99, 0xe7, 0xb9,
+    0x0c, 0x80, 0xb9, 0x62, 0x0b, 0xbb, 0xb0, 0xb0, 0x60, 0xb0, 0xb0, 0x74,
+    0xcc, 0x5b, 0x0b, 0x22, 0x86, 0x01, 0x00, 0x00, 0x00, 0x22, 0xc2, 0xfe,
+    0x8a, 0x99, 0xe0, 0xb9, 0xc0, 0xd0, 0x9b, 0xe2, 0xd0, 0xbb, 0xc2, 0x00,
+    0x99, 0x11, 0xa0, 0xa0, 0xf4, 0xb0, 0xcc, 0x82, 0xa0, 0x99, 0x20, 0xc7,
+    0xb9, 0x1a, 0x9a, 0x98, 0xc7, 0xb9, 0x0d, 0x80, 0x89, 0x62, 0x0b, 0x88,
+    0x80, 0x80, 0x60, 0x80, 0x80, 0x74, 0x56, 0x48, 0x00, 0x0b, 0xbb, 0x86,
+    0x00, 0x00, 0xb2, 0xcb, 0xfe, 0x00, 0x22, 0x11, 0xb0, 0x22, 0x20, 0x86,
+    0x35, 0x00, 0x0c, 0x03, 0x0c, 0x02, 0x57, 0xb9, 0x02, 0x06, 0x33, 0x00,
+    0xc0, 0xf5, 0x40, 0xdc, 0x2c, 0x40, 0x4b, 0x62, 0x0b, 0x44, 0x90, 0x55,
+    0x62, 0x40, 0x40, 0x60, 0x40, 0x55, 0x20, 0x50, 0x20, 0x74, 0xc6, 0x2c,
+    0x00, 0xd2, 0xcc, 0xe0, 0x00, 0x1c, 0x40, 0x40, 0x55, 0x81, 0xd0, 0xd0,
+    0x60, 0x00, 0x0d, 0x40, 0x90, 0x80, 0x91, 0x50, 0xf0, 0xf5, 0xf0, 0xa8,
+    0xe2, 0x00, 0x1c, 0x40, 0x00, 0x99, 0xa1, 0x00, 0x0d, 0x40, 0xb0, 0xd0,
+    0x91, 0x50, 0xe0, 0xf4, 0xf0, 0x88, 0xc2, 0x90, 0xdd, 0x20, 0x80, 0x3e,
+    0x82, 0x10, 0x40, 0x40, 0xd0, 0xaa, 0x81, 0x00, 0x1c, 0x40, 0x00, 0x44,
+    0xa1, 0x37, 0xba, 0x1d, 0x5a, 0xaa, 0x37, 0xba, 0x0c, 0x50, 0x9a, 0x62,
+    0x0b, 0x99, 0x90, 0x90, 0x60, 0x90, 0x90, 0x74, 0xcc, 0x59, 0x0b, 0x88,
+    0x86, 0x01, 0x00, 0x00, 0x00, 0x82, 0xc8, 0xfe, 0x5a, 0xaa, 0x30, 0xaa,
+    0xc0, 0xf0, 0x9a, 0xe2, 0xf0, 0xaa, 0xc2, 0x00, 0x99, 0x11, 0xd0, 0xd0,
+    0xf4, 0xa0, 0xee, 0x82, 0xd0, 0x99, 0x20, 0xe7, 0xb9, 0x1c, 0x5a, 0x99,
+    0xe7, 0xb9, 0x0d, 0x50, 0xd9, 0x62, 0xd2, 0xcd, 0xff, 0xd0, 0xd0, 0x60,
+    0xd0, 0xd0, 0x74, 0xcc, 0x3d, 0x0b, 0xaa, 0x06, 0x01, 0x00, 0xa2, 0xca,
+    0xfe, 0x5a, 0x99, 0x00, 0x88, 0x11, 0xa0, 0x28, 0x20, 0x40, 0x82, 0x82,
+    0x40, 0x42, 0xa2, 0xe0, 0x99, 0xc0, 0x47, 0x39, 0x0b, 0x00, 0x1c, 0x40,
+    0x00, 0xbb, 0xa1, 0x87, 0xbb, 0x04, 0x47, 0x99, 0x01, 0x0b, 0x22, 0x0c,
+    0x03, 0x1d, 0xf0, 0x00, 0x00, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x6e, 0x61,
+    0x6c, 0x3a, 0x20, 0x25, 0x75, 0x20, 0x66, 0x72, 0x65, 0x65, 0x2c, 0x20,
+    0x25, 0x75, 0x20, 0x6c, 0x61, 0x72, 0x67, 0x65, 0x73, 0x74, 0x20, 0x62,
+    0x6c, 0x6f, 0x63, 0x6b, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x70, 0x73, 0x72,
+    0x61, 0x6d, 0x3a, 0x20, 0x20, 0x20, 0x20, 0x25, 0x75, 0x20, 0x66, 0x72,
+    0x65, 0x65, 0x20, 0x6f, 0x66, 0x20, 0x25, 0x75, 0x0a, 0x00, 0x00, 0x00,
+    0x00, 0x75, 0x70, 0x20, 0x25, 0x75, 0x3a, 0x25, 0x30, 0x32, 0x75, 0x3a,
+    0x25, 0x30, 0x32, 0x75, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00,
+    0x00, 0x25, 0x73, 0x25, 0x73, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00,
+    0x00, 0x72, 0x65, 0x63, 0x6f, 0x76, 0x65, 0x72, 0x79, 0x00, 0x00, 0x00,
+    0x00, 0x6c, 0x6f, 0x61, 0x64, 0x65, 0x72, 0x00, 0x00, 0x75, 0x73, 0x61,
+    0x67, 0x65, 0x3a, 0x20, 0x72, 0x65, 0x62, 0x6f, 0x6f, 0x74, 0x20, 0x5b,
+    0x72, 0x65, 0x63, 0x6f, 0x76, 0x65, 0x72, 0x79, 0x7c, 0x6c, 0x6f, 0x61,
+    0x64, 0x65, 0x72, 0x5d, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x6d, 0x65, 0x6d,
+    0x00, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, 0x20, 0x75, 0x73, 0x61, 0x67,
+    0x65, 0x00, 0x00, 0x00, 0x00, 0x75, 0x70, 0x74, 0x69, 0x6d, 0x65, 0x00,
+    0x00, 0x74, 0x69, 0x6d, 0x65, 0x20, 0x73, 0x69, 0x6e, 0x63, 0x65, 0x20,
+    0x70, 0x6f, 0x77, 0x65, 0x72, 0x20, 0x6f, 0x6e, 0x00, 0x76, 0x65, 0x72,
+    0x73, 0x69, 0x6f, 0x6e, 0x00, 0x73, 0x68, 0x6f, 0x77, 0x20, 0x74, 0x68,
+    0x65, 0x20, 0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x20, 0x61, 0x6e, 0x64,
+    0x20, 0x70, 0x72, 0x6f, 0x66, 0x69, 0x6c, 0x65, 0x00, 0x69, 0x6e, 0x66,
+    0x6f, 0x00, 0x00, 0x00, 0x00, 0x62, 0x6f, 0x61, 0x72, 0x64, 0x2c, 0x20,
+    0x63, 0x68, 0x69, 0x70, 0x20, 0x61, 0x6e, 0x64, 0x20, 0x64, 0x69, 0x73,
+    0x70, 0x6c, 0x61, 0x79, 0x00, 0x70, 0x61, 0x72, 0x74, 0x73, 0x00, 0x00,
+    0x00, 0x74, 0x68, 0x65, 0x20, 0x70, 0x61, 0x72, 0x74, 0x69, 0x74, 0x69,
+    0x6f, 0x6e, 0x20, 0x74, 0x61, 0x62, 0x6c, 0x65, 0x00, 0x65, 0x63, 0x68,
+    0x6f, 0x00, 0x00, 0x00, 0x00, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x20, 0x74,
+    0x68, 0x65, 0x20, 0x61, 0x72, 0x67, 0x75, 0x6d, 0x65, 0x6e, 0x74, 0x73,
+    0x00, 0x63, 0x6c, 0x65, 0x61, 0x72, 0x00, 0x00, 0x00, 0x63, 0x6c, 0x65,
+    0x61, 0x72, 0x20, 0x74, 0x68, 0x65, 0x20, 0x73, 0x63, 0x72, 0x65, 0x65,
+    0x6e, 0x00, 0x00, 0x00, 0x00, 0x72, 0x65, 0x62, 0x6f, 0x6f, 0x74, 0x00,
+    0x00, 0x72, 0x65, 0x73, 0x74, 0x61, 0x72, 0x74, 0x20, 0x28, 0x6f, 0x72,
+    0x20, 0x72, 0x65, 0x63, 0x6f, 0x76, 0x65, 0x72, 0x79, 0x7c, 0x6c, 0x6f,
+    0x61, 0x64, 0x65, 0x72, 0x29, 0x00, 0x00, 0x00, 0x00, 0x70, 0x75, 0x72,
+    0x72, 0x63, 0x66, 0x67, 0x00, 0x73, 0x68, 0x6f, 0x77, 0x20, 0x74, 0x68,
+    0x65, 0x20, 0x62, 0x6f, 0x6f, 0x74, 0x20, 0x63, 0x6f, 0x6e, 0x66, 0x69,
+    0x67, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x2c, 0x06, 0x00,
+    0x00, 0x09, 0x00, 0x00, 0x00, 0x10, 0x05, 0x00, 0x00, 0x14, 0x05, 0x00,
+    0x00, 0x0c, 0x00, 0x00, 0x00, 0x24, 0x05, 0x00, 0x00, 0x2c, 0x05, 0x00,
+    0x00, 0x68, 0x00, 0x00, 0x00, 0x40, 0x05, 0x00, 0x00, 0x48, 0x05, 0x00,
+    0x00, 0xc0, 0x00, 0x00, 0x00, 0x64, 0x05, 0x00, 0x00, 0x6c, 0x05, 0x00,
+    0x00, 0xd4, 0x00, 0x00, 0x00, 0x84, 0x05, 0x00, 0x00, 0x8c, 0x05, 0x00,
+    0x00, 0xe8, 0x00, 0x00, 0x00, 0xa0, 0x05, 0x00, 0x00, 0xa8, 0x05, 0x00,
+    0x00, 0x0c, 0x01, 0x00, 0x00, 0xbc, 0x05, 0x00, 0x00, 0xc4, 0x05, 0x00,
+    0x00, 0x54, 0x01, 0x00, 0x00, 0xd8, 0x05, 0x00, 0x00, 0xe0, 0x05, 0x00,
+    0x00, 0x74, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x08, 0x06, 0x00,
+    0x00, 0x00, 0x02, 0x00, 0x00,
+};
+
+static const uint8_t s_fs_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x66, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x04, 0x0a, 0x00, 0x00, 0xdd, 0xfd, 0x0b, 0xb2, 0x3b, 0x64, 0xb5,
+    0x6a, 0xb0, 0xc3, 0x92, 0xb1, 0x05, 0xef, 0x35, 0x73, 0x23, 0x95, 0x49,
+    0x08, 0x5d, 0xb3, 0x89, 0xb4, 0x1d, 0x21, 0x49, 0x10, 0xd7, 0x82, 0xc2,
+    0x7a, 0x7c, 0x33, 0xd8, 0x9b, 0xb0, 0x42, 0x70, 0x07, 0x34, 0x7c, 0x8a,
+    0x74, 0x90, 0x78, 0x0e, 0x58, 0x82, 0xf3, 0x53, 0x69, 0x82, 0x94, 0x0c,
+    0x73, 0x25, 0xcc, 0xd9, 0x51, 0xc5, 0x48, 0x51, 0xcb, 0xfa, 0xb3, 0x23,
+    0x07, 0xce, 0xe7, 0x91, 0xda, 0x74, 0x8b, 0x90, 0x41, 0xfd, 0x0f, 0xea,
+    0x9c, 0x95, 0x01, 0x94, 0xbf, 0x08, 0x9c, 0x4e, 0x3a, 0x21, 0x32, 0x68,
+    0x65, 0x98, 0xbb, 0x67, 0x12, 0x44, 0x06, 0x00, 0x00, 0x25, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x30, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00,
+    0x00, 0x30, 0x01, 0x00, 0x00, 0x34, 0x01, 0x00, 0x00, 0xa0, 0x01, 0x00,
+    0x00, 0x48, 0x02, 0x00, 0x00, 0x4c, 0x02, 0x00, 0x00, 0x50, 0x02, 0x00,
+    0x00, 0x54, 0x02, 0x00, 0x00, 0x58, 0x02, 0x00, 0x00, 0xec, 0x02, 0x00,
+    0x00, 0x9c, 0x03, 0x00, 0x00, 0x4c, 0x04, 0x00, 0x00, 0x54, 0x04, 0x00,
+    0x00, 0x10, 0x05, 0x00, 0x00, 0x40, 0x06, 0x00, 0x00, 0xd4, 0x08, 0x00,
+    0x00, 0xdc, 0x08, 0x00, 0x00, 0xe0, 0x08, 0x00, 0x00, 0xe8, 0x08, 0x00,
+    0x00, 0xec, 0x08, 0x00, 0x00, 0xf4, 0x08, 0x00, 0x00, 0xf8, 0x08, 0x00,
+    0x00, 0x00, 0x09, 0x00, 0x00, 0x04, 0x09, 0x00, 0x00, 0x0c, 0x09, 0x00,
+    0x00, 0x10, 0x09, 0x00, 0x00, 0x18, 0x09, 0x00, 0x00, 0x1c, 0x09, 0x00,
+    0x00, 0x24, 0x09, 0x00, 0x00, 0x28, 0x09, 0x00, 0x00, 0x30, 0x09, 0x00,
+    0x00, 0x34, 0x09, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0xa4, 0x01, 0x00,
+    0x00, 0x50, 0x04, 0x00, 0x00, 0xe4, 0x08, 0x00, 0x00, 0xf0, 0x08, 0x00,
+    0x00, 0xfc, 0x08, 0x00, 0x00, 0x08, 0x09, 0x00, 0x00, 0x14, 0x09, 0x00,
+    0x00, 0x20, 0x09, 0x00, 0x00, 0x2c, 0x09, 0x00, 0x00, 0x38, 0x09, 0x00,
+    0x00, 0x3c, 0x09, 0x00, 0x00, 0xa0, 0x06, 0x00, 0x00, 0xac, 0x06, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0xfc, 0xff, 0xad, 0x02, 0x88, 0x08, 0xcd,
+    0x03, 0x88, 0x18, 0xdd, 0x05, 0x8c, 0x84, 0xb1, 0xf9, 0xff, 0xe0, 0x08,
+    0x00, 0x86, 0x01, 0x00, 0x00, 0xb1, 0xf8, 0xff, 0xe0, 0x08, 0x00, 0x1d,
+    0xf0, 0xb8, 0x06, 0x00, 0x00, 0xd0, 0x06, 0x00, 0x00, 0xfc, 0x06, 0x00,
+    0x00, 0x36, 0x81, 0x01, 0x91, 0xf0, 0xff, 0x8d, 0x03, 0x98, 0x09, 0x3d,
+    0x02, 0xe6, 0x38, 0x0c, 0x88, 0x09, 0xb1, 0xf8, 0xff, 0xad, 0x02, 0xe0,
+    0x08, 0x00, 0xc6, 0x09, 0x00, 0xa2, 0x29, 0x10, 0xe0, 0x0a, 0x00, 0x81,
+    0xe8, 0xff, 0x88, 0x08, 0x8c, 0xfa, 0xe8, 0x14, 0x2c, 0xf9, 0xd2, 0x0e,
+    0x00, 0xc8, 0xe8, 0x0c, 0x0f, 0x97, 0x1d, 0x1c, 0xc6, 0x03, 0x00, 0x88,
+    0x08, 0xb1, 0xef, 0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0x0c, 0x12, 0x86,
+    0x29, 0x00, 0x00, 0x92, 0x41, 0x50, 0xd2, 0x0e, 0x00, 0xac, 0x5d, 0x0c,
+    0x1f, 0x8d, 0x0f, 0xa2, 0xc1, 0x50, 0x5c, 0x02, 0x46, 0x02, 0x00, 0x00,
+    0x00, 0xd2, 0x4b, 0x00, 0xd2, 0x09, 0x00, 0x9c, 0x4d, 0x8a, 0xba, 0x1b,
+    0x88, 0xf0, 0x98, 0xc0, 0x9a, 0x9e, 0x27, 0x98, 0xeb, 0x4c, 0xf8, 0x06,
+    0x01, 0x00, 0x0c, 0x18, 0xa2, 0xc1, 0x50, 0x8a, 0x8a, 0xe8, 0x24, 0x0c,
+    0x09, 0x92, 0x48, 0x00, 0xd2, 0x0e, 0x00, 0x2c, 0xf8, 0x87, 0x1d, 0x0c,
+    0x82, 0x41, 0x00, 0xd2, 0x0e, 0x00, 0xac, 0x5d, 0x0c, 0x1f, 0x46, 0x00,
+    0x00, 0x0c, 0x0f, 0x8d, 0x0f, 0x5c, 0x02, 0xc6, 0x01, 0x00, 0xd2, 0x4b,
+    0x00, 0xd2, 0x09, 0x00, 0x9c, 0x1d, 0x8a, 0xb1, 0x1b, 0x88, 0xf0, 0x98,
+    0xc0, 0x9a, 0x9e, 0x27, 0x98, 0xeb, 0x4c, 0xf8, 0x46, 0x00, 0x00, 0x0c,
+    0x18, 0x8a, 0x81, 0x0c, 0x09, 0x92, 0x48, 0x00, 0xbd, 0x01, 0xe0, 0x0c,
+    0x00, 0x0c, 0x02, 0xd6, 0xea, 0x01, 0x81, 0xbc, 0xff, 0x28, 0x14, 0x88,
+    0x08, 0x92, 0x28, 0x11, 0x48, 0x18, 0xe0, 0x09, 0x00, 0xb1, 0xc7, 0xff,
+    0xdd, 0x0a, 0xcd, 0x02, 0xad, 0x03, 0xe0, 0x04, 0x00, 0x06, 0xd5, 0xff,
+    0x00, 0x1d, 0xf0, 0x00, 0x00, 0x04, 0x07, 0x00, 0x00, 0x08, 0x07, 0x00,
+    0x00, 0x36, 0x61, 0x00, 0x71, 0xb1, 0xff, 0x88, 0x07, 0xa2, 0x28, 0x10,
+    0xe0, 0x0a, 0x00, 0x88, 0x07, 0x9c, 0x2a, 0x88, 0xf8, 0xbd, 0x01, 0xa2,
+    0xc1, 0x04, 0xe0, 0x08, 0x00, 0x88, 0x07, 0x78, 0x18, 0xd6, 0x8a, 0x02,
+    0x06, 0x03, 0x00, 0x88, 0x08, 0xb1, 0xb5, 0xff, 0xad, 0x02, 0xe0, 0x08,
+    0x00, 0x86, 0x04, 0x00, 0x82, 0x28, 0x11, 0xe0, 0x08, 0x00, 0xc1, 0xef,
+    0xff, 0xb1, 0xb1, 0xff, 0xdd, 0x0a, 0xad, 0x02, 0xe0, 0x07, 0x00, 0x0c,
+    0x12, 0xc6, 0x05, 0x00, 0x00, 0xc8, 0x11, 0xd8, 0x01, 0xb1, 0xeb, 0xff,
+    0xc0, 0xed, 0xc0, 0xad, 0x02, 0xe0, 0xdd, 0x11, 0xe0, 0xcc, 0x11, 0xe0,
+    0x07, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0x30, 0x07, 0x00,
+    0x00, 0x0c, 0x00, 0x00, 0x00, 0x36, 0xe1, 0x00, 0x71, 0x95, 0xff, 0x88,
+    0x07, 0xa2, 0x28, 0x10, 0xe0, 0x0a, 0x00, 0x88, 0x07, 0x8c, 0xea, 0xd8,
+    0x98, 0xe6, 0x23, 0x18, 0x41, 0xf8, 0xff, 0x0c, 0x0c, 0x2c, 0xfb, 0x06,
+    0x0a, 0x00, 0x00, 0x88, 0x08, 0xb1, 0x9a, 0xff, 0xad, 0x02, 0xe0, 0x08,
+    0x00, 0x06, 0x1a, 0x00, 0x00, 0x48, 0x14, 0x2c, 0xf8, 0xb2, 0x04, 0x00,
+    0x87, 0x1b, 0x0d, 0x82, 0x41, 0x00, 0xb2, 0x04, 0x00, 0xac, 0x6b, 0x0c,
+    0x1c, 0x86, 0x00, 0x00, 0x00, 0x0c, 0x0c, 0x8d, 0x0c, 0x5c, 0x0e, 0xc6,
+    0x01, 0x00, 0xb2, 0x4a, 0x00, 0xb2, 0x09, 0x00, 0x9c, 0x1b, 0x8a, 0xa1,
+    0x1b, 0x88, 0xc0, 0x98, 0xc0, 0x9a, 0x94, 0xe7, 0x98, 0xeb, 0x4c, 0xf8,
+    0x46, 0x00, 0x00, 0x0c, 0x18, 0x8a, 0x81, 0x0c, 0x09, 0xb1, 0xe3, 0xff,
+    0x92, 0x48, 0x00, 0xcd, 0x02, 0xad, 0x01, 0xe0, 0x0d, 0x00, 0x0c, 0x08,
+    0xd6, 0x7a, 0x01, 0x88, 0x07, 0x92, 0x28, 0x11, 0x78, 0x18, 0xe0, 0x09,
+    0x00, 0xb1, 0x81, 0xff, 0xdd, 0x0a, 0xcd, 0x04, 0xad, 0x02, 0xe0, 0x07,
+    0x00, 0x0c, 0x18, 0x2d, 0x08, 0x1d, 0xf0, 0x00, 0x00, 0x34, 0x07, 0x00,
+    0x00, 0x3c, 0x07, 0x00, 0x00, 0x80, 0x07, 0x00, 0x00, 0x90, 0x07, 0x00,
+    0x00, 0x98, 0x07, 0x00, 0x00, 0x36, 0x41, 0x00, 0xa6, 0x23, 0x27, 0x88,
+    0x14, 0x91, 0xf9, 0xff, 0x42, 0x08, 0x00, 0x2c, 0xdb, 0xdc, 0x54, 0x06,
+    0x06, 0x00, 0x42, 0x08, 0x00, 0xcc, 0x84, 0x82, 0x09, 0x01, 0xac, 0x08,
+    0xc6, 0x02, 0x00, 0x00, 0x00, 0xb2, 0x09, 0x01, 0x1b, 0x99, 0x1b, 0x88,
+    0x47, 0x1b, 0xe6, 0x81, 0x5d, 0xff, 0xb1, 0xef, 0xff, 0x88, 0x08, 0xad,
+    0x02, 0x88, 0x08, 0xe0, 0x08, 0x00, 0x46, 0x0e, 0x00, 0x00, 0x31, 0x58,
+    0xff, 0xb1, 0xec, 0xff, 0x88, 0x03, 0xad, 0x02, 0x88, 0x08, 0xe0, 0x08,
+    0x00, 0x88, 0x03, 0x82, 0x28, 0x13, 0xe0, 0x08, 0x00, 0x88, 0x03, 0xa2,
+    0x28, 0x12, 0xe0, 0x0a, 0x00, 0x88, 0x03, 0xd6, 0xaa, 0x01, 0x92, 0x28,
+    0x11, 0x48, 0x18, 0xe0, 0x09, 0x00, 0xc1, 0xe2, 0xff, 0xb1, 0x5b, 0xff,
+    0xdd, 0x0a, 0xad, 0x02, 0xe0, 0x04, 0x00, 0x0c, 0x12, 0x06, 0x03, 0x00,
+    0x00, 0x88, 0x08, 0xb1, 0xde, 0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0x2d,
+    0x04, 0x1d, 0xf0, 0x00, 0x00, 0xa0, 0x07, 0x00, 0x00, 0x36, 0xe1, 0x00,
+    0x91, 0x43, 0xff, 0x8d, 0x03, 0x98, 0x09, 0x3d, 0x02, 0xe6, 0x28, 0x0c,
+    0x88, 0x09, 0xb1, 0xfa, 0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0xc6, 0x09,
+    0x00, 0xa2, 0x29, 0x10, 0xe0, 0x0a, 0x00, 0x81, 0x3b, 0xff, 0x88, 0x08,
+    0x8c, 0xfa, 0xc8, 0x14, 0x2c, 0xf9, 0xb2, 0x0c, 0x00, 0xe8, 0xc8, 0x0c,
+    0x0d, 0x97, 0x1b, 0x1c, 0xc6, 0x03, 0x00, 0x88, 0x08, 0xb1, 0x42, 0xff,
+    0xad, 0x02, 0xe0, 0x08, 0x00, 0x0c, 0x12, 0x86, 0x17, 0x00, 0x00, 0x92,
+    0x41, 0x00, 0xb2, 0x0c, 0x00, 0xac, 0x0b, 0x0c, 0x1d, 0x8d, 0x0d, 0x5c,
+    0x0f, 0xc6, 0x01, 0x00, 0xb2, 0x4a, 0x00, 0xb2, 0x09, 0x00, 0x9c, 0x1b,
+    0x8a, 0xa1, 0x1b, 0x88, 0xd0, 0x98, 0xc0, 0x9a, 0x9c, 0xf7, 0x98, 0xeb,
+    0x4c, 0xf8, 0x46, 0x00, 0x00, 0x0c, 0x18, 0x8a, 0x81, 0x0c, 0x09, 0x92,
+    0x48, 0x00, 0xad, 0x01, 0xe0, 0x0e, 0x00, 0x0c, 0x02, 0xd6, 0x0a, 0x02,
+    0x81, 0x22, 0xff, 0x28, 0x14, 0x82, 0x28, 0x00, 0x92, 0x28, 0x11, 0x42,
+    0x28, 0x01, 0xe0, 0x09, 0x00, 0xb1, 0x2c, 0xff, 0xdd, 0x0a, 0xcd, 0x02,
+    0xad, 0x03, 0xe0, 0x04, 0x00, 0x06, 0xe7, 0xff, 0x00, 0x1d, 0xf0, 0x00,
+    0x00, 0xb4, 0x07, 0x00, 0x00, 0x36, 0xe1, 0x00, 0x91, 0x17, 0xff, 0x8d,
+    0x03, 0x98, 0x09, 0x3d, 0x02, 0xe6, 0x28, 0x0c, 0x88, 0x09, 0xb1, 0xfa,
+    0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0xc6, 0x09, 0x00, 0xa2, 0x29, 0x10,
+    0xe0, 0x0a, 0x00, 0x81, 0x0f, 0xff, 0x88, 0x08, 0x8c, 0xfa, 0xc8, 0x14,
+    0x2c, 0xf9, 0xb2, 0x0c, 0x00, 0xe8, 0xd8, 0x0c, 0x0d, 0x97, 0x1b, 0x1c,
+    0xc6, 0x03, 0x00, 0x88, 0x08, 0xb1, 0x16, 0xff, 0xad, 0x02, 0xe0, 0x08,
+    0x00, 0x0c, 0x12, 0x86, 0x17, 0x00, 0x00, 0x92, 0x41, 0x00, 0xb2, 0x0c,
+    0x00, 0xac, 0x2b, 0x0c, 0x1d, 0x8d, 0x0d, 0x5c, 0x0f, 0x06, 0x02, 0x00,
+    0x00, 0xb2, 0x4a, 0x00, 0xb2, 0x09, 0x00, 0x9c, 0x2b, 0x8a, 0xa1, 0x1b,
+    0x88, 0xd0, 0x98, 0xc0, 0x9a, 0x9c, 0xf7, 0x98, 0xeb, 0x4c, 0xf8, 0x86,
+    0x00, 0x00, 0x00, 0x0c, 0x18, 0x8a, 0x81, 0x0c, 0x09, 0x92, 0x48, 0x00,
+    0xad, 0x01, 0xe0, 0x0e, 0x00, 0x0c, 0x02, 0xd6, 0xea, 0x01, 0x81, 0xf5,
+    0xfe, 0x28, 0x14, 0x88, 0x08, 0x92, 0x28, 0x11, 0x48, 0x18, 0xe0, 0x09,
+    0x00, 0xb1, 0x00, 0xff, 0xdd, 0x0a, 0xcd, 0x02, 0xad, 0x03, 0xe0, 0x04,
+    0x00, 0x06, 0xe7, 0xff, 0x00, 0x1d, 0xf0, 0x00, 0x00, 0xd4, 0x07, 0x00,
+    0x00, 0x54, 0x06, 0x00, 0x00, 0xe8, 0x07, 0x00, 0x00, 0x36, 0xe1, 0x00,
+    0x81, 0xe9, 0xfe, 0x88, 0x08, 0xe6, 0x23, 0x0c, 0x88, 0x08, 0xb1, 0xf9,
+    0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0xc6, 0x09, 0x00, 0xa2, 0x28, 0x10,
+    0xe0, 0x0a, 0x00, 0x81, 0xe2, 0xfe, 0x88, 0x08, 0x8c, 0xfa, 0xc8, 0x14,
+    0x2c, 0xf9, 0xb2, 0x0c, 0x00, 0xd8, 0xa8, 0x0c, 0x0e, 0x97, 0x1b, 0x1c,
+    0xc6, 0x03, 0x00, 0x88, 0x08, 0xb1, 0xe9, 0xfe, 0xad, 0x02, 0xe0, 0x08,
+    0x00, 0x0c, 0x12, 0x86, 0x1b, 0x00, 0x00, 0x92, 0x41, 0x00, 0xb2, 0x0c,
+    0x00, 0xac, 0x2b, 0x0c, 0x1e, 0x8d, 0x0e, 0x5c, 0x0f, 0x06, 0x02, 0x00,
+    0x00, 0xb2, 0x4a, 0x00, 0xb2, 0x09, 0x00, 0x9c, 0x2b, 0x8a, 0xa1, 0x1b,
+    0x88, 0xe0, 0x98, 0xc0, 0x9a, 0x9c, 0xf7, 0x98, 0xeb, 0x4c, 0xf8, 0x86,
+    0x00, 0x00, 0x00, 0x0c, 0x18, 0x8a, 0x81, 0x0c, 0x09, 0xb1, 0xe0, 0xff,
+    0x92, 0x48, 0x00, 0xcd, 0x02, 0xad, 0x01, 0xe0, 0x0d, 0x00, 0x81, 0xc8,
+    0xfe, 0x88, 0x08, 0xd6, 0xaa, 0x01, 0x92, 0x28, 0x11, 0x38, 0x14, 0x42,
+    0x28, 0x01, 0xe0, 0x09, 0x00, 0xb1, 0xd2, 0xfe, 0xdd, 0x0a, 0xcd, 0x03,
+    0xad, 0x02, 0xe0, 0x04, 0x00, 0x06, 0xe6, 0xff, 0x00, 0x88, 0x08, 0xb1,
+    0xd4, 0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x00,
+    0x00, 0xec, 0x07, 0x00, 0x00, 0x36, 0x01, 0x02, 0x81, 0xba, 0xfe, 0x7d,
+    0x03, 0x22, 0x61, 0x34, 0x88, 0x08, 0x3d, 0x04, 0xe6, 0x37, 0x0d, 0x88,
+    0x08, 0xb1, 0xfa, 0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0x06, 0x06, 0x00,
+    0x00, 0xa2, 0x28, 0x10, 0xe0, 0x0a, 0x00, 0x81, 0xb1, 0xfe, 0x88, 0x08,
+    0xcc, 0xea, 0x88, 0x08, 0xb1, 0xbc, 0xfe, 0xa2, 0x21, 0x34, 0xe0, 0x08,
+    0x00, 0x0c, 0x12, 0x86, 0x3a, 0x00, 0x8b, 0x24, 0xed, 0x03, 0x0c, 0x24,
+    0x3d, 0x08, 0x0c, 0x0a, 0xf2, 0xa0, 0x78, 0x2c, 0x06, 0x8d, 0x07, 0x78,
+    0x02, 0xcd, 0x0a, 0xb2, 0x07, 0x00, 0xdc, 0x3b, 0x1b, 0xca, 0x06, 0x08,
+    0x00, 0xb2, 0x45, 0x00, 0xb2, 0x09, 0x00, 0xcc, 0x6b, 0xad, 0x0c, 0x2b,
+    0xcd, 0x46, 0x04, 0x00, 0x00, 0xdd, 0x0c, 0xca, 0x51, 0x1b, 0xcc, 0xa0,
+    0x9c, 0xc0, 0x9a, 0x97, 0xf7, 0x9c, 0xe1, 0xa2, 0xa0, 0x77, 0x1b, 0x44,
+    0x47, 0x18, 0x0e, 0xf7, 0x1c, 0x1f, 0xaa, 0xa1, 0x62, 0x4a, 0x00, 0x4b,
+    0x22, 0xad, 0x0c, 0x06, 0xef, 0xff, 0x92, 0xa0, 0x78, 0x8d, 0x03, 0x3d,
+    0x0e, 0x97, 0x1c, 0x14, 0xaa, 0xa1, 0x0c, 0xa9, 0x92, 0x4a, 0x00, 0x46,
+    0x03, 0x00, 0x8d, 0x03, 0xc2, 0xa0, 0x77, 0x3d, 0x0e, 0xc6, 0x00, 0x00,
+    0x00, 0xc2, 0xa0, 0x77, 0xe8, 0x13, 0x2c, 0xf9, 0xb2, 0x0e, 0x00, 0xd8,
+    0xb8, 0x97, 0x1b, 0x0c, 0x92, 0x41, 0x78, 0xb2, 0x0e, 0x00, 0xac, 0x8b,
+    0x0c, 0x1f, 0x46, 0x00, 0x00, 0x0c, 0x0f, 0x8d, 0x0f, 0xa2, 0xc1, 0x78,
+    0x5c, 0x07, 0xc6, 0x01, 0x00, 0xb2, 0x46, 0x00, 0xb2, 0x09, 0x00, 0x9c,
+    0x4b, 0x8a, 0x6a, 0x1b, 0x88, 0xf0, 0x98, 0xc0, 0x9a, 0x9e, 0x77, 0x98,
+    0xeb, 0x4c, 0xf8, 0x06, 0x01, 0x00, 0x0c, 0x18, 0xa2, 0xc1, 0x78, 0x8a,
+    0x8a, 0x0c, 0x09, 0x92, 0x48, 0x00, 0xbd, 0x01, 0xe0, 0x0d, 0x00, 0x0c,
+    0x02, 0xd6, 0x0a, 0x02, 0x81, 0x79, 0xfe, 0x68, 0x13, 0x88, 0x08, 0x92,
+    0x28, 0x11, 0x78, 0x18, 0xe0, 0x09, 0x00, 0xdd, 0x0a, 0xb1, 0x83, 0xfe,
+    0xa2, 0x21, 0x34, 0x60, 0xc6, 0x20, 0xe0, 0x07, 0x00, 0x06, 0xc4, 0xff,
+    0x00, 0x1d, 0xf0, 0x00, 0x00, 0xd0, 0x08, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0x6e, 0xfe, 0x29, 0x08, 0x21, 0xfd, 0xff, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x5d, 0x02, 0xbc, 0xe4, 0x6d, 0x03, 0x4a, 0x43,
+    0x5c, 0xe2, 0x0c, 0x13, 0x0c, 0xd7, 0x92, 0x06, 0x00, 0x82, 0xc9, 0xe0,
+    0x80, 0x80, 0x74, 0x80, 0x82, 0x62, 0x0b, 0x88, 0x80, 0x80, 0x60, 0x80,
+    0x80, 0x74, 0xa2, 0xc9, 0xf6, 0xcd, 0x08, 0xa0, 0xc3, 0x83, 0xbd, 0x09,
+    0xcc, 0x88, 0x8c, 0x1c, 0x06, 0x01, 0x00, 0x2c, 0xeb, 0x77, 0x19, 0x06,
+    0x88, 0x25, 0xa8, 0x35, 0xe0, 0x08, 0x00, 0x1b, 0x66, 0x67, 0x94, 0xc9,
+    0x0c, 0x02, 0x1d, 0xf0, 0x00, 0x20, 0x20, 0x25, 0x73, 0x2f, 0x0a, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x20, 0x25, 0x2d, 0x32, 0x30, 0x73,
+    0x20, 0x25, 0x75, 0x0a, 0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20,
+    0x6d, 0x76, 0x20, 0x3c, 0x66, 0x72, 0x6f, 0x6d, 0x3e, 0x20, 0x3c, 0x74,
+    0x6f, 0x3e, 0x0a, 0x00, 0x00, 0x6e, 0x6f, 0x20, 0x66, 0x69, 0x6c, 0x65,
+    0x73, 0x79, 0x73, 0x74, 0x65, 0x6d, 0x20, 0x6d, 0x6f, 0x75, 0x6e, 0x74,
+    0x65, 0x64, 0x20, 0x28, 0x72, 0x75, 0x6e, 0x3a, 0x20, 0x66, 0x6f, 0x72,
+    0x6d, 0x61, 0x74, 0x20, 0x2d, 0x2d, 0x79, 0x65, 0x73, 0x29, 0x0a, 0x00,
+    0x00, 0x25, 0x73, 0x3a, 0x20, 0x25, 0x73, 0x0a, 0x00, 0x64, 0x66, 0x00,
+    0x00, 0x72, 0x6f, 0x6f, 0x74, 0x3a, 0x20, 0x25, 0x75, 0x4b, 0x20, 0x75,
+    0x73, 0x65, 0x64, 0x20, 0x6f, 0x66, 0x20, 0x25, 0x75, 0x4b, 0x20, 0x28,
+    0x25, 0x75, 0x20, 0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x73, 0x20, 0x66, 0x72,
+    0x65, 0x65, 0x29, 0x0a, 0x00, 0x2f, 0x00, 0x00, 0x00, 0x2d, 0x2d, 0x79,
+    0x65, 0x73, 0x00, 0x00, 0x00, 0x74, 0x68, 0x69, 0x73, 0x20, 0x65, 0x72,
+    0x61, 0x73, 0x65, 0x73, 0x20, 0x65, 0x76, 0x65, 0x72, 0x79, 0x74, 0x68,
+    0x69, 0x6e, 0x67, 0x20, 0x6f, 0x6e, 0x20, 0x74, 0x68, 0x65, 0x20, 0x72,
+    0x6f, 0x6f, 0x74, 0x20, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73, 0x74,
+    0x65, 0x6d, 0x2e, 0x0a, 0x72, 0x75, 0x6e, 0x3a, 0x20, 0x66, 0x6f, 0x72,
+    0x6d, 0x61, 0x74, 0x20, 0x2d, 0x2d, 0x79, 0x65, 0x73, 0x0a, 0x00, 0x00,
+    0x00, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x74, 0x69, 0x6e, 0x67, 0x2e,
+    0x2e, 0x2e, 0x0a, 0x00, 0x00, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x00,
+    0x00, 0x64, 0x6f, 0x6e, 0x65, 0x2e, 0x0a, 0x00, 0x00, 0x75, 0x73, 0x61,
+    0x67, 0x65, 0x3a, 0x20, 0x6d, 0x6b, 0x64, 0x69, 0x72, 0x20, 0x3c, 0x64,
+    0x69, 0x72, 0x3e, 0x0a, 0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20,
+    0x72, 0x6d, 0x20, 0x3c, 0x66, 0x69, 0x6c, 0x65, 0x20, 0x6f, 0x72, 0x20,
+    0x65, 0x6d, 0x70, 0x74, 0x79, 0x20, 0x64, 0x69, 0x72, 0x3e, 0x0a, 0x00,
+    0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20, 0x63, 0x61, 0x74, 0x20,
+    0x3c, 0x66, 0x69, 0x6c, 0x65, 0x3e, 0x0a, 0x00, 0x00, 0x0a, 0x00, 0x00,
+    0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20, 0x77, 0x72, 0x69, 0x74,
+    0x65, 0x20, 0x3c, 0x66, 0x69, 0x6c, 0x65, 0x3e, 0x20, 0x3c, 0x74, 0x65,
+    0x78, 0x74, 0x2e, 0x2e, 0x2e, 0x3e, 0x0a, 0x00, 0x00, 0x6c, 0x73, 0x00,
+    0x00, 0x6c, 0x69, 0x73, 0x74, 0x20, 0x61, 0x20, 0x64, 0x69, 0x72, 0x65,
+    0x63, 0x74, 0x6f, 0x72, 0x79, 0x00, 0x00, 0x00, 0x00, 0x63, 0x61, 0x74,
+    0x00, 0x73, 0x68, 0x6f, 0x77, 0x20, 0x61, 0x20, 0x66, 0x69, 0x6c, 0x65,
+    0x00, 0x6d, 0x6b, 0x64, 0x69, 0x72, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x6b,
+    0x65, 0x20, 0x61, 0x20, 0x64, 0x69, 0x72, 0x65, 0x63, 0x74, 0x6f, 0x72,
+    0x79, 0x00, 0x00, 0x00, 0x00, 0x72, 0x6d, 0x00, 0x00, 0x72, 0x65, 0x6d,
+    0x6f, 0x76, 0x65, 0x20, 0x61, 0x20, 0x66, 0x69, 0x6c, 0x65, 0x20, 0x6f,
+    0x72, 0x20, 0x65, 0x6d, 0x70, 0x74, 0x79, 0x20, 0x64, 0x69, 0x72, 0x00,
+    0x00, 0x6d, 0x76, 0x00, 0x00, 0x72, 0x65, 0x6e, 0x61, 0x6d, 0x65, 0x20,
+    0x6f, 0x72, 0x20, 0x6d, 0x6f, 0x76, 0x65, 0x00, 0x00, 0x77, 0x72, 0x69,
+    0x74, 0x65, 0x00, 0x00, 0x00, 0x77, 0x72, 0x69, 0x74, 0x65, 0x20, 0x74,
+    0x65, 0x78, 0x74, 0x20, 0x74, 0x6f, 0x20, 0x61, 0x20, 0x66, 0x69, 0x6c,
+    0x65, 0x00, 0x00, 0x00, 0x00, 0x66, 0x69, 0x6c, 0x65, 0x73, 0x79, 0x73,
+    0x74, 0x65, 0x6d, 0x20, 0x73, 0x70, 0x61, 0x63, 0x65, 0x00, 0x00, 0x00,
+    0x00, 0x65, 0x72, 0x61, 0x73, 0x65, 0x20, 0x61, 0x6e, 0x64, 0x20, 0x63,
+    0x72, 0x65, 0x61, 0x74, 0x65, 0x20, 0x74, 0x68, 0x65, 0x20, 0x66, 0x73,
+    0x00, 0x0a, 0x00, 0x00, 0x00, 0xdc, 0x08, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x0c, 0x08, 0x00, 0x00, 0x10, 0x08, 0x00, 0x00, 0xa8, 0x01, 0x00,
+    0x00, 0x24, 0x08, 0x00, 0x00, 0x28, 0x08, 0x00, 0x00, 0x58, 0x04, 0x00,
+    0x00, 0x34, 0x08, 0x00, 0x00, 0x3c, 0x08, 0x00, 0x00, 0xf0, 0x02, 0x00,
+    0x00, 0x50, 0x08, 0x00, 0x00, 0x54, 0x08, 0x00, 0x00, 0xa0, 0x03, 0x00,
+    0x00, 0x70, 0x08, 0x00, 0x00, 0x74, 0x08, 0x00, 0x00, 0x3c, 0x00, 0x00,
+    0x00, 0x84, 0x08, 0x00, 0x00, 0x8c, 0x08, 0x00, 0x00, 0x14, 0x05, 0x00,
+    0x00, 0x04, 0x07, 0x00, 0x00, 0xa4, 0x08, 0x00, 0x00, 0x38, 0x01, 0x00,
+    0x00, 0x90, 0x07, 0x00, 0x00, 0xb8, 0x08, 0x00, 0x00, 0x5c, 0x02, 0x00,
+    0x00,
+};
+
+static const uint8_t s_login_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x6c, 0x6f, 0x67, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x33, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x28, 0x05, 0x00, 0x00, 0xfd, 0xc4, 0x44, 0xc2, 0x35, 0x68, 0x01,
+    0x54, 0x06, 0xba, 0x76, 0xfb, 0x26, 0x46, 0x7f, 0x1c, 0xf5, 0x53, 0x58,
+    0x88, 0x55, 0x8d, 0xf1, 0x72, 0x42, 0x00, 0xfa, 0xd2, 0x8a, 0xec, 0x59,
+    0xa6, 0x91, 0xd7, 0x36, 0x5f, 0x65, 0x27, 0x85, 0x95, 0xeb, 0x3b, 0x28,
+    0x4a, 0xb0, 0x66, 0xd8, 0x61, 0x67, 0x43, 0x65, 0x5a, 0x7e, 0xe6, 0xb0,
+    0x57, 0xa8, 0x25, 0xd4, 0x34, 0x4a, 0xc2, 0x6e, 0x94, 0x16, 0xb8, 0x9f,
+    0x1c, 0x02, 0x6d, 0xfb, 0x51, 0x89, 0x11, 0xf0, 0x3c, 0x9b, 0x98, 0x96,
+    0xb3, 0x9b, 0xb3, 0xfe, 0xce, 0x7f, 0xc5, 0xad, 0x42, 0x8a, 0xfc, 0xfc,
+    0x53, 0x1f, 0xb6, 0x6e, 0x5d, 0x68, 0x02, 0x00, 0x00, 0x1d, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x0c, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00,
+    0x00, 0x48, 0x00, 0x00, 0x00, 0x4c, 0x00, 0x00, 0x00, 0xd4, 0x00, 0x00,
+    0x00, 0x84, 0x01, 0x00, 0x00, 0x38, 0x02, 0x00, 0x00, 0x64, 0x02, 0x00,
+    0x00, 0x20, 0x04, 0x00, 0x00, 0x28, 0x04, 0x00, 0x00, 0x2c, 0x04, 0x00,
+    0x00, 0x34, 0x04, 0x00, 0x00, 0x38, 0x04, 0x00, 0x00, 0x40, 0x04, 0x00,
+    0x00, 0x44, 0x04, 0x00, 0x00, 0x4c, 0x04, 0x00, 0x00, 0x50, 0x04, 0x00,
+    0x00, 0x58, 0x04, 0x00, 0x00, 0x5c, 0x04, 0x00, 0x00, 0x64, 0x04, 0x00,
+    0x00, 0x68, 0x04, 0x00, 0x00, 0x70, 0x04, 0x00, 0x00, 0x74, 0x04, 0x00,
+    0x00, 0x7c, 0x04, 0x00, 0x00, 0x80, 0x04, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x30, 0x04, 0x00, 0x00, 0x3c, 0x04, 0x00, 0x00, 0x48, 0x04, 0x00,
+    0x00, 0x54, 0x04, 0x00, 0x00, 0x60, 0x04, 0x00, 0x00, 0x6c, 0x04, 0x00,
+    0x00, 0x78, 0x04, 0x00, 0x00, 0x84, 0x04, 0x00, 0x00, 0x78, 0x02, 0x00,
+    0x00, 0x90, 0x02, 0x00, 0x00, 0x88, 0x04, 0x00, 0x00, 0xac, 0x02, 0x00,
+    0x00, 0x36, 0xa1, 0x00, 0x71, 0xfd, 0xff, 0xad, 0x01, 0x82, 0x27, 0x00,
+    0x82, 0x28, 0x14, 0xe0, 0x08, 0x00, 0xd8, 0xa1, 0x88, 0x07, 0x91, 0xf7,
+    0xff, 0xa1, 0xf6, 0xff, 0x88, 0x18, 0xd0, 0xa9, 0x83, 0xb1, 0xf7, 0xff,
+    0xdd, 0x0a, 0xcd, 0x01, 0xad, 0x02, 0xe0, 0x08, 0x00, 0x0c, 0x02, 0x1d,
+    0xf0, 0x80, 0x02, 0x00, 0x00, 0x88, 0x02, 0x00, 0x00, 0x94, 0x02, 0x00,
+    0x00, 0x9c, 0x02, 0x00, 0x00, 0x36, 0xa1, 0x00, 0x71, 0xed, 0xff, 0xad,
+    0x01, 0x82, 0x27, 0x00, 0x82, 0x28, 0x14, 0xe0, 0x08, 0x00, 0xf8, 0xa1,
+    0xa1, 0xe8, 0xff, 0xd1, 0xf8, 0xff, 0x98, 0x07, 0x88, 0x91, 0xf0, 0xda,
+    0x83, 0xe1, 0xf5, 0xff, 0xa1, 0xf3, 0xff, 0x0b, 0x88, 0x98, 0x19, 0xc2,
+    0x01, 0x20, 0xb1, 0xf3, 0xff, 0xfd, 0x0d, 0x80, 0xea, 0x83, 0xdd, 0x01,
+    0xad, 0x02, 0xe0, 0x09, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x36, 0x41, 0x00,
+    0x81, 0xdd, 0xff, 0x0c, 0x02, 0x88, 0x08, 0x82, 0x28, 0x15, 0xe0, 0x08,
+    0x00, 0x1d, 0xf0, 0x00, 0x00, 0x36, 0x41, 0x00, 0x81, 0xd8, 0xff, 0xad,
+    0x02, 0x88, 0x08, 0x82, 0x28, 0x16, 0xe0, 0x08, 0x00, 0x2d, 0x0a, 0x1d,
+    0xf0, 0x36, 0x41, 0x00, 0x81, 0xd3, 0xff, 0xad, 0x02, 0x88, 0x08, 0x0c,
+    0x0b, 0x82, 0x28, 0x17, 0xa6, 0x23, 0x02, 0xb2, 0x24, 0x01, 0xe0, 0x08,
+    0x00, 0x2d, 0x0a, 0x1d, 0xf0, 0xb4, 0x02, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0xcb, 0xff, 0xad, 0x02, 0xf8, 0x08, 0xe6, 0x23, 0x02, 0x46, 0x19,
+    0x00, 0x66, 0x23, 0x02, 0xc6, 0x21, 0x00, 0xd8, 0x24, 0xe2, 0x0d, 0x00,
+    0xdc, 0x5e, 0x46, 0x15, 0x00, 0x82, 0x09, 0x00, 0xcc, 0x58, 0xc2, 0x0b,
+    0x01, 0xc6, 0x05, 0x00, 0x00, 0x1b, 0xbb, 0xc2, 0x0b, 0x00, 0x46, 0x02,
+    0x00, 0xb1, 0xcd, 0xff, 0x8d, 0x0e, 0x9d, 0x0d, 0xc2, 0xa0, 0x61, 0x1b,
+    0x99, 0x87, 0x1c, 0xdc, 0xc7, 0x98, 0x1e, 0x46, 0x02, 0x00, 0x92, 0x08,
+    0x00, 0xcc, 0xc9, 0x82, 0x0b, 0x01, 0xec, 0x18, 0x81, 0xc5, 0xff, 0x92,
+    0xa0, 0x61, 0x06, 0x0f, 0x00, 0x1b, 0xbb, 0xc2, 0x0b, 0x00, 0xc6, 0x02,
+    0x00, 0x00, 0xb1, 0xc1, 0xff, 0x9d, 0x0e, 0xd0, 0x8d, 0x20, 0xc2, 0xa0,
+    0x73, 0x82, 0xc8, 0x01, 0x97, 0x1c, 0xd2, 0x88, 0x0f, 0xb1, 0xe1, 0xff,
+    0x0c, 0x12, 0xe0, 0x08, 0x00, 0x86, 0x09, 0x00, 0x00, 0xe2, 0x0d, 0x00,
+    0xcc, 0x9e, 0x82, 0x08, 0x01, 0x0c, 0x1c, 0x80, 0xce, 0x93, 0xc6, 0x02,
+    0x00, 0x92, 0x08, 0x01, 0x1b, 0x88, 0x1b, 0xdd, 0xe7, 0x19, 0xe5, 0x0c,
+    0x0c, 0x82, 0x2f, 0x18, 0xb8, 0x14, 0xe0, 0x08, 0x00, 0x2d, 0x0a, 0x1d,
+    0xf0, 0xdc, 0x02, 0x00, 0x00, 0x36, 0x41, 0x00, 0xad, 0x02, 0xa6, 0x33,
+    0x5c, 0xd8, 0x24, 0xe2, 0x0d, 0x00, 0xdc, 0x7e, 0x86, 0x14, 0x00, 0x00,
+    0x00, 0x82, 0x09, 0x00, 0xcc, 0x58, 0xc2, 0x0b, 0x01, 0xc6, 0x05, 0x00,
+    0x00, 0x1b, 0xbb, 0xc2, 0x0b, 0x00, 0x46, 0x02, 0x00, 0xb1, 0xa4, 0xff,
+    0x8d, 0x0e, 0x9d, 0x0d, 0xc2, 0xa0, 0x61, 0x1b, 0x99, 0x87, 0x1c, 0xdc,
+    0xc7, 0x98, 0x1a, 0x46, 0x0e, 0x00, 0x92, 0x08, 0x00, 0xcc, 0x69, 0x82,
+    0x0b, 0x01, 0xac, 0xe8, 0x86, 0x06, 0x00, 0x1b, 0xbb, 0xc2, 0x0b, 0x00,
+    0x06, 0x03, 0x00, 0x00, 0x00, 0x00, 0xb1, 0x99, 0xff, 0x9d, 0x0e, 0x8d,
+    0x0d, 0xc2, 0xa0, 0x73, 0x82, 0xc8, 0x01, 0x97, 0x1c, 0xd7, 0x81, 0x86,
+    0xff, 0xb1, 0xe5, 0xff, 0x88, 0x08, 0x0c, 0x12, 0x88, 0x08, 0xe0, 0x08,
+    0x00, 0x86, 0x0d, 0x00, 0x81, 0x82, 0xff, 0xb8, 0x14, 0x88, 0x08, 0x92,
+    0xa0, 0x61, 0xf2, 0x28, 0x1a, 0x81, 0x8d, 0xff, 0xc6, 0x05, 0x00, 0x00,
+    0x00, 0xe2, 0x0d, 0x00, 0xcc, 0xae, 0x82, 0x08, 0x01, 0x0c, 0x1c, 0x80,
+    0xce, 0x93, 0x06, 0x03, 0x00, 0x00, 0x92, 0x08, 0x01, 0x1b, 0x88, 0x1b,
+    0xdd, 0xe7, 0x19, 0xe4, 0x0c, 0x0c, 0xe0, 0x0f, 0x00, 0x2d, 0x0a, 0x1d,
+    0xf0, 0x04, 0x03, 0x00, 0x00, 0x36, 0x41, 0x00, 0x81, 0x72, 0xff, 0xad,
+    0x02, 0x88, 0x08, 0xe6, 0x23, 0x0e, 0x88, 0x08, 0xb1, 0xfb, 0xff, 0x22,
+    0xa0, 0x01, 0xe0, 0x08, 0x00, 0x86, 0x02, 0x00, 0x00, 0x82, 0x28, 0x19,
+    0xb8, 0x14, 0xe0, 0x08, 0x00, 0x2d, 0x0a, 0x1d, 0xf0, 0x1c, 0x04, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0x67, 0xff, 0x29, 0x08, 0x21, 0xfd, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x20, 0x28, 0x72, 0x6f, 0x6f, 0x74, 0x29,
+    0x00, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x73, 0x74, 0x61,
+    0x6e, 0x64, 0x61, 0x72, 0x64, 0x00, 0x00, 0x00, 0x00, 0x20, 0x72, 0x6f,
+    0x6f, 0x74, 0x00, 0x00, 0x00, 0x75, 0x69, 0x64, 0x3d, 0x25, 0x75, 0x28,
+    0x25, 0x73, 0x29, 0x20, 0x72, 0x6f, 0x6c, 0x65, 0x3d, 0x25, 0x73, 0x25,
+    0x73, 0x0a, 0x00, 0x00, 0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20,
+    0x75, 0x73, 0x65, 0x72, 0x61, 0x64, 0x64, 0x20, 0x3c, 0x6e, 0x61, 0x6d,
+    0x65, 0x3e, 0x20, 0x5b, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x7c, 0x73, 0x74,
+    0x61, 0x6e, 0x64, 0x61, 0x72, 0x64, 0x5d, 0x0a, 0x00, 0x75, 0x73, 0x61,
+    0x67, 0x65, 0x3a, 0x20, 0x75, 0x73, 0x65, 0x72, 0x6d, 0x6f, 0x64, 0x20,
+    0x3c, 0x6e, 0x61, 0x6d, 0x65, 0x3e, 0x20, 0x61, 0x64, 0x6d, 0x69, 0x6e,
+    0x7c, 0x73, 0x74, 0x61, 0x6e, 0x64, 0x61, 0x72, 0x64, 0x0a, 0x00, 0x00,
+    0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20, 0x75, 0x73, 0x65, 0x72,
+    0x64, 0x65, 0x6c, 0x20, 0x3c, 0x6e, 0x61, 0x6d, 0x65, 0x3e, 0x0a, 0x00,
+    0x00, 0x77, 0x68, 0x6f, 0x61, 0x6d, 0x69, 0x00, 0x00, 0x74, 0x68, 0x65,
+    0x20, 0x6c, 0x6f, 0x67, 0x67, 0x65, 0x64, 0x2d, 0x69, 0x6e, 0x20, 0x75,
+    0x73, 0x65, 0x72, 0x00, 0x00, 0x69, 0x64, 0x00, 0x00, 0x75, 0x69, 0x64,
+    0x2c, 0x20, 0x72, 0x6f, 0x6c, 0x65, 0x20, 0x61, 0x6e, 0x64, 0x20, 0x72,
+    0x6f, 0x6f, 0x74, 0x20, 0x73, 0x74, 0x61, 0x74, 0x65, 0x00, 0x00, 0x00,
+    0x00, 0x73, 0x75, 0x00, 0x00, 0x62, 0x65, 0x63, 0x6f, 0x6d, 0x65, 0x20,
+    0x72, 0x6f, 0x6f, 0x74, 0x20, 0x28, 0x6f, 0x77, 0x6e, 0x20, 0x70, 0x61,
+    0x73, 0x73, 0x77, 0x6f, 0x72, 0x64, 0x29, 0x00, 0x00, 0x70, 0x61, 0x73,
+    0x73, 0x77, 0x64, 0x00, 0x00, 0x63, 0x68, 0x61, 0x6e, 0x67, 0x65, 0x20,
+    0x61, 0x20, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64, 0x00, 0x00,
+    0x00, 0x75, 0x73, 0x65, 0x72, 0x61, 0x64, 0x64, 0x00, 0x61, 0x64, 0x64,
+    0x20, 0x61, 0x6e, 0x20, 0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x20,
+    0x28, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x20, 0x6f, 0x6e, 0x6c, 0x79, 0x29,
+    0x00, 0x75, 0x73, 0x65, 0x72, 0x64, 0x65, 0x6c, 0x00, 0x72, 0x65, 0x6d,
+    0x6f, 0x76, 0x65, 0x20, 0x61, 0x6e, 0x20, 0x61, 0x63, 0x63, 0x6f, 0x75,
+    0x6e, 0x74, 0x20, 0x28, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x20, 0x6f, 0x6e,
+    0x6c, 0x79, 0x29, 0x00, 0x00, 0x75, 0x73, 0x65, 0x72, 0x6d, 0x6f, 0x64,
+    0x00, 0x63, 0x68, 0x61, 0x6e, 0x67, 0x65, 0x20, 0x61, 0x20, 0x72, 0x6f,
+    0x6c, 0x65, 0x20, 0x28, 0x61, 0x64, 0x6d, 0x69, 0x6e, 0x20, 0x6f, 0x6e,
+    0x6c, 0x79, 0x29, 0x00, 0x00, 0x6c, 0x6f, 0x67, 0x6f, 0x75, 0x74, 0x00,
+    0x00, 0x65, 0x6e, 0x64, 0x20, 0x74, 0x68, 0x65, 0x20, 0x73, 0x65, 0x73,
+    0x73, 0x69, 0x6f, 0x6e, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x28, 0x04, 0x00,
+    0x00, 0x08, 0x00, 0x00, 0x00, 0x1c, 0x03, 0x00, 0x00, 0x24, 0x03, 0x00,
+    0x00, 0x10, 0x00, 0x00, 0x00, 0x38, 0x03, 0x00, 0x00, 0x3c, 0x03, 0x00,
+    0x00, 0x50, 0x00, 0x00, 0x00, 0x58, 0x03, 0x00, 0x00, 0x5c, 0x03, 0x00,
+    0x00, 0xa4, 0x00, 0x00, 0x00, 0x78, 0x03, 0x00, 0x00, 0x80, 0x03, 0x00,
+    0x00, 0xb8, 0x00, 0x00, 0x00, 0x94, 0x03, 0x00, 0x00, 0x9c, 0x03, 0x00,
+    0x00, 0xd8, 0x00, 0x00, 0x00, 0xb8, 0x03, 0x00, 0x00, 0xc0, 0x03, 0x00,
+    0x00, 0x3c, 0x02, 0x00, 0x00, 0xe0, 0x03, 0x00, 0x00, 0xe8, 0x03, 0x00,
+    0x00, 0x88, 0x01, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x0c, 0x04, 0x00,
+    0x00, 0x90, 0x00, 0x00, 0x00,
+};
+
+static const uint8_t s_appmgr_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x61, 0x70, 0x70, 0x6d, 0x67, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x32,
+    0x2e, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x50, 0x03, 0x00, 0x00, 0x0d, 0xc7, 0x73, 0xbf, 0x7d, 0x48, 0xa3,
+    0x37, 0x57, 0x4e, 0xe2, 0xef, 0x98, 0xfa, 0x1d, 0xb8, 0xc8, 0x15, 0xf2,
+    0x4c, 0x0e, 0x5b, 0x4f, 0x86, 0x23, 0x7f, 0x71, 0x74, 0xe3, 0x6e, 0x1b,
+    0x4f, 0x9a, 0x77, 0xa9, 0xfa, 0x0a, 0x77, 0xe0, 0x34, 0x31, 0x7f, 0x99,
+    0x97, 0x69, 0xdb, 0x40, 0x83, 0xe1, 0x4c, 0x58, 0x4d, 0x32, 0xa0, 0x0b,
+    0xc4, 0x22, 0x26, 0x68, 0x66, 0x3b, 0x40, 0xcd, 0x84, 0xa9, 0x52, 0x8e,
+    0x7a, 0xb0, 0x06, 0x30, 0x60, 0x25, 0x7d, 0x33, 0x34, 0xaa, 0x32, 0x8a,
+    0xe0, 0xe9, 0x28, 0x2c, 0xeb, 0x81, 0x05, 0x4c, 0x0c, 0xef, 0xa0, 0x77,
+    0xf0, 0x03, 0x06, 0x22, 0x97, 0x14, 0x01, 0x00, 0x00, 0x13, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x60, 0x00, 0x00, 0x00, 0x8c, 0x00, 0x00, 0x00, 0xb8, 0x00, 0x00,
+    0x00, 0xe4, 0x00, 0x00, 0x00, 0x10, 0x01, 0x00, 0x00, 0xa0, 0x02, 0x00,
+    0x00, 0xa8, 0x02, 0x00, 0x00, 0xac, 0x02, 0x00, 0x00, 0xb4, 0x02, 0x00,
+    0x00, 0xb8, 0x02, 0x00, 0x00, 0xc0, 0x02, 0x00, 0x00, 0xc4, 0x02, 0x00,
+    0x00, 0xcc, 0x02, 0x00, 0x00, 0xd0, 0x02, 0x00, 0x00, 0xd8, 0x02, 0x00,
+    0x00, 0xdc, 0x02, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0xb0, 0x02, 0x00,
+    0x00, 0xbc, 0x02, 0x00, 0x00, 0xc8, 0x02, 0x00, 0x00, 0xd4, 0x02, 0x00,
+    0x00, 0xe0, 0x02, 0x00, 0x00, 0x24, 0x01, 0x00, 0x00, 0x2c, 0x01, 0x00,
+    0x00, 0xe4, 0x02, 0x00, 0x00, 0x36, 0x41, 0x00, 0xad, 0x02, 0xa6, 0x23,
+    0x26, 0x88, 0x14, 0xb1, 0xfa, 0xff, 0x92, 0x08, 0x00, 0x2c, 0xdc, 0xdc,
+    0x49, 0xc6, 0x05, 0x00, 0x00, 0x92, 0x08, 0x00, 0xcc, 0x69, 0x82, 0x0b,
+    0x01, 0xac, 0x18, 0x46, 0x02, 0x00, 0xc2, 0x0b, 0x01, 0x1b, 0xbb, 0x1b,
+    0x88, 0x97, 0x1c, 0xe8, 0x81, 0xf3, 0xff, 0xb1, 0xf1, 0xff, 0x88, 0x08,
+    0x22, 0xa0, 0x01, 0x82, 0x28, 0x00, 0xe0, 0x08, 0x00, 0x86, 0x03, 0x00,
+    0x00, 0x00, 0x81, 0xed, 0xff, 0x88, 0x08, 0x82, 0x28, 0x1e, 0xe0, 0x08,
+    0x00, 0x2d, 0x0a, 0x1d, 0xf0, 0x80, 0x01, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0xe8, 0xff, 0xad, 0x02, 0x88, 0x08, 0xe6, 0x23, 0x0e, 0x88, 0x08,
+    0xb1, 0xfb, 0xff, 0x22, 0xa0, 0x01, 0xe0, 0x08, 0x00, 0x86, 0x02, 0x00,
+    0x00, 0x82, 0x28, 0x1b, 0xb8, 0x14, 0xe0, 0x08, 0x00, 0x2d, 0x0a, 0x1d,
+    0xf0, 0x98, 0x01, 0x00, 0x00, 0x36, 0x41, 0x00, 0x81, 0xdd, 0xff, 0xad,
+    0x02, 0x88, 0x08, 0xe6, 0x23, 0x0e, 0x88, 0x08, 0xb1, 0xfb, 0xff, 0x22,
+    0xa0, 0x01, 0xe0, 0x08, 0x00, 0x86, 0x02, 0x00, 0x00, 0x82, 0x28, 0x1c,
+    0xb8, 0x14, 0xe0, 0x08, 0x00, 0x2d, 0x0a, 0x1d, 0xf0, 0xc4, 0x01, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0xd2, 0xff, 0xad, 0x02, 0x88, 0x08, 0xe6,
+    0x23, 0x0e, 0x88, 0x08, 0xb1, 0xfb, 0xff, 0x22, 0xa0, 0x01, 0xe0, 0x08,
+    0x00, 0x86, 0x02, 0x00, 0x00, 0x82, 0x28, 0x1d, 0xb8, 0x14, 0xe0, 0x08,
+    0x00, 0x2d, 0x0a, 0x1d, 0xf0, 0xe0, 0x01, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0xc7, 0xff, 0xad, 0x02, 0x88, 0x08, 0xe6, 0x23, 0x0d, 0x88, 0x08,
+    0xb1, 0xfb, 0xff, 0x22, 0xa0, 0x01, 0xe0, 0x08, 0x00, 0x86, 0x02, 0x00,
+    0x82, 0x28, 0x1f, 0xb2, 0x24, 0x01, 0xe0, 0x08, 0x00, 0x2d, 0x0a, 0x1d,
+    0xf0, 0x9c, 0x02, 0x00, 0x00, 0x36, 0x41, 0x00, 0x81, 0xbc, 0xff, 0x29,
+    0x08, 0x21, 0xfd, 0xff, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0x2d, 0x2d, 0x79,
+    0x65, 0x73, 0x00, 0x00, 0x00, 0x74, 0x68, 0x69, 0x73, 0x20, 0x65, 0x72,
+    0x61, 0x73, 0x65, 0x73, 0x20, 0x65, 0x76, 0x65, 0x72, 0x79, 0x20, 0x61,
+    0x70, 0x70, 0x20, 0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x65, 0x64,
+    0x20, 0x66, 0x6f, 0x72, 0x20, 0x79, 0x6f, 0x75, 0x20, 0x28, 0x6e, 0x6f,
+    0x74, 0x20, 0x6f, 0x74, 0x68, 0x65, 0x72, 0x20, 0x75, 0x73, 0x65, 0x72,
+    0x73, 0x29, 0x2e, 0x0a, 0x72, 0x75, 0x6e, 0x3a, 0x20, 0x61, 0x70, 0x70,
+    0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x2d, 0x2d, 0x79, 0x65, 0x73,
+    0x0a, 0x00, 0x00, 0x00, 0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20,
+    0x61, 0x70, 0x70, 0x69, 0x6e, 0x66, 0x6f, 0x20, 0x3c, 0x6e, 0x61, 0x6d,
+    0x65, 0x3e, 0x0a, 0x00, 0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20,
+    0x61, 0x70, 0x70, 0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x20, 0x3c,
+    0x66, 0x69, 0x6c, 0x65, 0x20, 0x6f, 0x6e, 0x20, 0x72, 0x6f, 0x6f, 0x74,
+    0x2c, 0x20, 0x6f, 0x72, 0x20, 0x61, 0x20, 0x55, 0x52, 0x4c, 0x3e, 0x0a,
+    0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20, 0x61, 0x70, 0x70, 0x72,
+    0x65, 0x6d, 0x6f, 0x76, 0x65, 0x20, 0x3c, 0x6e, 0x61, 0x6d, 0x65, 0x3e,
+    0x0a, 0x00, 0x00, 0x00, 0x00, 0x75, 0x73, 0x61, 0x67, 0x65, 0x3a, 0x20,
+    0x72, 0x75, 0x6e, 0x20, 0x3c, 0x61, 0x70, 0x70, 0x3e, 0x0a, 0x00, 0x00,
+    0x00, 0x61, 0x70, 0x70, 0x69, 0x6e, 0x66, 0x6f, 0x00, 0x73, 0x68, 0x6f,
+    0x77, 0x20, 0x6f, 0x6e, 0x65, 0x20, 0x61, 0x70, 0x70, 0x27, 0x73, 0x20,
+    0x64, 0x65, 0x74, 0x61, 0x69, 0x6c, 0x73, 0x00, 0x00, 0x61, 0x70, 0x70,
+    0x69, 0x6e, 0x73, 0x74, 0x61, 0x6c, 0x6c, 0x00, 0x00, 0x69, 0x6e, 0x73,
+    0x74, 0x61, 0x6c, 0x6c, 0x20, 0x61, 0x20, 0x2e, 0x63, 0x61, 0x74, 0x20,
+    0x70, 0x61, 0x63, 0x6b, 0x61, 0x67, 0x65, 0x00, 0x00, 0x61, 0x70, 0x70,
+    0x72, 0x65, 0x6d, 0x6f, 0x76, 0x65, 0x00, 0x00, 0x00, 0x72, 0x65, 0x6d,
+    0x6f, 0x76, 0x65, 0x20, 0x61, 0x6e, 0x20, 0x61, 0x70, 0x70, 0x00, 0x00,
+    0x00, 0x61, 0x70, 0x70, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x00, 0x00,
+    0x00, 0x65, 0x72, 0x61, 0x73, 0x65, 0x20, 0x61, 0x6e, 0x64, 0x20, 0x63,
+    0x72, 0x65, 0x61, 0x74, 0x65, 0x20, 0x74, 0x68, 0x65, 0x20, 0x61, 0x70,
+    0x70, 0x73, 0x20, 0x66, 0x73, 0x00, 0x00, 0x00, 0x00, 0x72, 0x75, 0x6e,
+    0x00, 0x72, 0x75, 0x6e, 0x20, 0x61, 0x6e, 0x20, 0x69, 0x6e, 0x73, 0x74,
+    0x61, 0x6c, 0x6c, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x00, 0x00, 0x00,
+    0x00, 0x0a, 0x00, 0x00, 0x00, 0xa8, 0x02, 0x00, 0x00, 0x05, 0x00, 0x00,
+    0x00, 0xf4, 0x01, 0x00, 0x00, 0xfc, 0x01, 0x00, 0x00, 0x64, 0x00, 0x00,
+    0x00, 0x14, 0x02, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x90, 0x00, 0x00,
+    0x00, 0x38, 0x02, 0x00, 0x00, 0x44, 0x02, 0x00, 0x00, 0xbc, 0x00, 0x00,
+    0x00, 0x54, 0x02, 0x00, 0x00, 0x60, 0x02, 0x00, 0x00, 0x0c, 0x00, 0x00,
+    0x00, 0x80, 0x02, 0x00, 0x00, 0x84, 0x02, 0x00, 0x00, 0xe8, 0x00, 0x00,
+    0x00,
+};
+
+/* debug.cat (Modules/test/debug_module.c), the optional serial debug console -- planted
+ * only if missing (plant_temp_modules()'s own comment on why this one and sysinfo/fs/login/
+ * appmgr above are no longer treated the same way), so a device that already has it via
+ * netinstall or an explicit copy is never silently overwritten back to this baked-in
+ * version. Embedded for the same reason the others were originally: no real transport onto
+ * a brand-new board (waveshare154's bring-up) yet. */
+static const uint8_t s_debug_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x64, 0x65, 0x62, 0x75, 0x67, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x32,
+    0x2e, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0xf8, 0x04, 0x00, 0x00, 0xe8, 0xdc, 0x06, 0x89, 0x66, 0x4f, 0xd9,
+    0x0a, 0x8d, 0x8d, 0x8d, 0x9c, 0x58, 0x8b, 0xbb, 0x60, 0x93, 0xfd, 0x05,
+    0x39, 0x2c, 0xe8, 0x5e, 0xb2, 0x41, 0x45, 0x7f, 0x8e, 0x5f, 0x51, 0x28,
+    0x63, 0xe6, 0x16, 0x31, 0xd9, 0xda, 0x27, 0xc8, 0xc6, 0xfd, 0x42, 0x0a,
+    0x80, 0x4b, 0x1e, 0x5d, 0xbe, 0xe7, 0x05, 0xc8, 0x51, 0x1a, 0xa0, 0x24,
+    0xd6, 0x34, 0x10, 0x2b, 0x69, 0xa1, 0xb5, 0xde, 0x2f, 0x31, 0xb5, 0xf3,
+    0x6d, 0xdb, 0x4c, 0x71, 0xff, 0x30, 0x01, 0xae, 0xe2, 0x51, 0x6a, 0x65,
+    0xfc, 0x05, 0xbf, 0xfb, 0xac, 0xab, 0x53, 0x6d, 0xa7, 0x94, 0x4e, 0x24,
+    0xc6, 0xc6, 0xda, 0xab, 0xae, 0xf4, 0x02, 0x00, 0x00, 0x16, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00,
+    0x00, 0x34, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x00,
+    0x00, 0x40, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x00, 0x48, 0x00, 0x00,
+    0x00, 0x4c, 0x00, 0x00, 0x00, 0x98, 0x01, 0x00, 0x00, 0x9c, 0x01, 0x00,
+    0x00, 0xa0, 0x01, 0x00, 0x00, 0xa4, 0x01, 0x00, 0x00, 0xa8, 0x01, 0x00,
+    0x00, 0xac, 0x01, 0x00, 0x00, 0xb0, 0x01, 0x00, 0x00, 0xe8, 0x02, 0x00,
+    0x00, 0xf0, 0x02, 0x00, 0x00, 0x78, 0x04, 0x00, 0x00, 0x80, 0x04, 0x00,
+    0x00, 0x84, 0x04, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0xec, 0x02, 0x00,
+    0x00, 0x88, 0x04, 0x00, 0x00, 0x8c, 0x04, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0xfe, 0xff, 0xb2, 0x02, 0x00, 0x88, 0x08, 0xad, 0x02, 0x92, 0x28,
+    0x2a, 0x16, 0xdb, 0x00, 0xb2, 0xa0, 0x00, 0x1b, 0xbb, 0xb0, 0x8a, 0x80,
+    0x82, 0x08, 0x00, 0x56, 0x48, 0xff, 0xe0, 0x09, 0x00, 0x1d, 0xf0, 0x00,
+    0x00, 0x18, 0x03, 0x00, 0x00, 0x20, 0x03, 0x00, 0x00, 0x28, 0x03, 0x00,
+    0x00, 0x58, 0x03, 0x00, 0x00, 0x74, 0x03, 0x00, 0x00, 0x78, 0x03, 0x00,
+    0x00, 0x8c, 0x03, 0x00, 0x00, 0xa0, 0x03, 0x00, 0x00, 0xb8, 0x03, 0x00,
+    0x00, 0x36, 0x41, 0x01, 0x81, 0xeb, 0xff, 0xf8, 0x08, 0xe6, 0x23, 0x0c,
+    0x88, 0x0f, 0xb1, 0xf5, 0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0xc6, 0x0f,
+    0x00, 0xc8, 0x14, 0xd2, 0x0c, 0x00, 0xdc, 0x8d, 0xc6, 0x44, 0x00, 0x00,
+    0x00, 0x82, 0x09, 0x00, 0xcc, 0x58, 0xe2, 0x0b, 0x01, 0x06, 0x06, 0x00,
+    0x00, 0x1b, 0xbb, 0xe2, 0x0b, 0x00, 0x86, 0x02, 0x00, 0x00, 0xb1, 0xe8,
+    0xff, 0x8d, 0x0d, 0x9d, 0x0c, 0xe2, 0xa0, 0x77, 0x1b, 0x99, 0x87, 0x1e,
+    0xdb, 0xe7, 0x98, 0x6d, 0x66, 0x23, 0x0f, 0x88, 0x0f, 0xb1, 0xe6, 0xff,
+    0xad, 0x02, 0xe0, 0x08, 0x00, 0x0c, 0x12, 0x46, 0x39, 0x00, 0x00, 0xa8,
+    0x24, 0x92, 0x2f, 0x2a, 0xb2, 0x0a, 0x00, 0x8c, 0xbb, 0x0c, 0x0b, 0x1b,
+    0xbb, 0xb0, 0x8a, 0x80, 0x82, 0x08, 0x00, 0x56, 0x48, 0xff, 0xe0, 0x09,
+    0x00, 0x81, 0xce, 0xff, 0xa0, 0x4a, 0x20, 0x88, 0x08, 0xa1, 0xdb, 0xff,
+    0x82, 0x28, 0x2a, 0xb2, 0xa0, 0x01, 0xe0, 0x08, 0x00, 0x81, 0xc9, 0xff,
+    0xb1, 0xd8, 0xff, 0x88, 0x08, 0xad, 0x02, 0x88, 0x18, 0xcd, 0x04, 0xe0,
+    0x08, 0x00, 0x40, 0x2f, 0x05, 0xc6, 0x27, 0x00, 0x00, 0xd2, 0x08, 0x00,
+    0xcc, 0x6d, 0x82, 0x09, 0x01, 0x9c, 0x98, 0x06, 0x21, 0x00, 0x1b, 0x99,
+    0xb2, 0x09, 0x00, 0xc6, 0x01, 0x00, 0x91, 0xc9, 0xff, 0x8d, 0x0c, 0xb2,
+    0xa0, 0x72, 0x1b, 0x88, 0xd7, 0x1b, 0xdd, 0x06, 0x1b, 0x00, 0xc2, 0xa7,
+    0xd0, 0x26, 0x23, 0x29, 0x88, 0x24, 0xac, 0x48, 0x92, 0x08, 0x00, 0x9c,
+    0xf9, 0xcd, 0x0d, 0x0c, 0x9b, 0xa2, 0xc9, 0xd0, 0xa0, 0x90, 0x74, 0x1b,
+    0x88, 0xc0, 0xcc, 0xa0, 0x97, 0x3b, 0x0b, 0x92, 0x08, 0x00, 0xa0, 0xcc,
+    0x90, 0x56, 0x89, 0xfe, 0x86, 0x00, 0x00, 0xc2, 0xa7, 0xd0, 0x82, 0x2f,
+    0x2b, 0xb2, 0xa0, 0x7f, 0xad, 0x01, 0xe0, 0x08, 0x00, 0x81, 0xab, 0xff,
+    0xcd, 0x0a, 0x88, 0x08, 0xd6, 0xea, 0x00, 0x88, 0x08, 0xb1, 0xb9, 0xff,
+    0xad, 0x02, 0xe0, 0x08, 0x00, 0x0c, 0x12, 0x46, 0x09, 0x00, 0xaa, 0x91,
+    0x0c, 0x0a, 0xa2, 0x49, 0x00, 0x88, 0x18, 0xb1, 0xb4, 0xff, 0xad, 0x02,
+    0xdd, 0x01, 0xe0, 0x08, 0x00, 0x0c, 0x02, 0x46, 0x03, 0x00, 0x00, 0x88,
+    0x1f, 0xb1, 0xb1, 0xff, 0xad, 0x02, 0xe0, 0x08, 0x00, 0x06, 0xc5, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0xdc, 0x03, 0x00, 0x00, 0xe4, 0x03, 0x00,
+    0x00, 0x18, 0x04, 0x00, 0x00, 0x14, 0x04, 0x00, 0x00, 0x1c, 0x04, 0x00,
+    0x00, 0x20, 0x04, 0x00, 0x00, 0x24, 0x04, 0x00, 0x00, 0x36, 0x21, 0x01,
+    0xa1, 0xf9, 0xff, 0x0c, 0x07, 0x65, 0xe4, 0xff, 0x41, 0x90, 0xff, 0x51,
+    0xf7, 0xff, 0x2d, 0x07, 0x32, 0xa0, 0x70, 0x5c, 0xe6, 0x88, 0x04, 0xc2,
+    0xa0, 0xc8, 0x82, 0x28, 0x2b, 0x0c, 0x1b, 0xa2, 0xc1, 0x60, 0xe0, 0x08,
+    0x00, 0xa6, 0x1a, 0xec, 0x92, 0x01, 0x60, 0xa8, 0x04, 0xc2, 0xc9, 0xf3,
+    0x80, 0xfc, 0x40, 0xb2, 0xa0, 0x01, 0x80, 0x85, 0x41, 0x16, 0x8c, 0x00,
+    0xc2, 0xc9, 0xf6, 0xc0, 0x8b, 0x83, 0x16, 0x48, 0x08, 0x82, 0x2a, 0x2a,
+    0xb2, 0xa0, 0x02, 0x50, 0xa5, 0x20, 0xe0, 0x08, 0x00, 0xa6, 0x17, 0x61,
+    0x7a, 0x81, 0x22, 0x48, 0x00, 0x82, 0x01, 0x00, 0xa1, 0xe1, 0xff, 0xbd,
+    0x03, 0x9d, 0x01, 0xdc, 0x48, 0x06, 0x0a, 0x00, 0x00, 0x82, 0x09, 0x00,
+    0xcc, 0x68, 0x82, 0x0a, 0x01, 0x9c, 0x08, 0x86, 0x06, 0x00, 0xb2, 0x0a,
+    0x01, 0x1b, 0xaa, 0x1b, 0x99, 0xb7, 0x18, 0xe8, 0x46, 0x03, 0x00, 0x00,
+    0x00, 0xa1, 0xda, 0xff, 0x65, 0xdc, 0xff, 0xc6, 0x09, 0x00, 0x00, 0x00,
+    0x00, 0x88, 0x04, 0xa1, 0xd7, 0xff, 0x82, 0x28, 0x2a, 0x0c, 0x2b, 0xe0,
+    0x08, 0x00, 0x88, 0x04, 0xbd, 0x07, 0x82, 0x28, 0x2a, 0xad, 0x01, 0xe0,
+    0x08, 0x00, 0x88, 0x04, 0x0c, 0x2b, 0x82, 0x28, 0x2a, 0xad, 0x05, 0xe0,
+    0x08, 0x00, 0x88, 0x04, 0xa1, 0xcf, 0xff, 0x82, 0x28, 0x2a, 0x0c, 0x2b,
+    0xe0, 0x08, 0x00, 0x0c, 0x07, 0x06, 0xd3, 0xff, 0x00, 0x00, 0xc2, 0xc9,
+    0x81, 0x80, 0xfc, 0x40, 0x80, 0x85, 0x41, 0x8c, 0x7c, 0xc2, 0xc9, 0xf8,
+    0xc0, 0x8b, 0x83, 0x16, 0x68, 0x01, 0xe6, 0x17, 0x02, 0x06, 0xcc, 0xff,
+    0x82, 0x2a, 0x2a, 0xa1, 0xc4, 0xff, 0x0c, 0x3b, 0x0b, 0x77, 0xe0, 0x08,
+    0x00, 0x06, 0xc8, 0xff, 0x00, 0x82, 0xc9, 0xe0, 0x80, 0x80, 0x74, 0x80,
+    0x86, 0x62, 0x0b, 0x88, 0x80, 0x80, 0x60, 0x80, 0x80, 0x74, 0x16, 0xb8,
+    0xf0, 0x70, 0x86, 0x72, 0x0b, 0x88, 0x80, 0x80, 0x60, 0x80, 0x80, 0x74,
+    0x16, 0xd8, 0xef, 0x70, 0xc1, 0x80, 0x82, 0x2a, 0x2a, 0x92, 0x4c, 0x00,
+    0xa2, 0xc1, 0x60, 0x72, 0xc7, 0x01, 0xe0, 0x08, 0x00, 0x06, 0xba, 0xff,
+    0x00, 0x00, 0x0c, 0x00, 0x00, 0x28, 0x04, 0x00, 0x00, 0xb4, 0x01, 0x00,
+    0x00, 0x74, 0x04, 0x00, 0x00, 0x36, 0x41, 0x00, 0x91, 0x42, 0xff, 0x82,
+    0x22, 0x2c, 0xc1, 0xf9, 0xff, 0xb1, 0xfa, 0xff, 0xa1, 0xfa, 0xff, 0x29,
+    0x09, 0x0c, 0x2e, 0xd2, 0xa0, 0x00, 0xe0, 0x08, 0x00, 0x21, 0xf8, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x77, 0x72, 0x69, 0x74, 0x65, 0x00, 0x00,
+    0x00, 0x72, 0x65, 0x61, 0x64, 0x00, 0x00, 0x00, 0x00, 0x75, 0x73, 0x61,
+    0x67, 0x65, 0x3a, 0x20, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x20, 0x77,
+    0x72, 0x69, 0x74, 0x65, 0x20, 0x3c, 0x74, 0x65, 0x78, 0x74, 0x3e, 0x20,
+    0x7c, 0x20, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x20, 0x72, 0x65, 0x61,
+    0x64, 0x20, 0x5b, 0x6d, 0x73, 0x5d, 0x0a, 0x00, 0x00, 0x75, 0x73, 0x61,
+    0x67, 0x65, 0x3a, 0x20, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x20, 0x77,
+    0x72, 0x69, 0x74, 0x65, 0x20, 0x3c, 0x74, 0x65, 0x78, 0x74, 0x3e, 0x0a,
+    0x00, 0x0a, 0x00, 0x00, 0x00, 0x77, 0x72, 0x6f, 0x74, 0x65, 0x20, 0x25,
+    0x64, 0x20, 0x62, 0x79, 0x74, 0x65, 0x28, 0x73, 0x29, 0x0a, 0x00, 0x00,
+    0x00, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x20, 0x72, 0x65, 0x61, 0x64,
+    0x3a, 0x20, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x0a, 0x00, 0x72, 0x65, 0x61,
+    0x64, 0x20, 0x25, 0x64, 0x20, 0x62, 0x79, 0x74, 0x65, 0x28, 0x73, 0x29,
+    0x3a, 0x20, 0x25, 0x73, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x73, 0x65, 0x72,
+    0x69, 0x61, 0x6c, 0x3a, 0x20, 0x75, 0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e,
+    0x20, 0x73, 0x75, 0x62, 0x63, 0x6f, 0x6d, 0x6d, 0x61, 0x6e, 0x64, 0x20,
+    0x27, 0x25, 0x73, 0x27, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x70, 0x69, 0x6e,
+    0x67, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x0a, 0x64, 0x65, 0x62, 0x75, 0x67,
+    0x3a, 0x20, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x20, 0x63, 0x6f, 0x6e,
+    0x73, 0x6f, 0x6c, 0x65, 0x20, 0x72, 0x65, 0x61, 0x64, 0x79, 0x20, 0x28,
+    0x74, 0x72, 0x79, 0x3a, 0x20, 0x70, 0x69, 0x6e, 0x67, 0x29, 0x0d, 0x0a,
+    0x3e, 0x20, 0x00, 0x00, 0x00, 0x70, 0x6f, 0x6e, 0x67, 0x0d, 0x0a, 0x00,
+    0x00, 0x3f, 0x20, 0x00, 0x00, 0x3e, 0x20, 0x00, 0x00, 0x08, 0x20, 0x08,
+    0x00, 0x64, 0x62, 0x67, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x00, 0x00,
+    0x00, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x00, 0x00, 0x77, 0x72, 0x69,
+    0x74, 0x65, 0x20, 0x3c, 0x74, 0x65, 0x78, 0x74, 0x3e, 0x20, 0x7c, 0x20,
+    0x72, 0x65, 0x61, 0x64, 0x20, 0x5b, 0x6d, 0x73, 0x5d, 0x20, 0x2d, 0x2d,
+    0x20, 0x72, 0x61, 0x77, 0x20, 0x55, 0x41, 0x52, 0x54, 0x2f, 0x55, 0x53,
+    0x42, 0x2d, 0x53, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x2d, 0x4a, 0x54, 0x41,
+    0x47, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x80, 0x04, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x34, 0x04, 0x00, 0x00, 0x3c, 0x04, 0x00,
+    0x00, 0x50, 0x00, 0x00, 0x00,
+};
+
+/* The real keyboard driver module (Modules/drivers/kbd_i2c_module.c) -- converted off
+ * purr_kernel.c's own compiled-in kbd_probe/kbd_read/kbd_remove (deleted there; see that
+ * file's own comment), now auto-planted to /boot/drivers and purr_driver_register()'d by
+ * purr_modules_setup() below, same as every other temp asset on this page. */
+static const uint8_t s_kbd_i2c_driver_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x6b, 0x62, 0x64, 0x5f, 0x69, 0x32, 0x63, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0xcc, 0x00, 0x00, 0x00, 0xf9, 0xc6, 0x23, 0x1f, 0x26, 0x74, 0x89,
+    0xd9, 0x9f, 0x1a, 0xd2, 0x6c, 0xf8, 0xab, 0x6d, 0xbb, 0xff, 0xcc, 0x5e,
+    0x9c, 0x7f, 0x2e, 0xd6, 0x2b, 0x12, 0xd1, 0xe5, 0x90, 0xb8, 0xd2, 0x45,
+    0x68, 0x58, 0x9a, 0x51, 0xd9, 0x1b, 0x7b, 0x94, 0x0a, 0x25, 0x85, 0x49,
+    0x63, 0x9e, 0xb1, 0xe7, 0x64, 0xf9, 0xde, 0x51, 0xff, 0x4c, 0x67, 0x7e,
+    0xa3, 0xe2, 0xde, 0x59, 0x9e, 0x2f, 0x31, 0x1f, 0xa9, 0x17, 0xfd, 0x53,
+    0x48, 0x4f, 0xdb, 0x16, 0xb9, 0x5b, 0x45, 0x9b, 0x5a, 0xf6, 0x53, 0x9a,
+    0xac, 0x28, 0xab, 0x84, 0x2a, 0xc6, 0x23, 0x41, 0x8a, 0xa5, 0x3b, 0x40,
+    0x57, 0xae, 0x05, 0x3f, 0xbd, 0x6c, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x68, 0x00, 0x00, 0x00, 0x8c, 0x00, 0x00,
+    0x00, 0x90, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x94, 0x00, 0x00,
+    0x00, 0x98, 0x00, 0x00, 0x00, 0x9c, 0x00, 0x00, 0x00, 0xa4, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x88, 0x92, 0xd2, 0x08, 0x0c, 0xcc, 0x4d, 0x7c,
+    0xf2, 0xc6, 0x06, 0x00, 0x00, 0x91, 0xfb, 0xff, 0xe8, 0x48, 0x98, 0x09,
+    0xc8, 0x28, 0x98, 0x39, 0xb2, 0x28, 0x01, 0xa2, 0x28, 0x00, 0xe0, 0x09,
+    0x00, 0x16, 0x2a, 0xfe, 0xa9, 0x04, 0x0c, 0x02, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x0c, 0x19, 0x0c, 0x08, 0x20, 0x89, 0x83, 0xad,
+    0x02, 0xbd, 0x03, 0x80, 0xc0, 0x74, 0xcc, 0x38, 0x40, 0x9c, 0x93, 0x8c,
+    0x39, 0x7c, 0xf2, 0xc6, 0x04, 0x00, 0x81, 0xeb, 0xff, 0x1c, 0x4d, 0x88,
+    0x08, 0xcd, 0x04, 0x82, 0x28, 0x05, 0xe0, 0x08, 0x00, 0x56, 0x8a, 0xfe,
+    0x2d, 0x04, 0x1d, 0xf0, 0x00, 0x8c, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0xe4, 0xff, 0x29, 0x08, 0x21, 0xfd, 0xff, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0x6b, 0x62, 0x64,
+    0x2d, 0x69, 0x32, 0x63, 0x00, 0x84, 0x00, 0x00, 0x00, 0x84, 0x00, 0x00,
+    0x00, 0x04, 0x00, 0x00, 0x00, 0x7c, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00,
+    0x00, 0x04, 0x00, 0x00, 0x00,
+};
+
+/* The real touch driver module (Modules/drivers/gt911_module.c) -- converted off
+ * purr_kernel.c's own compiled-in gt911_probe/gt911_remove plus the chip logic that used to
+ * live in purr_kernel_touch_read() itself (deleted there; see that file's own comment). Same
+ * auto-plant/register() treatment as kbd_i2c.cat. */
+static const uint8_t s_gt911_driver_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x67, 0x74, 0x39, 0x31, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x94, 0x05, 0x00, 0x00, 0x1c, 0xc0, 0x5e, 0x3a, 0x6a, 0x28, 0x4b,
+    0x9e, 0x2d, 0x82, 0x0b, 0x86, 0x3f, 0xe8, 0x65, 0x2f, 0x91, 0x93, 0x0c,
+    0x74, 0x01, 0x11, 0xfc, 0x29, 0xb5, 0xa6, 0x7b, 0xc6, 0xc9, 0xeb, 0x34,
+    0xb0, 0x48, 0x25, 0x0b, 0xb8, 0x82, 0xc6, 0xec, 0xa2, 0x85, 0xd4, 0x8a,
+    0xa9, 0xff, 0x6b, 0x6a, 0x78, 0xc0, 0xce, 0x64, 0x1f, 0x50, 0x75, 0x73,
+    0x85, 0xc9, 0xb8, 0x83, 0x6f, 0xc0, 0xc9, 0x29, 0xf7, 0xbc, 0x96, 0x35,
+    0xc5, 0xcf, 0x8c, 0x48, 0x6f, 0x1a, 0x22, 0x30, 0xf7, 0x70, 0x2d, 0xc1,
+    0x9a, 0x6d, 0xcf, 0x65, 0x26, 0xec, 0x23, 0x32, 0x3c, 0x21, 0xd3, 0x2f,
+    0x6d, 0x20, 0xe3, 0xfa, 0xfa, 0x24, 0x03, 0x00, 0x00, 0x05, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x3c, 0x01, 0x00, 0x00, 0x20, 0x03, 0x00,
+    0x00, 0x50, 0x05, 0x00, 0x00, 0x54, 0x05, 0x00, 0x00, 0x03, 0x00, 0x00,
+    0x00, 0x58, 0x05, 0x00, 0x00, 0x5c, 0x05, 0x00, 0x00, 0x60, 0x05, 0x00,
+    0x00, 0x78, 0x05, 0x00, 0x00, 0x81, 0x4e, 0x00, 0x00, 0x36, 0xc1, 0x01,
+    0x81, 0xfd, 0xff, 0x91, 0xfd, 0xff, 0x88, 0x08, 0x92, 0x51, 0x00, 0x88,
+    0x48, 0x0c, 0x09, 0xad, 0x02, 0x92, 0x41, 0x02, 0x3c, 0x2d, 0x0c, 0x3c,
+    0xbd, 0x01, 0xe0, 0x08, 0x00, 0x1d, 0xf0, 0x00, 0x00, 0x81, 0x50, 0x00,
+    0x00, 0x80, 0x40, 0x00, 0x00, 0x36, 0xc1, 0x01, 0x0c, 0x18, 0x0c, 0x09,
+    0x20, 0x89, 0x93, 0x80, 0x70, 0x74, 0x56, 0x38, 0x0f, 0xf6, 0x44, 0x02,
+    0x46, 0x3b, 0x00, 0x41, 0xed, 0xff, 0x88, 0x04, 0xa8, 0xd8, 0xe0, 0x0a,
+    0x00, 0xc2, 0xa3, 0xe8, 0xdd, 0x07, 0x25, 0x2e, 0x00, 0x88, 0x32, 0x87,
+    0x3a, 0x1e, 0x81, 0xf3, 0xff, 0x98, 0x04, 0x82, 0x51, 0x00, 0x72, 0x41,
+    0x02, 0x82, 0xa7, 0xd0, 0x8a, 0x8a, 0x98, 0x49, 0xa8, 0x02, 0x89, 0x32,
+    0x3c, 0x2d, 0x0c, 0x3c, 0xbd, 0x01, 0xe0, 0x09, 0x00, 0x91, 0xe1, 0xff,
+    0x82, 0x24, 0x00, 0x92, 0x51, 0x00, 0xd2, 0xa0, 0xbc, 0x82, 0x28, 0x06,
+    0xa2, 0x22, 0x00, 0x0c, 0x09, 0x3c, 0x2f, 0x0c, 0x1e, 0xda, 0xd1, 0x0c,
+    0x2c, 0xbd, 0x01, 0x92, 0x41, 0xbc, 0xe0, 0x08, 0x00, 0xdc, 0x1a, 0x82,
+    0x01, 0xbc, 0x00, 0x98, 0x23, 0xd6, 0x99, 0x00, 0x80, 0x80, 0x34, 0xa8,
+    0x02, 0xcc, 0x68, 0x25, 0xf5, 0xff, 0x0c, 0x02, 0xc6, 0x1e, 0x00, 0x88,
+    0x04, 0x91, 0xdb, 0xff, 0xb2, 0xa0, 0xba, 0x88, 0x68, 0x3c, 0x2f, 0x0c,
+    0x4e, 0xdd, 0x01, 0x0c, 0x2c, 0xb0, 0xb1, 0x80, 0x92, 0x51, 0x5d, 0xe0,
+    0x08, 0x00, 0x8c, 0x8a, 0xa8, 0x02, 0xa5, 0xf2, 0xff, 0x46, 0xf5, 0xff,
+    0x00, 0x00, 0xc2, 0x12, 0x03, 0xd2, 0x12, 0x02, 0x82, 0x91, 0x01, 0x92,
+    0x91, 0x00, 0xd0, 0x88, 0x82, 0xf2, 0x12, 0x05, 0xc0, 0x99, 0x82, 0xe2,
+    0x12, 0x04, 0x0b, 0xbc, 0xf0, 0x88, 0xd2, 0xe0, 0x99, 0xd2, 0x90, 0x9b,
+    0xc0, 0xa0, 0x88, 0x53, 0xa0, 0x99, 0x53, 0xd7, 0x28, 0x02, 0x82, 0xcd,
+    0xff, 0xc7, 0xa9, 0x01, 0xbd, 0x09, 0x80, 0xa8, 0x21, 0xb0, 0x98, 0x21,
+    0x82, 0x43, 0x00, 0xa2, 0x43, 0x01, 0xb2, 0x43, 0x02, 0x92, 0x43, 0x03,
+    0xa8, 0x02, 0x0c, 0x42, 0xa5, 0xed, 0xff, 0x06, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x7c, 0xf2, 0x1d, 0xf0, 0x68, 0x05, 0x00, 0x00, 0x80, 0x47, 0x00,
+    0x00, 0x81, 0x40, 0x00, 0x00, 0x36, 0x41, 0x03, 0x78, 0x92, 0x51, 0xac,
+    0xff, 0xa8, 0x47, 0x26, 0x0a, 0x1e, 0x88, 0x05, 0x0c, 0x0b, 0x88, 0x88,
+    0xe0, 0x08, 0x00, 0x88, 0x05, 0xa2, 0xa0, 0x14, 0x88, 0xc8, 0xe0, 0x08,
+    0x00, 0x88, 0x05, 0xa8, 0x47, 0x82, 0x28, 0x08, 0x0c, 0x1b, 0xe0, 0x08,
+    0x00, 0x88, 0x05, 0xa2, 0xa1, 0x5e, 0x88, 0xc8, 0xe0, 0x08, 0x00, 0x88,
+    0x05, 0xe8, 0x57, 0x88, 0x38, 0xc8, 0x27, 0xb8, 0x17, 0xa8, 0x07, 0xd2,
+    0xa0, 0x5d, 0xe0, 0x08, 0x00, 0x6d, 0x0a, 0xcc, 0x3a, 0x7c, 0xf2, 0x46,
+    0x60, 0x00, 0x31, 0xea, 0xff, 0x98, 0x05, 0x32, 0x51, 0x00, 0x0c, 0x08,
+    0xd2, 0xa1, 0x72, 0x98, 0x69, 0x82, 0x51, 0xb9, 0x3c, 0x2f, 0x0c, 0x4e,
+    0x1a, 0xdd, 0xc2, 0xa0, 0x02, 0x10, 0xb1, 0x20, 0x82, 0x51, 0xba, 0xe0,
+    0x09, 0x00, 0xbc, 0x7a, 0x88, 0x05, 0xad, 0x06, 0x88, 0x78, 0xe0, 0x08,
+    0x00, 0x88, 0x05, 0xe8, 0x57, 0x88, 0x38, 0xc8, 0x27, 0xb8, 0x17, 0xa8,
+    0x07, 0x1c, 0x4d, 0xe0, 0x08, 0x00, 0x6d, 0x0a, 0x16, 0x5a, 0xfb, 0x88,
+    0x05, 0x32, 0x51, 0x00, 0xd2, 0xa1, 0x72, 0x88, 0x68, 0x3c, 0x2f, 0x0c,
+    0x4e, 0x1a, 0xdd, 0x0c, 0x2c, 0xbd, 0x01, 0xe0, 0x08, 0x00, 0x56, 0xba,
+    0xf9, 0x91, 0x83, 0xff, 0x88, 0x05, 0x92, 0x51, 0x00, 0x0c, 0x09, 0x92,
+    0x41, 0x02, 0x88, 0x48, 0x3c, 0x2d, 0x0c, 0x3c, 0x10, 0xb1, 0x20, 0x60,
+    0xa6, 0x20, 0xe0, 0x08, 0x00, 0x91, 0xcb, 0xff, 0x88, 0x05, 0x32, 0x17,
+    0x0c, 0x22, 0x17, 0x0d, 0x92, 0x51, 0x00, 0xd2, 0xa0, 0xba, 0x88, 0x68,
+    0x3c, 0x2f, 0xe2, 0xa0, 0xb8, 0xda, 0xd1, 0x0c, 0x2c, 0xbd, 0x01, 0x60,
+    0xa6, 0x20, 0xe0, 0x08, 0x00, 0x56, 0xca, 0x0c, 0x82, 0x01, 0xbc, 0x92,
+    0x01, 0xbb, 0x80, 0x88, 0x11, 0x90, 0x88, 0x20, 0x30, 0x88, 0xc0, 0x0c,
+    0x19, 0xbd, 0x0a, 0x80, 0xb9, 0x83, 0xb0, 0x80, 0x74, 0x9c, 0x88, 0xb2,
+    0x01, 0xbe, 0x82, 0x01, 0xbd, 0x80, 0xbb, 0x11, 0x80, 0xbb, 0x20, 0x20,
+    0xbb, 0xc0, 0x8d, 0x0a, 0xb0, 0x89, 0x83, 0x80, 0x80, 0x74, 0x56, 0x78,
+    0x09, 0x20, 0x88, 0x41, 0xc2, 0xa0, 0xba, 0x30, 0xa8, 0x41, 0xca, 0xc1,
+    0x82, 0x41, 0xbe, 0x82, 0xa1, 0x72, 0xa2, 0x41, 0xbc, 0x8a, 0xd1, 0x92,
+    0xa0, 0xb8, 0x32, 0x41, 0xbb, 0x22, 0x41, 0xbd, 0xc0, 0xac, 0x20, 0x82,
+    0xa0, 0x00, 0x76, 0x89, 0x09, 0xb2, 0x0a, 0x00, 0x1b, 0xaa, 0xba, 0x88,
+    0x80, 0x80, 0x74, 0x91, 0xa7, 0xff, 0x80, 0x80, 0x60, 0x80, 0x30, 0x74,
+    0x92, 0x51, 0x00, 0xc0, 0x8d, 0xc0, 0x2b, 0x91, 0x3d, 0xf0, 0x76, 0x88,
+    0x09, 0xa2, 0x0c, 0x00, 0x1b, 0xcc, 0xa2, 0x49, 0x00, 0x1b, 0x99, 0x88,
+    0x05, 0x3c, 0x2d, 0x88, 0x48, 0xc2, 0xa0, 0xba, 0x10, 0xb1, 0x20, 0x60,
+    0xa6, 0x20, 0xe0, 0x08, 0x00, 0x92, 0xaf, 0x80, 0x88, 0x05, 0x92, 0x51,
+    0x00, 0x32, 0x41, 0x02, 0x88, 0x48, 0x3c, 0x2d, 0x0c, 0x3c, 0xbd, 0x01,
+    0xad, 0x06, 0xe0, 0x08, 0x00, 0x92, 0xa0, 0x81, 0x92, 0x51, 0x00, 0x88,
+    0x05, 0x0c, 0x19, 0x92, 0x41, 0x02, 0x88, 0x48, 0x3c, 0x2d, 0x0c, 0x3c,
+    0x10, 0xb1, 0x20, 0x60, 0xa6, 0x20, 0xe0, 0x08, 0x00, 0x81, 0x8d, 0xff,
+    0x98, 0x77, 0xa8, 0x67, 0x0c, 0x02, 0x69, 0x08, 0xa9, 0x18, 0x99, 0x28,
+    0x29, 0x38, 0x89, 0x04, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0x50, 0x05, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0x36, 0xff, 0x29, 0x08, 0x21, 0xfd, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0xbd, 0x03, 0x9d, 0x02, 0xad, 0x02, 0x8d, 0x04,
+    0x3d, 0x05, 0x2d, 0x0b, 0x56, 0x75, 0x12, 0x47, 0xbb, 0x27, 0x90, 0xf4,
+    0x40, 0x16, 0xd9, 0x0b, 0x00, 0x19, 0x40, 0x00, 0x2b, 0xa1, 0x90, 0xb0,
+    0x60, 0x00, 0x0b, 0x40, 0xa0, 0xb0, 0x91, 0x00, 0x19, 0x40, 0x00, 0x84,
+    0xa1, 0x20, 0x2b, 0x20, 0x00, 0x19, 0x40, 0x00, 0xaa, 0xa1, 0x06, 0x27,
+    0x00, 0x00, 0xcc, 0x34, 0x0c, 0x1c, 0x40, 0x8c, 0xc2, 0xc0, 0xf8, 0x40,
+    0x80, 0x2b, 0xc0, 0x0c, 0x13, 0x16, 0x9c, 0x08, 0x2c, 0x0a, 0xc0, 0xaa,
+    0xc0, 0x00, 0x1c, 0x40, 0x00, 0x88, 0xa1, 0x00, 0x0a, 0x40, 0xb0, 0x30,
+    0x91, 0x80, 0xd0, 0xf5, 0x00, 0x0a, 0x40, 0x90, 0xa0, 0x91, 0x00, 0x1c,
+    0x40, 0x00, 0xbb, 0xa1, 0xb0, 0xba, 0x20, 0x00, 0x1c, 0x40, 0x00, 0xa9,
+    0xa1, 0xd0, 0x93, 0xe2, 0x80, 0xc0, 0xf4, 0xd0, 0x33, 0xc2, 0x30, 0xec,
+    0x82, 0x10, 0x40, 0x40, 0xb0, 0x99, 0x81, 0xe7, 0xb9, 0x16, 0x8a, 0x99,
+    0x0b, 0xf3, 0xe7, 0xb9, 0x0d, 0x87, 0x39, 0x0a, 0x32, 0xc3, 0xfe, 0x8a,
+    0x99, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0x3d, 0x0f, 0xe0, 0x99, 0xc0,
+    0xd0, 0x29, 0xe2, 0xd0, 0x99, 0xc2, 0x00, 0x22, 0x11, 0xb0, 0xb0, 0xf4,
+    0x90, 0xcc, 0x82, 0xb0, 0x22, 0x20, 0xc7, 0xb2, 0x13, 0x8a, 0x22, 0x0b,
+    0xb9, 0xc7, 0xb2, 0x0a, 0x87, 0x32, 0x07, 0x92, 0xc9, 0xfe, 0x8a, 0x22,
+    0x46, 0x00, 0x00, 0x9d, 0x0b, 0x00, 0x33, 0x11, 0xc0, 0x22, 0xc0, 0x90,
+    0x33, 0x20, 0x80, 0xd0, 0xf5, 0xd0, 0x92, 0xe2, 0x80, 0xc0, 0xf4, 0xd0,
+    0x22, 0xc2, 0x20, 0xbc, 0x82, 0x10, 0x40, 0x40, 0xa0, 0x99, 0x81, 0xb7,
+    0xb9, 0x16, 0x8a, 0x99, 0x0b, 0xe2, 0xb7, 0xb9, 0x0d, 0x87, 0x39, 0x0a,
+    0x22, 0xc2, 0xfe, 0x8a, 0x99, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2d,
+    0x0e, 0xb0, 0x99, 0xc0, 0xd0, 0xb9, 0xe2, 0xd0, 0x99, 0xc2, 0x00, 0xbb,
+    0x11, 0xa0, 0xa0, 0xf4, 0x90, 0xcc, 0x82, 0xa0, 0xab, 0x20, 0xc7, 0xba,
+    0x0f, 0xaa, 0xa8, 0xb2, 0xc9, 0xff, 0xc7, 0xba, 0x05, 0x92, 0xc9, 0xfe,
+    0x87, 0xba, 0x01, 0x9d, 0x0b, 0x00, 0x22, 0x11, 0x90, 0x22, 0x20, 0x06,
+    0x34, 0x00, 0x00, 0x0c, 0x03, 0x0c, 0x02, 0x57, 0xbb, 0x02, 0x46, 0x31,
+    0x00, 0xc0, 0xf5, 0x40, 0xdc, 0x6c, 0x0c, 0x18, 0xb7, 0x35, 0x02, 0x82,
+    0xa0, 0x00, 0x0c, 0x1a, 0x47, 0xb9, 0x01, 0x0c, 0x0a, 0xa0, 0x28, 0x20,
+    0x20, 0x20, 0x74, 0x86, 0x29, 0x00, 0x2c, 0x0a, 0xc0, 0xaa, 0xc0, 0x00,
+    0x0a, 0x40, 0x40, 0xd0, 0x91, 0x00, 0x1c, 0x40, 0x00, 0x55, 0xa1, 0x00,
+    0x0a, 0x40, 0xb0, 0x80, 0x91, 0x50, 0xdd, 0x20, 0x00, 0x1c, 0x40, 0x00,
+    0xbb, 0xa1, 0x00, 0x0a, 0x40, 0x90, 0xa0, 0x91, 0xb0, 0xea, 0x20, 0xd0,
+    0xb0, 0xf5, 0xb0, 0xa8, 0xe2, 0xd0, 0xf0, 0xf4, 0xb0, 0x88, 0xc2, 0x80,
+    0x5f, 0x82, 0x10, 0x40, 0x40, 0xe0, 0xaa, 0x81, 0x00, 0x1c, 0x40, 0x00,
+    0x44, 0xa1, 0x57, 0xba, 0x13, 0xda, 0xaa, 0x0b, 0x38, 0x57, 0xba, 0x0a,
+    0xd7, 0x3a, 0x07, 0x82, 0xc8, 0xfe, 0xda, 0xaa, 0x46, 0x00, 0x00, 0x8d,
+    0x03, 0x50, 0xaa, 0xc0, 0xb0, 0x3a, 0xe2, 0xb0, 0xba, 0xc2, 0x00, 0x33,
+    0x11, 0xe0, 0xa0, 0xf4, 0xb0, 0xff, 0x82, 0xa0, 0x33, 0x20, 0xf7, 0xb3,
+    0x13, 0xda, 0x33, 0x0b, 0xab, 0xf7, 0xb3, 0x0a, 0xd7, 0x33, 0x07, 0xb2,
+    0xcb, 0xfe, 0xda, 0x33, 0x46, 0x00, 0x00, 0xbd, 0x0a, 0x00, 0x88, 0x11,
+    0xb0, 0x28, 0x20, 0x40, 0x82, 0x82, 0x40, 0x42, 0xa2, 0xf0, 0x33, 0xc0,
+    0x47, 0x33, 0x0b, 0x00, 0x1c, 0x40, 0x00, 0x99, 0xa1, 0x87, 0xb9, 0x04,
+    0x47, 0x93, 0x01, 0x0b, 0x22, 0x0c, 0x03, 0x1d, 0xf0, 0x67, 0x74, 0x39,
+    0x31, 0x31, 0x00, 0x00, 0x00, 0x48, 0x05, 0x00, 0x00, 0x48, 0x05, 0x00,
+    0x00, 0x48, 0x01, 0x00, 0x00, 0x34, 0x03, 0x00, 0x00, 0x34, 0x00, 0x00,
+    0x00, 0x04, 0x00, 0x00, 0x00,
+};
+
+/* The real display driver module (Modules/drivers/st7789_module.c) -- converted off
+ * purr_kernel.c's compiled-in st7789.c (deleted; see that file's own former comment and
+ * purr_kernel.c's note by s_drivers[]). Same auto-plant/register() treatment as the other
+ * two, except display is the one purr_kernel_init() can no longer guarantee synchronously --
+ * main.c's own comment on why the hard halt moved to after this loads. */
+static const uint8_t s_st7789_driver_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x73, 0x74, 0x37, 0x37, 0x38, 0x39, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x32,
+    0x2e, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x94, 0x07, 0x00, 0x00, 0x9a, 0x53, 0xa0, 0xb7, 0xae, 0x95, 0xac,
+    0xb0, 0xe5, 0x03, 0x4f, 0x2e, 0x80, 0x8a, 0xc4, 0x99, 0xac, 0x42, 0x03,
+    0xcd, 0x91, 0x96, 0xad, 0x80, 0x2f, 0x2b, 0xc4, 0x29, 0x73, 0x27, 0x64,
+    0x73, 0x57, 0x7a, 0x48, 0x8b, 0x1e, 0x72, 0xf3, 0xbf, 0xe6, 0x1d, 0x7a,
+    0xf4, 0x77, 0xd3, 0x96, 0xbc, 0xee, 0xa0, 0x5e, 0x69, 0x7a, 0x74, 0x18,
+    0x77, 0xfe, 0x69, 0x77, 0xe1, 0xd1, 0x63, 0xd9, 0x1f, 0x4b, 0x69, 0xa0,
+    0x33, 0xa3, 0x35, 0x52, 0x7d, 0x1a, 0xa5, 0xcc, 0x69, 0x29, 0x41, 0x78,
+    0xd4, 0xb4, 0x98, 0xc4, 0xeb, 0xf5, 0xaa, 0x8f, 0xcc, 0xeb, 0xcc, 0x2b,
+    0x11, 0x58, 0x18, 0x81, 0xcc, 0xf0, 0x05, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x4c, 0x00, 0x00,
+    0x00, 0x1c, 0x04, 0x00, 0x00, 0x20, 0x04, 0x00, 0x00, 0xec, 0x05, 0x00,
+    0x00, 0x10, 0x06, 0x00, 0x00, 0x14, 0x06, 0x00, 0x00, 0x07, 0x00, 0x00,
+    0x00, 0x24, 0x04, 0x00, 0x00, 0x18, 0x06, 0x00, 0x00, 0x1c, 0x06, 0x00,
+    0x00, 0x38, 0x07, 0x00, 0x00, 0x3c, 0x07, 0x00, 0x00, 0x40, 0x07, 0x00,
+    0x00, 0x48, 0x07, 0x00, 0x00, 0x60, 0x07, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0xfe, 0xff, 0x20, 0xa0, 0x74, 0x88, 0x08, 0x22, 0xa0, 0x00, 0x82,
+    0x28, 0x10, 0xe0, 0x08, 0x00, 0x1d, 0xf0, 0x00, 0x00, 0x50, 0x07, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x71, 0xfe, 0xff, 0x61, 0xf6, 0xff, 0x98, 0x17,
+    0x88, 0x06, 0xa8, 0x39, 0x88, 0xb8, 0xbd, 0x02, 0xe0, 0x08, 0x00, 0x88,
+    0x06, 0xa8, 0x07, 0x88, 0x28, 0xdd, 0x04, 0x0c, 0x0c, 0xbd, 0x03, 0xe0,
+    0x08, 0x00, 0x2d, 0x0a, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0x4c, 0x07, 0x00,
+    0x00, 0x36, 0x61, 0x00, 0x71, 0xeb, 0xff, 0x88, 0x07, 0x82, 0x28, 0x17,
+    0x56, 0xa2, 0x04, 0xe0, 0x08, 0x00, 0x61, 0xfa, 0xff, 0xc0, 0x20, 0x00,
+    0x88, 0x06, 0xec, 0x78, 0x2c, 0x88, 0xad, 0x02, 0x0c, 0x1c, 0xbd, 0x01,
+    0x82, 0x41, 0x00, 0xa5, 0xfa, 0xff, 0x2d, 0x0a, 0xdc, 0x5a, 0x1c, 0x08,
+    0x0c, 0x1c, 0xbd, 0x01, 0x82, 0x41, 0x00, 0xa5, 0xf9, 0xff, 0x2d, 0x0a,
+    0xcc, 0x5a, 0x0c, 0x18, 0xc0, 0x20, 0x00, 0x89, 0x06, 0x88, 0x07, 0x82,
+    0x28, 0x18, 0xe0, 0x08, 0x00, 0x88, 0x07, 0x0c, 0x5a, 0x88, 0xc8, 0xe0,
+    0x08, 0x00, 0xc6, 0x1b, 0x00, 0x00, 0xe0, 0x08, 0x00, 0x61, 0xe8, 0xff,
+    0x0c, 0x02, 0xc0, 0x20, 0x00, 0x58, 0x06, 0x66, 0x15, 0x56, 0x1c, 0x18,
+    0xad, 0x02, 0xcd, 0x05, 0xbd, 0x01, 0x82, 0x41, 0x00, 0xa5, 0xf5, 0xff,
+    0x2d, 0x0a, 0x56, 0x3a, 0x04, 0x88, 0x07, 0x0c, 0x29, 0x82, 0x28, 0x18,
+    0xc0, 0x20, 0x00, 0x99, 0x06, 0xe0, 0x08, 0x00, 0x88, 0x07, 0xa2, 0xa0,
+    0x78, 0x88, 0xc8, 0xe0, 0x08, 0x00, 0x88, 0x07, 0x82, 0x28, 0x17, 0xe0,
+    0x08, 0x00, 0x2c, 0x98, 0x82, 0x41, 0x00, 0xcd, 0x05, 0xbd, 0x01, 0xad,
+    0x02, 0x65, 0xf2, 0xff, 0x88, 0x07, 0x0c, 0x09, 0x82, 0x28, 0x18, 0xc0,
+    0x20, 0x00, 0x99, 0x06, 0x2d, 0x0a, 0xe0, 0x08, 0x00, 0x06, 0x02, 0x00,
+    0x00, 0x88, 0x07, 0x82, 0x28, 0x18, 0xe0, 0x08, 0x00, 0x1d, 0xf0, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0xbf, 0xff, 0x1c, 0x0c, 0x98, 0x18, 0x88,
+    0x38, 0xb2, 0x19, 0x0c, 0xa2, 0x19, 0x0d, 0x80, 0x81, 0x41, 0xc2, 0x42,
+    0x06, 0xc8, 0x09, 0x7b, 0xd2, 0x82, 0x52, 0x02, 0xb2, 0x52, 0x00, 0xa2,
+    0x52, 0x01, 0x0c, 0x08, 0x1c, 0x79, 0xc6, 0x02, 0x00, 0xa2, 0x4b, 0x07,
+    0x1b, 0x88, 0x0b, 0x99, 0xcc, 0x19, 0x46, 0x02, 0x00, 0x8a, 0xac, 0xa2,
+    0x0a, 0x00, 0x8a, 0xb2, 0x56, 0x9a, 0xfe, 0x8a, 0x8d, 0x0c, 0x09, 0x92,
+    0x48, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00,
+    0xff, 0x36, 0x61, 0x00, 0x81, 0xaa, 0xff, 0xc1, 0xfd, 0xff, 0x88, 0x18,
+    0xa2, 0x18, 0x0f, 0xb2, 0x18, 0x0e, 0x3a, 0x3a, 0x30, 0x80, 0x74, 0x2a,
+    0x2b, 0x5a, 0x5a, 0x80, 0xa8, 0x11, 0x30, 0x88, 0x74, 0x20, 0x90, 0x74,
+    0xa0, 0x88, 0x20, 0x50, 0xa8, 0x74, 0x4a, 0x4b, 0x00, 0xaa, 0x11, 0x80,
+    0xb9, 0x11, 0xc0, 0x88, 0x10, 0x20, 0x98, 0x74, 0xb0, 0x99, 0x20, 0xa0,
+    0x88, 0x20, 0x40, 0xb8, 0x74, 0x00, 0xbb, 0x11, 0xc0, 0x99, 0x10, 0x80,
+    0x88, 0x11, 0xb0, 0x99, 0x20, 0x80, 0x55, 0x01, 0x80, 0x88, 0x41, 0x50,
+    0x88, 0x20, 0x80, 0x99, 0x11, 0x80, 0x44, 0x01, 0x90, 0x98, 0x41, 0x89,
+    0x01, 0x2c, 0xa8, 0x40, 0x99, 0x20, 0x0c, 0x1c, 0x8b, 0xb1, 0x0c, 0x0a,
+    0x82, 0x41, 0x08, 0x99, 0x11, 0xe5, 0xe3, 0xff, 0xec, 0xea, 0x0c, 0x4c,
+    0xca, 0xb1, 0x0c, 0x1a, 0x65, 0xe3, 0xff, 0xec, 0x3a, 0x2c, 0xb8, 0x0c,
+    0x1c, 0x8b, 0xb1, 0x82, 0x41, 0x08, 0x65, 0xe2, 0xff, 0xdc, 0x5a, 0x0c,
+    0x4c, 0xbd, 0x01, 0x0c, 0x1a, 0xa5, 0xe1, 0xff, 0xcc, 0xaa, 0x2c, 0xc8,
+    0x0c, 0x1c, 0x8b, 0xb1, 0x82, 0x41, 0x08, 0xe5, 0xe0, 0xff, 0x2d, 0x0a,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x36, 0x61, 0x00, 0x91, 0x78, 0xff, 0x7d,
+    0x02, 0x88, 0x09, 0x82, 0x28, 0x17, 0xe0, 0x08, 0x00, 0x81, 0x88, 0xff,
+    0xc0, 0x20, 0x00, 0x28, 0x08, 0x56, 0x62, 0x0e, 0x81, 0x79, 0xff, 0x4a,
+    0x97, 0xa8, 0x18, 0x20, 0xf7, 0x53, 0xb2, 0x1a, 0x0c, 0xa2, 0x1a, 0x0d,
+    0x5a, 0x83, 0xb0, 0x99, 0x43, 0x20, 0xe3, 0x53, 0xa0, 0x88, 0x43, 0x97,
+    0x2f, 0x02, 0xc6, 0x33, 0x00, 0x87, 0x2e, 0x02, 0x46, 0x32, 0x00, 0x0b,
+    0xd8, 0x0b, 0xc9, 0xe0, 0x88, 0xc0, 0xbd, 0x0e, 0xad, 0x0f, 0x70, 0x2f,
+    0xc0, 0x82, 0x61, 0x02, 0xf0, 0x79, 0xc0, 0x30, 0x3e, 0xc0, 0xa5, 0xef,
+    0xff, 0x91, 0x69, 0xff, 0xa9, 0x11, 0x58, 0x39, 0x88, 0x11, 0x50, 0x51,
+    0x41, 0x70, 0x55, 0xd2, 0x0c, 0x1a, 0xa0, 0x55, 0x53, 0x56, 0x68, 0x09,
+    0x40, 0x83, 0x82, 0x4a, 0x44, 0x2a, 0x88, 0x7a, 0x88, 0x40, 0x95, 0x82,
+    0x60, 0x68, 0x90, 0x88, 0x11, 0x38, 0x21, 0x99, 0x31, 0x7a, 0x77, 0x89,
+    0x01, 0x91, 0x5d, 0xff, 0xd8, 0x11, 0xb8, 0x29, 0x50, 0x23, 0x43, 0xb0,
+    0xfb, 0x20, 0x60, 0xe6, 0x20, 0xc2, 0xc7, 0xfe, 0xc0, 0xc1, 0x41, 0x70,
+    0x9e, 0xc0, 0x8d, 0x0f, 0x1b, 0xcc, 0x76, 0x8c, 0x14, 0xa2, 0x19, 0x00,
+    0xa0, 0xa8, 0x41, 0xa2, 0x48, 0x00, 0xa2, 0x19, 0x00, 0x92, 0xc9, 0x02,
+    0xa2, 0x48, 0x01, 0x82, 0xc8, 0x02, 0xd2, 0xcd, 0x01, 0x7a, 0xff, 0x4a,
+    0xee, 0xd7, 0x92, 0xd0, 0x70, 0xc2, 0x82, 0x9c, 0x2c, 0x0c, 0x1a, 0x25,
+    0xd3, 0xff, 0x88, 0x11, 0x2d, 0x0a, 0x0c, 0x1a, 0x20, 0x8a, 0x83, 0x80,
+    0x80, 0x74, 0xc6, 0x00, 0x00, 0x28, 0x11, 0x0c, 0x18, 0x98, 0x01, 0xa8,
+    0x21, 0x5a, 0x99, 0x99, 0x01, 0x98, 0x31, 0x50, 0x33, 0xc0, 0x9a, 0x66,
+    0x98, 0x01, 0xa7, 0xa9, 0x0f, 0x56, 0xc8, 0xf8, 0x46, 0x02, 0x00, 0x0c,
+    0x02, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0x28, 0x11, 0x91, 0x36, 0xff,
+    0x82, 0x29, 0x00, 0x82, 0x28, 0x18, 0xe0, 0x08, 0x00, 0x1d, 0xf0, 0x00,
+    0x00, 0x36, 0x61, 0x00, 0x71, 0x31, 0xff, 0x60, 0x60, 0xf4, 0x82, 0x27,
+    0x00, 0x82, 0x28, 0x17, 0xe0, 0x08, 0x00, 0x81, 0x40, 0xff, 0xc0, 0x20,
+    0x00, 0xa2, 0x28, 0x00, 0x56, 0x5a, 0x0b, 0x81, 0x31, 0xff, 0x40, 0x42,
+    0x80, 0x98, 0x18, 0x5a, 0x83, 0xc2, 0x19, 0x0c, 0xb2, 0x19, 0x0d, 0xc0,
+    0x44, 0x43, 0xa0, 0x92, 0x53, 0xa0, 0xe3, 0x53, 0xb0, 0x28, 0x43, 0x47,
+    0x29, 0x02, 0x46, 0x25, 0x00, 0x27, 0x2e, 0x02, 0xc6, 0x23, 0x00, 0xbd,
+    0x0e, 0xad, 0x09, 0x99, 0x01, 0xe9, 0x11, 0x0b, 0xd2, 0x0b, 0xc4, 0x65,
+    0xde, 0xff, 0xb1, 0x23, 0xff, 0x98, 0x01, 0x88, 0x3b, 0xe8, 0x11, 0x80,
+    0x51, 0x41, 0x3d, 0x0a, 0xcc, 0x65, 0xad, 0x03, 0x56, 0xb3, 0x06, 0xc6,
+    0x08, 0x00, 0x81, 0x1d, 0xff, 0x5a, 0xb5, 0xb2, 0xcb, 0xfe, 0xb0, 0xb1,
+    0x41, 0xa8, 0x28, 0x60, 0xc8, 0x41, 0x1b, 0xbb, 0x60, 0x60, 0x74, 0x76,
+    0x8b, 0x07, 0xc2, 0x4a, 0x00, 0x62, 0x4a, 0x01, 0x2b, 0xaa, 0x06, 0xf5,
+    0xff, 0x00, 0xe0, 0x22, 0xc0, 0x90, 0x44, 0xc0, 0x20, 0x64, 0x82, 0x0c,
+    0x12, 0x60, 0x45, 0x63, 0x40, 0x94, 0x80, 0x20, 0xa2, 0x20, 0x90, 0xc9,
+    0x20, 0x9c, 0x19, 0x81, 0x0e, 0xff, 0xb8, 0x28, 0xa5, 0xc3, 0xff, 0xbd,
+    0x03, 0xa0, 0xb2, 0x83, 0xb0, 0xb0, 0x74, 0xc6, 0x00, 0x00, 0xbd, 0x02,
+    0xad, 0x03, 0x40, 0x66, 0xc0, 0x9d, 0x03, 0x60, 0x92, 0x93, 0x90, 0x90,
+    0x74, 0x8c, 0x69, 0x56, 0xab, 0xfc, 0x46, 0x00, 0x00, 0x0c, 0x0a, 0x88,
+    0x07, 0x82, 0x28, 0x18, 0xa9, 0x01, 0xe0, 0x08, 0x00, 0x28, 0x01, 0x1d,
+    0xf0, 0x30, 0x06, 0x00, 0x00, 0x30, 0x07, 0x00, 0x00, 0x04, 0x00, 0x00,
+    0x00, 0x36, 0x81, 0x00, 0x28, 0x92, 0x71, 0xfb, 0xfe, 0x29, 0x41, 0x98,
+    0x41, 0x21, 0xf3, 0xfe, 0x82, 0x19, 0x0c, 0x98, 0x02, 0xb8, 0x41, 0xb0,
+    0x88, 0x11, 0x98, 0xe9, 0xad, 0x08, 0xb9, 0x17, 0x89, 0x37, 0x49, 0x51,
+    0xe0, 0x09, 0x00, 0xa9, 0x27, 0x16, 0x0a, 0x12, 0x98, 0x41, 0x88, 0x02,
+    0xa8, 0x39, 0x88, 0x88, 0xb2, 0xa0, 0x00, 0xe0, 0x08, 0x00, 0x98, 0x41,
+    0x88, 0x02, 0xd8, 0x99, 0x88, 0x18, 0xb8, 0x29, 0xa8, 0x73, 0x0c, 0x0c,
+    0xe0, 0x08, 0x00, 0x8d, 0x0a, 0x16, 0xca, 0x0f, 0x98, 0x41, 0x89, 0x07,
+    0xa8, 0x49, 0x66, 0x0a, 0x02, 0x06, 0x2d, 0x00, 0x88, 0x02, 0x0c, 0x0b,
+    0x88, 0x88, 0xe0, 0x08, 0x00, 0x88, 0x02, 0x1c, 0x4a, 0x88, 0xc8, 0xe0,
+    0x08, 0x00, 0x88, 0x02, 0x98, 0x41, 0x88, 0xb8, 0xa8, 0x49, 0x0c, 0x1b,
+    0xe0, 0x08, 0x00, 0x88, 0x02, 0xa2, 0xa0, 0x78, 0x88, 0xc8, 0xe0, 0x08,
+    0x00, 0x06, 0x22, 0x00, 0x00, 0x00, 0xb2, 0x0a, 0x00, 0x1b, 0xaa, 0xb2,
+    0x49, 0x00, 0x1b, 0x99, 0x0b, 0x88, 0x56, 0x08, 0xff, 0x66, 0x33, 0x15,
+    0x88, 0x41, 0xa2, 0x08, 0x21, 0x92, 0x08, 0x20, 0x8d, 0x06, 0xa0, 0x87,
+    0x93, 0xd0, 0x88, 0x11, 0x90, 0x88, 0x20, 0x82, 0x41, 0x00, 0xf2, 0x05,
+    0x02, 0x82, 0x05, 0x00, 0xcd, 0x07, 0xf9, 0x61, 0xeb, 0xb1, 0xad, 0x06,
+    0x82, 0x41, 0x0e, 0x65, 0xb3, 0xff, 0xf8, 0x61, 0x4d, 0x0a, 0xad, 0x06,
+    0xf0, 0xa7, 0x93, 0x8d, 0x06, 0x40, 0x87, 0x83, 0xa0, 0xa0, 0x74, 0x80,
+    0x80, 0x74, 0x9c, 0x3a, 0x9c, 0x18, 0xcd, 0x0f, 0xbd, 0x01, 0xad, 0x07,
+    0x65, 0xb1, 0xff, 0x8d, 0x06, 0xa0, 0x87, 0x83, 0x4d, 0x0a, 0x80, 0x80,
+    0x74, 0xa2, 0x05, 0x01, 0x8c, 0x9a, 0xb8, 0x02, 0xb8, 0xcb, 0x89, 0x61,
+    0xe0, 0x0b, 0x00, 0x88, 0x61, 0x1b, 0x33, 0x0c, 0xe9, 0x52, 0xc5, 0x11,
+    0x37, 0x39, 0x17, 0xcc, 0xb8, 0x86, 0x04, 0x00, 0x00, 0x0c, 0x03, 0x51,
+    0xb8, 0xff, 0x0c, 0x17, 0x6d, 0x03, 0x3b, 0xa5, 0x9d, 0x01, 0x0c, 0xe8,
+    0x86, 0xd9, 0xff, 0x8c, 0x34, 0xc6, 0x06, 0x00, 0x00, 0x00, 0x92, 0x21,
+    0x04, 0x82, 0x09, 0x22, 0x16, 0xe8, 0x01, 0x82, 0xa0, 0x21, 0x0c, 0x1c,
+    0xbd, 0x01, 0xad, 0x04, 0x82, 0x41, 0x00, 0xa5, 0xab, 0xff, 0x8c, 0xca,
+    0x88, 0x02, 0x0c, 0xaa, 0x88, 0xc8, 0xe0, 0x08, 0x00, 0x7c, 0xf7, 0x86,
+    0x1b, 0x00, 0x82, 0xa0, 0x13, 0x82, 0x41, 0x00, 0x0c, 0x1c, 0xbd, 0x01,
+    0x0c, 0x0a, 0xa5, 0xa9, 0xff, 0x88, 0x02, 0x7d, 0x0a, 0x88, 0xc8, 0x0c,
+    0xaa, 0xe0, 0x08, 0x00, 0x56, 0xd7, 0xfd, 0x88, 0x41, 0xed, 0x07, 0xd2,
+    0x18, 0x0d, 0xc2, 0x18, 0x0c, 0xbd, 0x07, 0xad, 0x07, 0x25, 0xd9, 0xff,
+    0x2c, 0x98, 0x0c, 0x1c, 0xbd, 0x01, 0x82, 0x41, 0x00, 0xad, 0x07, 0xe5,
+    0xa6, 0xff, 0x88, 0x02, 0x0c, 0xaa, 0x88, 0xc8, 0xe0, 0x08, 0x00, 0x98,
+    0x41, 0x81, 0x98, 0xff, 0xa8, 0x59, 0x26, 0x0a, 0x1b, 0x88, 0x02, 0x82,
+    0x28, 0x0f, 0xe0, 0x08, 0x00, 0x81, 0x94, 0xff, 0xcc, 0xda, 0x98, 0x18,
+    0x0c, 0x1a, 0xa0, 0x99, 0x20, 0xa1, 0x92, 0xff, 0x99, 0x18, 0xa2, 0x68,
+    0x05, 0x98, 0x51, 0x89, 0x09, 0x2d, 0x07, 0x1d, 0xf0, 0x10, 0x06, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0x83, 0xfe, 0x29, 0x08, 0x21, 0xfd, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x73, 0x74, 0x37, 0x37, 0x38, 0x39, 0x00, 0x00, 0x08, 0x06, 0x00,
+    0x00, 0x08, 0x06, 0x00, 0x00, 0x28, 0x04, 0x00, 0x00, 0x00, 0x06, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x96, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x0a,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x3a, 0x0a, 0x01, 0x55, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0x00, 0x01, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0xb2, 0x00, 0x05, 0x0c, 0x0c, 0x00, 0x33, 0x33, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xb7, 0x00, 0x01, 0x35, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xbb,
+    0x00, 0x01, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x01, 0x0c, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc2, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xc3, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc4, 0x00, 0x01, 0x20, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc6, 0x00, 0x01, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xd0, 0x00, 0x02, 0xa4, 0xa1, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x00,
+    0x0e, 0xd0, 0x00, 0x02, 0x07, 0x0a, 0x28, 0x32, 0x44, 0x42, 0x06, 0x0e,
+    0x12, 0x14, 0x17, 0xe1, 0x00, 0x0e, 0xd0, 0x00, 0x02, 0x07, 0x0a, 0x28,
+    0x31, 0x54, 0x47, 0x0e, 0x1c, 0x17, 0x1b, 0x1e, 0x00, 0x1c, 0x00, 0x02,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x1c, 0x01, 0x00, 0x00, 0x1c, 0x02, 0x00,
+    0x00, 0x38, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00,
+    0x00,
+};
+
+typedef struct {
+    const char *filename;
+    const uint8_t *data;
+    uint32_t len;
+} temp_module_asset_t;
+
+static const temp_module_asset_t s_temp_modules[] = {
+    {"about.cat", s_about_module, sizeof(s_about_module)},
+    {"apps.cat", s_apps_module, sizeof(s_apps_module)},
+    {"wifi.cat", s_wifi_module, sizeof(s_wifi_module)},
+    {"netinstall.cat", s_netinstall_module, sizeof(s_netinstall_module)},
+};
+
+static const temp_module_asset_t s_temp_kernelmods[] = {
+    {"sysinfo.cat", s_sysinfo_module, sizeof(s_sysinfo_module)},
+    {"fs.cat", s_fs_module, sizeof(s_fs_module)},
+    {"login.cat", s_login_module, sizeof(s_login_module)},
+    {"appmgr.cat", s_appmgr_module, sizeof(s_appmgr_module)},
+    {"debug.cat", s_debug_module, sizeof(s_debug_module)},
+};
+
+/* The battery gauge and the keyboard backlight (Modules/drivers/battery_module.c, kbd_backlight_module.c): board devices on the T-Deck Plus, baked in
+ * like the keyboard driver so they come up with no network. Signed with the developer key. */
+static const uint8_t s_battery_driver_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x62, 0x61, 0x74, 0x74, 0x65, 0x72, 0x79, 0x2d, 0x61, 0x64, 0x63,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0x2e, 0x30,
+    0x2e, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0xc8, 0x01, 0x00, 0x00, 0xde, 0x2d, 0x66, 0x4e, 0x38, 0x95, 0x60,
+    0x76, 0x4f, 0x64, 0xb6, 0x25, 0xfd, 0xac, 0x06, 0xf0, 0xde, 0xac, 0x11,
+    0x90, 0x73, 0x67, 0x36, 0x5b, 0x9f, 0xce, 0xdd, 0xfb, 0xfb, 0x1b, 0x90,
+    0x24, 0xd0, 0x85, 0x3c, 0x85, 0xb1, 0xe0, 0x0f, 0x2c, 0xa2, 0x45, 0xa3,
+    0xa9, 0xdc, 0x05, 0x15, 0x42, 0xad, 0xc7, 0xe7, 0x6a, 0x9b, 0xa2, 0x4a,
+    0xa9, 0xd9, 0xaa, 0xe3, 0xc6, 0xf7, 0x50, 0x18, 0x4f, 0x5e, 0xa5, 0x69,
+    0x58, 0x07, 0xf3, 0x90, 0x6f, 0xb5, 0x42, 0xee, 0xea, 0xfe, 0x7e, 0x68,
+    0x0d, 0xa8, 0xf1, 0xcc, 0x4f, 0x5d, 0x78, 0xb2, 0x1b, 0x03, 0x11, 0xaf,
+    0x8d, 0xf0, 0x1c, 0x44, 0x56, 0x28, 0x01, 0x00, 0x00, 0x06, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x4c, 0x00, 0x00,
+    0x00, 0x24, 0x01, 0x00, 0x00, 0x50, 0x01, 0x00, 0x00, 0x54, 0x01, 0x00,
+    0x00, 0x03, 0x00, 0x00, 0x00, 0x58, 0x01, 0x00, 0x00, 0x5c, 0x01, 0x00,
+    0x00, 0x60, 0x01, 0x00, 0x00, 0x98, 0x01, 0x00, 0x00, 0xa8, 0x01, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x78, 0x92, 0x56, 0x47, 0x00, 0x7c, 0xf2, 0xc6,
+    0x0c, 0x00, 0x61, 0xfa, 0xff, 0x28, 0x36, 0x56, 0x22, 0xff, 0x88, 0x27,
+    0xa6, 0x18, 0xed, 0x81, 0xf8, 0xff, 0x82, 0x28, 0x00, 0x82, 0x28, 0x11,
+    0x16, 0x18, 0xfe, 0xa2, 0x27, 0x00, 0xe0, 0x08, 0x00, 0x96, 0x8a, 0xfd,
+    0x88, 0x27, 0xa8, 0x07, 0x98, 0x17, 0x89, 0x26, 0x0c, 0x18, 0xa9, 0x06,
+    0x99, 0x16, 0x89, 0x36, 0x69, 0x04, 0x1d, 0xf0, 0x00, 0x68, 0x01, 0x00,
+    0x00, 0x10, 0xf5, 0xff, 0xff, 0xe4, 0x0c, 0x00, 0x00, 0xff, 0xff, 0x00,
+    0x00, 0x67, 0x10, 0x00, 0x00, 0x36, 0x41, 0x00, 0xcc, 0x32, 0x7c, 0xf2,
+    0xc6, 0x2d, 0x00, 0x98, 0x32, 0x0c, 0x17, 0x0c, 0x08, 0x90, 0x87, 0x83,
+    0x80, 0x60, 0x74, 0x56, 0xb8, 0xfe, 0xb6, 0x44, 0xe8, 0x81, 0xe2, 0xff,
+    0xa8, 0x02, 0x88, 0x08, 0x82, 0x28, 0x11, 0xe0, 0x08, 0x00, 0x96, 0x8a,
+    0xfd, 0x98, 0x12, 0x88, 0x22, 0x90, 0xaa, 0x82, 0x91, 0xf2, 0xff, 0x80,
+    0xaa, 0xd2, 0x81, 0xef, 0xff, 0x80, 0x8a, 0x43, 0xa7, 0x29, 0x51, 0x91,
+    0xec, 0xff, 0xa7, 0xa9, 0x51, 0xd1, 0xe9, 0xff, 0xad, 0x07, 0x9d, 0x0d,
+    0x0c, 0xbb, 0x76, 0x8b, 0x39, 0xc2, 0x19, 0x02, 0x4b, 0x99, 0xc7, 0x28,
+    0x2f, 0x0b, 0xba, 0xd0, 0xbb, 0xa0, 0xd0, 0xaa, 0xa0, 0xd2, 0x0a, 0x02,
+    0x92, 0x0b, 0x02, 0xa2, 0x1b, 0x00, 0xd0, 0x99, 0xc0, 0xc0, 0xb8, 0xc0,
+    0xb0, 0x99, 0x82, 0xc0, 0xaa, 0xc0, 0xa0, 0x99, 0xd2, 0xda, 0x99, 0x80,
+    0xc0, 0x74, 0x90, 0x90, 0x74, 0x80, 0x88, 0x74, 0x0c, 0x1a, 0xc6, 0x09,
+    0x00, 0x1b, 0xaa, 0x0c, 0x09, 0x06, 0x02, 0x00, 0x00, 0x92, 0xa0, 0x64,
+    0x46, 0x00, 0x00, 0x9d, 0x06, 0xb1, 0xd5, 0xff, 0xd2, 0xa6, 0x40, 0xba,
+    0xb8, 0x80, 0xc0, 0x74, 0x0c, 0x1a, 0x80, 0x88, 0x74, 0xb7, 0xbd, 0x01,
+    0x0c, 0x0a, 0xa0, 0xa0, 0x74, 0x92, 0x43, 0x00, 0xc2, 0x43, 0x01, 0x82,
+    0x43, 0x02, 0xa2, 0x43, 0x03, 0x0c, 0x42, 0x1d, 0xf0, 0x50, 0x01, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x81, 0xb6, 0xff, 0x29, 0x08, 0x21, 0xfd, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x8c, 0x22, 0x0c, 0x08,
+    0x89, 0x32, 0x1d, 0xf0, 0x00, 0x62, 0x61, 0x74, 0x74, 0x65, 0x72, 0x79,
+    0x2d, 0x61, 0x64, 0x63, 0x00, 0x44, 0x01, 0x00, 0x00, 0x44, 0x01, 0x00,
+    0x00, 0x08, 0x00, 0x00, 0x00, 0x38, 0x01, 0x00, 0x00, 0x60, 0x00, 0x00,
+    0x00, 0x05, 0x00, 0x00, 0x00, 0x68, 0x10, 0x64, 0x00, 0x04, 0x10, 0x5a,
+    0x00, 0xa0, 0x0f, 0x50, 0x00, 0x50, 0x0f, 0x46, 0x00, 0x0a, 0x0f, 0x3c,
+    0x00, 0xd8, 0x0e, 0x32, 0x00, 0xa6, 0x0e, 0x28, 0x00, 0x74, 0x0e, 0x1e,
+    0x00, 0x42, 0x0e, 0x14, 0x00, 0xde, 0x0d, 0x0a, 0x00, 0x48, 0x0d, 0x03,
+    0x00, 0xe4, 0x0c, 0x00, 0x00,
+};
+
+static const uint8_t s_kbd_backlight_driver_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x6b, 0x62, 0x64, 0x2d, 0x62, 0x61, 0x63, 0x6b, 0x6c, 0x69, 0x67,
+    0x68, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0x2e, 0x31,
+    0x2e, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x08, 0x02, 0x00, 0x00, 0x45, 0x34, 0x1d, 0x3c, 0xed, 0xf8, 0x3e,
+    0x2a, 0xee, 0x9f, 0x70, 0x2d, 0xba, 0xe8, 0x64, 0x35, 0x1d, 0xc9, 0x91,
+    0xb2, 0xda, 0xe9, 0x73, 0x7a, 0x33, 0xff, 0xaa, 0x6e, 0xb5, 0xec, 0x31,
+    0x32, 0x4c, 0xa0, 0x48, 0xe1, 0x83, 0x04, 0xe5, 0x7c, 0x00, 0xce, 0xe3,
+    0xcd, 0x47, 0xb8, 0x49, 0xe5, 0x4f, 0x31, 0x4a, 0xfa, 0xad, 0xa6, 0x66,
+    0x48, 0x35, 0xe5, 0xda, 0x34, 0x22, 0xd9, 0x1d, 0x8a, 0xc8, 0x93, 0x0f,
+    0x71, 0x3c, 0x4f, 0x7d, 0xac, 0xe2, 0xb6, 0x60, 0xc0, 0x67, 0xf0, 0xe8,
+    0x67, 0xf1, 0x71, 0x1c, 0x91, 0xb9, 0x35, 0x5d, 0x47, 0x9e, 0x0b, 0xb5,
+    0xfb, 0xbd, 0x00, 0xd7, 0xed, 0x98, 0x01, 0x00, 0x00, 0x07, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x10, 0x01, 0x00,
+    0x00, 0x14, 0x01, 0x00, 0x00, 0x94, 0x01, 0x00, 0x00, 0xb8, 0x01, 0x00,
+    0x00, 0xbc, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0xc0, 0x01, 0x00,
+    0x00, 0xc4, 0x01, 0x00, 0x00, 0xc8, 0x01, 0x00, 0x00, 0xec, 0x01, 0x00,
+    0x00, 0x36, 0x61, 0x00, 0xac, 0x62, 0x88, 0x22, 0xac, 0x28, 0x71, 0xfc,
+    0xff, 0xa8, 0x02, 0x88, 0x07, 0x0c, 0x19, 0x88, 0x48, 0x3c, 0x2d, 0x0c,
+    0x2c, 0xbd, 0x01, 0x92, 0x51, 0x00, 0xe0, 0x08, 0x00, 0x88, 0x07, 0xa8,
+    0x02, 0x88, 0x78, 0xe0, 0x08, 0x00, 0x0c, 0x08, 0x89, 0x22, 0x1d, 0xf0,
+    0x00, 0xd0, 0x01, 0x00, 0x00, 0x36, 0x61, 0x00, 0xcc, 0x32, 0x7c, 0xf2,
+    0x06, 0x32, 0x00, 0xa8, 0x22, 0x0c, 0x19, 0x0c, 0x08, 0xa0, 0x89, 0x83,
+    0x80, 0xa0, 0x74, 0x56, 0xb8, 0xfe, 0x40, 0x9a, 0x93, 0x56, 0x59, 0xfe,
+    0x26, 0x14, 0x75, 0x82, 0x03, 0x00, 0xa2, 0xa0, 0xa6, 0xa7, 0x98, 0x0d,
+    0x92, 0x02, 0x04, 0x81, 0xf3, 0xff, 0x9a, 0x88, 0x42, 0x08, 0x00, 0x06,
+    0x15, 0x00, 0xa2, 0xa0, 0xa5, 0xa7, 0x98, 0x58, 0xe2, 0x03, 0x01, 0xb1,
+    0xee, 0xff, 0x4d, 0x09, 0xcd, 0x09, 0x7d, 0x09, 0xa2, 0xa0, 0x04, 0x76,
+    0x8a, 0x1a, 0xd2, 0x0b, 0x00, 0xe0, 0x84, 0xc0, 0xe0, 0x9d, 0xc0, 0x90,
+    0x91, 0x60, 0x80, 0x81, 0x60, 0x87, 0xa9, 0x04, 0xc0, 0x70, 0x74, 0x4d,
+    0x0d, 0x1b, 0xcc, 0x1b, 0xbb, 0x81, 0xd7, 0xff, 0x0c, 0x19, 0x88, 0x08,
+    0x92, 0x41, 0x00, 0x42, 0x41, 0x01, 0x88, 0x48, 0xa8, 0x02, 0x3c, 0x2d,
+    0xc2, 0xa0, 0x02, 0x10, 0xb1, 0x20, 0xe0, 0x08, 0x00, 0x56, 0x9a, 0xf7,
+    0x72, 0x42, 0x04, 0x42, 0x43, 0x00, 0x0c, 0x12, 0x06, 0x0f, 0x00, 0x00,
+    0x00, 0x82, 0x02, 0x04, 0x71, 0xd8, 0xff, 0x1b, 0x88, 0x80, 0x80, 0x14,
+    0x8a, 0x97, 0xa2, 0x09, 0x00, 0x91, 0xc8, 0xff, 0x82, 0x42, 0x04, 0x98,
+    0x09, 0x0c, 0x18, 0xa2, 0x41, 0x01, 0x82, 0x41, 0x00, 0x88, 0x49, 0xa8,
+    0x02, 0x3c, 0x2d, 0x0c, 0x2c, 0xbd, 0x01, 0xe0, 0x08, 0x00, 0x56, 0xca,
+    0xf3, 0x82, 0x02, 0x04, 0x8a, 0x77, 0x42, 0x07, 0x00, 0x86, 0xee, 0xff,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0xe0, 0x01, 0x00, 0x00, 0xd4, 0x01, 0x00,
+    0x00, 0x01, 0x80, 0xff, 0xff, 0x36, 0x81, 0x00, 0x88, 0x92, 0x16, 0x38,
+    0x05, 0x71, 0xfc, 0xff, 0x68, 0x27, 0x8c, 0xc6, 0x98, 0x57, 0x56, 0x79,
+    0x04, 0x51, 0xf8, 0xff, 0x0c, 0x16, 0x86, 0x00, 0x00, 0x00, 0x5d, 0x07,
+    0x31, 0xb1, 0xff, 0xe8, 0x48, 0x98, 0x03, 0xd2, 0x08, 0x0c, 0x98, 0x39,
+    0xc8, 0x28, 0xb8, 0x18, 0xa2, 0x28, 0x00, 0xe0, 0x09, 0x00, 0xac, 0x3a,
+    0x98, 0x03, 0xe1, 0xf0, 0xff, 0x98, 0x49, 0x3c, 0x2d, 0x0c, 0x2c, 0xbd,
+    0x01, 0xa2, 0x61, 0x04, 0xe2, 0x51, 0x00, 0xe0, 0x09, 0x00, 0x88, 0x41,
+    0x2d, 0x0a, 0x8c, 0xca, 0x98, 0x03, 0xad, 0x08, 0x88, 0x79, 0xe0, 0x08,
+    0x00, 0x7c, 0xf2, 0x86, 0x04, 0x00, 0x60, 0x66, 0x90, 0x70, 0x66, 0xa0,
+    0x89, 0x06, 0x0c, 0x28, 0x82, 0x46, 0x04, 0x0c, 0x18, 0x89, 0x26, 0x59,
+    0x04, 0x1d, 0xf0, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x36, 0x41, 0x00,
+    0x81, 0x99, 0xff, 0x29, 0x08, 0x21, 0xfd, 0xff, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x6b, 0x62, 0x64, 0x2d, 0x62, 0x61, 0x63, 0x6b, 0x6c, 0x69, 0x67,
+    0x68, 0x74, 0x00, 0x00, 0x00, 0xa8, 0x01, 0x00, 0x00, 0xa8, 0x01, 0x00,
+    0x00, 0x1c, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00,
+    0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x40, 0x80, 0xff,
+};
+
+/* Unlike the two above, this one isn't scaffolding for "no real distribution path yet" --
+ * it's the actual safety net for a driver that real boot now depends on (keyboard; see
+ * purr_kernel.c's own comment on why it's gone from there). Baked into firmware the same way
+ * so a freshly erased/formatted root filesystem still gets it back on the very next boot,
+ * same self-healing `only_if_missing` planting as /system and /kernelmods already rely on. */
+static const temp_module_asset_t s_temp_drivers[] = {
+    {"kbd_i2c.cat", s_kbd_i2c_driver_module, sizeof(s_kbd_i2c_driver_module)},
+    {"gt911.cat", s_gt911_driver_module, sizeof(s_gt911_driver_module)},
+    {"st7789.cat", s_st7789_driver_module, sizeof(s_st7789_driver_module)},
+    {"battery.cat", s_battery_driver_module, sizeof(s_battery_driver_module)},
+    {"kbd-backlight.cat", s_kbd_backlight_driver_module, sizeof(s_kbd_backlight_driver_module)},
+};
+
+/* Shared by cmd_plantmodules (manual, explicit, always overwrites) and purr_modules_setup's
+ * own automatic call (below, fills in only what's missing -- see that call site's comment
+ * on why those are different, not the same unconditional-overwrite behavior this function
+ * used to always have). purr_fs_write silently no-ops into a fresh copy each boot when
+ * nothing changed, so repeating it isn't free but it's cheap -- the fix for the exact
+ * friction every ABI bump hit this session: re-flashing the app image never touches what's
+ * already sitting on the root filesystem, so a stale on-disk kernelmod gets rejected as an
+ * ABI mismatch, correctly, until something replants it. This whole block is temporary
+ * scaffolding (see its own comment above cmd_plantmodules) for boards/modules with no real
+ * distribution path yet -- debug.cat (waveshare154's bring-up) is the current example. */
+/* Whether the file at `path` already holds exactly `want`. */
+typedef struct {
+    const uint8_t *want;
+    uint32_t want_len, pos;
+    int same;
+} file_cmp_t;
+
+static int file_cmp_cb(void *ctx, const void *data, uint32_t len)
+{
+    file_cmp_t *c = ctx;
+    if (c->pos + len > c->want_len || memcmp(c->want + c->pos, data, len) != 0) {
+        c->same = 0;
+        return 1;
+    }
+    c->pos += len;
+    return 0;
+}
+
+static int fs_file_is(const char *path, const uint8_t *want, uint32_t want_len)
+{
+    int is_dir = 0;
+    uint32_t size = 0;
+    if (purr_fs_stat(&s_fs, path, &is_dir, &size) != 0 || is_dir || size != want_len) {
+        return 0;
+    }
+    file_cmp_t c = {want, want_len, 0, 1};
+    purr_fs_read(&s_fs, path, file_cmp_cb, &c);
+    return c.same && c.pos == want_len;
+}
+
+static int plant_temp_modules_ex(purr_cli_t *cli, int only_if_missing)
+{
+    if (!need_fs(cli)) return 1;
+    if (purr_fs_mkdir(&s_fs, PURR_MODULES_DIR) < 0) {
+        /* already exists is fine; anything else, the write below will fail too and say why */
+    }
+    for (size_t i = 0; i < sizeof(s_temp_modules) / sizeof(s_temp_modules[0]); i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%s", PURR_MODULES_DIR, s_temp_modules[i].filename);
+        if (only_if_missing && purr_fs_stat(&s_fs, path, NULL, NULL) == 0) {
+            continue;    /* already there -- never stomp something netinstall (or a user) gave it */
+        }
+        int e = purr_fs_write(&s_fs, path, s_temp_modules[i].data, s_temp_modules[i].len);
+        if (e < 0) {
+            fail(cli, path, e);
+            return 1;
+        }
+        purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)s_temp_modules[i].len);
+    }
+    purr_fs_mkdir(&s_fs, PURR_KERNELMODS_DIR);
+    for (size_t i = 0; i < sizeof(s_temp_kernelmods) / sizeof(s_temp_kernelmods[0]); i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%s", PURR_KERNELMODS_DIR, s_temp_kernelmods[i].filename);
+        if (only_if_missing && purr_fs_stat(&s_fs, path, NULL, NULL) == 0) {
+            continue;
+        }
+        int e = purr_fs_write(&s_fs, path, s_temp_kernelmods[i].data, s_temp_kernelmods[i].len);
+        if (e < 0) {
+            fail(cli, path, e);
+            return 1;
+        }
+        purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)s_temp_kernelmods[i].len);
+    }
+    purr_fs_mkdir(&s_fs, "/boot");
+    purr_fs_mkdir(&s_fs, PURR_DRIVERS_DIR);
+    for (size_t i = 0; i < sizeof(s_temp_drivers) / sizeof(s_temp_drivers[0]); i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%s", PURR_DRIVERS_DIR, s_temp_drivers[i].filename);
+        /* Unlike /system and /kernelmods, nothing but this firmware ever puts a file in
+         * /boot/drivers, so a file that differs from the baked-in blob is a stale one, not
+         * something netinstall or a user supplied. "Only if missing" left a stale touch module
+         * on the filesystem across a firmware flash that fixed it (2026-10-25); replace it. */
+        if (only_if_missing && fs_file_is(path, s_temp_drivers[i].data, (uint32_t)s_temp_drivers[i].len)) {
+            continue;
+        }
+        int e = purr_fs_write(&s_fs, path, s_temp_drivers[i].data, s_temp_drivers[i].len);
+        if (e < 0) {
+            fail(cli, path, e);
+            return 1;
+        }
+        purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)s_temp_drivers[i].len);
+    }
+    return 0;
+}
+
+static int cmd_plantmodules(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (plant_temp_modules_ex(cli, 0) != 0) {    /* explicit: always overwrite, as before */
+        return 1;
+    }
+    purr_cli_puts(cli, "reboot to load them.\n");
+    return 0;
+}
+
+/* AppRuntime/SPEC.md chunk E: the first real .cat app, embedded the same temporary
+ * way s_temp_modules/s_temp_kernelmods are above -- no transport onto the device yet
+ * (section 7's MTP/SD/serial are all unbuilt), so this is how the test app actually
+ * reaches real hardware to prove load->relocate->call->lifecycle end to end. Remove
+ * once a real transport exists, same as cmd_plantmodules's own comment says for
+ * modules/kernelmods. */
+static const uint8_t s_hello_app_package[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x04, 0x02, 0x00,
+    0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x7c, 0x00, 0x00, 0x00, 0x03, 0x47, 0x91, 0x9f, 0xbf, 0x80, 0xba,
+    0x8e, 0xf4, 0xdc, 0x8c, 0x99, 0x5a, 0x0c, 0x68, 0xea, 0xe8, 0x05, 0x41,
+    0xcf, 0x97, 0x9a, 0x2c, 0x3a, 0xa4, 0x8d, 0x94, 0x79, 0x3d, 0x82, 0x08,
+    0xbe, 0xe5, 0xe8, 0xe6, 0x86, 0x65, 0x1b, 0xdc, 0x7b, 0x7f, 0xb2, 0x11,
+    0xb4, 0xbb, 0x39, 0xc2, 0xce, 0xfe, 0xbc, 0x86, 0x80, 0x58, 0xcf, 0xa3,
+    0x08, 0x94, 0x60, 0x38, 0x74, 0x10, 0x8a, 0x40, 0x68, 0x3e, 0xc5, 0x9c,
+    0x37, 0x74, 0x66, 0x7d, 0x15, 0x7a, 0x33, 0x6d, 0x4a, 0x67, 0x18, 0x21,
+    0x65, 0xe5, 0x92, 0x51, 0x1b, 0x2a, 0x91, 0xaf, 0x40, 0xfc, 0x11, 0x2b,
+    0x05, 0x80, 0x44, 0x66, 0x89, 0x1c, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, 0x58, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x8c, 0x92, 0x88, 0x02, 0x16, 0x58, 0x00, 0xa1,
+    0xfc, 0xff, 0xe0, 0x08, 0x00, 0x0c, 0x02, 0x1d, 0xf0, 0x54, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x21, 0xfe, 0xff, 0x1d, 0xf0, 0x36, 0x41, 0x00,
+    0x1d, 0xf0, 0x00, 0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x66,
+    0x72, 0x6f, 0x6d, 0x20, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x5f, 0x61, 0x70,
+    0x70, 0x21, 0x20, 0x6f, 0x6e, 0x5f, 0x63, 0x72, 0x65, 0x61, 0x74, 0x65,
+    0x20, 0x72, 0x61, 0x6e, 0x2e, 0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, 0x04, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00,
+};
+
+static int cmd_planthelloapp(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (!need_fs(cli)) return 1;
+    const char *path = "/tmp_hello.cat";
+    int e = purr_fs_write(&s_fs, path, s_hello_app_package, sizeof(s_hello_app_package));
+    if (e < 0) {
+        fail(cli, path, e);
+        return 1;
+    }
+    purr_cli_printf(cli, "wrote %s (%u bytes). now run: appinstall %s\n", path,
+                    (unsigned)sizeof(s_hello_app_package), path);
+    return 0;
+}
+
+/* Proof-of-life for the LVGL shell UI chunk (documentation/ UI design, not yet written):
+ * proves the flush-callback-to-purr_display_v2_t pipeline actually draws real pixels,
+ * without touching the boot sequence or the working text shell -- that wiring (LVGL first,
+ * text shell as the fallback) is a separate, later chunk.
+ *
+ * Color-LCD T-Deck boards only (PurrOS/main/CMakeLists.txt's own matching condition on
+ * whether purr_lvgl.c is even compiled in) -- waveshare154's 8 MB layout doesn't have the
+ * flash budget for LVGL yet; see that CMakeLists comment for the real overflow this avoided. */
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+static int cmd_lvgldemo(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    purr_cli_puts(cli, "lvgl: starting (15s demo)...\n");
+    purr_console_flush();
+    if (purr_lvgl_init() != ESP_OK) {
+        purr_cli_puts(cli, "lvgl: init failed (see the log)\n");
+        return 1;
+    }
+    purr_lvgl_demo_screen();
+    purr_lvgl_run_for_ms(15000);
+    purr_kernel_table()->console_clear();
+    purr_cli_puts(cli, "lvgl: done\n");
+    return 0;
+}
+#endif
+
+/* ---------------------------------------------------------------- purrctl (plan6.md)
+ * The shell's way into the app runtime, in the manner of hyprctl: dispatchers change things,
+ * queries read them, `events` streams what happens. Every one of these is a request to the
+ * runtime's manager task (purr_catrt.h); the shell holds no state of its own. */
+static int purrctl_run(purr_cli_t *cli, int rc_wanted_text, const char *line, int is_query)
+{
+    (void)rc_wanted_text;
+    char *out = malloc(1600);
+    if (out == NULL) {
+        purr_cli_puts(cli, "purrctl: out of memory\n");
+        return 1;
+    }
+    int rc = is_query ? purr_catrt_query(line, out, 1600) : purr_catrt_dispatch(line, out, 1600);
+    purr_cli_puts(cli, out);
+    free(out);
+    return rc < 0 ? 1 : 0;
+}
+
+static unsigned purrctl_mods(const char *s)
+{
+    unsigned m = 0;
+    if (strstr(s, "SUPER") || strstr(s, "super")) m |= PURR_RT_MOD_SUPER;
+    if (strstr(s, "CTRL") || strstr(s, "ctrl")) m |= PURR_RT_MOD_CTRL;
+    if (strstr(s, "ALT") || strstr(s, "alt")) m |= PURR_RT_MOD_ALT;
+    if (strstr(s, "SHIFT") || strstr(s, "shift")) m |= PURR_RT_MOD_SHIFT;
+    return m;
+}
+
+static int cmd_purrctl(purr_cli_t *cli, int argc, char **argv)
+{
+    if (argc < 2) {
+        purr_cli_puts(cli,
+            "usage: purrctl dispatch <open|close|kill|focus|cycle|suspend|resume|background|pin|post> [args]\n"
+            "       purrctl <apps|activeapp|memory|rules|binds|version> [-j]\n"
+            "       purrctl events | reload | key <MODS> <key>\n");
+        return 1;
+    }
+    char line[PURR_RT_LINE_LEN];
+    line[0] = '\0';
+    const char *sub = argv[1];
+    if (strcmp(sub, "dispatch") == 0) {
+        for (int i = 2; i < argc; i++) {
+            size_t n = strlen(line);
+            snprintf(line + n, sizeof(line) - n, "%s%s", i > 2 ? " " : "", argv[i]);
+        }
+        return purrctl_run(cli, 1, line, 0);
+    }
+    if (strcmp(sub, "events") == 0) {
+        purr_cli_puts(cli, "events (any key stops):\n");
+        purr_console_flush();
+        uint32_t cur = purr_catrt_event_cursor();
+        char ev[PURR_RT_LINE_LEN * 2];
+        for (;;) {
+            while (purr_catrt_event_next(&cur, ev, sizeof(ev))) {
+                purr_cli_puts(cli, ev);
+                purr_cli_puts(cli, "\n");
+            }
+            purr_console_flush();
+            if (purr_kernel_key() != 0) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        return 0;
+    }
+    if (strcmp(sub, "reload") == 0) {
+        char err[512];
+        int bad = purr_catrt_reload(err, sizeof(err));
+        if (bad < 0) {
+            purr_cli_puts(cli, "purrctl: the runtime did not answer\n");
+            return 1;
+        }
+        if (bad == 0) {
+            purr_cli_puts(cli, "reloaded /etc/apps.conf\n");
+        } else {
+            purr_cli_printf(cli, "reloaded /etc/apps.conf with %d bad line%s:\n%s", bad,
+                            bad == 1 ? "" : "s", err);
+        }
+        return bad ? 1 : 0;
+    }
+    if (strcmp(sub, "key") == 0) {
+        if (argc < 4) {
+            purr_cli_puts(cli, "usage: purrctl key <MODS> <key>   e.g. purrctl key SUPER Tab\n");
+            return 1;
+        }
+        int handled = purr_catrt_key(purrctl_mods(argv[2]), argv[3]);
+        purr_cli_puts(cli, handled > 0 ? "handled\n" : "no bind for that\n");
+        return handled > 0 ? 0 : 1;
+    }
+    for (int i = 1; i < argc; i++) {
+        size_t n = strlen(line);
+        snprintf(line + n, sizeof(line) - n, "%s%s", i > 1 ? " " : "", argv[i]);
+    }
+    return purrctl_run(cli, 1, line, 1);
+}
+
+static const purr_cmd_t s_cmds[] = {
+    {"help",    "list the commands",             purr_cli_cmd_help},
+    {"plantmodules", "temporary: plant the real modules for testing", cmd_plantmodules},
+    {"planthelloapp", "temporary: stage the hello test app for appinstall", cmd_planthelloapp},
+    {"purrctl", "app runtime: dispatch|apps|activeapp|memory|rules|binds|version|events|reload|key", cmd_purrctl},
+    {"testdriverload", "temporary: proof of the loadable-driver mechanism", cmd_testdriverload},
+    {"secure", "security status; enforce / relax / dev on|off (admin)", cmd_secure},
+    {"trust", "trust apply <file>: apply a signed trust block (admin)", cmd_trust},
+    {"settings", "settings [list] | get <key> | set <key> <value>: the same settings as the Settings app",
+     purr_settings_cmd},
+    {"perms", "perms [app | reset <app>]: what apps are allowed to do (admin to change)", purr_perms_cmd},
+    {"grant", "grant <app> <permission>: allow keep-awake or wake-alarm (admin)", purr_perms_cmd},
+    {"revoke", "revoke <app> <permission>: the app asks again (admin)", purr_perms_cmd},
+#if CONFIG_PURR_PROFILE_FULL
+    {"hwscan", "hwscan [power <gpio>]: look for attached hardware (I2C), reading only", purr_hwscan_cmd},
+    {"store", "store [repos | list | add <url> | confirm | refresh | check | install <name> <repo-id> | remove <name> <repo-id> | bootstrap]: repositories and the Store", purr_store_cmd},
+    {"sd", "sd [status | mount | unmount | ls [path] | test]: the SD card at /sd", purr_sd_cmd},
+    {"gps", "gps [fix | watch | power on|off | rate <hz>]: the GPS receiver", purr_gps_cmd},
+    {"radio", "radio config <MHz> [...] | tx <text> | rx [seconds] | sleep | status: the LoRa radio", purr_radio_cmd},
+    {"battery", "the battery gauge: the raw reading and what the OS makes of it", purr_battery_cmd},
+    {"modem", "modem [status | power on|off | connect <apn> | disconnect | at <cmd>]: a cellular modem", purr_modem_cmd},
+    {"hwdev", "hwdev [add <driver> <sda> <scl> <addr> | read <name> | remove <name>]: devices set up by hand or by Find hardware", purr_hwsetup_cmd},
+#endif
+    {"power", "power [screen on|off | timeout <seconds|never>]: sleep state, wake locks and alarms",
+     purr_power_cmd},
+#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+    {"lvgldemo", "proof of life: draw one LVGL screen for 15s", cmd_lvgldemo},
+    {"testkbdmodule", "temporary: test the real kbd_i2c driver module against live hardware", cmd_testkbdmodule},
+#endif
+};
+
+/* ---------------------------------------------------------------- Modules (real) */
+/*
+ * The first real module (Modules/SPEC.md): loads every `.cat` file in /modules on the root
+ * filesystem at boot: verify -> parse layout -> relocate (two passes, one per base -- section
+ * 4) -> map executable -> call entry, merging each module's exported commands into the
+ * shell's dispatch table. This is permanent: it is how a module actually becomes usable.
+ */
+#define PURR_MODULE_MAX 8
+#define PURR_MODULE_READ_CAP (128 * 1024)
+
+typedef struct {
+    uint8_t *databuf;                  /* kept forever: modules are never unloaded (yet) */
+    const purr_module_table_t *table;
+} loaded_module_t;
+
+static loaded_module_t s_loaded_modules[PURR_MODULE_MAX];
+static int s_loaded_module_count = 0;
+
+/*
+ * The prototype kernel<->CoreOS boundary (PurrOS/components/coreos/include/
+ * purr_kernel_table.h, PurrOS/components/coreos/SPEC.md section 4.1), one layer below the
+ * CoreOS-to-module boundary above. Loads from /kernelmods, a separate folder from /system, so
+ * the two boundaries stay conceptually distinct even while this monolith hosts both roles
+ * until a real kernel binary exists.
+ */
+#define PURR_KERNELMOD_MAX 8
+
+typedef struct {
+    uint8_t *databuf;
+    const purr_kernel_module_table_t *table;
+} loaded_kernelmod_t;
+
+static loaded_kernelmod_t s_loaded_kernelmods[PURR_KERNELMOD_MAX];
+static int s_loaded_kernelmod_count = 0;
+
+static void core_table_puts(purr_cli_t *cli, const char *s)
+{
+    purr_cli_puts(cli, s);
+}
+
+static void core_table_printf(purr_cli_t *cli, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    char buf[160];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    purr_cli_puts(cli, buf);
+}
+
+/* What Modules/appmanager/apps_module.c's `apps` command calls through the core table
+ * instead of touching purr_fs/purr_appmgr directly -- the exact same scan cmd_apps used to
+ * do inline, before it moved into a module. A module never gets a purr_fs_t or a key bag. */
+static void core_table_apps_scan(purr_app_registry_t *out_reg)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        memset(out_reg, 0, sizeof(*out_reg));
+        return;
+    }
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, out_reg);
+    STORE_MARK_VOUCHED(out_reg, root);               /* what a trusted repository vouches for shows and runs like any app */
+}
+
+void purr_apps_scan_current_user(purr_app_registry_t *out_reg)
+{
+    core_table_apps_scan(out_reg);
+}
+
+/* Words a person reads, not an ESP-IDF error name -- moved here from the old inline
+ * cmd_wifi_connect, since a module can't see a wifi_err_reason_t at all. */
 static const char *net_reason_text(uint8_t reason)
 {
     switch (reason) {
@@ -268,242 +4827,1954 @@ static const char *net_reason_text(uint8_t reason)
     }
 }
 
-static void print_connect_error(purr_cli_t *cli, esp_err_t e)
+static int core_table_net_scan(purr_module_net_ap_t *out, int max, int *out_n, char *err, size_t err_cap)
 {
-    const char *why = e == ESP_ERR_TIMEOUT ? net_reason_text(purr_net_last_disconnect_reason()) : NULL;
-    if (e == ESP_ERR_TIMEOUT) {
-        purr_cli_puts(cli, "connection timed out. Could not connect.");
-    } else {
-        purr_cli_printf(cli, "could not connect (%s).", esp_err_to_name(e));
-    }
-    purr_cli_printf(cli, why ? " (%s)\n" : "\n", why ? why : "");
-}
-
-static int cmd_wifi_connect(purr_cli_t *cli, int argc, char **argv)
-{
-    if (argc < 2) {
-        purr_cli_puts(cli, "usage: wifi connect <ssid> [password]\n");
-        return 1;
-    }
-    const char *pass = argc > 2 ? argv[2] : "";
-    purr_cli_printf(cli, "connecting to %s...\n", argv[1]);
-    purr_console_flush();
-    esp_err_t e = purr_net_connect(argv[1], pass, 15000);
+    purr_net_ap_t aps[16];
+    int cap = max < 16 ? max : 16;
+    int n = 0;
+    esp_err_t e = purr_net_scan(aps, cap, &n);
     if (e != ESP_OK) {
-        print_connect_error(cli, e);
-        return 1;
-    }
-    purr_net_status_t st;
-    purr_net_status(&st);
-    purr_cli_printf(cli, "connected, ip %s\n", st.ip);
-    return 0;
-}
-
-static int cmd_wifi_forget(purr_cli_t *cli, int argc, char **argv)
-{
-    if (argc < 2) {
-        purr_cli_puts(cli, "usage: wifi forget <ssid>\n");
-        return 1;
-    }
-    purr_net_forget(argv[1]);
-    purr_cli_puts(cli, "forgotten (if it was saved)\n");
-    return 0;
-}
-
-static int cmd_wifi_list(purr_cli_t *cli)
-{
-    purr_net_ap_t saved[PURR_WIFI_MAX_SAVED];
-    int n = purr_net_saved(saved, PURR_WIFI_MAX_SAVED);
-    if (n == 0) {
-        purr_cli_puts(cli, "no saved networks\n");
+        snprintf(err, err_cap, "scan failed: %s", esp_err_to_name(e));
         return 0;
     }
-    for (int i = 0; i < n; i++) {
-        purr_cli_printf(cli, "  %-32s %s\n", saved[i].ssid, saved[i].open ? "(open)" : "");
+    int shown = n < cap ? n : cap;
+    for (int i = 0; i < shown; i++) {
+        snprintf(out[i].ssid, sizeof(out[i].ssid), "%s", aps[i].ssid);
+        out[i].rssi = aps[i].rssi;
+        out[i].open = aps[i].open;
     }
-    return 0;
-}
-
-static int cmd_wifi(purr_cli_t *cli, int argc, char **argv)
-{
-    if (argc < 2) {
-        purr_cli_puts(cli, "usage: wifi scan|connect|forget|list|status\n");
-        return 1;
-    }
-    if (strcmp(argv[1], "scan") == 0) return cmd_wifi_scan(cli);
-    if (strcmp(argv[1], "connect") == 0) return cmd_wifi_connect(cli, argc - 1, argv + 1);
-    if (strcmp(argv[1], "forget") == 0) return cmd_wifi_forget(cli, argc - 1, argv + 1);
-    if (strcmp(argv[1], "list") == 0) return cmd_wifi_list(cli);
-    if (strcmp(argv[1], "status") == 0) return cmd_net(cli, 0, NULL);
-    purr_cli_printf(cli, "wifi: unknown subcommand '%s'\n", argv[1]);
+    *out_n = n;
     return 1;
 }
 
-static int cmd_version(purr_cli_t *cli, int argc, char **argv)
+static int core_table_net_connect(const char *ssid, const char *pass, char *err, size_t err_cap)
 {
-    (void)argc; (void)argv;
-    purr_cli_printf(cli, "%s %s (%s profile)\n", SYSTEM_NAME, VERSION, PROFILE_NAME);
-    return 0;
-}
-
-static int cmd_info(purr_cli_t *cli, int argc, char **argv)
-{
-    (void)argc; (void)argv;
-    esp_chip_info_t chip;
-    esp_chip_info(&chip);
-    purr_display_info_t di = {0};
-    const purr_display_v2_t *d = purr_kernel_display();
-    if (d) {
-        d->get_info(&di);
+    esp_err_t e = purr_net_connect(ssid, pass, 15000);
+    if (e != ESP_OK) {
+        if (e == ESP_ERR_TIMEOUT) {
+            const char *why = net_reason_text(purr_net_last_disconnect_reason());
+            snprintf(err, err_cap, "connection timed out. Could not connect.%s%s",
+                    why ? " " : "", why ? why : "");
+        } else {
+            snprintf(err, err_cap, "could not connect (%s).", esp_err_to_name(e));
+        }
+        return 0;
     }
-    purr_cli_printf(cli, "system:  %s %s\n", SYSTEM_NAME, VERSION);
-    purr_cli_printf(cli, "board:   %s\n", purr_board()->name);
-    purr_cli_printf(cli, "chip:    %s rev %d.%d, %d cores\n", CONFIG_IDF_TARGET,
-                    chip.revision / 100, chip.revision % 100, chip.cores);
-    purr_cli_printf(cli, "display: %s %dx%d\n", d ? di.name : "none", di.width, di.height);
-    purr_cli_printf(cli, "idf:     %s\n", esp_get_idf_version());
-    return 0;
+    return 1;
 }
 
-static int cmd_mem(purr_cli_t *cli, int argc, char **argv)
+static int core_table_net_forget(purr_cli_t *cli, const char *ssid)
 {
-    (void)argc; (void)argv;
-    purr_cli_printf(cli, "internal: %u free, %u largest block\n",
-                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-    size_t psram = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-    if (psram) {
-        purr_cli_printf(cli, "psram:    %u free of %u\n",
-                        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (unsigned)psram);
-    }
-    return 0;
-}
-
-static int cmd_uptime(purr_cli_t *cli, int argc, char **argv)
-{
-    (void)argc; (void)argv;
-    unsigned s = (unsigned)(esp_timer_get_time() / 1000000);
-    purr_cli_printf(cli, "up %u:%02u:%02u\n", s / 3600, (s / 60) % 60, s % 60);
-    return 0;
-}
-
-static int cmd_parts(purr_cli_t *cli, int argc, char **argv)
-{
-    (void)argc; (void)argv;
-    purr_cli_puts(cli, "name      type sub offset   size\n");
-    esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
-    for (; it != NULL; it = esp_partition_next(it)) {
-        const esp_partition_t *p = esp_partition_get(it);
-        purr_cli_printf(cli, "%-9s %-4s %02x  %06x  %uK\n", p->label,
-                        p->type == ESP_PARTITION_TYPE_APP ? "app" : "data",
-                        (unsigned)p->subtype, (unsigned)p->address, (unsigned)(p->size / 1024));
-    }
-    esp_partition_iterator_release(it);
-    return 0;
-}
-
-static int cmd_echo(purr_cli_t *cli, int argc, char **argv)
-{
-    for (int i = 1; i < argc; i++) {
-        purr_cli_printf(cli, "%s%s", i > 1 ? " " : "", argv[i]);
-    }
-    purr_cli_puts(cli, "\n");
-    return 0;
-}
-
-static int cmd_clear(purr_cli_t *cli, int argc, char **argv)
-{
-    (void)cli; (void)argc; (void)argv;
-    purr_console_clear();
-    return 0;
-}
-
-/* Load purrcfg, or say why not. */
-static int load_cfg(purr_cli_t *cli, purr_flash_t *fl, purr_cfg_t *cfg)
-{
-    if (purr_cfgstore_open(fl) != 0) {
-        purr_cli_puts(cli, "purrcfg: no such partition\n");
-        return -1;
-    }
-    int r = purr_cfg_load(fl, cfg, NULL);
-    if (r < 0) {
-        purr_cli_puts(cli, "purrcfg: read error\n");
-        return -1;
-    }
-    return r;                                     /* 0 = read, 1 = blank, defaults used */
-}
-
-static int cmd_reboot(purr_cli_t *cli, int argc, char **argv)
-{
-    if (argc > 2 || (argc == 2 && strcmp(argv[1], "recovery") != 0)) {
-        purr_cli_puts(cli, "usage: reboot [recovery]\n");
+    if (!require_admin(cli)) {        /* F-10 */
         return 1;
     }
-    if (argc == 2) {
-        /* The one-shot request: the bootloader clears it and starts KittenOS once. */
-        purr_flash_t fl;
-        purr_cfg_t cfg;
-        if (load_cfg(cli, &fl, &cfg) < 0) {
-            return 1;
+    purr_net_forget(ssid);
+    return 0;
+}
+
+static int core_table_net_saved(purr_module_net_ap_t *out, int max)
+{
+    purr_net_ap_t saved[PURR_WIFI_MAX_SAVED];
+    int cap = max < PURR_WIFI_MAX_SAVED ? max : PURR_WIFI_MAX_SAVED;
+    int n = purr_net_saved(saved, cap);
+    int shown = n < cap ? n : cap;
+    for (int i = 0; i < shown; i++) {
+        snprintf(out[i].ssid, sizeof(out[i].ssid), "%s", saved[i].ssid);
+        out[i].rssi = saved[i].rssi;
+        out[i].open = saved[i].open;
+    }
+    return shown;
+}
+
+static void core_table_net_status(purr_module_net_status_t *out)
+{
+    purr_net_status_t st;
+    purr_net_status(&st);
+    out->connected = st.connected;
+    snprintf(out->ssid, sizeof(out->ssid), "%s", st.ssid);
+    out->rssi = st.rssi;
+    snprintf(out->ip, sizeof(out->ip), "%s", st.ip);
+}
+
+/* The one opaque call the netinstall module gets, instead of decomposed primitives -- see the
+ * comment on purr_core_table_t's net_install field. purr_net_install_run() is the exact body
+ * cmd_net_install used to be, unmoved except for its name and where argv[1] gets resolved. */
+static int core_table_net_install(purr_cli_t *cli, const char *component)
+{
+    /* F-10: gated here, not inside purr_net_install_run() itself -- that function is also
+     * how purr_continue_install() (commands.c) finishes a recovery install automatically,
+     * early in boot before any session exists to check. This is the boundary a module (the
+     * only other caller) actually crosses. */
+    if (!require_admin(cli)) {
+        return 1;
+    }
+    return purr_net_install_run(cli, component);
+}
+
+static const purr_core_table_t s_core_table = {
+    .puts = core_table_puts,
+    .printf = core_table_printf,
+    .apps_scan = core_table_apps_scan,
+    .net_scan = core_table_net_scan,
+    .net_connect = core_table_net_connect,
+    .net_forget = core_table_net_forget,
+    .net_saved = core_table_net_saved,
+    .net_status = core_table_net_status,
+    .net_install = core_table_net_install,
+};
+
+/* The prototype kernel table's real implementation -- backed by the actual running
+ * heap/timer, exactly what a real kernel binary would provide, just hosted in this monolith
+ * for now (purr_kernel_table.h's own comment explains why). */
+static void *kernel_table_heap_alloc(size_t n) { return malloc(n); }
+static void kernel_table_heap_free(void *p) { free(p); }
+static uint32_t kernel_table_heap_free_internal(void)
+{
+    return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+}
+static uint32_t kernel_table_heap_largest_free_internal(void)
+{
+    return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+}
+static uint32_t kernel_table_heap_free_psram(void)
+{
+    return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+}
+static uint32_t kernel_table_heap_total_psram(void)
+{
+    return (uint32_t)heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+}
+static uint64_t kernel_table_uptime_us(void) { return (uint64_t)esp_timer_get_time(); }
+
+/* The filesystem sweep's kernel-side: plain wrappers around the same purr_fs_t calls the
+ * inline commands used before, except fs_format(), which folds in the flash_bd/unmount
+ * sequence that used to be spread across cmd_format's body -- a module is never handed a raw
+ * block device (purr_kernel_table.h's own comment on this). */
+/* F-10: every entry point a module can reach gets checked here, once, against the caller's
+ * session (fs_allowed(), above) -- kernel-internal code that calls purr_fs_* directly
+ * instead of through this table (login.c, purr_fs_setup() itself, ensure_user_home()) never
+ * crosses this check, by construction, so a wrong or corrupted permission can only ever stop
+ * a standard user from reaching something they don't own, never the kernel itself. */
+static int kernel_table_fs_list(const char *path, purr_fs_list_fn cb, void *ctx)
+{
+    if (!fs_allowed(path, PURR_FS_MODE_OREAD)) {
+        return PURR_FS_ERR_DENIED;
+    }
+    return purr_fs_list(&s_fs, path, cb, ctx);
+}
+static int kernel_table_fs_read(const char *path, purr_fs_read_fn cb, void *ctx)
+{
+    if (!fs_allowed(path, PURR_FS_MODE_OREAD)) {
+        return PURR_FS_ERR_DENIED;
+    }
+    return purr_fs_read(&s_fs, path, cb, ctx);
+}
+static int kernel_table_fs_write(const char *path, const void *data, uint32_t len)
+{
+    if (!fs_allowed(path, PURR_FS_MODE_OWRITE)) {
+        return PURR_FS_ERR_DENIED;
+    }
+    int is_new = (purr_fs_stat(&s_fs, path, NULL, NULL) == LFS_ERR_NOENT);
+    int e = purr_fs_write(&s_fs, path, data, len);
+    if (e == 0 && is_new) {
+        fs_claim(path);          /* a brand-new file belongs to whoever just created it */
+    }
+    return e;
+}
+static int kernel_table_fs_mkdir(const char *path)
+{
+    if (!fs_allowed(path, PURR_FS_MODE_OWRITE)) {
+        return PURR_FS_ERR_DENIED;
+    }
+    int e = purr_fs_mkdir(&s_fs, path);
+    if (e == 0) {
+        fs_claim(path);
+    }
+    return e;
+}
+static int kernel_table_fs_remove(const char *path)
+{
+    if (!fs_allowed(path, PURR_FS_MODE_OWRITE)) {
+        return PURR_FS_ERR_DENIED;
+    }
+    return purr_fs_remove(&s_fs, path);
+}
+static int kernel_table_fs_rename(const char *from, const char *to)
+{
+    if (!fs_allowed(from, PURR_FS_MODE_OWRITE) || !fs_allowed(to, PURR_FS_MODE_OWRITE)) {
+        return PURR_FS_ERR_DENIED;
+    }
+    return purr_fs_rename(&s_fs, from, to);
+}
+static int kernel_table_fs_stat(const char *path, int *is_dir, uint32_t *size)
+{
+    return purr_fs_stat(&s_fs, path, is_dir, size);
+}
+
+static int kernel_table_fs_usage(uint32_t *used, uint32_t *total)
+{
+    return purr_fs_usage(&s_fs, used, total);
+}
+static int kernel_table_fs_mounted(void) { return purr_fs_mounted(&s_fs); }
+static const char *kernel_table_fs_strerror(int err) { return purr_fs_strerror(err); }
+static int kernel_table_fs_format(void)
+{
+    if (!is_admin()) {         /* F-10 -- no cli reaches this entry, so no message to print */
+        return PURR_FS_ERR_DENIED;
+    }
+    purr_bd_t bd;
+    if (purr_fs_flash_bd("root", &bd) != 0) {
+        return -1;
+    }
+    purr_fs_unmount(&s_fs);
+    return purr_fs_format(&s_fs, &bd);
+}
+static void kernel_table_console_flush(void) { purr_console_flush(); }
+
+static const purr_kernel_table_t s_kernel_table = {
+    .puts = core_table_puts,
+    .printf = core_table_printf,
+    .heap_alloc = kernel_table_heap_alloc,
+    .heap_free = kernel_table_heap_free,
+    .heap_free_internal = kernel_table_heap_free_internal,
+    .heap_largest_free_internal = kernel_table_heap_largest_free_internal,
+    .heap_free_psram = kernel_table_heap_free_psram,
+    .heap_total_psram = kernel_table_heap_total_psram,
+    .uptime_us = kernel_table_uptime_us,
+    .fs_list = kernel_table_fs_list,
+    .fs_read = kernel_table_fs_read,
+    .fs_write = kernel_table_fs_write,
+    .fs_mkdir = kernel_table_fs_mkdir,
+    .fs_remove = kernel_table_fs_remove,
+    .fs_rename = kernel_table_fs_rename,
+    .fs_usage = kernel_table_fs_usage,
+    .fs_mounted = kernel_table_fs_mounted,
+    .fs_strerror = kernel_table_fs_strerror,
+    .fs_format = kernel_table_fs_format,
+    .console_flush = kernel_table_console_flush,
+    .login_whoami = kernel_table_login_whoami,
+    .login_logout = kernel_table_login_logout,
+    .login_su = kernel_table_login_su,
+    .login_passwd = kernel_table_login_passwd,
+    .login_useradd = kernel_table_login_useradd,
+    .login_userdel = kernel_table_login_userdel,
+    .login_usermod = kernel_table_login_usermod,
+    .app_info = kernel_table_app_info,
+    .app_install = kernel_table_app_install,
+    .app_remove = kernel_table_app_remove,
+    .app_format = kernel_table_app_format,
+    .app_run = kernel_table_app_run,
+    .print_version = kernel_table_print_version,
+    .print_info = kernel_table_print_info,
+    .print_parts = kernel_table_print_parts,
+    .print_purrcfg = kernel_table_print_purrcfg,
+    .console_clear = kernel_table_console_clear,
+    .reboot_system = kernel_table_reboot_system,
+    .read_key = kernel_table_read_key,
+    .login_run = kernel_table_login_run,
+    .login_skip = kernel_table_login_skip,
+    .login_take_logout = kernel_table_login_take_logout,
+    .serial_write = kernel_table_serial_write,
+    .serial_read = kernel_table_serial_read,
+    .task_create = kernel_table_task_create,
+};
+
+const purr_kernel_table_t *purr_kernel_table(void)
+{
+    return &s_kernel_table;
+}
+
+typedef struct {
+    char names[PURR_MODULE_MAX][48];
+    int is_dir[PURR_MODULE_MAX];
+    int count;
+} module_listing_t;
+
+static void collect_module_row(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)size;
+    module_listing_t *l = ctx;
+    if (l->count < PURR_MODULE_MAX) {
+        strncpy(l->names[l->count], name, sizeof(l->names[l->count]) - 1);
+        l->names[l->count][sizeof(l->names[l->count]) - 1] = '\0';
+        l->is_dir[l->count] = is_dir;
+        l->count++;
+    }
+}
+
+/* Why a module didn't end up loaded, coarse enough to decide whether the file itself is at
+ * fault (Modules/SPEC.md section 7.1): UNTRUSTED and INCOMPATIBLE are both deterministic
+ * properties of the file's own bytes -- they will fail exactly the same way on every future
+ * boot too, so the sweep quarantines the file rather than leaving it to fail silently forever.
+ * TRANSIENT is everything environment/resource-shaped (a read error, an allocation failure, an
+ * `esp_mmu_map` failure) -- not the file's fault, and might well succeed on a later boot, so
+ * it's just logged and left where it is. */
+typedef enum {
+    MODULE_LOAD_OK = 0,
+    MODULE_LOAD_UNTRUSTED,      /* failed verification, wrong image type, or a malformed payload */
+    MODULE_LOAD_INCOMPATIBLE,   /* verified fine, but entry() returned a bad/mismatched ABI table */
+    MODULE_LOAD_TRANSIENT,      /* resource/environment failure, unrelated to trust */
+} module_load_result_t;
+
+/*
+ * Reads, verifies, relocates and maps a relocatable file's payload as one executable PSRAM
+ * block -- Modules/SPEC.md section 7's steps 1-7, shared by every loader below instead of
+ * duplicated per caller (it used to be, once for /system modules and again, near-identically,
+ * for /kernelmods). Multi-page now, not fixed at one `CONFIG_MMU_PAGE_SIZE` block: `max_pages`
+ * lets a caller allow more room than a module needs today, which is the "real work, not a
+ * design question" PurrOS/SPEC.md section 6 calls for before CoreOS itself -- far bigger than
+ * anything built as a module so far -- can load this way. Existing callers keep passing 1, so
+ * nothing about their behavior changes; a future CoreOS loader passes a real page budget.
+ *
+ * `expected_image_type` is PURR_IMG_MODULE for /system and /kernelmods, or PURR_IMG_APP for
+ * AppRuntime's minimal runtime (chunk C) -- the container format, the layout parser and the
+ * two-base relocation scheme underneath are identical either way (purr_appmgr.c never looks
+ * past the container header at a payload's own shape), so this stays one function with one
+ * more parameter instead of a near-duplicate for apps.
+ *
+ * On PURR_LOAD_OK, `*out_databuf` (writable) and `*out_exec_ptr` (executable) are two aliases
+ * of the same mapped block, and `*out_entry_offset` is the entry point's byte offset into it --
+ * the caller adds it to `*out_exec_ptr`, casts to its own entry function type, and calls it.
+ * The caller owns cleanup on every path (esp_mmu_unmap + free) once it has these three values;
+ * this function only cleans up its own intermediate allocations and, on failure, everything.
+ */
+#if CONFIG_PURR_PROFILE_FULL
+static const uint8_t *s_shell_pack;                     /* the picture pack a loaded shell carries inside itself (purr_shell_module_pack) */
+static uint32_t s_shell_pack_size;
+#endif
+typedef enum {
+    PURR_LOAD_OK = 0,
+    PURR_LOAD_TRANSIENT,    /* OOM, mmu-map failure: not the file's fault, retry next boot */
+    PURR_LOAD_UNTRUSTED,    /* bad signature, bad layout, too big: quarantine, don't retry */
+} purr_load_result_t;
+
+/* Only an app in a user's own folder, /home/<name>/apps/<app>/package.cat or the developer folder
+ * /home/<name>/devapps/<app>/package.cat, can ever be unsigned. The system's /apps, /system, /kernelmods
+ * and /boot/drivers can not, whatever the settings say. */
+static int path_in_user_apps(const char *path)
+{
+    if (strncmp(path, "/home/", 6) != 0 || strstr(path, "..") != NULL) {
+        return 0;
+    }
+    const char *after_name = strchr(path + 6, '/');
+    return after_name != NULL &&
+           (strncmp(after_name, "/apps/", 6) == 0 || strncmp(after_name, "/devapps/", 9) == 0);
+}
+
+/* A driver file in /boot/drivers. Developer mode with the "unsigned" switch on may load one that has no trusted signature (onboarding new
+ * hardware); the same rule as for an unsigned app: its hash must still match, a revoked key is still refused, and nothing outside
+ * /boot/drivers qualifies. Drivers are native code in the kernel, which is why this needs developer mode and can never apply to a
+ * device whose signed trust block says DEV_LOCKED. */
+static int path_in_boot_drivers(const char *path)
+{
+    return strncmp(path, PURR_DRIVERS_DIR "/", sizeof(PURR_DRIVERS_DIR)) == 0 && strstr(path, "..") == NULL;
+}
+
+/* Everything after the bytes are in memory: verify the signature, lay the module out, relocate it, map it executable. Takes
+ * ownership of rb (malloc'd, len bytes) and frees it. The file version below reads the module from the filesystem; the recovery
+ * loader, which has no filesystem, hands in the baked-in driver modules directly (purr_loader_load_drivers). */
+static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, const char *path, const char *log_tag,
+                                                    uint32_t max_pages, uint8_t expected_image_type, int expected_subtype,
+                                                    uint8_t **out_databuf, void **out_exec_ptr,
+                                                    uint32_t *out_entry_offset);
+
+static purr_load_result_t load_relocatable_image(uint8_t *rb, size_t len, const char *path, const char *log_tag,
+                                                 uint32_t max_pages, uint8_t expected_image_type,
+                                                 uint8_t **out_databuf, void **out_exec_ptr,
+                                                 uint32_t *out_entry_offset)
+{
+    return load_relocatable_image_ex(rb, len, path, log_tag, max_pages, expected_image_type, -1, out_databuf, out_exec_ptr, out_entry_offset);
+}
+
+/* `expected_subtype` is -1 for "any" (every module and app today) or a PURR_MOD_* the file must carry: a shell is the only caller that sets it, so a driver or any other
+ * module signed by a trusted key can never be loaded as a shell. For PURR_MOD_SHELL the shell header at the start of the code is checked before anything is
+ * mapped (ABI version, export count) and its bss size is added to the mapped block (zeroed memory after the code, where the linker put .bss). */
+static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, const char *path, const char *log_tag,
+                                                    uint32_t max_pages, uint8_t expected_image_type, int expected_subtype,
+                                                    uint8_t **out_databuf, void **out_exec_ptr,
+                                                    uint32_t *out_entry_offset)
+{
+    purr_cfg_t cfg;
+    purr_flash_t fl;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {.chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls};
+    purr_mem_read_ctx_t mrc = {rb, len};
+    purr_image_header_t hdr;
+    purr_verify_result_t vr = purr_image_verify(&env, purr_mem_read, &mrc, len, &hdr);
+    /* Developer mode, with "allow unsigned apps" switched on, lets an APP through that has no trusted
+     * signature (never a module, driver or kernel mod, and never a revoked key). The verifier stops at the
+     * key lookup, before it has looked at the payload, so its hash is checked here: an unsigned app is
+     * still not allowed to be a damaged one. */
+    if ((vr == PURR_V_NO_KEY || vr == PURR_V_ROLE_MISMATCH || vr == PURR_V_BAD_SIGNATURE) &&
+        expected_image_type == PURR_IMG_APP && hdr.image_type == PURR_IMG_APP &&
+        path_in_user_apps(path) && purr_security_unsigned_apps_allowed() &&
+        (uint64_t)hdr.payload_offset + hdr.payload_size <= len) {
+        uint8_t digest[PURR_SHA256_LEN];
+        purr_sha256(rb + hdr.payload_offset, hdr.payload_size, digest);
+        if (memcmp(digest, hdr.payload_sha256, PURR_SHA256_LEN) == 0) {
+            ESP_LOGW(log_tag, "%s: UNSIGNED APP, loaded because developer mode allows it", path);
+            vr = PURR_V_OK;
         }
-        purr_cfg_set_flag(&cfg, PURR_CFGF_FORCE_RECOVERY);
-        if (purr_cfg_store(&fl, &cfg) != 0) {
-            purr_cli_puts(cli, "purrcfg: could not write the request\n");
-            return 1;
+    }
+    /* A trusted repository's signed index stands for the package (Repositories/SPEC.md section 5): an unprivileged app with a receipt that matches these
+     * exact bytes. Never a module or a driver, and never an app in any folder but a user's own apps. */
+    if ((vr == PURR_V_NO_KEY || vr == PURR_V_ROLE_MISMATCH || vr == PURR_V_BAD_SIGNATURE) &&
+        expected_image_type == PURR_IMG_APP && hdr.image_type == PURR_IMG_APP && path_in_user_apps(path) &&
+        STORE_VOUCHES(path, rb, len)) {
+        ESP_LOGI(log_tag, "%s: vouched for by a trusted repository", path);
+        vr = PURR_V_OK;
+    }
+    if ((vr == PURR_V_NO_KEY || vr == PURR_V_ROLE_MISMATCH || vr == PURR_V_BAD_SIGNATURE) &&
+        expected_image_type == PURR_IMG_MODULE && hdr.image_type == PURR_IMG_MODULE &&
+        PURR_FLAGS_SUBTYPE(hdr.flags) == PURR_MOD_DRIVER && path_in_boot_drivers(path) &&
+        purr_security_unsigned_apps_allowed() && (uint64_t)hdr.payload_offset + hdr.payload_size <= len) {
+        uint8_t digest[PURR_SHA256_LEN];
+        purr_sha256(rb + hdr.payload_offset, hdr.payload_size, digest);
+        if (memcmp(digest, hdr.payload_sha256, PURR_SHA256_LEN) == 0) {
+            ESP_LOGW(log_tag, "%s: UNSIGNED DRIVER, loaded because developer mode allows it", path);
+            vr = PURR_V_OK;
         }
-        purr_cli_puts(cli, "restarting into recovery...\n");
-    } else {
-        purr_cli_puts(cli, "restarting...\n");
+    }
+    if (vr != PURR_V_OK || hdr.image_type != expected_image_type ||
+        (expected_subtype >= 0 && PURR_FLAGS_SUBTYPE(hdr.flags) != (unsigned)expected_subtype)) {
+        ESP_LOGW(log_tag, "%s: %s", path, vr != PURR_V_OK ? purr_verify_name(vr) : "wrong image type");
+        free(rb);
+        return PURR_LOAD_UNTRUSTED;
+    }
+    if ((uint64_t)hdr.payload_offset + hdr.payload_size > len) {
+        ESP_LOGW(log_tag, "%s: payload runs past the file", path);
+        free(rb);
+        return PURR_LOAD_UNTRUSTED;
+    }
+
+    const uint8_t *payload = rb + hdr.payload_offset;
+    purr_module_layout_t layout;
+    purr_module_layout_result_t lr = purr_module_parse_layout(payload, hdr.payload_size, &layout);
+    if (lr != PURR_MOD_LAYOUT_OK) {
+        ESP_LOGW(log_tag, "%s: bad layout: %s", path, purr_module_layout_result_name(lr));
+        free(rb);
+        return PURR_LOAD_UNTRUSTED;
+    }
+
+    /* Two relocation passes against two different bases, not one (Modules/SPEC.md section
+     * 4, revised): a word holding a FUNCTION's address (the entry point, or -- found the
+     * hard way, on real hardware -- a function pointer sitting in an exported table) must
+     * resolve to wherever the module ends up mapped EXECUTABLE, since that's the only alias
+     * anything will ever be called through. A word holding an OBJECT's address (a global,
+     * written to or just read; a string; a const table) must resolve to the plain WRITABLE
+     * copy instead: the executable mapping is exec+read only, not writable, so a global
+     * relocated to it can be read but never written -- a first version of this relocated
+     * everything the same way and a module with one writable global crashed the device with
+     * a hardware cache-safety trap the instant it tried to initialize that global. purrstrap
+     * tells the two apart using the compiler's own FUNC/OBJECT symbol types (readelf, not
+     * nm's section letters), not anything guessed here. */
+    uint32_t *data_offsets = NULL;
+    if (layout.data_reloc_count > 0) {
+        data_offsets = malloc(layout.data_reloc_count * sizeof(uint32_t));
+        if (data_offsets == NULL) {
+            free(rb);
+            return PURR_LOAD_TRANSIENT;
+        }
+        purr_module_read_data_relocs(payload, &layout, data_offsets);
+    }
+    uint32_t *code_offsets = NULL;
+    if (layout.code_reloc_count > 0) {
+        code_offsets = malloc(layout.code_reloc_count * sizeof(uint32_t));
+        if (code_offsets == NULL) {
+            free(data_offsets);
+            free(rb);
+            return PURR_LOAD_TRANSIENT;
+        }
+        purr_module_read_code_relocs(payload, &layout, code_offsets);
+    }
+
+    uint32_t extra = 0;                                                     /* zeroed memory after the code (a shell's bss) */
+#if CONFIG_PURR_PROFILE_FULL
+    purr_shellhdr_t sh = {0};
+    if (expected_subtype == PURR_MOD_SHELL) {
+        const char *problem = NULL;
+        purr_shellhdr_result_t hr = purr_shellhdr_parse(payload + layout.code_offset, layout.code_size, PURR_SHELL_ABI_VERSION, &sh);
+        if (hr == PURR_SHELLHDR_OK) {
+            hr = purr_shellhdr_check(payload + layout.code_offset, layout.code_size, &sh, purr_shell_export_names, (uint32_t)purr_shell_export_count,
+                                     (const purr_shellhdr_pair_t *)purr_shell_layout, (uint32_t)purr_shell_layout_count, &problem);
+        }
+        if (hr != PURR_SHELLHDR_OK) {
+            ESP_LOGW(log_tag, "%s: %s%s%s", path, purr_shellhdr_result_name(hr), problem != NULL ? ": " : "", problem != NULL ? problem : "");
+            free(data_offsets);
+            free(code_offsets);
+            free(rb);
+            return PURR_LOAD_UNTRUSTED;
+        }
+        extra = sh.bss_size;
+    }
+#endif
+    /* Round up to a whole number of pages -- esp_mmu_map needs a page-aligned length, and this
+     * is also where "too big" gets decided, against the caller's own budget rather than a
+     * single hardcoded page. */
+    uint32_t want = ((layout.code_size + extra + CONFIG_MMU_PAGE_SIZE - 1) / CONFIG_MMU_PAGE_SIZE) *
+                    CONFIG_MMU_PAGE_SIZE;
+    if (want > (uint64_t)max_pages * CONFIG_MMU_PAGE_SIZE) {
+        ESP_LOGW(log_tag, "%s: too big (%u bytes, room for %u page(s))", path,
+                (unsigned)layout.code_size, (unsigned)max_pages);
+        free(data_offsets);
+        free(code_offsets);
+        free(rb);
+        return PURR_LOAD_UNTRUSTED;
+    }
+    uint8_t *databuf = heap_caps_aligned_alloc(CONFIG_MMU_PAGE_SIZE, want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (databuf == NULL) {
+        free(data_offsets);
+        free(code_offsets);
+        free(rb);
+        return PURR_LOAD_TRANSIENT;
+    }
+    memset(databuf, 0, want);
+    memcpy(databuf, payload + layout.code_offset, layout.code_size);
+
+    /* Data relocations only need databuf's own address, available immediately. */
+    purr_reloc_result_t rr = purr_relocate(databuf, want, data_offsets, layout.data_reloc_count,
+                                          (uint32_t)(uintptr_t)databuf);
+    free(data_offsets);
+    if (rr != PURR_RELOC_OK) {
+        ESP_LOGW(log_tag, "%s: data relocation failed: %s", path, purr_reloc_result_name(rr));
+        free(code_offsets);
+        free(rb);
+        free(databuf);
+        return PURR_LOAD_UNTRUSTED;
+    }
+
+    /* Code relocations need the executable alias's address, which only exists after mapping. */
+    esp_err_t ee = esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    esp_paddr_t paddr = 0;
+    mmu_target_t target = 0;
+    if (ee == ESP_OK) ee = esp_mmu_vaddr_to_paddr(databuf, &paddr, &target);
+    void *exec_ptr = NULL;
+    if (ee == ESP_OK) {
+        ee = esp_mmu_map(paddr, want, MMU_TARGET_PSRAM0, MMU_MEM_CAP_EXEC | MMU_MEM_CAP_READ,
+                         ESP_MMU_MMAP_FLAG_PADDR_SHARED, &exec_ptr);
+    }
+    if (ee != ESP_OK) {
+        ESP_LOGW(log_tag, "%s: PSRAM exec mapping failed: %s", path, esp_err_to_name(ee));
+        free(code_offsets);
+        free(rb);
+        free(databuf);
+        return PURR_LOAD_TRANSIENT;
+    }
+
+    rr = purr_relocate(databuf, want, code_offsets, layout.code_reloc_count,
+                       (uint32_t)(uintptr_t)exec_ptr);
+    free(code_offsets);
+    free(rb);
+    if (rr != PURR_RELOC_OK) {
+        ESP_LOGW(log_tag, "%s: code relocation failed: %s", path, purr_reloc_result_name(rr));
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return PURR_LOAD_UNTRUSTED;
+    }
+#if CONFIG_PURR_PROFILE_FULL
+    if (expected_subtype == PURR_MOD_SHELL) {                               /* the real address of every OS name the shell uses, over the placeholders the linker left */
+        purr_shellhdr_result_t hr = purr_shellhdr_patch(databuf, layout.code_size, &sh, purr_shell_export_names, (uint32_t)purr_shell_export_count, purr_shell_exports);
+        if (hr != PURR_SHELLHDR_OK) {
+            ESP_LOGW(log_tag, "%s: %s", path, purr_shellhdr_result_name(hr));
+            esp_mmu_unmap(exec_ptr);
+            free(databuf);
+            return PURR_LOAD_UNTRUSTED;
+        }
+    }
+#endif
+
+    ee = esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    if (ee == ESP_OK) {
+        ee = esp_cache_msync(exec_ptr, want,
+                            ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+    }
+    if (ee != ESP_OK) {
+        ESP_LOGW(log_tag, "%s: post-relocation cache sync failed: %s", path, esp_err_to_name(ee));
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return PURR_LOAD_TRANSIENT;
+    }
+
+#if CONFIG_PURR_PROFILE_FULL
+    if (expected_subtype == PURR_MOD_SHELL) {
+        s_shell_pack = sh.pack_size != 0 ? databuf + sh.pack_offset : NULL;     /* readable through the data alias, and it stays: a shell is never unloaded */
+        s_shell_pack_size = sh.pack_size;
+    }
+#endif
+    *out_databuf = databuf;
+    *out_exec_ptr = exec_ptr;
+    *out_entry_offset = layout.entry_offset;
+    return PURR_LOAD_OK;
+}
+
+static purr_load_result_t load_relocatable_file(const char *path, const char *log_tag,
+                                                uint32_t read_cap, uint32_t max_pages,
+                                                uint8_t expected_image_type,
+                                                uint8_t **out_databuf, void **out_exec_ptr,
+                                                uint32_t *out_entry_offset)
+{
+    uint8_t *rb = malloc(read_cap);
+    if (rb == NULL) {
+        return PURR_LOAD_TRANSIENT;
+    }
+    appinstall_read_ctx_t rc = {rb, read_cap, 0};
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
+        free(rb);
+        return PURR_LOAD_TRANSIENT;
+    }
+    return load_relocatable_image(rb, rc.len, path, log_tag, max_pages, expected_image_type, out_databuf,
+                                  out_exec_ptr, out_entry_offset);
+}
+
+#if CONFIG_PURR_PROFILE_FULL
+/* A shell's own budget, apart from the modules': eight 64 KB pages and a 1 MB read buffer (plan7.md). The Windows 10 Mobile shell is about 37 KB with its bss. */
+#define PURR_SHELL_LOAD_MAX_PAGES 8
+#define PURR_SHELL_READ_CAP (1024 * 1024)
+
+/* A shell file is large (hundreds of KB with its pictures) and the root file system has no lock: another task using it during a long read can leave wrong bytes in what
+ * this read returns, without any error. So the payload hash is checked as soon as the bytes are in memory, and a file that does not match is read again (up to three
+ * times) before it is called damaged. A retry is logged: seeing it means something else was using the file system. Returns the buffer (len set), or NULL. */
+static int shell_payload_hash_ok(const uint8_t *rb, size_t len)
+{
+    purr_image_header_t hdr;
+    uint8_t d[PURR_SHA256_LEN];
+    if (len < sizeof(hdr)) {
+        return 0;
+    }
+    memcpy(&hdr, rb, sizeof(hdr));
+    if ((uint64_t)hdr.payload_offset + hdr.payload_size > len) {
+        return 0;
+    }
+    purr_sha256(rb + hdr.payload_offset, hdr.payload_size, d);
+    return memcmp(d, hdr.payload_sha256, PURR_SHA256_LEN) == 0;
+}
+
+static uint8_t *read_shell_file(const char *path, uint32_t cap, size_t *len)
+{
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        uint8_t *rb = malloc(cap);
+        if (rb == NULL) {
+            return NULL;
+        }
+        appinstall_read_ctx_t rc = {rb, cap, 0};
+        if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) >= 0 && shell_payload_hash_ok(rb, rc.len)) {
+            if (attempt > 1) {
+                ESP_LOGW("shell", "%s: the first %d read(s) did not match the file's own hash; read again (something else was using the file system)", path, attempt - 1);
+            }
+            *len = rc.len;
+            return rb;
+        }
+        free(rb);
+        vTaskDelay(pdMS_TO_TICKS(50));                  /* let whatever else is using the file system finish */
+    }
+    return NULL;
+}
+
+/* The picture pack the loaded shell carries inside itself, if it has one: 0 and its address and size, else -1. Valid for the rest of the boot. */
+int purr_shell_module_pack(const uint8_t **pack, uint32_t *size)
+{
+    if (s_shell_pack == NULL || s_shell_pack_size == 0) {
+        return -1;
+    }
+    *pack = s_shell_pack;
+    *size = s_shell_pack_size;
+    return 0;
+}
+
+/* Is this shell file signed by a key this device trusts for shells? The same verification the loader does (key bag, role, revoked keys), nothing more: a shell has no
+ * unsigned or "vouched by a repository" way in, whatever the settings say (it is native code that owns the screen). */
+static int shell_image_trusted(const uint8_t *rb, size_t len)
+{
+    purr_cfg_t cfg;
+    purr_flash_t fl;
+    if (purr_cfgstore_open(&fl) != 0 || purr_cfg_load(&fl, &cfg, NULL) < 0) {
+        purr_cfg_defaults(&cfg);
+    }
+    purr_cfg_t view;
+    os_cfg_view(&cfg, &view);
+    purr_keybag_t bag;
+    purr_keybag_build(&bag, purr_default_keys, purr_default_keys_count, &view);
+    purr_verify_env_t env = {.chip_id = NET_INSTALL_CHIP, .bag = &bag, .crypto = &purr_crypto_mbedtls};
+    purr_mem_read_ctx_t mrc = {(uint8_t *)rb, len};
+    purr_image_header_t hdr;
+    return purr_image_verify(&env, purr_mem_read, &mrc, len, &hdr) == PURR_V_OK && hdr.image_type == PURR_IMG_MODULE && PURR_FLAGS_SUBTYPE(hdr.flags) == PURR_MOD_SHELL;
+}
+
+/* Is the installed shell /ui/shells/<id>/shell.cat compatible with this kernel? Reads the file and reads its header: every OS name it uses must exist here, and every
+ * layout fact it carries must match (purr_shell_layout.def). purr_shell_module_load() repeats all of it. Returns
+ * PURR_SHELL_CHECK_OK, PURR_SHELL_CHECK_INCOMPATIBLE (a newer kernel or an updated shell would fix it) or PURR_SHELL_CHECK_BAD (missing, unreadable, not a shell, damaged,
+ * or not signed by a key this device trusts for shells: the signature is checked here too, so Settings and the Store can say so before the shell is chosen).
+ * built_for (when not NULL) gets the kernel version the shell was built for. */
+int purr_shell_module_check(const char *id, char *built_for, size_t cap)
+{
+    if (built_for != NULL && cap > 0) {
+        built_for[0] = '\0';
+    }
+    char path[64];
+    snprintf(path, sizeof(path), "/ui/shells/%s/shell.cat", id);
+    int is_dir = 0;
+    uint32_t file_size = 0;
+    if (purr_fs_stat(&s_fs, path, &is_dir, &file_size) != 0 || is_dir || file_size == 0 || file_size > PURR_SHELL_READ_CAP) {
+        return PURR_SHELL_CHECK_BAD;
+    }
+    size_t flen = 0;
+    uint8_t *rb = read_shell_file(path, file_size, &flen);
+    if (rb == NULL) {
+        return PURR_SHELL_CHECK_BAD;
+    }
+    appinstall_read_ctx_t rc = {rb, file_size, (uint32_t)flen};
+    int res = PURR_SHELL_CHECK_BAD;
+    purr_image_header_t hdr;
+    if (rc.len >= sizeof(hdr) && shell_image_trusted(rb, rc.len)) {
+        memcpy(&hdr, rb, sizeof(hdr));
+        purr_module_layout_t layout;
+        if (hdr.image_type == PURR_IMG_MODULE && PURR_FLAGS_SUBTYPE(hdr.flags) == PURR_MOD_SHELL && (uint64_t)hdr.payload_offset + hdr.payload_size <= rc.len &&
+            purr_module_parse_layout(rb + hdr.payload_offset, hdr.payload_size, &layout) == PURR_MOD_LAYOUT_OK) {
+            const uint8_t *code = rb + hdr.payload_offset + layout.code_offset;
+            purr_shellhdr_t sh;
+            const char *problem = NULL;
+            purr_shellhdr_result_t hr = purr_shellhdr_parse(code, layout.code_size, PURR_SHELL_ABI_VERSION, &sh);
+            if (hr == PURR_SHELLHDR_OK) {
+                if (built_for != NULL) {
+                    snprintf(built_for, cap, "%s", sh.built_for);
+                }
+                hr = purr_shellhdr_check(code, layout.code_size, &sh, purr_shell_export_names, (uint32_t)purr_shell_export_count,
+                                         (const purr_shellhdr_pair_t *)purr_shell_layout, (uint32_t)purr_shell_layout_count, &problem);
+            }
+            if (hr == PURR_SHELLHDR_OK) {
+                res = PURR_SHELL_CHECK_OK;
+            } else if (hr == PURR_SHELLHDR_NEEDS_NEWER || hr == PURR_SHELLHDR_LAYOUT_MISMATCH || hr == PURR_SHELLHDR_BAD_ABI) {
+                ESP_LOGW("shell", "%s: %s%s%s", path, purr_shellhdr_result_name(hr), problem != NULL ? ": " : "", problem != NULL ? problem : "");
+                res = PURR_SHELL_CHECK_INCOMPATIBLE;
+            }
+        }
+    }
+    free(rb);
+    return res;
+}
+
+/* Loads /ui/shells/<id>/shell.cat: verifies it (a trusted key whose role may sign a shell, the shell subtype, a header for this ABI), relocates it, writes the real
+ * addresses of the OS names over its placeholders, maps it executable and calls its entry point. Returns its ops table, or NULL (and says why in the log). A shell stays
+ * loaded for the life of the boot: there is no unloading, a different choice takes effect at the next start. */
+const purr_shell_ops_t *purr_shell_module_load(const char *id)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/ui/shells/%s/shell.cat", id);
+    int is_dir = 0;
+    uint32_t file_size = 0;
+    if (purr_fs_stat(&s_fs, path, &is_dir, &file_size) != 0 || is_dir || file_size == 0 || file_size > PURR_SHELL_READ_CAP) {
+        ESP_LOGW("shell", "%s: missing or not a usable size", path);
+        return NULL;
+    }
+    size_t flen = 0;
+    uint8_t *rb = read_shell_file(path, file_size, &flen);
+    if (rb == NULL) {
+        ESP_LOGW("shell", "%s: could not be read, or does not match its own hash", path);
+        return NULL;
+    }
+    appinstall_read_ctx_t rc = {rb, file_size, (uint32_t)flen};
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    if (load_relocatable_image_ex(rb, rc.len, path, "shell", PURR_SHELL_LOAD_MAX_PAGES, PURR_IMG_MODULE, PURR_MOD_SHELL, &databuf, &exec_ptr, &entry_offset) != PURR_LOAD_OK) {
+        return NULL;
+    }
+    purr_shell_module_main_t entry = (purr_shell_module_main_t)((uint8_t *)exec_ptr + entry_offset);
+    const purr_shell_ops_t *ops = entry();
+    if (ops == NULL || ops->size < sizeof(purr_shell_ops_t) || ops->abi_version != PURR_SHELL_ABI_VERSION || ops->start == NULL || ops->id == NULL) {
+        ESP_LOGW("shell", "%s: the entry point gave no usable ops table", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return NULL;
+    }
+    return ops;
+}
+#endif
+
+/* One page each, same as before this function was pulled out of load_one_module_file()/
+ * load_one_kernelmod_file() -- a future CoreOS loader (PurrOS/SPEC.md section 6) is the reason
+ * load_relocatable_file() takes a page budget at all, but neither existing caller needs more
+ * than it always has. */
+#define PURR_MODULE_LOAD_MAX_PAGES 1
+#define PURR_KERNELMOD_LOAD_MAX_PAGES 1
+
+/* AppRuntime/SPEC.md's minimal-first manager (chunk C). One page, same budget as a module --
+ * revisit once a real app needs more than a trivial test app does. */
+#define PURR_APP_LOAD_MAX_PAGES 1
+
+/* purr_app_env_t's console_print has no cli/handle of its own (purr_app_abi.h's reasoning:
+ * the whole run is synchronous on the calling task), so the cli it should write to is
+ * stashed here for the duration of one app_run() call instead. Not safe across concurrent
+ * calls -- there is only ever one instance running at a time in this minimal runtime, so
+ * there is no concurrency to be unsafe against yet; revisit the moment a second one exists. */
+static purr_cli_t *s_apprt_cli;
+
+static void apprt_console_print(const char *s)
+{
+    if (s_apprt_cli != NULL) {
+        purr_cli_puts(s_apprt_cli, s);
+    }
+}
+
+static int kernel_table_app_run(purr_cli_t *cli, const char *name)
+{
+    if (!need_fs(cli)) return 1;
+    char root[64];
+    user_apps_root(root, sizeof(root), purr_login_current()->name);
+    char path[96];
+    snprintf(path, sizeof(path), "%s/%s/package.cat", root, name);
+
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_file(path, "apprt", APP_SCRATCH_CAP,
+                                                 PURR_APP_LOAD_MAX_PAGES, PURR_IMG_APP,
+                                                 &databuf, &exec_ptr, &entry_offset);
+    if (r != PURR_LOAD_OK) {
+        purr_cli_printf(cli, "run: no such app '%s', or it failed to load\n", name);
+        return 1;
+    }
+
+    purr_app_entry_fn entry = (purr_app_entry_fn)((uint8_t *)exec_ptr + entry_offset);
+    const purr_app_table_t *table = entry();
+    if (table == NULL || table->abi_version != PURR_APP_ABI_VERSION || table->on_create == NULL) {
+        purr_cli_printf(cli, "run: '%s' is not compatible with this runtime\n", name);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return 1;
+    }
+
+    /* Minimal-first (AppRuntime/SPEC.md section 1): no event loop, no sched catcall, no
+     * foreground/background state -- the whole "run" is on_create(), then an immediate
+     * on_destroy(). Enough to prove the real pipeline (load, relocate, call, lifecycle) end
+     * to end before any multitasking is built. */
+    purr_app_env_t env = {.console_print = apprt_console_print};
+    s_apprt_cli = cli;
+    int cr = table->on_create(&env, NULL, 0);
+    purr_cli_printf(cli, "%s: on_create returned %d\n", name, cr);
+    if (table->on_destroy != NULL) {
+        table->on_destroy(PURR_APP_DESTROY_NORMAL);
+    }
+    s_apprt_cli = NULL;
+
+    esp_mmu_unmap(exec_ptr);
+    free(databuf);
+    return 0;
+}
+
+/* ---------------------------------------------------------------- app runtime platform (plan6.md)
+ * What purr_catrt.c runs on: loading a signed .cat, saved state, the console, and a few files.
+ *
+ * An app that is not signed by a trusted key never runs. load_relocatable_file() runs
+ * purr_image_verify() first, which needs a key id, a role that may sign an app, the payload hash
+ * and the signature to all check out, whatever the secure mode is (the mode only decides the
+ * version floor), so an unsigned or altered app comes back PURR_LOAD_UNTRUSTED and is refused here
+ * before a byte of it is relocated or called. */
+
+typedef struct {
+    uint8_t *databuf;
+    void *exec_ptr;
+} catrt_loaded_t;
+
+static int catrt_try_load(const char *path, const purr_app_table_t **table, void **handle)
+{
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_file(path, "apprt", APP_SCRATCH_CAP,
+                                                 PURR_APP_LOAD_MAX_PAGES, PURR_IMG_APP, &databuf,
+                                                 &exec_ptr, &entry_offset);
+    if (r == PURR_LOAD_UNTRUSTED) {
+        ESP_LOGW("apprt", "%s: refused (not signed by a trusted key, or altered)", path);
+        return PURR_RT_HOST_UNTRUSTED;
+    }
+    if (r != PURR_LOAD_OK) {
+        return -1;
+    }
+    purr_app_entry_fn entry = (purr_app_entry_fn)((uint8_t *)exec_ptr + entry_offset);
+    const purr_app_table_t *t = entry();
+    if (t == NULL || t->on_create == NULL ||
+        (t->abi_version != PURR_APP_ABI_VERSION && t->abi_version != PURR_APP_ABI_VERSION_2)) {
+        ESP_LOGW("apprt", "%s: not compatible with this runtime", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+    catrt_loaded_t *l = malloc(sizeof(*l));
+    if (l == NULL) {
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+    l->databuf = databuf;
+    l->exec_ptr = exec_ptr;
+    *table = t;
+    *handle = l;
+    return 0;
+}
+
+/* A user's own copy of an app wins over the system one, and a refused user copy is not quietly
+ * replaced by the system one: there is no fallback past a refusal. */
+static int catrt_platform_load(const char *name, const purr_app_table_t **table, void **handle)
+{
+    if (name == NULL || name[0] == '\0' || strchr(name, '/') != NULL || strstr(name, "..") != NULL) {
+        return -1;
+    }
+    char path[112];
+    const purr_user_t *u = purr_login_current();
+    if (u != NULL && u->name[0] != '\0' && purr_security_dev_active()) {
+        /* the developer folder wins while developer mode is on, so a build under test can stand in for an
+         * installed app of the same name (the installed one is untouched on disk) */
+        snprintf(path, sizeof(path), "/home/%s/devapps/%s/package.cat", u->name, name);
+        int r = catrt_try_load(path, table, handle);
+        if (r == 0 || r == PURR_RT_HOST_UNTRUSTED) {
+            return r;
+        }
+    }
+    if (u != NULL && u->name[0] != '\0') {
+        snprintf(path, sizeof(path), "/home/%s/apps/%s/package.cat", u->name, name);
+        int r = catrt_try_load(path, table, handle);
+        if (r == 0 || r == PURR_RT_HOST_UNTRUSTED) {
+            return r;
+        }
+    }
+    snprintf(path, sizeof(path), "/apps/%s/package.cat", name);
+    return catrt_try_load(path, table, handle);
+}
+
+static void catrt_platform_unload(void *handle)
+{
+    catrt_loaded_t *l = handle;
+    if (l == NULL) {
+        return;
+    }
+    esp_mmu_unmap(l->exec_ptr);
+    free(l->databuf);
+    free(l);
+}
+
+static void catrt_state_path(char *out, size_t cap, const char *name)
+{
+    snprintf(out, cap, "/var/state/%s.bin", name);
+}
+
+static int catrt_save_state(const char *name, const void *buf, uint32_t len)
+{
+    purr_fs_mkdir(&s_fs, "/var");
+    purr_fs_mkdir(&s_fs, "/var/state");
+    char path[64];
+    catrt_state_path(path, sizeof(path), name);
+    return purr_fs_write(&s_fs, path, buf, len);
+}
+
+static int catrt_load_state(const char *name, void *buf, uint32_t cap)
+{
+    char path[64];
+    catrt_state_path(path, sizeof(path), name);
+    appinstall_read_ctx_t rc = {buf, cap, 0};
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
+        return 0;                               /* nothing saved (or too big to hand back) */
+    }
+    return (int)rc.len;
+}
+
+static void catrt_console_write(const char *buf, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        purr_console_put(NULL, buf[i]);
     }
     purr_console_flush();
-    esp_restart();
+}
+
+static int catrt_read_file(const char *path, char *buf, size_t cap)
+{
+    if (cap < 2) {
+        return -1;
+    }
+    appinstall_read_ctx_t rc = {(uint8_t *)buf, (uint32_t)cap - 1, 0};
+    if (purr_fs_read(&s_fs, path, appinstall_accumulate, &rc) < 0) {
+        return -1;
+    }
+    buf[rc.len] = '\0';
+    return (int)rc.len;
+}
+
+static int catrt_write_file(const char *path, const void *buf, size_t len)
+{
+    char dir[96];
+    for (size_t i = 1; path[i] != '\0' && i < sizeof(dir) - 1; i++) {
+        if (path[i] == '/') {
+            memcpy(dir, path, i);
+            dir[i] = '\0';
+            purr_fs_mkdir(&s_fs, dir);          /* an existing directory is just an ignored error */
+        }
+    }
+    return purr_fs_write(&s_fs, path, buf, (uint32_t)len);
+}
+
+void purr_catrt_setup(purr_cli_t *cli)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        return;
+    }
+    static const purr_catrt_platform_t plat = {
+        .load = catrt_platform_load,
+        .unload = catrt_platform_unload,
+        .save_state = catrt_save_state,
+        .load_state = catrt_load_state,
+        .console_write = catrt_console_write,
+        .read_file = catrt_read_file,
+        .write_file = catrt_write_file,
+    };
+    purr_fs_mkdir(&s_fs, "/apps");
+    purr_catrt_storage_init();
+    purr_catrt_files_init();
+#if CONFIG_PURR_PROFILE_FULL
+    purr_catrt_msg_init();
+#endif
+    purr_catrt_devices_init();
+    STORE_INIT();
+    purr_catrt_power_init();
+    esp_err_t e = purr_catrt_start(&plat);
+    purr_cli_printf(cli, "apps: runtime %s\n", e == ESP_OK ? "up" : "did not start");
+}
+
+static module_load_result_t load_one_module_file(const char *path)
+{
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_file(path, "modules", PURR_MODULE_READ_CAP,
+                                                 PURR_MODULE_LOAD_MAX_PAGES, PURR_IMG_MODULE,
+                                                 &databuf, &exec_ptr, &entry_offset);
+    if (r == PURR_LOAD_TRANSIENT) {
+        return MODULE_LOAD_TRANSIENT;
+    }
+    if (r == PURR_LOAD_UNTRUSTED) {
+        return MODULE_LOAD_UNTRUSTED;
+    }
+
+    if (s_loaded_module_count >= PURR_MODULE_MAX) {
+        ESP_LOGW("modules", "%s: too many modules already loaded", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return MODULE_LOAD_TRANSIENT;
+    }
+
+    purr_module_entry_fn entry = (purr_module_entry_fn)(uintptr_t)((uint8_t *)exec_ptr + entry_offset);
+    const purr_module_table_t *table = entry(&s_core_table);
+    if (table == NULL || table->abi_version != PURR_MODULE_ABI_VERSION) {
+        ESP_LOGW("modules", "%s: bad module table (abi mismatch or NULL)", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return MODULE_LOAD_INCOMPATIBLE;
+    }
+
+    s_loaded_modules[s_loaded_module_count].databuf = databuf;
+    s_loaded_modules[s_loaded_module_count].table = table;
+    s_loaded_module_count++;
+    ESP_LOGI("modules", "%s: loaded, %u command(s)", path, (unsigned)table->cmd_count);
+    return MODULE_LOAD_OK;
+}
+
+/* Where a rejected/incompatible file goes instead of staying in /system forever failing the
+ * same way (Modules/SPEC.md section 7.1) -- quarantined, not deleted, so it stays around as
+ * evidence of what got rejected and why. */
+#define PURR_QUARANTINE_DIR PURR_MODULES_DIR "/.rejected"
+
+static void quarantine_module_file(purr_cli_t *cli, const char *dir, const char *name, const char *why)
+{
+    purr_fs_mkdir(&s_fs, PURR_QUARANTINE_DIR);   /* idempotent; ignore "already exists" */
+    char from[80], to[96];
+    snprintf(from, sizeof(from), "%s/%s", dir, name);
+    snprintf(to, sizeof(to), "%s/%s", PURR_QUARANTINE_DIR, name);
+    if (purr_fs_rename(&s_fs, from, to) == 0) {
+        purr_cli_printf(cli, "system: %s %s -- quarantined\n", from, why);
+    } else {
+        /* Couldn't move it (fs error) -- still say so; it'll be tried again next boot. */
+        purr_cli_printf(cli, "system: %s %s -- could not quarantine, will retry next boot\n", from, why);
+    }
+}
+
+/* The boot-time sweep (Modules/SPEC.md section 7.1): every file directly under `dir` is
+ * attempted, same verify-then-load path load_one_module_file() has always used. A file whose
+ * own bytes can never pass -- failed verification, or an ABI this core doesn't speak -- is
+ * quarantined so it's never retried or silently re-logged every boot. A transient failure
+ * (out of memory, a mapping failure) is just logged and left in place: not the file's fault,
+ * and it may well load next boot. One bad file never stops the rest from loading. */
+static void load_modules_from(purr_cli_t *cli, const char *dir)
+{
+    module_listing_t l = {.count = 0};
+    if (purr_fs_list(&s_fs, dir, collect_module_row, &l) != 0) {
+        return; /* no modules folder yet: nothing to load, not an error */
+    }
+    for (int i = 0; i < l.count; i++) {
+        if (l.is_dir[i]) {
+            continue;
+        }
+        size_t n = strlen(l.names[i]);
+        if (n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0) {
+            continue;
+        }
+        char path[80];
+        snprintf(path, sizeof(path), "%s/%s", dir, l.names[i]);
+#if CONFIG_PURR_VERBOSE_BOOT
+        purr_cli_printf(cli, "system: checking %s...\n", path);
+#endif
+        module_load_result_t r = load_one_module_file(path);
+        if (r == MODULE_LOAD_UNTRUSTED) {
+            quarantine_module_file(cli, dir, l.names[i], "rejected (failed verification)");
+        } else if (r == MODULE_LOAD_INCOMPATIBLE) {
+            quarantine_module_file(cli, dir, l.names[i], "incompatible (abi mismatch)");
+        } else if (r == MODULE_LOAD_OK) {
+#if CONFIG_PURR_VERBOSE_BOOT
+            purr_cli_printf(cli, "system: %s verified, loaded (%u command(s))\n", path,
+                            (unsigned)s_loaded_modules[s_loaded_module_count - 1].table->cmd_count);
+#endif
+        } else {
+#if CONFIG_PURR_VERBOSE_BOOT
+            purr_cli_printf(cli, "system: %s skipped for now (resource issue, will retry next boot)\n", path);
+#endif
+        }
+    }
+}
+
+/*
+ * load_one_kernelmod_file()/load_kernelmods_from(): the same verify/relocate/map/call
+ * pipeline as load_one_module_file()/load_modules_from() above, duplicated rather than
+ * parameterized, because the two boundaries they load against are genuinely different types
+ * (purr_kernel_table_t vs purr_core_table_t) -- keeping them as separate functions keeps that
+ * distinction visible in the code, not just in a comment. /kernelmods is not yet given the
+ * same eager quarantine treatment /system got (Modules/SPEC.md section 7.1): this boundary is
+ * still a prototype (PurrOS/components/coreos/SPEC.md section 4.1/10), not production, so a
+ * failure here is just logged and skipped for now. Hardening it is real future work once a
+ * real kernel binary exists.
+ */
+static int load_one_kernelmod_file(const char *path)
+{
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_file(path, "kernelmods", PURR_MODULE_READ_CAP,
+                                                 PURR_KERNELMOD_LOAD_MAX_PAGES, PURR_IMG_MODULE,
+                                                 &databuf, &exec_ptr, &entry_offset);
+    if (r != PURR_LOAD_OK) {
+        return -1;
+    }
+
+    if (s_loaded_kernelmod_count >= PURR_KERNELMOD_MAX) {
+        ESP_LOGW("kernelmods", "%s: too many kernelmods already loaded", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+
+    purr_kernel_module_entry_fn entry =
+        (purr_kernel_module_entry_fn)(uintptr_t)((uint8_t *)exec_ptr + entry_offset);
+    const purr_kernel_module_table_t *table = entry(&s_kernel_table);
+    if (table == NULL || table->abi_version != PURR_KERNEL_TABLE_ABI_VERSION) {
+        ESP_LOGW("kernelmods", "%s: bad kernelmod table (abi mismatch or NULL)", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+
+    s_loaded_kernelmods[s_loaded_kernelmod_count].databuf = databuf;
+    s_loaded_kernelmods[s_loaded_kernelmod_count].table = table;
+    s_loaded_kernelmod_count++;
+    ESP_LOGI("kernelmods", "%s: loaded, %u command(s)", path, (unsigned)table->cmd_count);
     return 0;
 }
 
-static int cmd_purrcfg(purr_cli_t *cli, int argc, char **argv)
+static void load_kernelmods_from(purr_cli_t *cli, const char *dir)
 {
-    (void)argc; (void)argv;
-    purr_flash_t fl;
-    purr_cfg_t cfg;
-    int r = load_cfg(cli, &fl, &cfg);
-    if (r < 0) {
+    module_listing_t l = {.count = 0};
+    if (purr_fs_list(&s_fs, dir, collect_module_row, &l) != 0) {
+        return; /* no kernelmods folder yet: nothing to load, not an error */
+    }
+    for (int i = 0; i < l.count; i++) {
+        if (l.is_dir[i]) {
+            continue;
+        }
+        size_t n = strlen(l.names[i]);
+        if (n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0) {
+            continue;
+        }
+        char path[80];
+        snprintf(path, sizeof(path), "%s/%s", dir, l.names[i]);
+#if CONFIG_PURR_VERBOSE_BOOT
+        purr_cli_printf(cli, "kernelmods: checking %s...\n", path);
+#endif
+        int r = load_one_kernelmod_file(path);
+#if CONFIG_PURR_VERBOSE_BOOT
+        if (r == 0) {
+            purr_cli_printf(cli, "kernelmods: %s verified, loaded (%u command(s))\n", path,
+                            (unsigned)s_loaded_kernelmods[s_loaded_kernelmod_count - 1].table->cmd_count);
+        } else {
+            purr_cli_printf(cli, "kernelmods: %s rejected or skipped (see serial log)\n", path);
+        }
+#else
+        (void)r;
+#endif
+    }
+}
+
+/* ---------------------------------------------------------------- driver modules
+ *
+ * First proof of the loadable-driver mechanism (Drivers/SPEC.md section 4, kernel/SPEC.md
+ * section 5's "separate driver modules... come later" -- now that the module mechanism itself
+ * has long since passed, that condition is met). s_hello_driver_module/load_one_driver_file()
+ * below are still the standalone proof -- harmless, touches no real hardware, reachable only
+ * via `testdriverload` -- but the mechanism itself is real now: load_drivers_from() further
+ * down (purr_modules_setup()'s own call) uses this exact same load_one_driver_file() for the
+ * real keyboard, touch (gt911), and display (st7789) modules -- all three now
+ * purr_driver_register()'d into actual boot, nothing compiled into purr_kernel.c's static
+ * `s_drivers[]` anymore except epd1in54 (a different board's panel). st7789 needed main.c's
+ * own hard halt-on-missing-display to move from right after purr_kernel_init() to right after
+ * purr_modules_setup() (main.c's own comment on why), since it can only load after the
+ * filesystem mounts, unlike the compiled-in version it replaced. */
+static const uint8_t s_hello_driver_module[] = {
+    0x52, 0x52, 0x55, 0x50, 0x01, 0xad, 0x00, 0x09, 0x00, 0x03, 0x02, 0x05,
+    0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x5f, 0x64, 0x72, 0x69, 0x76, 0x65,
+    0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x2e, 0x31,
+    0x2e, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xad, 0x00, 0x00,
+    0x00, 0x68, 0x00, 0x00, 0x00, 0x66, 0xee, 0xe8, 0x11, 0x01, 0x00, 0xa8,
+    0x40, 0x03, 0xa4, 0xbf, 0x0d, 0xf7, 0xed, 0x52, 0x58, 0x25, 0x75, 0xdb,
+    0xbf, 0x78, 0x26, 0x33, 0xc4, 0x19, 0x75, 0x5b, 0x35, 0x7a, 0x33, 0x90,
+    0xeb, 0x94, 0x1e, 0x25, 0xd6, 0x1a, 0x2b, 0xd7, 0x40, 0x15, 0x48, 0xcb,
+    0x37, 0x5a, 0xed, 0x79, 0xe5, 0xd4, 0x37, 0xa7, 0xbb, 0xeb, 0x24, 0x5f,
+    0xfc, 0x99, 0x07, 0x46, 0xc3, 0x2d, 0xbf, 0xc8, 0x2f, 0xd5, 0xdc, 0x33,
+    0x13, 0xb3, 0xe5, 0x5d, 0xf4, 0x26, 0xe0, 0xec, 0x02, 0x1a, 0xe6, 0x9c,
+    0x26, 0x69, 0xc5, 0x3f, 0x6b, 0x80, 0x73, 0x8e, 0xe7, 0x95, 0x5b, 0xf4,
+    0x6a, 0x86, 0x99, 0x73, 0x3c, 0x04, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00,
+    0x00, 0x02, 0x00, 0x00, 0x00, 0x38, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x00,
+    0x00, 0x30, 0x00, 0x00, 0x00, 0x36, 0x41, 0x00, 0x21, 0xfe, 0xff, 0x1d,
+    0xf0, 0x36, 0x41, 0x00, 0x0c, 0x02, 0x29, 0x04, 0x1d, 0xf0, 0x00, 0x00,
+    0x00, 0x36, 0x41, 0x00, 0x1d, 0xf0, 0x00, 0x00, 0x00, 0x68, 0x65, 0x6c,
+    0x6c, 0x6f, 0x5f, 0x64, 0x72, 0x69, 0x76, 0x65, 0x72, 0x00, 0x00, 0x00,
+    0x00, 0x20, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00,
+    0x00, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+    0x00,
+};
+
+/* Same verify/relocate/map/call pipeline as load_one_kernelmod_file() above, against the
+ * driver boundary (purr_driver_bus_table_t) instead of the kernel-table one. The driver's own
+ * bus_abi must match this kernel's bus table, and the pointer is also validated by shape:
+ * non-NULL, with a real name/compatible/probe. */
+/* The part after the module is mapped: ask it for its driver, and refuse a bad one or one built for another bus table. */
+static int driver_from_loaded(const char *path, uint8_t *databuf, void *exec_ptr, uint32_t entry_offset,
+                              const purr_driver_t **out_driver)
+{
+    purr_driver_entry_fn entry =
+        (purr_driver_entry_fn)(uintptr_t)((uint8_t *)exec_ptr + entry_offset);
+    const purr_driver_t *drv = entry(purr_driver_bus_table());
+    if (drv == NULL || drv->name == NULL || drv->compatible == NULL || drv->probe == NULL) {
+        ESP_LOGW("drivers", "%s: bad driver (NULL or missing required fields)", path);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+    if (drv->bus_abi < PURR_DRIVER_BUS_ABI_MIN || drv->bus_abi > PURR_DRIVER_BUS_ABI_VERSION) {
+        /* A module built against another bus table calls the wrong slots (a now_us() landing on
+         * delay_ms() put the UI task to sleep for 12.8 days, 2026-10-25). Refuse it by name. */
+        ESP_LOGE("drivers", "%s: '%s' was built for driver bus ABI %u, this kernel serves %u to %u: "
+                 "rebuild it (or get a version for this ABI)", path, drv->name, (unsigned)drv->bus_abi,
+                 (unsigned)PURR_DRIVER_BUS_ABI_MIN, (unsigned)PURR_DRIVER_BUS_ABI_VERSION);
+        esp_mmu_unmap(exec_ptr);
+        free(databuf);
+        return -1;
+    }
+
+    /* databuf/exec_ptr are deliberately leaked for this proof (never unmapped/freed on
+     * success) -- the loaded driver's probe()/remove() function pointers live inside that
+     * mapped memory for as long as anything might call them, same as every other loaded
+     * module in this file keeps its mapping alive indefinitely once bound. */
+    *out_driver = drv;
+    return 0;
+}
+
+static int load_one_driver_file(const char *path, const purr_driver_t **out_driver)
+{
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_file(path, "drivers", PURR_MODULE_READ_CAP,
+                                                 PURR_KERNELMOD_LOAD_MAX_PAGES, PURR_IMG_MODULE,
+                                                 &databuf, &exec_ptr, &entry_offset);
+    if (r != PURR_LOAD_OK) {
+        return -1;
+    }
+    return driver_from_loaded(path, databuf, exec_ptr, entry_offset, out_driver);
+}
+
+/* The same, from a module already in memory (a baked-in one). */
+static int load_one_driver_image(const char *label, const uint8_t *image, size_t len, const purr_driver_t **out_driver)
+{
+    uint8_t *rb = malloc(len);
+    if (rb == NULL) {
+        return -1;
+    }
+    memcpy(rb, image, len);
+    uint8_t *databuf;
+    void *exec_ptr;
+    uint32_t entry_offset;
+    purr_load_result_t r = load_relocatable_image(rb, len, label, "drivers", PURR_KERNELMOD_LOAD_MAX_PAGES, PURR_IMG_MODULE,
+                                                  &databuf, &exec_ptr, &entry_offset);
+    if (r != PURR_LOAD_OK) {
+        return -1;
+    }
+    return driver_from_loaded(label, databuf, exec_ptr, entry_offset, out_driver);
+}
+
+/* The real boot-time sweep (unlike load_kernelmods_from()'s own sibling, this is not
+ * "still a prototype boundary" -- real hardware depends on it now). Same loop shape as
+ * load_modules_from()/load_kernelmods_from() above, but each successfully loaded driver is
+ * purr_driver_register()'d immediately instead of collected into a table for one bulk bind at
+ * the end -- register() does its own matching against the board right there (purr_driver.h's
+ * own comment on why: a device already bound is never stolen, so loading drivers in any order
+ * is safe). One bad file never stops the rest, same "log and skip, don't quarantine" treatment
+ * kernelmods get -- this boundary is still young enough that quarantine feels premature. */
+/* ---- a driver that stopped the device (owner, 2026-11-05: one driver of the set crashed the whole device, and nothing said which).
+ * Around each driver's probe the kernel calls purr_driver_guard(): it writes the driver's file name to /boot/drivers.trying and removes it when the probe returns.
+ * If the device dies inside the probe the file is still there on the next start, and load_drivers_from() moves that driver into /boot/drivers.crashed before it loads
+ * anything, so the device comes up and the Device Manager can say which one it was (and try it again on purpose). */
+#define DRIVER_TRY_FILE    "/boot/drivers.trying"
+#define DRIVER_CRASHED_DIR "/boot/drivers.crashed"
+
+typedef struct {
+    char name[32];                                  /* the driver's own name (purr_driver_t.name) */
+    char file[48];                                  /* its file in /boot/drivers */
+} drv_file_t;
+static drv_file_t s_drv_files[16];
+static int s_ndrv_files;
+
+static void note_driver_file(const char *drv_name, const char *path)
+{
+    if (drv_name == NULL || path == NULL) {
+        return;
+    }
+    const char *base = strrchr(path, '/');
+    base = base != NULL ? base + 1 : path;
+    for (int i = 0; i < s_ndrv_files; i++) {
+        if (strcmp(s_drv_files[i].name, drv_name) == 0) {
+            snprintf(s_drv_files[i].file, sizeof(s_drv_files[i].file), "%s", base);
+            return;
+        }
+    }
+    if (s_ndrv_files < (int)(sizeof(s_drv_files) / sizeof(s_drv_files[0]))) {
+        snprintf(s_drv_files[s_ndrv_files].name, sizeof(s_drv_files[0].name), "%s", drv_name);
+        snprintf(s_drv_files[s_ndrv_files].file, sizeof(s_drv_files[0].file), "%s", base);
+        s_ndrv_files++;
+    }
+}
+
+void purr_driver_guard(const char *name, int begin)
+{
+    if (name == NULL || !purr_fs_mounted(&s_fs)) {
+        return;
+    }
+    if (uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t) < 4096) {
+        return;                                         /* a small task (the Wi-Fi settle task has 3 KB): the file system needs more stack than it can spare */
+    }
+    if (!begin) {
+        purr_fs_remove(&s_fs, DRIVER_TRY_FILE);
+        return;
+    }
+    const char *file = name;
+    for (int i = 0; i < s_ndrv_files; i++) {
+        if (strcmp(s_drv_files[i].name, name) == 0) {
+            file = s_drv_files[i].file;
+        }
+    }
+    char line[64];
+    int n = snprintf(line, sizeof(line), "%s\n", file);
+    purr_fs_mkdir(&s_fs, "/boot");
+    purr_fs_write(&s_fs, DRIVER_TRY_FILE, line, (uint32_t)n);
+}
+
+/* The drivers the firmware carries itself (s_temp_drivers: display, touch, keyboard, battery, keyboard backlight): planted into /boot/drivers on every start and
+ * loaded first, because without the display nothing can be shown at all. They are never held back and never set aside. */
+static int builtin_driver_file(const char *file)
+{
+    for (size_t i = 0; i < sizeof(s_temp_drivers) / sizeof(s_temp_drivers[0]); i++) {
+        if (strcmp(file, s_temp_drivers[i].filename) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Drivers that stopped the device are listed in /boot/drivers.bad (one file name per line): the automatic put-back after sign-in (recover_drivers_task) never tries those
+ * again by itself; Device Manager > Drivers still offers them. /boot/drivers.retrying names the driver the put-back is trying right now: if the device dies while it is
+ * there, the next start knows who to blame, sets it aside and lists it as bad, so the put-back can never loop on one driver. */
+#define DRIVER_BAD_FILE   "/boot/drivers.bad"
+#define DRIVER_RETRY_FILE "/boot/drivers.retrying"
+
+static int driver_is_bad(const char *file)
+{
+    uint8_t *buf = NULL;
+    uint32_t len = 0;
+    if (bl_read_file(DRIVER_BAD_FILE, &buf, &len) != 0) {
+        return 0;
+    }
+    size_t fl = strlen(file);
+    int hit = 0;
+    for (uint32_t i = 0; i < len;) {
+        uint32_t j = i;
+        while (j < len && buf[j] != '\n') {
+            j++;
+        }
+        if (j - i == fl && memcmp(buf + i, file, fl) == 0) {
+            hit = 1;
+        }
+        i = j + 1;
+    }
+    free(buf);
+    return hit;
+}
+
+static void driver_mark_bad(const char *file)
+{
+    if (driver_is_bad(file)) {
+        return;
+    }
+    uint8_t *old = NULL;
+    uint32_t len = 0;
+    if (bl_read_file(DRIVER_BAD_FILE, &old, &len) != 0) {
+        old = NULL;
+        len = 0;
+    }
+    if (len > 1024) {                                   /* a list this long is not a real one: start it again */
+        free(old);
+        old = NULL;
+        len = 0;
+    }
+    size_t fl = strlen(file);
+    uint8_t *nb = malloc(len + fl + 2);
+    if (nb != NULL) {
+        if (len > 0) {
+            memcpy(nb, old, len);
+        }
+        memcpy(nb + len, file, fl);
+        nb[len + fl] = '\n';
+        purr_fs_write(&s_fs, DRIVER_BAD_FILE, nb, (uint32_t)(len + fl + 1));
+        free(nb);
+    }
+    free(old);
+}
+
+/* The device stopped while the automatic put-back was trying a driver: that driver is set aside again and listed as bad. */
+static void blame_retried_driver(purr_cli_t *cli, const char *dir)
+{
+    uint8_t *buf = NULL;
+    uint32_t len = 0;
+    if (bl_read_file(DRIVER_RETRY_FILE, &buf, &len) != 0) {
+        return;
+    }
+    char file[48];
+    size_t n = len < sizeof(file) - 1 ? len : sizeof(file) - 1;
+    memcpy(file, buf, n);
+    file[n] = '\0';
+    free(buf);
+    file[strcspn(file, "\r\n")] = '\0';
+    purr_fs_remove(&s_fs, DRIVER_RETRY_FILE);
+    if (file[0] == '\0' || strchr(file, '/') != NULL || strstr(file, "..") != NULL || builtin_driver_file(file)) {
+        return;
+    }
+    char from[96], to[96];
+    snprintf(from, sizeof(from), "%s/%s", dir, file);
+    purr_fs_mkdir(&s_fs, DRIVER_CRASHED_DIR);
+    snprintf(to, sizeof(to), "%s/%s", DRIVER_CRASHED_DIR, file);
+    purr_fs_remove(&s_fs, to);
+    purr_fs_rename(&s_fs, from, to);
+    driver_mark_bad(file);
+    ESP_LOGW("drivers", "%s was being put back when the device stopped: set aside again, and not tried again by itself", file);
+    purr_cli_printf(cli, "drivers: %s stopped the device when it was put back; set aside (Device Manager > Drivers)\n", file);
+}
+
+static void quarantine_crashed_driver(purr_cli_t *cli, const char *dir)
+{
+    blame_retried_driver(cli, dir);
+    uint8_t *buf = NULL;
+    uint32_t len = 0;
+    if (bl_read_file(DRIVER_TRY_FILE, &buf, &len) != 0) {
+        return;
+    }
+    char file[48];
+    size_t n = len < sizeof(file) - 1 ? len : sizeof(file) - 1;
+    memcpy(file, buf, n);
+    file[n] = '\0';
+    free(buf);
+    file[strcspn(file, "\r\n")] = '\0';
+    purr_fs_remove(&s_fs, DRIVER_TRY_FILE);
+    if (file[0] == '\0' || strchr(file, '/') != NULL || strstr(file, "..") != NULL || builtin_driver_file(file)) {
+        return;                                         /* (the firmware's own drivers are not set aside: without the display there is nothing to show) */
+    }
+    char from[96], to[96];
+    snprintf(from, sizeof(from), "%s/%s", dir, file);
+    purr_fs_mkdir(&s_fs, DRIVER_CRASHED_DIR);
+    snprintf(to, sizeof(to), "%s/%s", DRIVER_CRASHED_DIR, file);
+    purr_fs_remove(&s_fs, to);
+    if (purr_fs_rename(&s_fs, from, to) == 0) {
+        driver_mark_bad(file);
+        ESP_LOGW("drivers", "%s was starting when the device stopped last time: set aside in " DRIVER_CRASHED_DIR, file);
+        purr_cli_printf(cli, "drivers: %s stopped the device last time; set aside (Device Manager > Drivers)\n", file);
+    }
+}
+
+/* Which drivers load when. Signing in needs the input drivers and nothing else, so on the full system only those load at start (mode 1); every other file in
+ * /boot/drivers loads once somebody has signed in (mode 2, purr_drivers_load_deferred). A driver that stops the device during sign-in can then no longer lock
+ * anybody out before they have typed a word, and the memory the late drivers need is asked for when the system is idle rather than during the busiest second of
+ * the start. Wi-Fi is not a driver file and starts as before. Mode 0 loads everything (the recovery profiles, the text shell). The core list is by component
+ * name: the file is "<component>-<board>.cat". */
+static int s_drv_mode;
+static const char *const s_core_drivers[] = {"kbd-raw", "trackball-gpio"};
+#define DRIVER_SETTLE_FILE "/boot/drivers.settling"
+
+static int core_driver_file(const char *file)
+{
+    if (builtin_driver_file(file)) {
         return 1;
     }
-    static const char *const modes[] = {"off", "warn", "enforce"};
-    purr_cli_printf(cli, "copy:        %s\n", r == 0 ? "stored" : "none yet (defaults)");
-    purr_cli_printf(cli, "seq:         %u\n", (unsigned)cfg.seq);
-    purr_cli_printf(cli, "secure mode: %s\n", cfg.secure_mode < 3 ? modes[cfg.secure_mode] : "?");
-    purr_cli_printf(cli, "flags:       0x%x%s\n", (unsigned)cfg.flags,
-                    (cfg.flags & PURR_CFGF_FORCE_RECOVERY) ? " (recovery requested)" : "");
-    purr_cli_printf(cli, "boot count:  %u, fails %u\n", (unsigned)cfg.boot_seq, (unsigned)cfg.boot_fail_count);
+    for (size_t i = 0; i < sizeof(s_core_drivers) / sizeof(s_core_drivers[0]); i++) {
+        size_t n = strlen(s_core_drivers[i]);
+        if (strncmp(file, s_core_drivers[i], n) == 0 && file[n] == '-') {
+            return 1;
+        }
+    }
     return 0;
 }
 
-static const purr_cmd_t s_cmds[] = {
-    {"help",    "list the commands",             purr_cli_cmd_help},
-    {"version", "show the system and profile",   cmd_version},
-    {"info",    "board, chip and display",       cmd_info},
-    {"mem",     "free memory",                   cmd_mem},
-    {"uptime",  "time since power on",           cmd_uptime},
-    {"parts",   "the partition table",           cmd_parts},
-    {"ls",      "list a directory",              cmd_ls},
-    {"cat",     "show a file",                   cmd_cat},
-    {"mkdir",   "make a directory",              cmd_mkdir},
-    {"rm",      "remove a file or empty dir",    cmd_rm},
-    {"mv",      "rename or move",                cmd_mv},
-    {"write",   "write text to a file",          cmd_write},
-    {"df",      "filesystem space",              cmd_df},
-    {"format",  "erase and create the fs",       cmd_format},
-    {"wifi",    "scan|connect|forget|list|status", cmd_wifi},
-    {"net",     "connection status",             cmd_net},
-    {"echo",    "print the arguments",           cmd_echo},
-    {"clear",   "clear the screen",              cmd_clear},
-    {"reboot",  "restart (reboot recovery)",     cmd_reboot},
-    {"purrcfg", "show the boot config",          cmd_purrcfg},
-};
+/* The other half of the protection. The marker above catches a driver that dies inside its own start-up; a driver that dies later (a task or interrupt it set
+ * up, a bad pin state, memory it used up) leaves no marker, and the recovery loader reinstalls the kernel without touching the file system, so the same drivers
+ * load again and the loop never ends. The bootloader counts every start and the OS clears the count only once it has run to a settled state (main.c), so a count
+ * of 2 or more here means the start before this one never got there. Then none of the downloaded drivers loads this time: they are all set aside, the device
+ * comes up, and Device Manager > Drivers offers each one back, one at a time, to find the one that is guilty. A power cut during a start does the same, which
+ * costs a few taps and nothing else. */
+static void quarantine_all_drivers(purr_cli_t *cli, const char *dir)
+{
+    purr_flash_t fl;
+    purr_cfg_t cfg;
+    int isdir = 0;
+    uint32_t sz = 0;
+    int late_died = purr_fs_stat(&s_fs, DRIVER_SETTLE_FILE, &isdir, &sz) == 0;      /* the late drivers were loading and the device stopped within 30 s of it */
+    int unsettled = load_cfg(cli, &fl, &cfg) == 0 && cfg.boot_fail_count >= 2;
+    if (!late_died && !unsettled) {
+        return;
+    }
+    purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);
+    module_listing_t l = {.count = 0};
+    if (purr_fs_list(&s_fs, dir, collect_module_row, &l) != 0) {
+        return;
+    }
+    int moved = 0;
+    for (int i = 0; i < l.count; i++) {
+        size_t n = strlen(l.names[i]);
+        if (l.is_dir[i] || n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0) {
+            continue;
+        }
+        if (builtin_driver_file(l.names[i]) || (!unsettled && core_driver_file(l.names[i]))) {
+            continue;                                   /* the firmware's own drivers never move; and if only the late drivers were running, the input drivers stay */
+        }
+        char from[96], to[96];
+        snprintf(from, sizeof(from), "%s/%s", dir, l.names[i]);
+        purr_fs_mkdir(&s_fs, DRIVER_CRASHED_DIR);
+        snprintf(to, sizeof(to), "%s/%s", DRIVER_CRASHED_DIR, l.names[i]);
+        purr_fs_remove(&s_fs, to);
+        if (purr_fs_rename(&s_fs, from, to) == 0) {
+            moved++;
+        }
+    }
+    if (moved > 0) {
+        ESP_LOGW("drivers", "the last start did not settle: %d downloaded driver(s) set aside in " DRIVER_CRASHED_DIR, moved);
+        purr_cli_printf(cli, "drivers: the last start did not settle; %d driver(s) set aside (Device Manager > Drivers)\n", moved);
+    }
+}
+
+/* Loads (verifies, relocates) one driver file and registers it with the board profile. For the hardware setup, which adds drivers after boot. */
+int purr_driver_load_file(const char *path)
+{
+    const purr_driver_t *drv = NULL;
+    if (load_one_driver_file(path, &drv) != 0) {
+        return -1;
+    }
+    note_driver_file(drv->name, path);
+    purr_driver_register(purr_board(), drv);
+    return 0;
+}
+
+static void load_drivers_from(purr_cli_t *cli, const char *dir)
+{
+    int main_dir = strcmp(dir, PURR_DRIVERS_DIR) == 0;
+    if (main_dir && s_drv_mode != 2) {
+        quarantine_crashed_driver(cli, dir);
+        quarantine_all_drivers(cli, dir);
+    }
+    module_listing_t l = {.count = 0};
+    if (purr_fs_list(&s_fs, dir, collect_module_row, &l) != 0) {
+        return; /* no drivers folder yet: nothing to load, not an error */
+    }
+    for (int i = 0; i < l.count; i++) {
+        if (l.is_dir[i]) {
+            continue;
+        }
+        size_t n = strlen(l.names[i]);
+        if (n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0) {
+            continue;
+        }
+        if (main_dir && s_drv_mode != 0 && core_driver_file(l.names[i]) != (s_drv_mode == 1)) {
+            continue;                                   /* the other phase's */
+        }
+        char path[80];
+        snprintf(path, sizeof(path), "%s/%s", dir, l.names[i]);
+#if CONFIG_PURR_VERBOSE_BOOT
+        purr_cli_printf(cli, "drivers: checking %s...\n", path);
+#endif
+        const purr_driver_t *drv = NULL;
+        if (load_one_driver_file(path, &drv) == 0) {
+            note_driver_file(drv->name, path);
+            purr_driver_register(purr_board(), drv);
+#if CONFIG_PURR_VERBOSE_BOOT
+            purr_cli_printf(cli, "drivers: %s verified, loaded ('%s')\n", path, drv->name);
+#endif
+        } else {
+#if CONFIG_PURR_VERBOSE_BOOT
+            purr_cli_printf(cli, "drivers: %s rejected or skipped (see serial log)\n", path);
+#endif
+        }
+    }
+}
+
+static int cmd_testdriverload(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (!need_fs(cli)) return 1;
+
+    purr_fs_mkdir(&s_fs, "/boot");
+    purr_fs_mkdir(&s_fs, PURR_DRIVERS_DIR);
+    char path[64];
+    snprintf(path, sizeof(path), "%s/hello_driver.cat", PURR_DRIVERS_DIR);
+    if (purr_fs_write(&s_fs, path, s_hello_driver_module, sizeof(s_hello_driver_module)) < 0) {
+        purr_cli_printf(cli, "testdriverload: could not stage %s\n", path);
+        return 1;
+    }
+    purr_cli_printf(cli, "testdriverload: staged %s (%u bytes)\n", path,
+                    (unsigned)sizeof(s_hello_driver_module));
+
+    const purr_driver_t *drv = NULL;
+    if (load_one_driver_file(path, &drv) != 0) {
+        purr_cli_printf(cli, "testdriverload: FAILED to load/verify/relocate\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "testdriverload: loaded driver '%s' (compatible=\"%s\")\n",
+                    drv->name, drv->compatible);
+
+    void *handle = (void *)0x1;    /* non-NULL so a real probe() bug (forgetting to set it)
+                                     * would be visible as a wrong value, not a false pass */
+    int pr = drv->probe(NULL, NULL, &handle);
+    if (pr != 0) {
+        purr_cli_printf(cli, "testdriverload: probe() FAILED (%d)\n", pr);
+        return 1;
+    }
+    purr_cli_printf(cli, "testdriverload: probe() ok, handle=%p\n", handle);
+    drv->remove(handle);
+    purr_cli_printf(cli, "testdriverload: remove() ran, PASS\n");
+    return 0;
+}
+
+/* s_kbd_i2c_driver_module[] moved up near s_temp_modules[] (this file, above) -- it's now the
+ * real, boot-loaded keyboard driver (auto-planted and purr_driver_register()'d by
+ * purr_modules_setup()), not just this proof's own private asset. testkbdmodule stays useful
+ * on its own: it exercises the module's probe()/read() directly, independent of whatever the
+ * real boot path already bound it to. */
+static int cmd_testkbdmodule(purr_cli_t *cli, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (!need_fs(cli)) return 1;
+
+    purr_fs_mkdir(&s_fs, "/boot");
+    purr_fs_mkdir(&s_fs, PURR_DRIVERS_DIR);
+    char path[64];
+    snprintf(path, sizeof(path), "%s/kbd_i2c.cat", PURR_DRIVERS_DIR);
+    if (purr_fs_write(&s_fs, path, s_kbd_i2c_driver_module, sizeof(s_kbd_i2c_driver_module)) < 0) {
+        purr_cli_printf(cli, "testkbdmodule: could not stage %s\n", path);
+        return 1;
+    }
+    purr_cli_printf(cli, "testkbdmodule: staged %s (%u bytes)\n", path,
+                    (unsigned)sizeof(s_kbd_i2c_driver_module));
+
+    const purr_driver_t *drv = NULL;
+    if (load_one_driver_file(path, &drv) != 0) {
+        purr_cli_printf(cli, "testkbdmodule: FAILED to load/verify/relocate\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "testkbdmodule: loaded driver '%s' (compatible=\"%s\")\n",
+                    drv->name, drv->compatible);
+
+    const purr_board_t *b = purr_board();
+    purr_device_t dev;
+    memset(&dev, 0, sizeof(dev));
+    dev.name = "keyboard-test";
+    dev.compatible = "kbd-i2c";
+    dev.cfg = &b->keyboard;
+    for (int i = 0; i < PURR_MAX_EXTRA_PINS; i++) {
+        dev.extra_pins[i] = PURR_PIN_NONE;
+    }
+
+    void *handle = NULL;
+    if (drv->probe(&dev, b, &handle) != 0) {
+        purr_cli_printf(cli, "testkbdmodule: probe() FAILED -- this board may have no keyboard\n");
+        return 1;
+    }
+    purr_cli_printf(cli, "testkbdmodule: probe() ok, handle=%p -- press some keys, polling for 5s\n",
+                    handle);
+
+    int seen = 0;
+    int64_t until = esp_timer_get_time() + 5000000;
+    while (esp_timer_get_time() < until) {
+        uint8_t c = 0;
+        if (drv->read(handle, &c, 1) == 1 && c != 0) {
+            purr_cli_printf(cli, "testkbdmodule: read byte 0x%02x\n", (unsigned)c);
+            seen++;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    drv->remove(handle);
+    purr_cli_printf(cli, "testkbdmodule: remove() ran, saw %d byte(s) -- %s\n", seen,
+                    seen > 0 ? "PASS" : "no keys seen (press keys while it's polling, next time?)");
+    return 0;
+}
+
+/* Called once during boot setup (main.c, right after purr_fs_setup), before login or the
+ * shell exist -- not lazily on the first shell command anymore (Modules/SPEC.md section 7.1).
+ * That's the whole point: /system is swept and enforced before anything can even reach a
+ * prompt, the same way both KittenOS and PURR OS already report the fs mount and Wi-Fi status
+ * on `cli` at this point in boot. */
+#if CONFIG_PURR_PROFILE_FULL
+static void settle_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(30000));
+    purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);          /* the device ran 30 s with every driver loaded: whatever stops it later is not a start-up fault */
+    vTaskDelete(NULL);
+}
+
+static void late_quiet_put(void *ctx, char c) { (void)ctx; (void)c; }
+
+/* After sign-in, once the device has run settled (the 30 s window of settle_task), the drivers that were set aside only because a start did not settle are put back one at
+ * a time, with no restart: move the file back, load and bind it, then give the device 20 s before the next. A driver that stops the device is found by DRIVER_RETRY_FILE
+ * at the next start and stays set aside. Drivers already listed as bad are left alone. */
+#define PUTBACK_SETTLE_MS 20000
+
+static void recover_drivers_task(void *arg)
+{
+    (void)arg;
+    static purr_cli_t cli;
+    purr_cli_init(&cli, NULL, 0, late_quiet_put, NULL, "");
+    for (int i = 0; i < 60; i++) {                       /* wait for the start-up settle window to close (it does after 30 s of running) */
+        int isdir = 0;
+        uint32_t sz = 0;
+        if (purr_fs_stat(&s_fs, DRIVER_SETTLE_FILE, &isdir, &sz) != 0) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    module_listing_t l = {.count = 0};
+    if (purr_fs_list(&s_fs, DRIVER_CRASHED_DIR, collect_module_row, &l) != 0 || l.count == 0) {
+        vTaskDelete(NULL);
+        return;
+    }
+    int candidates = 0;
+    for (int i = 0; i < l.count; i++) {
+        size_t n = strlen(l.names[i]);
+        if (!l.is_dir[i] && n >= 4 && strcmp(l.names[i] + n - 4, ".cat") == 0 && !driver_is_bad(l.names[i]) && !builtin_driver_file(l.names[i])) {
+            candidates++;
+        }
+    }
+    if (candidates == 0) {
+        vTaskDelete(NULL);
+        return;
+    }
+    purr_notify_add("System", "The system is still setting itself up in the background.");
+    int back = 0, stay = 0;
+    for (int i = 0; i < l.count; i++) {
+        size_t n = strlen(l.names[i]);
+        if (l.is_dir[i] || n < 4 || strcmp(l.names[i] + n - 4, ".cat") != 0 || builtin_driver_file(l.names[i])) {
+            continue;
+        }
+        if (driver_is_bad(l.names[i])) {
+            stay++;
+            continue;
+        }
+        char from[96], to[96];
+        snprintf(from, sizeof(from), "%s/%s", DRIVER_CRASHED_DIR, l.names[i]);
+        snprintf(to, sizeof(to), "%s/%s", PURR_DRIVERS_DIR, l.names[i]);
+        purr_fs_write(&s_fs, DRIVER_RETRY_FILE, l.names[i], (uint32_t)strlen(l.names[i]));      /* before anything can go wrong */
+        if (purr_fs_rename(&s_fs, from, to) != 0) {
+            purr_fs_remove(&s_fs, DRIVER_RETRY_FILE);
+            stay++;
+            continue;
+        }
+        if (purr_driver_load_file(to) != 0) {            /* does not verify or relocate: it is not a good file, so it goes back and is not tried again */
+            purr_fs_remove(&s_fs, from);
+            purr_fs_rename(&s_fs, to, from);
+            driver_mark_bad(l.names[i]);
+            purr_fs_remove(&s_fs, DRIVER_RETRY_FILE);
+            stay++;
+            continue;
+        }
+        purr_hwsetup_boot(&cli);                          /* bind the device it is for */
+        vTaskDelay(pdMS_TO_TICKS(PUTBACK_SETTLE_MS));
+        purr_fs_remove(&s_fs, DRIVER_RETRY_FILE);         /* the device ran on: this one is fine */
+        back++;
+    }
+    char msg[120];
+    snprintf(msg, sizeof(msg), "Setup finished: %d driver(s) are back%s.", back, stay ? ", the others stay set aside (Device Manager > Drivers)" : "");
+    purr_notify_add("System", msg);
+    vTaskDelete(NULL);
+}
+
+
+static void late_drivers_task(void *arg)
+{
+    (void)arg;
+    static purr_cli_t cli;
+    purr_cli_init(&cli, NULL, 0, late_quiet_put, NULL, "");
+    vTaskDelay(pdMS_TO_TICKS(5000));                    /* let the home screen finish drawing first (with automatic sign-in the session starts at boot, with nothing to wait for) */
+    purr_fs_write(&s_fs, DRIVER_SETTLE_FILE, "1\n", 2);  /* gone again after 30 s; still here at the next start means the device stopped inside that time */
+    s_drv_mode = 2;
+    load_drivers_from(&cli, PURR_DRIVERS_DIR);
+    s_drv_mode = 0;
+    purr_hwsetup_boot(&cli);                            /* bind the devices whose drivers have just arrived */
+    if (xTaskCreate(settle_task, "drv-settle", 4096, NULL, 3, NULL) != pdPASS) {
+        purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);
+    }
+    xTaskCreate(recover_drivers_task, "drv-back", 12288, NULL, 3, NULL);     /* puts back what was set aside only because a start did not settle */
+    vTaskDelete(NULL);
+}
+
+/* Once, after the first sign-in of this start: loads the drivers that were held back (see s_drv_mode). On its own task with the stack a driver load needs. */
+void purr_drivers_load_deferred(void)
+{
+    static int started;
+    if (started || !purr_fs_mounted(&s_fs)) {
+        return;
+    }
+    started = 1;
+    if (xTaskCreate(late_drivers_task, "drv-late", 12288, NULL, 4, NULL) != pdPASS) {
+        started = 0;
+    }
+}
+#else
+void purr_drivers_load_deferred(void) {}
+#endif
+
+void purr_modules_setup(purr_cli_t *cli)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        return;
+    }
+    /* plant_temp_modules_ex() with only_if_missing=1, not the old unconditional-overwrite
+     * automatic call (OTA/SPEC.md sections 3 and 6.1, PurrOS/components/coreos/SPEC.md
+     * section 10): the real replacement for most of these is "netinstall modules", fetching
+     * each one from the module index -- this only fills in whatever is still genuinely
+     * missing (never overwrites something netinstall or a user already provided), so a
+     * board with no real distribution path set up yet (debug.cat on waveshare154's bring-up
+     * is the current example) still gets it automatically, without that safety net
+     * regressing for a board that already uses netinstall for everything else. `plantmodules`
+     * (cmd_plantmodules, manual) keeps its own always-overwrite behavior for explicit local
+     * testing. */
+    plant_temp_modules_ex(cli, 1);
+    load_modules_from(cli, PURR_MODULES_DIR);
+    load_kernelmods_from(cli, PURR_KERNELMODS_DIR);
+    /* Neither keyboard nor touch is read anywhere until well after this point (main.c's own
+     * call order -- the space-bar shell-escape poll, every login prompt, and LVGL's input
+     * polling all happen later), so both are safe to load here, after the filesystem mounts.
+     * display is the one exception -- purr_kernel_init() must still bind it synchronously
+     * before this function even runs (main.c's own hard halt otherwise), so it stays
+     * compiled in. */
+#if CONFIG_PURR_PROFILE_FULL
+    s_drv_mode = 1;                         /* the input drivers now; the rest after sign-in (purr_drivers_load_deferred) */
+#endif
+    load_drivers_from(cli, PURR_DRIVERS_DIR);
+    s_drv_mode = 0;
+#if CONFIG_PURR_PROFILE_FULL
+    purr_hwsetup_boot(cli);                 /* the discovered profile (/etc/board.conf): bind its devices to the drivers just loaded */
+#endif
+    if (purr_device_state("keyboard") != PURR_DEV_BOUND) {
+        purr_cli_printf(cli, "drivers: WARNING -- keyboard did not bind "
+                             "(no loaded driver matched)\n");
+    }
+    if (purr_device_state("touch") != PURR_DEV_BOUND) {
+        /* Optional priority on this board profile (purr_board.h) -- a missing touch driver
+         * degrades to no tap input, not a dead shell, so this is a note, not a WARNING. */
+        purr_cli_printf(cli, "drivers: touch did not bind (no loaded driver matched)\n");
+    }
+}
+
+
+/* The recovery loader has no filesystem, so it cannot load its display, keyboard and touch drivers from /boot/drivers the way
+ * purr_modules_setup() does. It loads the same baked-in modules (each verified like any other) straight from memory instead.
+ * Without this the loader never gets a screen: the display became a loadable module (commit 45c46edc). Returns how many bound. */
+int purr_loader_load_drivers(void)
+{
+    int bound = 0;
+    for (size_t i = 0; i < sizeof(s_temp_drivers) / sizeof(s_temp_drivers[0]); i++) {
+        const purr_driver_t *drv = NULL;
+        if (load_one_driver_image(s_temp_drivers[i].filename, s_temp_drivers[i].data, s_temp_drivers[i].len, &drv) == 0) {
+            purr_driver_register(purr_board(), drv);
+            bound++;
+        }
+    }
+    return bound;
+}
 
 const purr_cmd_t *purr_commands(int *count)
 {
-    *count = (int)(sizeof(s_cmds) / sizeof(s_cmds[0]));
-    return s_cmds;
+    static purr_cmd_t *combined = NULL;
+    static int combined_count = 0;
+
+    if (combined == NULL) {
+        /* Modules are no longer loaded lazily here: purr_modules_setup() (main.c, boot time,
+         * before login) already swept and loaded everything in /system (Modules/SPEC.md
+         * section 7.1). This just combines whatever's already in s_loaded_modules with the
+         * built-ins. */
+        int base_n = (int)(sizeof(s_cmds) / sizeof(s_cmds[0]));
+        int total = base_n;
+        for (int i = 0; i < s_loaded_module_count; i++) {
+            total += (int)s_loaded_modules[i].table->cmd_count;
+        }
+        for (int i = 0; i < s_loaded_kernelmod_count; i++) {
+            total += (int)s_loaded_kernelmods[i].table->cmd_count;
+        }
+        combined = malloc(sizeof(purr_cmd_t) * (size_t)total);
+        if (combined == NULL) {
+            *count = base_n;
+            return s_cmds;             /* out of memory: fall back to just the built-ins */
+        }
+        memcpy(combined, s_cmds, sizeof(purr_cmd_t) * (size_t)base_n);
+        int pos = base_n;
+        for (int i = 0; i < s_loaded_module_count; i++) {
+            const purr_module_table_t *t = s_loaded_modules[i].table;
+            memcpy(combined + pos, t->cmds, sizeof(purr_cmd_t) * t->cmd_count);
+            pos += (int)t->cmd_count;
+        }
+        for (int i = 0; i < s_loaded_kernelmod_count; i++) {
+            const purr_kernel_module_table_t *t = s_loaded_kernelmods[i].table;
+            memcpy(combined + pos, t->cmds, sizeof(purr_cmd_t) * t->cmd_count);
+            pos += (int)t->cmd_count;
+        }
+        combined_count = total;
+    }
+    *count = combined_count;
+    return combined;
 }

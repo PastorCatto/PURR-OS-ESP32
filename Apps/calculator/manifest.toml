@@ -1,0 +1,26 @@
+name = "calculator"
+version = "1.0.0"
+description = "A calculator with the four operations, percent and sign change"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "calculator_entry"
+
+[catcalls]
+console = "1.0"
+ui = "3.0"
+app = "1.0"
+
+[permissions]
+requests = []
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 8192
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "Calculator"
+icon = ""

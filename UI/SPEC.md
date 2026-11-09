@@ -20,7 +20,8 @@ shell, built on the same services.
   `ui` (which widget, what happened) in the same queue as key and pointer events
   (`../Catcalls/SPEC.md` section 2). The app has one loop and one place to wait, and no callbacks
   run on the UI's own thread.
-- **Themes belong to the system** and are plain-text config files (section 3).
+- **Themes are signed binary packages** (`.kit` files, section 3), not text config. They're read
+  straight from a dedicated flash partition, never dumped into PSRAM.
 - **Full-screen apps with a system status bar.** Only the foreground app is visible. Switching
   goes through the task manager.
 - **Screen size and orientation are reported to the app,** with an event when they change, so it
@@ -39,27 +40,68 @@ shell, built on the same services.
   foreground app. It reads the same `system` values apps can.
 - **KittenOS's own screens** use MiniWin directly, not through the catcall.
 
-## 3. Themes
+## 3. Themes and screen layout
 
-Themes are written as config files in the Hyprland style: simple `key = value` lines with
-comments, in `/etc/themes`. The user can edit them, and they **reload live** when they change.
+**Superseded, 2026-10-10:** this section originally specced a theme as a single signed `.kit`
+binary package (colors, fonts, spacing, icons and images all in one container, "not a text
+config file"), read execute-in-place from a dedicated `themes` partition, boot-time-synced
+against a LittleFS copy the same way modules/kernelmods/bootpkg are. That was designed but
+never built. What got built instead, proven on real T-Deck Plus hardware the same day, is
+below -- deliberately not signed, and deliberately a text format, both explicit choices once
+it was clear what this actually needed to do.
 
-A theme controls:
+**A screen is declared in a small, hand-rolled, Hyprland-flavored text config**
+(`PurrOS/main/purr_ui_config.h`/`.c`), read from LittleFS (`/ui/shell.conf` is the first one,
+planted with a sane default on first boot if nothing is there yet -- same missing-only
+convention `purr_modules_setup()`'s auto-plant already uses). A screen is a block containing
+widgets (label, button, image so far), each with position/size/color/scale and at most one
+animation:
 
-- colors: background, text, accent, borders, and the states of widgets (normal, pressed, disabled)
-- fonts and sizes
-- spacing and padding
-- corner radius and border width
-- the icon set
-- animations: on or off, and speed
+```
+screen "shell" {
+    background = #000000
+    label "title" { text = "PURR OS"; position = 16, 16; color = #fda000; scale = 3;
+                     animation = fade_in, 400, ease_out }
+}
+```
 
-Rules:
+Unknown widget types, properties or animation names are logged and skipped, not fatal -- a
+config written against a newer parser should still mostly render on an older build. A missing
+or genuinely malformed config *is* treated as critical (`purr_lvgl_report_critical_error()`),
+falling back to the text shell (section on fallback behavior, `PurrOS/main/main.c`).
 
-- The theme is **system-wide.** Apps get the current one automatically for every widget.
-- The user changes it in one place, with the `system-settings` permission.
-- An app can draw its own colors on a canvas, but it **cannot restyle the standard widgets.**
-- The old system's default look was a Windows CE Classic theme. Whether that stays the default is
-  open.
+**Images live in a pack, separately from the config that references them** --
+the one part of the original design that did carry over. In the original design this was a raw `ui_assets` partition (512 KB, later **5 MB at 0x501000, up to 1.0.28**).
+**Flash map v2 (release 1.0.29, written but not yet run on a device) removed that partition:** the pack is now a file in LittleFS (`root`, which runs from 0x5C1000 to
+the end of the flash; `PurrOS/partitions/tdeck.csv`/`tdeck_plus.csv`), `/ui/<shell>/pack.bin` for a shell's default pack and `/ui/themes/<id>/pack.bin` for an installed theme
+([plan1.md](../plan1.md), [plan7.md](../plan7.md)). The pack holds raw RGB565 pixel data, built by
+`purrstrap uiassets build` from a directory of PNGs (a hand-rolled decoder -- 8bpc RGB/RGBA,
+non-interlaced only -- since this project has never taken a Pillow dependency), read
+read-only/memory-mapped straight from flash at boot up to 1.0.28 (`purr_ui_assets.c`, zero-copy, no PSRAM
+cost; from 1.0.29 the file is read from LittleFS), validated by a magic number and a CRC32 rather than a signature. A config's `image`
+widget references one by name (`asset = "icon_name"`); a missing asset is logged and that one
+widget is skipped, not a critical error -- missing art isn't treated the same as a missing
+config.
+
+**Why not signed, and why not binary:** nothing on this partition is executable code the way
+a kernelmod, kittenos or bootpkg image is -- the existing signature/verification machinery
+(`purr_verify`, the key roles) exists to stop a compromised or buggy system from smuggling
+code into a boot-critical slot, a threat model that doesn't apply to "which color is the
+title text." A plain text config is also directly human-editable and diffable, which a
+binary `.kit` container deliberately was not.
+
+**Still true from the original design, not yet revisited:**
+
+- The theme/config is system-wide; apps get the current one for standard widgets (once apps
+  exist at all to care -- `AppRuntime/SPEC.md`'s minimal-first scope, in progress).
+- Applying a changed config happens on the next boot's `purr_ui_load_and_build()`, not a
+  live hot-reload -- no apply-now path exists yet, though nothing architectural rules one out
+  later (unlike the old design's "`.kit` + a flash burn," a text file is cheap to re-read on
+  demand).
+- Whether an app can restyle standard widgets, or only draw on its own canvas, is still open
+  -- revisit once the `ui` catcall (section 2) actually exists.
+- The old system's default look (Windows CE Classic) is not carried over; the current default
+  (`/ui/shell.conf`'s planted content) is this project's own, not trying to match it.
 
 ## 4. Testing
 
@@ -67,7 +109,9 @@ Rules:
   backend and a fake MiniWin backend.
 - Events: a `ui` event lands in the same queue in the right order relative to key and pointer
   events, and the queue drops the oldest when full.
-- Theme files: parsing, a bad line, a missing key falling back to the default, and a live reload.
+- Themes: `.kit` parsing, a corrupt or unsigned package being rejected, the boot-time sync
+  (match leaves the partition alone, mismatch burns it, a missing/invalid LittleFS copy falls
+  back to what's already burned or to the built-in default).
 - Rotation and different screen sizes: the size event arrives, and layouts stay inside the screen.
 - The threading rule: no app call reaches LVGL outside the service.
 
@@ -77,9 +121,10 @@ Rules:
   or close to all of it.
 - **The canvas drawing calls.**
 - **Fonts and Unicode,** since each font costs flash and RAM.
-- **The icon set format.**
-- **The theme file syntax** in detail: sections, variables, and how one theme handles different
-  screen sizes and densities.
+- **The `.kit` container layout** in detail: binary format for colors, fonts, the icon set and
+  images, versioning, and how one theme handles different screen sizes and densities.
+- **Where the `themes` partition goes** in the partition table, and the exact LittleFS path for
+  the active `.kit` file.
 - **An on-screen keyboard,** which the CYD needs for typing a Wi-Fi password, and a text-entry
   component in general.
 - **Memory accounting.** The widgets an app creates live in the UI service's memory. Whether they

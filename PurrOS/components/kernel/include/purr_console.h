@@ -10,6 +10,7 @@
 
 #include "esp_err.h"
 
+#include "purr_board.h"
 #include "purr_display.h"
 
 #ifdef __cplusplus
@@ -19,10 +20,23 @@ extern "C" {
 /* Start a console filling the display. */
 esp_err_t purr_console_init(const purr_display_v2_t *d);
 
+/* Starts the console sized from the board profile's own display.width/height, with no real
+ * display behind it yet (purr_console_flush() already no-ops with no display set -- this
+ * just means text accumulates safely instead of crashing on a NULL d->get_info()). For the
+ * window between purr_kernel_init() and the display driver module actually loading/binding
+ * (main.c's own comment on why display can't load before the filesystem mounts, unlike
+ * keyboard/touch) -- purr_console_init(d) replaces this with the real thing once d exists,
+ * same sizing math, so nothing but the few lines printed during that window is ever lost
+ * (and those are always also on the serial log via ESP_LOGI/ESP_LOGW). */
+esp_err_t purr_console_init_headless(const purr_board_t *board);
+
 /* A shell output sink: ctx is ignored. Changes show at the next flush. */
 void purr_console_put(void *ctx, char c);
 
 void purr_console_clear(void);
+
+/* While muted, flush draws nothing (text still collects): a graphical shell owns the display. */
+void purr_console_set_muted(int muted);
 
 /* Draw what changed since the last flush. */
 void purr_console_flush(void);

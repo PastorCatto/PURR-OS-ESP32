@@ -1,0 +1,27 @@
+name = "store"
+version = "1.0.2"
+description = "The Store: apps, assets and extras from the repositories you trust, with updates"
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "store_entry"
+
+[catcalls]
+console = "1.0"
+ui = "3.0"
+app = "1.0"
+store = "1.0"
+
+[permissions]
+requests = ["install-apps"]
+
+[runtime]
+stack_bytes = 8192
+heap_bytes = 24576
+threads = 1
+background = false
+saves_state = false
+
+[display]
+name = "Store"
+icon = ""

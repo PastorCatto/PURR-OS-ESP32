@@ -116,6 +116,32 @@ class ToolTests(unittest.TestCase):
             code = keys.generate(self.ctx, "system", self.path("k"), 1)
         self.assertNotEqual(code, 0)
 
+    def test_generate_refuses_to_overwrite(self):
+        # F-19: re-running generate used to replace an existing key pair with no warning.
+        keys.generate(self.ctx, "system", self.path("k"), 1)
+        code = keys.generate(self.ctx, "system", self.path("k"), 1)
+        self.assertNotEqual(code, 0)
+        self.assertIn("already exists", self.out.getvalue())
+
+        code = keys.generate(self.ctx, "system", self.path("k"), 1, force=True)
+        self.assertEqual(code, 0)
+
+    def test_sign_rejects_key_id_zero(self):
+        # F-19: id 0 means "no key" to the device -- signing with it used to succeed and
+        # produce a container that would be rejected on the device with no clue why.
+        keys.generate(self.ctx, "system", self.path("k"), 1)
+        img_path = self.path("bootpkg.bin")
+        open(img_path, "wb").write(make_image())
+        code = keys.sign(self.ctx, self.path("k", "system.key"), 0, img_path, None)
+        self.assertNotEqual(code, 0)
+        self.assertIn("no key", self.out.getvalue())
+
+        # Omitting --key-id (None, "leave as is") on an UNSIGNED image is the same danger:
+        # the header's id is still 0 (make_image()'s own placeholder), so this must refuse
+        # too, not just the case where --key-id 0 was typed explicitly.
+        code = keys.sign(self.ctx, self.path("k", "system.key"), None, img_path, None)
+        self.assertNotEqual(code, 0)
+
     def test_verify_catches_tampered_payload(self):
         keys.generate(self.ctx, "system", self.path("k"), 1)
         img_path = self.path("bootpkg.bin")

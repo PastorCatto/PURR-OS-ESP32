@@ -14,8 +14,9 @@
 #include <stddef.h>
 
 #include "purr_board.h"
+#include "purr_driver.h"
 
-static const purr_board_t s_board = {
+static purr_board_t s_board = {
     .name = "tdeck_plus",
     .power_pin = 10,
     .power_settle_ms = 50,
@@ -35,9 +36,110 @@ static const purr_board_t s_board = {
     /* The keyboard is a small controller of its own: one byte read gives the next
      * key as ASCII, or 0 for none. */
     .keyboard = {.port = 0, .sda = 18, .scl = 8, .addr = 0x55, .hz = 100 * 1000},
+    /* GT911 touch -- same I2C bus as the keyboard (sda=18/scl=8), polling mode (int_pin
+     * unused on this board), reset on GPIO17. native_x_max/native_y_max and the
+     * swap+mirror+rescale math they feed are confirmed against the archive driver's own
+     * direct hardware capture (purr_board.h's own comment on why), not assumed. */
+    .touch = {.port = 0, .sda = 18, .scl = 8, .int_pin = PURR_PIN_NONE, .rst_pin = 17,
+             .hz = 400 * 1000, .width = 320, .height = 240,
+             .native_x_max = 311, .native_y_max = 235},
+    /* No BOOT/PWR buttons on this board (it has a real keyboard) -- explicit, not left to
+     * default-zero-init, since GPIO0 is a real pin and btn_boot_pin==0 would be read as
+     * "GPIO0 is the boot button" rather than "no button" if this were left unset. */
+    .btn_boot_pin = PURR_PIN_NONE,
+    .btn_pwr_pin = PURR_PIN_NONE,
+    .btn_hold_ms = 0,
+    /* .devices/.device_count: installed by purr_board() below, once s_devices exists --
+     * a struct literal can't take the address of one of its own fields while it's still
+     * being built. */
+};
+
+/* The battery sits behind a 1:2 divider on GPIO 4 (LilyGO's BOARD_BAT_ADC); the keyboard controller also takes the backlight command, at the same address on the same wires. */
+static const purr_adc_dev_cfg_t s_battery_cfg = {.pin = 4, .mul = 2, .div = 1};
+static const purr_i2c_dev_cfg_t s_kbd_light_cfg = {.port = 0, .sda = 18, .scl = 8, .addr = 0x55, .hz = 100 * 1000};
+/* The raw key state of the same controller, for games (Modules/drivers/kbd_raw_module.c): probing it changes nothing, it only switches the keyboard to raw mode while a game is in front. */
+static const purr_i2c_dev_cfg_t s_kbd_raw_cfg = {.port = 0, .sda = 18, .scl = 8, .addr = 0x55, .hz = 100 * 1000};
+
+/* The GPS receiver and the LoRa radio (LilyGO's wiring; unchecked on this unit, so they are plain data: a wrong pin is a one-line change here or in /etc/board.conf).
+ * The GPS (u-blox MIA-M10Q) sits on GPIO 43/44, which are also UART0's default pins: with UART1 moved onto them the console's UART output stops and the USB
+ * serial port carries the logs, as it already does. Both are optional and have no driver in the firmware: they come from signed driver modules (gnss-nmea,
+ * lora-sx126x), so with no driver loaded they simply report "no driver". The radio's reset is left unset: LilyGO wires it to GPIO 17, the touch controller's
+ * reset, and sharing that line would reset the touch chip too. */
+static const purr_kv_cfg_t s_gps_cfg = {.count = 4, .kv = {{"port", 1}, {"tx", 43}, {"rx", 44}, {"baud", 38400}}};
+/* The SD card slot shares the display's and the radio's SPI bus (its own chip select, GPIO 39, is held high at start-up: idle_high_pins). The "sd-spi" driver drives
+ * that line itself because a card wants it held low for a whole command, its answer and the data; hz is the speed after start-up (start-up is always 400 kHz). */
+static const purr_kv_cfg_t s_sd_cfg = {.count = 2, .kv = {{"cs", 39}, {"hz", 20000000}}};
+/* The trackball: four direction pulses and a click on their own GPIOs (LilyGO). Click is GPIO 0, the boot strapping pin. Which pin is which direction is
+ * not yet checked on a unit; it is data, so correcting it is one line here and one in sdk/boards/tdeck_plus.toml. */
+static const purr_kv_cfg_t s_trackball_cfg = {.count = 5, .kv = {{"up", 3}, {"down", 15}, {"left", 1}, {"right", 2}, {"click", 0}}};
+static const purr_kv_cfg_t s_lora_cfg = {.count = 6, .kv = {{"cs", 9}, {"rst", -1}, {"busy", 13}, {"dio1", 45}, {"tcxo_mv", 1800}, {"dio2sw", 1}}};
+
+/* F-02: the registry's view of this board's two devices, pointing at the same
+ * purr_display_cfg_t/purr_keyboard_cfg_t s_board already carries (not a second copy).
+ * extra_pins are each device's own pins beyond the shared SPI bus (display: cs, dc, rst,
+ * backlight) or beyond its own I2C bus entirely (keyboard: none -- sda/scl are the bus
+ * itself, not extra). */
+static const purr_device_t s_devices[] = {
+    {
+        .name = "display", .compatible = "st7789", .priority = PURR_PRI_REQUIRED,
+        .extra_pins = {12, 11, PURR_PIN_NONE, 42, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_board.display,
+    },
+    {
+        .name = "keyboard", .compatible = "kbd-i2c", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE,
+                      PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_board.keyboard,
+    },
+    {
+        .name = "touch", .compatible = "gt911", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {17, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE,
+                      PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_board.touch,
+    },
+    {
+        .name = "battery", .compatible = "battery-adc", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {4, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_battery_cfg,
+    },
+    {
+        .name = "kbd-backlight", .compatible = "kbd-backlight", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_kbd_light_cfg,
+    },
+    {
+        .name = "kbdraw", .compatible = "kbd-raw", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_kbd_raw_cfg,
+    },
+    {
+        .name = "gps0", .compatible = "gnss-nmea", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {43, 44, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_gps_cfg,
+    },
+    {
+        .name = "sd0", .compatible = "sd-spi", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {39, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_sd_cfg,
+    },
+    {
+        .name = "lora0", .compatible = "lora-sx126x", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {9, 13, 45, PURR_PIN_NONE, PURR_PIN_NONE, PURR_PIN_NONE},
+        .cfg = &s_lora_cfg,
+        .defer = PURR_DEFER_NET,        /* the radio binds after Wi-Fi has settled: both share the owner's service, and bringing them up together was too much at start */
+    },
+    {
+        .name = "trackball", .compatible = "trackball-gpio", .priority = PURR_PRI_OPTIONAL,
+        .extra_pins = {3, 15, 1, 2, 0, PURR_PIN_NONE},
+        .cfg = &s_trackball_cfg,
+    },
 };
 
 const purr_board_t *purr_board(void)
 {
+    if (s_board.devices == NULL) {
+        s_board.devices = s_devices;
+        s_board.device_count = sizeof(s_devices) / sizeof(s_devices[0]);
+    }
     return &s_board;
 }

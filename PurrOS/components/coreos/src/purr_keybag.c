@@ -81,13 +81,22 @@ int purr_role_may_sign(uint8_t role, uint8_t image_type, uint8_t subtype)
         case PURR_MOD_COREOS:
         case PURR_MOD_BOOTPKG:
         case PURR_MOD_LOADER:
+        case PURR_MOD_BOOTLOADER:
             return role == PURR_ROLE_BOOT;
+        case PURR_MOD_UIASSETS:
+            return role == PURR_ROLE_BOOT || role == PURR_ROLE_SYSTEM;       /* pictures, not code: the release's system key signs them, and so does the boot key a dev server uses */
         case PURR_MOD_APPMANAGER:
         case PURR_MOD_RUNTIME:
         case PURR_MOD_DEVBUNDLE:
             return role == PURR_ROLE_SYSTEM;
         case PURR_MOD_DRIVER:
             return role == PURR_ROLE_SYSTEM || role == PURR_ROLE_VENDOR ||
+                   role == PURR_ROLE_DEVELOPER || role == PURR_ROLE_OWNER;
+        case PURR_MOD_SHELL:
+            /* A shell is native code that runs in the kernel and owns the whole screen, so it may be signed by the same roles as a driver (the project's
+             * system key, a vendor, the developer key, the device owner's own key) and by the boot key a dev server uses. Which of those keys a device
+             * trusts at all is the key bag's business: a locked device's bag holds the project's keys only (plan7.md, the shell trust rules). */
+            return role == PURR_ROLE_BOOT || role == PURR_ROLE_SYSTEM || role == PURR_ROLE_VENDOR ||
                    role == PURR_ROLE_DEVELOPER || role == PURR_ROLE_OWNER;
         default:
             return 0;

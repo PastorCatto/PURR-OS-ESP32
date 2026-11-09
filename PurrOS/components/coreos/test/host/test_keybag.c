@@ -96,7 +96,24 @@ static void test_roles(void)
     CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_COREOS));
     CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_BOOTPKG));
     CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_LOADER));
+    CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_BOOTLOADER));
+    CHECK(!purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_BOOTLOADER));       /* only the boot key may sign a bootloader */
+    CHECK(!purr_role_may_sign(PURR_ROLE_DEVELOPER, PURR_IMG_MODULE, PURR_MOD_BOOTLOADER));
+    CHECK(!purr_role_may_sign(PURR_ROLE_VENDOR, PURR_IMG_MODULE, PURR_MOD_BOOTLOADER));
+    CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_UIASSETS));                /* an icon pack: the boot key or the system key */
+    CHECK(purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_UIASSETS));
+    CHECK(!purr_role_may_sign(PURR_ROLE_DEVELOPER, PURR_IMG_MODULE, PURR_MOD_UIASSETS));
+    CHECK(!purr_role_may_sign(PURR_ROLE_VENDOR, PURR_IMG_MODULE, PURR_MOD_UIASSETS));
+    CHECK(!purr_role_may_sign(PURR_ROLE_OWNER, PURR_IMG_MODULE, PURR_MOD_UIASSETS));
     CHECK(!purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_KERNEL));
+    /* a shell is native code in the kernel: signed like a driver, plus the boot key a dev server uses; never by no role at all */
+    CHECK(purr_role_may_sign(PURR_ROLE_BOOT, PURR_IMG_MODULE, PURR_MOD_SHELL));
+    CHECK(purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_SHELL));
+    CHECK(purr_role_may_sign(PURR_ROLE_OWNER, PURR_IMG_MODULE, PURR_MOD_SHELL));
+    CHECK(purr_role_may_sign(PURR_ROLE_DEVELOPER, PURR_IMG_MODULE, PURR_MOD_SHELL));
+    CHECK(purr_role_may_sign(PURR_ROLE_VENDOR, PURR_IMG_MODULE, PURR_MOD_SHELL));
+    CHECK(!purr_role_may_sign(PURR_ROLE_NONE, PURR_IMG_MODULE, PURR_MOD_SHELL));
+    CHECK(!purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_APP + 100, PURR_MOD_SHELL));
     CHECK(purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_APPMANAGER));
     CHECK(purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_RUNTIME));
     CHECK(purr_role_may_sign(PURR_ROLE_SYSTEM, PURR_IMG_MODULE, PURR_MOD_DEVBUNDLE));

@@ -1,0 +1,16 @@
+# Name,   Type, SubType, Offset,  Size
+# Waveshare ESP32-S3-ePaper-1.54: 8 MB flash, in the shape of flash map v2 (plan1.md, tdeck_plus.csv): only the kernel, the recovery loader and KittenOS
+# have slots of their own, besides what is read without a file system (nvs, purrcfg, phy_init, bootpkg, netrec). Everything else -- the picture packs, themes,
+# shells, apps, drivers and modules -- is a file in LittleFS (`root`), which runs from 0x461000 to the end of the 8 MB flash (0x39F000 bytes, about 3.6 MiB).
+# Each slot is 256 KB larger than it was before (the same step the T-Deck took): kittenos 1.375 MB, kernel 1.5 MB, loader 1.375 MB. Measured on 2026-11-08: the
+# recovery (KittenOS) image is 1.19 MB and the loader 1.13 MB; the full image does not link for this board yet (it has no UI stack), so the kernel slot is the old
+# size plus the same 256 KB, not a measurement. Changing this table is not an OTA: it needs a cable flash and a full erase of root (its start moved from 0x3A1000).
+nvs,      data, nvs,     0xB000,   0x4000
+purrcfg,  data, 0x40,    0xF000,   0x2000
+phy_init, data, phy,     0x11000,  0x1000
+bootpkg,  data, 0x40,    0x12000,  0xE000
+kittenos, app,  factory, 0x20000,  0x160000
+kernel,   app,  ota_0,   0x180000, 0x180000
+loader,   app,  test,    0x300000, 0x160000
+netrec,   data, 0x41,    0x460000, 0x1000
+root,     data, 0x83,    0x461000, 0x39F000
