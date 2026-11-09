@@ -877,6 +877,39 @@ def handle(state, method, route, q, body):
             activity.record(ws, "image", name, "system", name, "built, %d MB" % (r["bytes"] >> 20))
             return {"ok": True, "image": r["image"], "delivery": r["delivery"], "bytes": r["bytes"], "steps": r["steps"], "fit": r["fit"], "versions": r["versions"], "artifacts": [r["image"]]}
         return {"job": state.jobs.start("Building the system", work)}
+    if route == "system/testable":
+        s = systemmod.load(ws, q.get("name"))
+        ok, why = emulator.available(s["board"])
+        img = os.path.join(ws.builds, "system-" + s["name"], "%s-%s.img" % (s["name"], s["board"]))
+        if ok and not os.path.isfile(img):
+            ok, why = False, "Build the system first: there is no image to test yet."
+        return {"available": ok, "why": why, "busy": state.emu["busy"], "image": img if os.path.isfile(img) else ""}
+    if route == "system/test":
+        name = body.get("name")
+        s = systemmod.load(ws, name)
+        ok, why = emulator.available(s["board"])
+        img = os.path.join(ws.builds, "system-" + name, "%s-%s.img" % (name, s["board"]))
+        if not ok:
+            raise ValueError(why)
+        if not os.path.isfile(img):
+            raise ValueError("Build the system first: there is no image to test yet.")
+        if state.emu["busy"] or (state.emu["proc"] is not None and state.emu["proc"].poll() is None):
+            raise ValueError("The emulator is already busy. Close its window, or wait, first.")
+        shots = tempfile.mkdtemp(prefix="purr-vmtest-", dir=state.uploads)
+        state.emu["busy"], state.emu["shots_dir"] = True, shots
+        seconds = max(30, min(300, int(body.get("seconds") or 120)))
+        activity.record(ws, "emulator", "test %s" % name, "system", name, "in a virtual device")
+
+        def work(say):
+            try:
+                r = emulator.test_image(img, s["board"], seconds=seconds, workdir=shots, on_check=lambda i, st, t: say("@@test|%s|%s|%s" % (i, st, t)), on_line=say)
+            except emulator.EmulatorError as e:
+                say("Not this time: %s" % e)
+                return {"ok": False, "error": str(e), "checks": []}
+            finally:
+                state.emu["busy"] = False
+            return {"ok": r["ok"], "checks": r["checks"], "stage": r["stage"], "seconds": r["seconds"], "shots": [os.path.basename(x) for x in r["shots"]], "tail": r["tail"]}
+        return {"job": state.jobs.start("Testing the image in a virtual device", work)}
     if route == "system/address":
         return {"address": systemmod.lan_address(), "port": devserver.DEFAULT_PORT}
 

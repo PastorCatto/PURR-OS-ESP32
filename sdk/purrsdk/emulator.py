@@ -16,6 +16,7 @@ The program does no waiting of its own between commands, so the caller paces the
 """
 
 import os
+import re
 import shutil
 import signal
 import socket
@@ -403,3 +404,124 @@ def run_app(cat_file, image=None, board=DEFAULT_BOARD, shots=None, port=47801, h
         return {"ok": True, "shots": kept}
     finally:
         srv.stop()
+
+
+# ---------------------------------------------------------------------------------------------------- test a built image
+# What a built image does when it starts in the emulator, read from its serial log and its screen. The stages, from the log lines the firmware prints (checked on a real
+# build of 1.1 in the emulator): the bootloader, the boot package it verifies, the system, then wherever the system gets to.
+EMU_BOARDS = {"tdeck_plus": "t-deck-plus", "tdeck": "t-deck-plus"}      # the T-Deck has the same screen and keys; the e-paper board is not emulated
+STAGES = (("android-home:", "the home screen"), ("oobe", "the setup wizard"), ("wifi_init", "the recovery loader, starting the network (a blank device installs the rest from the internet)"))
+CRASH = ("Guru Meditation Error", "Backtrace:", "abort() was called", "assert failed", "panic'ed", "Rebooting...")
+
+
+def emulator_board_for(board):
+    """The emulator's board file for a PURR board, or None when this board cannot be emulated."""
+    return EMU_BOARDS.get(board)
+
+
+def clean_serial(text):
+    """The serial dump without ANSI colours and without the duplicate copy the USB Serial/JTAG port prints (the dump has one section per port)."""
+    text = re.sub(r"--- USB Serial/JTAG ---\n.*?(?=--- UART0 ---|\Z)", "", text, flags=re.S)
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def lit_fraction(png_path):
+    """How much of a screenshot is not black (0 to 1). A screen with nothing on it is the sign of a board that never drew."""
+    from . import uimaker
+    w, h, rgba = uimaker.read_png(png_path)
+    n = w * h
+    lit = sum(1 for i in range(n) if rgba[i * 4 + 3] and (rgba[i * 4] > 24 or rgba[i * 4 + 1] > 24 or rgba[i * 4 + 2] > 24))
+    return lit / float(n or 1)
+
+
+def available(board="tdeck_plus"):
+    """(True, "") when a built image for this board can be tested here, else (False, why in plain words)."""
+    if os.name == "nt":
+        return False, "The emulator is not available on Windows yet (the patched QEMU has no Windows build)."
+    if emulator_board_for(board) is None:
+        return False, "The %s board is not emulated yet." % board
+    em = find()
+    if em is None or not em["headless"]:
+        return False, "There is no emulator in this kit. A kit built with the emulator has an emulator/ folder; set PURR_EMULATOR_DIR to use another."
+    return True, ""
+
+
+def test_image(image, board="tdeck_plus", seconds=120, workdir=None, on_check=None, on_line=print, poll=4):
+    """Start a built flash image in the emulator without a window and see what it does. Never touches the image (the emulator works on a copy).
+    Returns {"ok", "checks": [{"id", "status", "text"}], "stage", "shots": [png paths], "seconds", "tail": [last lines of the log]}; ok is False only when a check failed
+    (a crash, a boot loop, a boot package that did not verify, a board that never started)."""
+    ok_, why = available(board)
+    if not ok_:
+        raise EmulatorError(why)
+    if not os.path.isfile(image):
+        raise EmulatorError("I cannot find the image %s." % image)
+    work = workdir or tempfile.mkdtemp(prefix="purr-test-")
+    checks = []
+
+    def check(i, status, text):
+        checks.append({"id": i, "status": status, "text": text})
+        if on_check:
+            on_check(i, status, text)
+
+    t0 = time.time()
+    shots, lit, stage, stage_at, serial = [], [], None, None, ""
+    with Headless(image, emulator_board_for(board), work, seconds=seconds + 90) as h:
+        on_line("The emulator is starting the image (the board takes about a minute to settle).")
+        n = 0
+        while time.time() - t0 < seconds:
+            time.sleep(poll)
+            if not h.running():
+                break
+            serial = clean_serial(h.serial(timeout=20))
+            for marker, label in STAGES:                      # the list is ordered from the furthest stage to the earliest: the first one in the log is where it got to
+                if marker in serial:
+                    if stage != label:
+                        stage, stage_at = label, time.time()
+                    break
+            screen_off = "screen off" in serial
+            if (n == 0 or time.time() - t0 > 12 * (n + 1)) and not screen_off and n < 4 and "purros: PURR OS starting" in serial:
+                try:
+                    p = h.shot("t%d" % n)
+                    shots.append(p)
+                    lit.append(lit_fraction(p))
+                    n += 1
+                except EmulatorError:
+                    pass
+            if stage and stage_at and time.time() - stage_at > 10 and shots:
+                break
+            if any(c in serial for c in CRASH):
+                break
+        serial = clean_serial(h.serial(timeout=30)) or serial
+        alive = h.running()
+    took = time.time() - t0
+
+    boots = serial.count("purr_boot: PURR OS bootloader")
+    if boots >= 1:
+        check("start", "ok", "The bootloader started.")
+    else:
+        check("start", "bad", "The board never printed the bootloader's banner: nothing booted from this image.")
+    m = re.search(r"bootpkg ([\w.-]+) loaded \(key id (\d+), ([^)]*)\)", serial)
+    if m and m.group(3).strip() == "ok":
+        check("bootpkg", "ok", "The boot package %s verified (signed by key %s)." % (m.group(1), m.group(2)))
+    elif m:
+        check("bootpkg", "bad", "The boot package did not verify: %s." % m.group(0))
+    else:
+        check("bootpkg", "warn" if boots else "bad", "The boot package's check did not show in the log.")
+    crashed = [c for c in CRASH if c in serial and c != "Rebooting..."]
+    if crashed:
+        check("crash", "bad", "The board crashed: its log says %r." % crashed[0])
+    elif boots > 1:
+        check("crash", "bad", "The board restarted %d times in %d seconds: a boot loop." % (boots, took))
+    else:
+        check("crash", "ok", "No crash and no restart.")
+    if "purros: PURR OS starting" in serial:
+        check("system", "ok", "The system started.")
+    else:
+        check("system", "bad" if boots else "warn", "The system never announced itself after the boot package.")
+    if lit:
+        best = max(lit)
+        check("screen", "ok" if best > 0.01 else "bad", "The screen shows something (%d%% of it lit)." % round(best * 100) if best > 0.01 else "The screen stayed black.")
+    else:
+        check("screen", "warn", "No picture of the screen could be taken.")
+    check("stage", "ok" if stage else "warn", ("It got as far as " + stage + ".") if stage else "It started but did not reach the home screen, the setup wizard or the recovery loader within %d seconds." % seconds)
+    return {"ok": not any(c["status"] == "bad" for c in checks), "checks": checks, "stage": stage or "", "shots": shots, "seconds": round(took), "tail": serial.strip().split("\n")[-30:], "alive": alive}

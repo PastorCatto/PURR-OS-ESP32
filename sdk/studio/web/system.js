@@ -129,12 +129,38 @@ pages.system = {
         try { const a = await api.get("system/address"); const sv = await api.post("server/start", { folder: r.delivery, port: a.port, name: name }); airText.textContent = (sv.ok === false ? sv.text : "Serving on " + a.address + " : " + a.port + ". On the device: Settings, Developer options, Developer Portal, and let it find this computer.");
           airBtn.textContent = "serving"; } catch (e) { say(e); } } });
       grid.appendChild(h("div", { class: "bx-deliver", style: { background: "#0050ef" } }, h("span", { class: "bx-dt", text: "over the air" }), airText, h("span", { style: { flexGrow: 1 } }), airBtn));
-      /* emulator */
+      /* in a virtual device: open it, or test the built image automatically */
       const emuText = h("span", { class: "bx-card-s", text: "Checking for the emulator…" });
-      const emuBtn = h("button", { class: "bx-light", text: "open the emulator", onclick: () => go("run") });
-      api.get("emulator").then(s => { emuText.textContent = s.available ? "Emulator found, VM image found. It runs a copy; nothing is written. Starting takes about a minute." : s.why; emuBtn.disabled = !s.available; }).catch(() => { });
-      grid.appendChild(h("div", { class: "bx-deliver", style: { background: "#aa00ff" } }, h("span", { class: "bx-dt", text: "in the emulator" }), emuText, h("span", { style: { flexGrow: 1 } }), emuBtn));
-      body.appendChild(grid);
+      const results = h("div", { class: "bx-testres" });
+      const testBtn = h("button", { class: "bx-light", text: "test it automatically", onclick: () => runTest() });
+      const emuBtn = h("button", { class: "bx-ghost-w", text: "open the emulator window", onclick: () => go("run") });
+      api.get("system/testable", { name }).then(s => { emuText.textContent = s.available ? "Start the image you just built in a virtual device and check that it boots: the bootloader, the signed boot package, the system, no crash, a screen that draws. Nothing is written to your image; it takes about a minute." : s.why; testBtn.disabled = !s.available; emuBtn.disabled = !s.available; }).catch(() => { });
+      grid.appendChild(h("div", { class: "bx-deliver", style: { background: "#aa00ff" } }, h("span", { class: "bx-dt", text: "in a virtual device" }), emuText, h("span", { style: { flexGrow: 1 } }), testBtn, emuBtn));
+      async function runTest() {
+        testBtn.disabled = true; testBtn.textContent = "testing…"; clear(results);
+        const order = [["start", "The bootloader starts"], ["bootpkg", "The boot package verifies"], ["system", "The system starts"], ["crash", "No crash, no restart"], ["screen", "The screen draws"], ["stage", "It gets somewhere"]];
+        const rows = {}; order.forEach(([id, label]) => { rows[id] = h("div", { class: "bx-job" }, h("span", { class: "bx-jicon", text: "○" }), h("span", { style: { flexGrow: 1 } }, h("span", { text: label }), h("span", { class: "dim small", style: { display: "block" }, text: "waiting" }))); results.appendChild(rows[id]); });
+        const shots = h("div", { class: "row", style: { flexWrap: "wrap", gap: "10px", marginTop: "10px" } }), verdict = h("div", { class: "bx-verdict", hidden: true });
+        results.appendChild(shots); results.appendChild(verdict);
+        const paintRow = (id, st, text) => { const r = rows[id]; if (!r) return; const ic = $(".bx-jicon", r); ic.className = "bx-jicon " + ({ ok: "done", warn: "skip", bad: "fail" }[st] || ""); ic.textContent = { ok: "✓", warn: "!", bad: "×" }[st] || "○"; $(".small", r).textContent = text; };
+        try {
+          const { job } = await api.post("system/test", { name });
+          let since = 0, res = null;
+          for (;;) {
+            const j = await api.get("job", { id: job, since }); since = j.next;
+            j.lines.forEach(l => { if (l.startsWith("@@test|")) { const [, id, st, ...t] = l.split("|"); paintRow(id, st, t.join("|")); } });
+            if (j.done) { res = j.result; break; }
+            await new Promise(r => setTimeout(r, 1500));
+          }
+          if (res && res.checks) res.checks.forEach(c => paintRow(c.id, c.status, c.text));
+          verdict.hidden = false;
+          if (res && res.ok) { verdict.style.background = "#60a917"; verdict.textContent = "It boots. " + (res.stage ? "It got as far as " + res.stage + "." : "") + " (" + res.seconds + " s)"; }
+          else { verdict.style.background = "#e51400"; verdict.textContent = res && res.error ? res.error : "It did not boot cleanly. The lines marked × say what went wrong."; }
+          for (const n of (res && res.shots) || []) { try { const sh = await api.get("emulator/shot", { name: n }); shots.appendChild(h("figure", { style: { margin: 0 } }, h("img", { src: sh.data, alt: n, style: { width: "320px", imageRendering: "pixelated", border: "1px solid var(--line)" } }), h("figcaption", { class: "dim small", text: n }))); } catch (e) { /* no picture */ } }
+        } catch (e) { say(e); }
+        testBtn.disabled = false; testBtn.textContent = "test it again";
+      }
+      body.appendChild(grid); body.appendChild(results);
       body.appendChild(h("p", { class: "dim", style: { marginTop: "14px", lineHeight: 1.5 }, text: "The image is " + r.image + ". The delivery folder is " + r.delivery + (S.O.system.ui ? ", with your UI in ui/themes/" + S.O.system.ui + " to copy to the device or the SD card." : ".") }));
       body.appendChild(h("div", { class: "row", style: { marginTop: "6px" } }, h("button", { class: "bx-ghost", text: "show the image in its folder", onclick: () => api.post("reveal", { path: r.image }).catch(say) })));
     }

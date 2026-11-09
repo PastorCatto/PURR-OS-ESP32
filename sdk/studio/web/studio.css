@@ -287,3 +287,8 @@ textarea { font-family: var(--mono); font-size: 13px; line-height: 1.45; resize:
 .bx-dt { font-size: 34px; font-weight: 200; }
 .bx-light { min-height: 52px; background: #fff; border: 0; color: #111; font-size: 17px; font-weight: 600; cursor: pointer; }
 .bx-light:disabled { opacity: .55; }
+
+.bx-ghost-w { min-height: 44px; background: transparent; border: 2px solid #fff; color: #fff; font-size: 15px; cursor: pointer; }
+.bx-ghost-w:disabled { opacity: .55; }
+.bx-testres { margin-top: 18px; max-width: 760px; display: flex; flex-direction: column; }
+.bx-verdict { margin-top: 12px; padding: 14px 18px; color: #fff; font-size: 17px; font-weight: 300; }
