@@ -62,6 +62,7 @@ async function answer(r) {
 const api = {
   get: (route, params) => fetch("/api/" + route + (params ? "?" + new URLSearchParams(params) : "")).then(answer),
   post: (route, body) => fetch("/api/" + route, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) }).then(answer),
+  uploadZip: (file) => fetch("/api/ui/upload?kind=zip", { method: "POST", body: file }).then(answer),
   upload: (file) => fetch("/api/inspect/upload?name=" + encodeURIComponent(file.name), { method: "POST", body: file }).then(answer),
 };
 
@@ -184,6 +185,7 @@ pages.home = {
     T("c6", "configure", "settings", "system.conf, apps.conf, boot options.", () => go("configure"));
     T("c7", "docs", "docs", "How it all works, kindly explained.", () => go("docs"));
     T("c8", "doctor", "doctor", "Is the kit whole?", () => go("doctor"));
+    T("c6 wide", "make a UI", "brand", "Draw a theme from one file, or drop in a SquareLine export.", () => go("ui"));
     T("c2 wide", "device image", "release", "One whole image for a device, ready to flash. No terminal.", () => go("image"));
     T("c3", "flash", "release", "Write an image to a board over USB.", () => go("flash"));
     T("c4", "run", "run", "Try an app in the emulator, no device needed.", () => go("run"));

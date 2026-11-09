@@ -399,6 +399,102 @@ pages.flash = {
   },
 };
 
+/* The UI maker: a theme drawn from ui.toml, adapted to the shell, with your own pictures (or a SquareLine Studio export) winning (purrsdk/uimaker.py). */
+pages.ui = {
+  title: "make a UI",
+  async render(el, openName) {
+    const body = h("div");
+    el.appendChild(body);
+    const show = async (name) => { clear(body); name ? await editor(body, name, show) : await start(body, show); };
+    await show(typeof openName === "string" ? openName : null);
+  },
+};
+
+async function start(root, show) {
+  const list = (await api.get("ui/projects")).projects;
+  root.appendChild(h("p", { class: "dim", style: { maxWidth: "66ch" }, text: "A UI is a theme: the pictures a shell draws (icons, battery and signal marks, wallpaper) and a few colours. Describe the look in one small file, ui.toml, and Studio draws every picture at the size the shell wants. Draw any of them yourself, or drop in a SquareLine Studio export, and yours win." }));
+  if (list.length) {
+    root.appendChild(h("h3", { text: "Your UIs" }));
+    list.forEach(p => root.appendChild(h("div", { class: "item", onclick: () => show(p.name) }, h("span", { class: "badge", text: "ui" }), h("span", {}, h("div", { text: p.name }), h("div", { class: "sub", text: p.version })))));
+  }
+  root.appendChild(h("h3", { text: "Start a new one" }));
+  const name = h("input", { type: "text", placeholder: "moonlit", "aria-label": "Name" });
+  const shell = h("select", {}, h("option", { value: "android", text: "Android style (Froyo)" }), h("option", { value: "w10m", text: "Windows style" }));
+  const board = h("select", {}, ["tdeck_plus", "tdeck"].map(b => h("option", { value: b, text: b })));
+  const how = h("select", {}, h("option", { value: "fresh", text: "a fresh look I will describe" }), h("option", { value: "sq", text: "a SquareLine Studio export" }));
+  const zip = h("input", { type: "file", accept: ".zip", "aria-label": "SquareLine export (zip)" });
+  const path = h("input", { type: "text", placeholder: "or the folder of the export or project", "aria-label": "SquareLine folder" });
+  const sqBox = h("div", { hidden: true }, field("The export", zip, "In SquareLine Studio: Export, Export UI Files. Zip that folder (or the whole project folder) and drop the zip here."), path);
+  how.onchange = () => { sqBox.hidden = how.value !== "sq"; };
+  const go_ = btn("start", async () => {
+    go_.disabled = true;
+    try {
+      let src = path.value.trim();
+      if (how.value === "sq" && zip.files[0]) src = (await api.uploadZip(zip.files[0])).path;
+      if (how.value === "sq" && !src) throw new Error("Choose the export's zip, or type its folder.");
+      const r = await api.post("ui/new", { name: name.value, shell: shell.value, board: board.value, squareline: how.value === "sq" ? src : null });
+      if (r.import) toast("Imported " + r.import.pictures.length + " picture(s).");
+      await show(r.name);
+    } catch (e) { say(e); }
+    go_.disabled = false;
+  }, "primary");
+  root.appendChild(h("div", { style: { maxWidth: "620px" } }, field("Name", name, "It becomes the folder /ui/themes/<name> on the device."), field("Which shell?", shell), field("Which device?", board), field("Start from", how), sqBox, go_));
+}
+
+async function editor(root, name, show) {
+  const info = await api.get("ui/project", { name });
+  const ta = h("textarea", { spellcheck: false, rows: 22, "aria-label": "ui.toml", style: { width: "100%", fontFamily: "var(--mono)", fontSize: "13px", lineHeight: "1.5" } });
+  ta.value = info.text;
+  const problems = h("div"), preview = h("div", { class: "row", style: { flexWrap: "wrap", gap: "10px" } }), mapBox = h("div"), log = h("div", { class: "log", hidden: true }), result = h("div");
+  async function refresh() {
+    clear(problems); clear(preview);
+    try {
+      const p = await api.post("ui/preview", { text: ta.value });
+      (p.problems || []).forEach(t => problems.appendChild(h("p", { class: "dim", style: { color: "var(--warn)" }, text: t })));
+      p.pictures.forEach(x => preview.appendChild(h("figure", { style: { margin: 0, textAlign: "center" } },
+        h("div", { style: { padding: "8px", background: p.colours.background } }, h("img", { src: x.data, alt: x.name, style: { width: Math.max(32, x.w * 2) + "px", imageRendering: "pixelated" } })),
+        h("figcaption", { class: "dim mono", style: { fontSize: "11px" }, text: x.name }))));
+    } catch (e) { problems.appendChild(h("p", { class: "dim", text: e.message || String(e) })); }
+  }
+  async function save() { try { const r = await api.post("ui/save", { name, text: ta.value }); (r.problems || []).forEach(t => toast(t)); await refresh(); } catch (e) { say(e); } }
+  function mapping() {
+    clear(mapBox);
+    if (!info.pictures.length) return;
+    mapBox.appendChild(h("h3", { text: "Pictures brought in" }));
+    mapBox.appendChild(h("p", { class: "dim", style: { maxWidth: "62ch" }, text: "Choose which slot each picture is for. A picture is resized to its slot's size. 'none' leaves it unused." }));
+    info.pictures.forEach(pic => {
+      const sel = h("select", {}, h("option", { value: "", text: "none" }), info.slots.map(s => h("option", { value: s, text: s, selected: s === (pic.slot || pic.guess) })));
+      let was = pic.slot;
+      sel.onchange = async () => {
+        try { const r = await api.post("ui/map", { name, slot: sel.value, file: sel.value ? pic.file : null, old_slot: was }); was = sel.value || null; ta.value = r.text; await refresh(); } catch (e) { say(e); }
+      };
+      mapBox.appendChild(h("div", { class: "item", style: { cursor: "default" } }, h("span", { class: "badge", text: pic.id }), h("span", { class: "sub", style: { flex: "1 1 auto" }, text: pic.file }), sel));
+    });
+  }
+  const build = btn("make the UI", async () => {
+    clear(log); clear(result); log.hidden = false; build.disabled = true;
+    try {
+      await api.post("ui/save", { name, text: ta.value });
+      const { job } = await api.post("ui/make", { name });
+      const r = await watchJob(job, log);
+      if (r.ok) {
+        result.appendChild(h("div", { class: "check" }, h("div", { class: "sq ok", text: "✓" }), h("div", {}, h("div", { class: "n", text: "Your UI is ready." }),
+          h("div", { class: "t", text: r.count + " pictures: " + r.generated + " drawn, " + r.yours.length + " yours, " + r.resized.length + " resized · " + (r.bytes / 1024).toFixed(0) + " KB" }), h("div", { class: "t mono", text: r.out }))));
+        result.appendChild(h("p", { class: "dim", style: { maxWidth: "66ch" }, text: "Copy that folder to /ui/themes/" + name + " on the device (or the SD card's ui/themes folder), then choose it in Settings. Studio checked the pack the way the device will." }));
+        r.checks.filter(c => c.status !== "ok").forEach(c => result.appendChild(h("p", { class: "dim", text: c.name + ": " + c.text })));
+      } else toast("That did not work. The lines say why.");
+    } catch (e) { say(e); }
+    build.disabled = false;
+  }, "primary");
+  root.appendChild(h("div", { class: "row", style: { marginBottom: "12px" } }, btn("← all UIs", () => show(null)), h("span", { class: "badge", text: info.shell }), h("strong", { text: name })));
+  root.appendChild(h("div", { class: "cols" },
+    h("div", {}, h("h3", { text: "ui.toml" }), ta, h("div", { class: "row", style: { marginTop: "8px" } }, btn("save and preview", save), build), problems),
+    h("div", {}, h("h3", { text: "Preview" }), preview, mapBox)));
+  root.appendChild(log); root.appendChild(result);
+  mapping();
+  await refresh();
+}
+
 /* The image maker: one whole flash image for a device, from the signed parts. No terminal, no compiler (purrsdk/image.py). */
 function mb(n) { return n == null ? "" : (n / 1048576).toFixed(2) + " MB"; }
 pages.image = {

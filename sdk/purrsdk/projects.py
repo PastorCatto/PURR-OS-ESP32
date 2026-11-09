@@ -215,6 +215,17 @@ def build(ws, path, board="tdeck_plus", key=None, key_id=0, password=None, on_li
             notes.append("Not signed yet: choose a key to sign it. A device in developer mode runs unsigned apps from your own folder.")
         return finish(True)
 
+    if kind == "theme" and os.path.isfile(os.path.join(path, "ui.toml")):          # a UI project: drawn from ui.toml, your pictures first (uimaker.py)
+        from . import uimaker
+        r = uimaker.compose(path, on_line=say)
+        for t in r.get("problems", []) + r.get("notes", []):
+            say(t)
+        if not r["ok"]:
+            return finish(False)
+        artifacts += [os.path.join(r["out"], "theme.conf"), r["pack"]]
+        notes.append("Copy the folder %s to /ui/themes/%s on the device (or the SD card's ui/themes folder). %d picture(s): %d drawn, %d yours, %d resized." % (r["out"], name, r["count"], len(r["generated"]), len(r["yours"]), len(r["resized"])))
+        return finish(True)
+
     if kind == "theme":
         conf_path = os.path.join(path, "theme.conf")
         if not os.path.isfile(conf_path):

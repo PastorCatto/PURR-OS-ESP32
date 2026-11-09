@@ -23,7 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 
 from purrsdk import (__version__, boards, brand, configs, devserver, doctor, emulator, flash, image as imagemaker, inspector, keybag, keys, minitoml, projects, repo as repo_mod,  # noqa: E402
-                     release, workspace)
+                     release, uimaker, workspace)
 
 WEB = os.path.join(HERE, "web")
 MAX_UPLOAD = 64 * 1024 * 1024
@@ -142,8 +142,8 @@ def make_handler(state):
                 return _json(self, {"error": "That is bigger than I can take in one go (%d MB)." % (MAX_UPLOAD >> 20)}, 413)
             raw = self.rfile.read(length) if length else b""
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
-            if url.path == "/api/inspect/upload":
-                return self._api("POST", "inspect/upload", q, raw)
+            if url.path in ("/api/inspect/upload", "/api/ui/upload"):
+                return self._api("POST", url.path[5:], q, raw)
             try:
                 body = json.loads(raw.decode("utf-8")) if raw else {}
             except ValueError:
@@ -606,6 +606,90 @@ def handle(state, method, route, q, body):
             say("[ok] Your flash image is ready.")
             return {"ok": True, "out": r["out"], "bytes": r["bytes"], "sha256": r["sha256"], "notes": r["notes"], "fit": r["fit"], "artifacts": [r["out"]]}
         return {"job": state.jobs.start("Making the flash image", work)}
+
+    # ---- UI maker (a theme from ui.toml; a SquareLine Studio export can be dropped in)
+    if route == "ui/starter":
+        return {"text": uimaker.starter(q.get("name") or "my-ui", q.get("shell") or "android", q.get("board") or "tdeck_plus")}
+    if route == "ui/upload":
+        os.makedirs(state.uploads, exist_ok=True)
+        ext = ".zip" if q.get("kind") == "zip" else ".bin"
+        path = os.path.join(state.uploads, "squareline-%s%s" % (secrets.token_hex(4), ext))
+        with open(path, "wb") as fh:
+            fh.write(body or b"")
+        return {"path": path, "bytes": len(body or b"")}
+    if route == "ui/projects":
+        ws.ensure()
+        return {"projects": [p for p in projects.list_projects(ws) if p["kind"] == "theme" and os.path.isfile(os.path.join(p["path"], "ui.toml"))]}
+    if route == "ui/new":
+        ws.ensure()
+        name = (body.get("name") or "").strip()
+        try:
+            r = uimaker.new_project(ws, name, body.get("shell") or "android", body.get("board") or "tdeck_plus", squareline=body.get("squareline") or None, on_line=lambda l: None)
+        except projects.ProjectError as e:
+            raise ValueError(str(e))
+        return {"name": name, "path": r["path"], "import": r["import"]}
+    if route == "ui/project":
+        root = state.safe_project(q.get("name"))
+        toml = os.path.join(root, "ui.toml")
+        if not os.path.isfile(toml):
+            raise ValueError("That project has no ui.toml.")
+        cfg, problems = uimaker.load_template(toml)
+        pics = []
+        imp = os.path.join(root, "imported")
+        if os.path.isdir(imp) and cfg:
+            for f in sorted(os.listdir(imp)):
+                if f.lower().endswith(".png"):
+                    pics.append({"id": f[:-4], "file": "imported/" + f, "slot": next((k for k, v in cfg["pictures"].items() if v == "imported/" + f), None), "guess": uimaker.guess_slot(f[:-4], cfg["shell"])})
+        return {"name": q.get("name"), "text": _read_text(toml), "problems": problems, "pictures": pics,
+                "slots": sorted(uimaker.wanted(cfg)) if cfg else [], "shell": cfg["shell"] if cfg else None}
+    if route == "ui/save":
+        root = state.safe_project(body.get("name"))
+        text = body.get("text") or ""
+        cfg, problems = uimaker.load_template(text)
+        with open(os.path.join(root, "ui.toml"), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return {"saved": True, "problems": problems}
+    if route == "ui/map":
+        root = state.safe_project(body.get("name"))
+        toml = os.path.join(root, "ui.toml")
+        text = uimaker.set_mapping(_read_text(toml), body.get("slot") or "", body.get("file") or None, body.get("old_slot") or None)
+        with open(toml, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        return {"text": text}
+    if route == "ui/preview":
+        cfg, problems = uimaker.load_template(body.get("text") or "")
+        if cfg is None or problems and not cfg.get("look"):
+            raise ValueError(" ".join(problems))
+        sample = {"android": ["fr_app", "fr_settings", "fr_folder", "fr_gallery", "fr_messaging", "st_b60", "st_bc3", "st_s3", "st_w4", "kb_menu", "kb_home", "kb_back"],
+                  "w10m": ["wp_settings", "wp_system", "wp_devices", "wp_network", "wp_personalization", "wp_apps", "wp_account", "wp_time", "wp_privacy", "wp_about", "wifi_icon", "brightness_ic"]}.get(cfg["shell"], [])
+        import base64
+        import io
+        out = []
+        want = uimaker.wanted(cfg)
+        for n in sample:
+            if n not in want:
+                continue
+            w, h = want[n]
+            rgba = uimaker.draw(n, w, h, cfg["look"])
+            tmp = os.path.join(state.uploads, "prev-%s.png" % secrets.token_hex(3))
+            uimaker.write_png(tmp, w, h, rgba)
+            with open(tmp, "rb") as fh:
+                out.append({"name": n, "w": w, "h": h, "data": "data:image/png;base64," + base64.b64encode(fh.read()).decode("ascii")})
+            os.remove(tmp)
+        look = cfg["look"]
+        return {"pictures": out, "problems": problems, "colours": {"accent": "#%02x%02x%02x" % look.accent, "background": "#%02x%02x%02x" % look.bg, "foreground": "#%02x%02x%02x" % look.fg}}
+    if route == "ui/make":
+        root = state.safe_project(body.get("name"))
+
+        def work(say):
+            r = uimaker.compose(root, on_line=say)
+            for t in r.get("problems", []) + r.get("notes", []):
+                say(t)
+            if not r["ok"]:
+                return {"ok": False}
+            say("[ok] Your UI is ready.")
+            return {"ok": True, "out": r["out"], "bytes": r["bytes"], "count": r["count"], "generated": len(r["generated"]), "yours": r["yours"], "resized": r["resized"], "checks": r["checks"], "artifacts": [r["pack"]]}
+        return {"job": state.jobs.start("Making the UI", work)}
 
     # ---- docs
     if route == "docs":

@@ -46,6 +46,10 @@ Gather the parts of a system into a folder a device can recover from, then hand 
 
 Edit the files that configure a device: `system.conf` (the settings), `apps.conf` (how apps run) and the boot trust block.
 
+## make a UI
+
+Describe a theme in one small file, `ui.toml`, and Studio draws every picture a shell asks for; your own pictures, or a SquareLine Studio export dropped in as a zip, win. See [17-making-a-ui.md](17-making-a-ui.md).
+
 ## device image
 
 One whole flash image for a device, from the signed parts, with no terminal: pick the device and the folder with the parts, check how each part fits its slot, press **make the image**, then flash it. See [16-device-image.md](16-device-image.md).

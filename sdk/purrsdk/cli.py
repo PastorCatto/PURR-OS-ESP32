@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, image, inspector, keys, minitoml, projects, release, repo, runner, ui, workspace
+from . import __version__, boards, brand, configs, doctor, emulator, flash, font, formats, image, inspector, keys, minitoml, projects, release, repo, runner, ui, uimaker, workspace
 
 TTY = sys.stdout.isatty()
 COL = {"ok": "92", "warn": "93", "bad": "91", "info": "96", "dim": "90"}
@@ -372,6 +372,30 @@ def cmd_font(a):
 
 
 def cmd_ui(a):
+    if a.action in ("new", "import", "make"):
+        ws = ws_of(a)
+        if a.action == "make":
+            path = a.target if os.path.isdir(a.target) else os.path.join(ws.projects, a.target)
+            r = uimaker.compose(path, on_line=lambda l: print("  " + l))
+            for t in r.get("problems", []):
+                print(paint("  " + t, "bad"))
+            for n in r.get("notes", []):
+                line("info", "", n)
+            if r["ok"]:
+                print(paint("Your UI is ready: ", "ok") + r["out"])
+                print("   %d picture(s): %d drawn, %d yours, %d resized. Copy the folder to /ui/themes/<name> on the device." % (r["count"], len(r["generated"]), len(r["yours"]), len(r["resized"])))
+            return 0 if r["ok"] else 1
+        try:
+            r = uimaker.new_project(ws, a.target, a.shell or "android", a.board, squareline=a.squareline if a.action == "import" else None, on_line=lambda l: print("  " + l))
+        except (projects.ProjectError, ValueError) as e:
+            print(paint("Not this time: ", "bad") + str(e))
+            return 1
+        print(paint("Started the UI project: ", "ok") + r["path"])
+        print("   Edit ui.toml, then `purr ui make %s`." % a.target)
+        if r["import"]:
+            for p_ in r["import"]["pictures"]:
+                line("ok" if p_["slot"] else "info", p_["id"], "%dx%d -> %s" % (p_["w"], p_["h"], p_["slot"] or "no slot matched: point a slot at imported/%s.png in ui.toml" % p_["id"]))
+        return 0
     if a.action == "pack":
         out = a.out or "pack.bin"
         try:
@@ -552,10 +576,12 @@ def build_parser():
     s.set_defaults(fn=cmd_font)
 
     s = sub.add_parser("ui", help="make a UI pack from a folder of PNGs, or check a pack or a theme folder the way the OS will")
-    s.add_argument("action", choices=("pack", "check"))
-    s.add_argument("target", help="for `pack`: the folder of PNGs; for `check`: a pack.bin or a theme folder")
+    s.add_argument("action", choices=("pack", "check", "new", "import", "make"))
+    s.add_argument("target", help="for `pack`: the folder of PNGs; for `check`: a pack.bin or a theme folder; for `new`, `import` and `make`: the UI project name")
+    s.add_argument("--squareline", help="for `import`: a SquareLine Studio export folder, project folder or .zip")
+    s.add_argument("--board", default="tdeck_plus", help="for `new` and `import`: the device the UI is for")
     s.add_argument("--out", help="for `pack`: the pack file (default pack.bin)")
-    s.add_argument("--shell", choices=ui.SHELLS, help="for `check`: this shell's picture names (UI/PACK-NAMES.md); a pack must have every required name, a theme folder may leave some out")
+    s.add_argument("--shell", choices=ui.SHELLS, help="for `new`/`import`: the shell the UI is for (default android). For `check`: this shell's picture names (UI/PACK-NAMES.md); a pack must have every required name, a theme folder may leave some out")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_ui)
 
