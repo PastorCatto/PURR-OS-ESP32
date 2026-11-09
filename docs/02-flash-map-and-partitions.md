@@ -7,7 +7,7 @@
 - The T-Deck Plus has 16 MB of flash. The layout is in one file: [PurrOS/partitions/tdeck_plus.csv](../PurrOS/partitions/tdeck_plus.csv). If any document disagrees with that file, the file is right.
 - The bootloader sits at 0x0 and may use 40 KB. The partition table is at 0xA000 (moved from 0x8000 on 2026-10-25).
 - Three app slots, all fixed size: `kittenos` 0x20000 (1.75 MB), `kernel` 0x1E0000 (2.125 MB), `loader` 0x400000 (1.75 MB). In flash map v2 each is 256 KB larger than it was up to 1.0.28, room to grow into. There is no OTA pair and no `otadata`.
-- **Flash map v2 (release 1.0.29).** Only those three slots, besides what is read without a file system (`nvs`, `purrcfg`, `phy_init`, `bootpkg`, `netrec`), have partitions of their own. Everything else (picture packs, themes, shells, apps, drivers, modules) is a file in `root` (LittleFS), which now runs from 0x5C1000 to the end of the flash: 0xA3F000 bytes, about 10.2 MiB (the three slots took 768 KB of the 5 MB the picture partition freed). The old 5 MB `ui_assets` partition is gone. This is **designed and written into the tables and tools, and has not yet run on a device**; the 1.0.28 and older layout is described under "The old layout" below.
+- **Flash map v2 (release 1.0.29).** Only those three slots, besides what is read without a file system (`nvs`, `purrcfg`, `phy_init`, `bootpkg`, `netrec`), have partitions of their own. Everything else (picture packs, themes, shells, apps, drivers, modules) is a file in `root` (LittleFS), which now runs from 0x5C1000 to the end of the flash: 0xA3F000 bytes, about 10.2 MiB (the three slots took 768 KB of the 5 MB the picture partition freed). The old 5 MB `ui_assets` partition is gone. This is **in the tables and tools and has run on a T-Deck Plus (the owner's hardware pass on release 1.1, 2026-11-08)**; the 1.0.28 and older layout is described under "The old layout" below.
 - The last 4096 bytes of each app slot hold the signature trailer, so an image may be at most the slot size minus 4096.
 - Changing the table means rebuilding every image (the app reads the table at the compiled offset) and erasing `root` on devices flashed with an older layout. The table is never replaced by an update (bootloader update is off), so moving to flash map v2 takes a **cable flash and a full erase of `root`** ([plan1.md](../plan1.md)).
 
@@ -51,7 +51,7 @@ Addresses are flash offsets. "End" is the first byte after the partition.
 | `netrec` | data, 0x41 | 0x5C0000 | 4 KB | 0x5C1000 | Last Wi-Fi network, for recovery |
 | `root` | data, 0x83 | 0x5C1000 | 0xA3F000 (about 10.2 MiB) | 0x1000000 | LittleFS root filesystem: the system, the apps and the picture packs |
 
-The map fills the 16 MB exactly. No bytes are unused between rows. This is the **flash map v2** table of release 1.0.29 (owner's approval, 2026-11-06, [plan1.md](../plan1.md)); it is written into the CSVs and the build and SDK tools but has not yet run on a device.
+The map fills the 16 MB exactly. No bytes are unused between rows. This is the **flash map v2** table of release 1.0.29 (owner's approval, 2026-11-06, [plan1.md](../plan1.md)); it is written into the CSVs and the build and SDK tools and has run on a T-Deck Plus (the owner's hardware pass on release 1.1, 2026-11-08).
 
 ### The old layout (1.0.28 and older)
 

@@ -1,6 +1,6 @@
 # 22. Building on Windows
 
-*Current as of PURR OS 1.1 (2026-11-08).*
+*Current as of PURR OS 1.1 and SDK 2.0 (2026-11-09).*
 
 ## Short version
 
@@ -37,6 +37,17 @@ The owner has a Windows PC and wants a Windows build of the developer kit and a 
 - **The firmware:** from the ESP-IDF PowerShell, in `PurrOS\`: `idf.py -B ..\out\stdfull -D IDF_TARGET=esp32s3 -D SDKCONFIG=..\out\stdfull.sdkconfig -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.board.tdeck_plus;sdkconfig.profile.full" build`. The flavors and profiles are the same as in [CLAUDE.md](../CLAUDE.md). A full build takes a long time; the first one on a new machine downloads components.
 - **Signing and releases:** `python purrstrap\purrstrap.py keys sign ...` and `python purrstrap\purrstrap.py dev serve --dir out\devrepo --port 47801` work as on the Mac. The shell scripts (`tools\vm\*.sh`, `tools\release\*`) assume `zsh` or `sh`: use WSL or Git Bash, or call the Python commands they contain.
 - **Flashing:** find the port in Device Manager (a "USB Serial Device" or "USB JTAG/serial debug unit", `COM5` for instance), then `python -m esptool --chip esp32s3 -p COM5 -b 460800 write_flash 0x400000 loader_slot.bin`. Slot images are made with `purrstrap coreos slot-image` and the offsets are in [chapter 02](02-flash-map-and-partitions.md). The T-Deck's USB port is the chip's own USB Serial/JTAG; Windows 10 and 11 normally load a driver by themselves, and OpenOCD may need Zadig for the JTAG half.
+
+## Compile a whole system from source (SDK 2.0)
+
+New on 2026-11-09 and **not yet run on Windows**. From the ESP-IDF PowerShell (so ESP-IDF 5.3.5 is the active one; `purrstrap` also finds the installer's manifest), with a **short workspace** (`$env:PURR_WORKSPACE = "C:\p"`: the pulled source and ESP-IDF's build folders go deep, and Windows stops at 260 characters; Studio warns when the path is long):
+
+1. Make a boot key and a developer key (ids 7 and 6): `bin\purr.cmd keys new --role boot --key-id 7`, `bin\purr.cmd keys new --role developer --key-id 6`.
+2. `bin\purr.cmd system new froyo --board tdeck_plus`, then `bin\purr.cmd system set froyo --parts-from source --source-ref PURR2.0 --boot-key boot.key --boot-key-id 7 --key developer.key --key-id 6 --keep-ours on` (or the same choices in Studio, device step).
+3. `$env:PURRSTRAP_KEY_PASSWORD = "..."; $env:PURRSTRAP_BOOT_KEY_PASSWORD = "..."; bin\purr.cmd system build froyo`, in the same PowerShell, then clear them. The first compile of the firmware takes ten minutes or more.
+4. `bin\purr.cmd system test froyo` needs the emulator, which Windows does not have: skip it there, or copy the image to a Mac.
+
+The whole set of tests, with the Mac result for each, is [sdk/TEST-PLAN-2.0.md](../sdk/TEST-PLAN-2.0.md). The installer for ESP-IDF cannot be run by `purr source install-compiler` on Windows; install it with Espressif's installer.
 
 ## What goes wrong and how to fix it
 

@@ -88,7 +88,7 @@ The flash is divided into fixed slots. The partition table is [bootloader/partit
 | `netrec` | 0x5C0000 | 4 KB | The saved network used during recovery |
 | `root` | 0x5C1000 | about 10.2 MiB | The LittleFS file system: accounts, apps, settings, downloaded drivers, and the picture packs for the shells (icons, wallpapers) |
 
-This is flash map v2 (release 1.0.29; written into the tables and tools, not yet run on a device). Up to 1.0.28 the picture pack had its own 5 MB partition (`ui_assets`) at 0x501000 and `root` began at 0xA01000, about 6 MB. Moving a device to the new table takes a cable flash and a full erase.
+This is flash map v2 (release 1.0.29; in the tables and tools, and run on a T-Deck Plus in the owner's hardware pass on release 1.1). Up to 1.0.28 the picture pack had its own 5 MB partition (`ui_assets`) at 0x501000 and `root` began at 0xA01000, about 6 MB. Moving a device to the new table takes a cable flash and a full erase.
 
 What happens, in order:
 

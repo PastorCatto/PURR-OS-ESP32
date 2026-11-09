@@ -17,6 +17,8 @@
 | `purr board check\|build board.toml` | check a board, or write its board file and profile |
 | `purr release --board B --key K` | gather a signed release |
 | `purr image --board B [--parts DIR] [--out FILE] [--trust-block F] [--plan]` | make one whole flash image from the signed parts (see [16-device-image.md](16-device-image.md)) |
+| `purr system list\|new\|show\|set\|build\|test NAME ...` | a *system*: a device with its parts, drivers, apps and keys, saved by name. `new NAME --board B`; `set NAME --parts-from ready\|source --source-ref PURR2.0 --shell android --version 1.1.0 --boot-key K --boot-key-id 7 --key D --key-id 6 --keep-ours on\|off --drivers a,b --apps mine,src:notes`; `show` lists the choices and what is wrong with the keys; `build` runs the whole road (below); `test` boots the built image in the emulator and checks it (`--seconds N`, `--image F`) |
+| `purr source check\|pull\|compiler\|install-compiler [--url U] [--ref R]` | the PURR OS source a system is compiled from: is something newer, pull it into the workspace, is ESP-IDF 5.3.5 there, install it (about 2.5 GB; not on Windows) |
 | `purr serve [--dir D] [--port P]` | run the dev server |
 | `purr publish FILE` | put a build in the server's folder |
 | `purr flash IMAGE --port P` | write an image to a board (a whole image whose partition table is not the board's layout gets a note first) |
@@ -33,3 +35,14 @@
 `purr font check` reads the file itself, with no other tools, and warns (does not fail) for a colour font, a variable font, or a missing licence string. It checks the file's structure, not each glyph's outline, so a pass is not a proof that the file is safe to draw. A `pack` or `add` step for fonts is not written. It is a gate for the device side that is designed but not built: [docs/21-fonts.md](../../docs/21-fonts.md) in the repository.
 
 Projects, keys and builds live in `~/PURR-Projects` (change it with `--workspace` or `PURR_WORKSPACE`). A key's password comes from a prompt, or from `PURRSTRAP_KEY_PASSWORD` for scripts.
+
+## Building a system from a terminal
+```
+purr system new froyo --board tdeck_plus
+purr system set froyo --parts-from source --source-ref PURR2.0 --boot-key my-boot.key --boot-key-id 7 --key my-dev.key --key-id 6 --keep-ours on
+purr system show froyo                 # says what is wrong with the keys, if anything
+PURRSTRAP_KEY_PASSWORD=...  PURRSTRAP_BOOT_KEY_PASSWORD=...  purr system build froyo
+purr system test froyo                 # boots the image in the emulator and checks it
+```
+The passwords come from the environment of that one command, or are asked for in a terminal; they are never saved. `PURRSTRAP_KEY_PASSWORD` is the developer key's, `PURRSTRAP_BOOT_KEY_PASSWORD` the boot key's (the same one is used when it is unset). The same settings are in Studio's *build a system*; see [01-studio.md](01-studio.md) and [16-device-image.md](16-device-image.md). Exit status is 0 when the build (or the test) passed.
+

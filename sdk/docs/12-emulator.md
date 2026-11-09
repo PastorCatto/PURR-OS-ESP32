@@ -59,3 +59,7 @@ Reaching your computer: a dev server on your computer at port 47801 is `http://1
 ## What is in the folder
 
 `esp32-emulator` (the window), `headless_tap` (no window), `run-emulator` (the launcher), `vendor/qemu/` (the patched QEMU with its libraries and ROM images), `boards/`, `licenses/`, `source/` (the QEMU source offer), `NOTICES-emulator.md`. It runs on a Mac with an Intel processor and macOS 26 or newer. If macOS refuses to open it after a download: `xattr -dr com.apple.quarantine <the kit folder>`.
+
+## Testing a whole image
+
+`purr system test NAME` (or *test it automatically* on the deliver page of *build a system*) boots a flash image you built in the emulator without a window and checks the serial log and the screen: the bootloader starts, the boot package verifies (and which key signed it), the kernel slot verifies, no crash, the screen is drawn, and how far it got (home screen, setup wizard, or the recovery loader a blank device stops at). It runs on a copy, so the image is never changed. It does not tap the UI, and it does not run on the Windows kit (no emulator). See [16-device-image.md](16-device-image.md).

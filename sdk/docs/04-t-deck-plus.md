@@ -19,7 +19,7 @@ The goal for this board is **100 % supported**: every part has a driver you can 
 
 ## The flash
 
-16 MB. Flash map v2 (release 1.0.29; written into the board file and the tools, not yet run on a device):
+16 MB. Flash map v2 (release 1.0.29; in the board file and the tools; it has run on a T-Deck Plus (the owner's hardware pass on release 1.1, 2026-11-08)):
 
 | Partition | Offset | Size | What |
 |---|---|---|---|

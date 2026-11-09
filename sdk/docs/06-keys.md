@@ -8,7 +8,7 @@ Every file a device installs carries a **signature**: a small proof that a key t
 
 - A **key** is a pair: a **private** key you keep secret (it is encrypted with a password), and a **public** key anyone can have.
 - A **role** says what a key is for. A device checks that the role is allowed to sign that kind of file.
-- A **key id** (1 to 31) is a short number stored in the file's header, so the device knows which key to check against.
+- A **key id** (0 to 31) is a short number stored in the file's header, so the device knows which key to check against.
 
 | Role | May sign |
 |---|---|
@@ -23,8 +23,8 @@ Every file a device installs carries a **signature**: a small proof that a key t
 In Studio, open **keys** and **make the key**. Or:
 
 ```
-bin/purr keys new --role developer --key-id 4
-bin/purr sign thing.cat --key developer --key-id 4
+bin/purr keys new --role developer --key-id 6
+bin/purr sign thing.cat --key developer --key-id 6
 bin/purr inspect thing.cat
 ```
 
@@ -38,7 +38,7 @@ A device has a **key bag**: the public keys built into it (this kit knows them: 
 
 So for a device to accept files signed by your key, one of these has to be true:
 
-1. Your key is in its key bag, which means a bootloader built from source with your key in it.
+1. Your key is in its key bag, which means a bootloader built from source with your key in it (Studio's *build a system* does exactly that: see [Your own image](#your-own-image-whose-keys-it-trusts) below).
 2. Your key is in its trust block, signed by the boot key that device trusts.
 3. The device is in **developer mode** and its secure mode is **warn**: it boots anything, with a warning. This is how development boards work.
 
@@ -56,3 +56,13 @@ When you drop a file, the **Signature** line is one of:
 ## The key set since OS 1.0.32
 
 A device built from OS 1.0.32 on carries five keys: **1** (old boot), **2** (old developer), **3** (boot), **4** (developer), **5** (hub, role system). Use `--key-id 4` for apps and drivers you sign with the project's developer key, and `bin/purr keys list` to see what your kit's device knows. The old ids 1 and 2 are removed in a later bootloader (0.6.0). A device older than 1.0.32 knows only ids 1 and 2, so a release you sign for it must use one of those until it has been updated once ([docs/03-trust-and-keys.md](../../docs/03-trust-and-keys.md), "The key rotation"). Keep your own private keys out of any folder you commit, and give the passphrase to one command at a time through `PURRSTRAP_KEY_PASSWORD`.
+
+## Your own image: whose keys it trusts
+
+When you compile a system from source ([16-device-image.md](16-device-image.md)), you decide which public keys the bootloader, the kernel and the boot package compile in. You need two keys of your own: a **boot** key (signs the firmware: the kernel, loader, KittenOS, boot package and bootloader) and a **developer** key (signs the modules, drivers and apps). Make them in Studio's **keys** page or with `purr keys new --role boot --key-id 7` and `purr keys new --role developer --key-id 6`; the public half is the `.pub` file next to each private key.
+
+- **Keep PURR's keys** (on by default): the image trusts your keys *and* PURR's five, so it runs what you compiled and still takes PURR's updates. Your ids must then be from **6 to 31**, because 1 to 5 are PURR's.
+- **Taken out:** the image trusts only your two keys. Nothing signed by PURR is accepted, PURR's updates included, until you switch the setting back on and build again. Use this for an image you vetted and built yourself and want nobody else's key in.
+
+The choice is checked before a build starts (both keys chosen, different ids, ids 0 to 31). The key list lives in one file, `PurrOS/components/coreos/keys/purr_default_keys.c`; a build from source writes it in the workspace's copy of the source and never in your own checkout. The two keys have two passwords, asked once and never saved (`PURRSTRAP_KEY_PASSWORD` for the developer key, `PURRSTRAP_BOOT_KEY_PASSWORD` for the boot key, for a script).
+

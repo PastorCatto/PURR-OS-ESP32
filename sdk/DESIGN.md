@@ -2,6 +2,8 @@
 
 *Current as of PURR OS 1.1 (2026-11-08).*
 
+> **Update, 2026-11-09 (SDK 2.0):** the source build that this document puts off to "a separate later download" now exists inside the kit's workflow: *build a system* can pull the PURR OS source and compile the firmware, system modules, drivers and apps with the person's own keys (ESP-IDF 5.3.5 is installed once, it is not in the kit). The ready-made road below is unchanged. See [docs/16-device-image.md](docs/16-device-image.md), [docs/06-keys.md](docs/06-keys.md) and [NOTES-compile-from-source.md](NOTES-compile-from-source.md).
+
 The kit lets one person build **any part of PURR OS** from a download, on any computer, without this repository or ESP-IDF. The end goal the owner
 set: **a 100 % supported T-Deck Plus built through the SDK**: display, touch, keyboard, trackball, battery, GPS, LoRa, the SD card, sound, and the
 radios, all as drivers and configuration a person can read, change and rebuild.

@@ -2,7 +2,7 @@
 
 One list, run first on the Mac bench (by Claude, 2026-11-09) and then by hand on the Windows machine. Each test says how to run it, what a pass looks like, and the Mac result.
 Where a test needs a password or a key, use **throwaway keys** made for the test (never the project's keys) and type the passwords yourself.
-Windows notes: the compile needs ESP-IDF 5.3.5 installed with Espressif's installer; run everything from the kit's `PURR-Studio` shortcut or `bin\purr`. Anything marked **(Windows: unknown)** has not been run on Windows by anyone yet.
+Windows notes: the compile needs ESP-IDF 5.3.5 installed with Espressif's installer; run everything from the kit's `PURR-Studio` shortcut or `bin\purr`. Use a **short workspace** (`PURR_WORKSPACE=C:\p`): the pulled source and the build folders are deep and Windows stops at 260 characters. Every test below can also be run from a terminal with `purr system ...` and `purr source ...` ([10-cli.md](docs/10-cli.md)); the virtual-device test (15) needs the emulator, which the Windows kit does not have. Anything marked **(Windows: unknown)** has not been run on Windows by anyone yet.
 
 Result words: **pass**, **fail** (and what), **not run**.
 
@@ -10,7 +10,7 @@ Result words: **pass**, **fail** (and what), **not run**.
 |---|------|-----|-------------------|-----------|
 | 1 | Version | `bin/purr version` | `PURR Developer Kit 2.0.0`  **pass** (2.0.0) |
 | 2 | Doctor | `bin/purr doctor` | no `bad` lines (warnings about missing hardware are fine)  **pass** (all green; two `i` notes: no VM image, no prebuilt parts in this checkout) |
-| 3 | Unit tests | `python -m unittest discover -s sdk/tests` (kit: its own Python) | `OK`, the number of skipped tests is only those that need a tool the machine lacks  **pass** (SDK suite 364 tests; purrstrap suite 158 with the kit's Python, which has `cryptography`; skips are tests needing a tool the machine lacks) |
+| 3 | Unit tests | `python -m unittest discover -s sdk/tests` (kit: its own Python) | `OK`, the number of skipped tests is only those that need a tool the machine lacks  **pass** (SDK suite 371 tests; purrstrap suite 158 with the kit's Python, which has `cryptography`; skips are tests needing a tool the machine lacks) |
 | 4 | Studio opens | start `PURR-Studio`, open the link | the main menu shows, no red error  **pass** (device and build tabs rendered headless; the real browser window was not opened by Claude) |
 | 5 | Keys | Studio, keys: make a **boot** key (id 7) and a **developer** key (id 6), each with a password | `<name>.key` and `<name>.pub` for each in the workspace's keys folder  **pass** with `purrstrap keys generate` (boot id 7, developer id 6); the Studio keys page was not clicked |
 | 6 | Compiler found | build a system, device step, "compile from the newest source" | it says `Compiler: ESP-IDF 5.3.5` **(Windows: unknown: found through the installer's manifest)**  **pass** (ESP-IDF 5.3.5 found at `~/esp/esp-idf-v5.3.5`) |

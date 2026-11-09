@@ -74,7 +74,7 @@ falling back to the text shell (section on fallback behavior, `PurrOS/main/main.
 the one part of the original design that did carry over. In the original design this was a raw `ui_assets` partition (512 KB, later **5 MB at 0x501000, up to 1.0.28**).
 **Flash map v2 (release 1.0.29, written but not yet run on a device) removed that partition:** the pack is now a file in LittleFS (`root`, which runs from 0x5C1000 to
 the end of the flash; `PurrOS/partitions/tdeck.csv`/`tdeck_plus.csv`), `/ui/<shell>/pack.bin` for a shell's default pack and `/ui/themes/<id>/pack.bin` for an installed theme
-([plan1.md](plan1.md), [plan7.md](plan7.md)). The pack holds raw RGB565 pixel data, built by
+([plan1.md](../plan1.md), [plan7.md](../plan7.md)). The pack holds raw RGB565 pixel data, built by
 `purrstrap uiassets build` from a directory of PNGs (a hand-rolled decoder -- 8bpc RGB/RGBA,
 non-interlaced only -- since this project has never taken a Pillow dependency), read
 read-only/memory-mapped straight from flash at boot up to 1.0.28 (`purr_ui_assets.c`, zero-copy, no PSRAM

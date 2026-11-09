@@ -40,7 +40,7 @@ Accounts, login, and how they meet apps and remote access. Permissions are in
   and iterations slow guessing but do not stop it. This is the same limit as the saved Wi-Fi passwords
   (`../Network/SPEC.md` section 1).
 
-### 2.1 File ownership ([F-10](../documentation/FINDINGS.md#f-10))
+### 2.1 File ownership ([F-10](../archive/documentation/FINDINGS.md#f-10))
 
 Every file has an owner (a uid) and a tiny mode -- whether anyone other than the owner can read or write it.
 There are no groups, so nothing richer than that is meaningful. Root and an admin acting on their own behalf

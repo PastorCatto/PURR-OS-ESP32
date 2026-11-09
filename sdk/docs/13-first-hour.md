@@ -9,7 +9,7 @@ What has been checked: the commands below exist and are covered by the kit's tes
 ## Minutes 0 to 10: is the kit whole?
 
 1. Unpack the kit and open a terminal in its folder.
-2. Run `bin/purr version`. It prints the kit version (1.1.0 or later).
+2. Run `bin/purr version`. It prints the kit version (2.0.0 or later).
 3. Run `bin/purr doctor`. Each line says what it checked: Python, the toolchain, the signing library, the emulator, the VM image. A line that says "missing" has the fix written next to it.
 4. If macOS refuses to open a program because the kit was downloaded: `xattr -dr com.apple.quarantine <the kit folder>` once.
 

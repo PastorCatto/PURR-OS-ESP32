@@ -2,7 +2,7 @@
 
 *Current as of PURR OS 1.1 (2026-11-08).*
 
-Studio looks like the start screen of a Windows Phone on purpose. Every tile is a tool. Click one, and the back button (the circle with the arrow) takes you home.
+Studio looks like the start screen of a Windows Phone on purpose. Every tile is a tool. Click one, and the back button (the circle with the arrow) takes you home. The big tile at the top is the last thing you did; see [The main menu](#the-main-menu) below.
 
 ## open an image
 

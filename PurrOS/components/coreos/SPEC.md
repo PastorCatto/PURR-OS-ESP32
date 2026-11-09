@@ -168,7 +168,7 @@ the callbacks it was given.
 
 ### 3.7 purr_cli (command-line engine and shell syntax)
 
-**Designed, not built** ([F-04](../../../documentation/FINDINGS.md#f-04)). What `purr_cli.c` actually
+**Designed, not built** ([F-04](../../../archive/documentation/FINDINGS.md#f-04)). What `purr_cli.c` actually
 has today: tokenizing with quotes, line editing (backspace, Ctrl-U), and a command table -- real,
 tested, and in daily use. Everything else below -- pipes, redirection, `;`/`&&`/`||`/`&`, variables,
 scripts, `log`/`status`/`report`/`clear-failures`/`sh`/`ps`/`top`/`kill`/`run`, job control -- is the
@@ -320,7 +320,7 @@ field, as CoreOS's real call sites actually convert (section 10).
 
 ### 4.2 File ownership and permission enforcement
 
-Design for [F-10](../../../documentation/FINDINGS.md#f-10): today every file is a plain
+Design for [F-10](../../../archive/documentation/FINDINGS.md#f-10): today every file is a plain
 LittleFS path with no owner or mode at all, so any command a module can reach -- `cat
 /etc/shadow`, `write`/`rm` over `/etc/passwd` or `/system`, `format --yes`, `netinstall
 kernel` -- works for a standard user exactly as it would for root. The account-facing
