@@ -79,6 +79,7 @@ class Base(unittest.TestCase):
         os.environ.update(self._env)
 
 
+@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Finding(Base):
     def test_finds_the_folder_named_in_the_environment(self):
         em = emulator.find()
@@ -109,6 +110,7 @@ class Finding(Base):
         self.assertIn("no emulator", str(cm.exception).lower())
 
 
+@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Session(Base):
     def test_a_run_takes_pictures_and_reads_the_serial_log(self):
         work = os.path.join(self.tmp, "w")
@@ -187,6 +189,7 @@ class Session(Base):
             emulator.Headless(self.image, workdir=os.path.join(self.tmp, "w6"))
 
 
+@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Serving(Base):
     def test_a_taken_port_is_refused_and_named(self):
         sock = socket.socket()
@@ -207,6 +210,7 @@ class Serving(Base):
         self.assertFalse(emulator._port_busy(port))
 
 
+@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Steps(Base):
     def test_steps_run_in_order_and_pictures_come_back(self):
         rec = os.path.join(self.tmp, "rec.txt")

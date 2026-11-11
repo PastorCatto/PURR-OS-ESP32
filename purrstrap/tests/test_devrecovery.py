@@ -30,7 +30,7 @@ class RecoveryHosting(unittest.TestCase):
         with open(self.mod, "wb") as fh:
             fh.write(img("about", "0.1.1"))
         self.legal = os.path.join(self.tmp, "legal.txt")
-        with open(self.legal, "w") as fh:
+        with open(self.legal, "w", newline="\n") as fh:
             fh.write("# note\nCredits.\n")
 
     def run_recovery(self, **kw):

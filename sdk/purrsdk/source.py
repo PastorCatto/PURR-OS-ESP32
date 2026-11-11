@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -152,6 +153,21 @@ def check(ws, url=DEFAULT_URL, ref=DEFAULT_REF):
     return out
 
 
+def _rmtree(path):
+    """Remove a folder, also when git has made its files read-only (Windows refuses to delete those; shutil.rmtree(ignore_errors=True) then silently leaves them behind)."""
+    def clear(func, p, _exc):
+        try:
+            os.chmod(os.path.dirname(p), stat.S_IRWXU)      # (the same on other systems: a folder one may not write to)
+            os.chmod(p, stat.S_IWRITE | stat.S_IRWXU)
+            func(p)
+        except OSError:
+            pass
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=clear)
+    else:
+        shutil.rmtree(path, onerror=clear)
+
+
 def pull(ws, url=DEFAULT_URL, ref=DEFAULT_REF, on_line=print):
     """Fetch the newest source. Returns {"commit", "changed"}. The tree is replaced as a whole, so a half-finished pull never leaves a mixed one."""
     latest = remote_head(url, ref)
@@ -161,7 +177,7 @@ def pull(ws, url=DEFAULT_URL, ref=DEFAULT_REF, on_line=print):
         return {"commit": latest, "changed": False}
     os.makedirs(folder(ws), exist_ok=True)
     tmp = os.path.join(folder(ws), "tree.new")
-    shutil.rmtree(tmp, ignore_errors=True)
+    _rmtree(tmp)
     on_line("Fetching %s (%s) %s..." % (url, ref, "with git" if have_git() else "as a tarball"))
     try:
         if have_git():
@@ -169,19 +185,21 @@ def pull(ws, url=DEFAULT_URL, ref=DEFAULT_REF, on_line=print):
         else:
             _fetch_tarball(url, ref, tmp, on_line)
     except SourceError:
-        shutil.rmtree(tmp, ignore_errors=True)
+        _rmtree(tmp)
         raise
     if not os.path.isdir(os.path.join(tmp, "PurrOS")):
-        shutil.rmtree(tmp, ignore_errors=True)
+        _rmtree(tmp)
         raise SourceError("%s (%s) has no PurrOS folder: this is not the PURR OS source." % (url, ref))
     # keep the previous build folders: they are what makes the next compile a short one
     old = tree(ws)
     for sub in ("PurrOS/build",):
         if os.path.isdir(os.path.join(old, sub)):
             os.makedirs(os.path.dirname(os.path.join(tmp, sub)), exist_ok=True)
-            shutil.rmtree(os.path.join(tmp, sub), ignore_errors=True)
+            _rmtree(os.path.join(tmp, sub))
             shutil.move(os.path.join(old, sub), os.path.join(tmp, sub))
-    shutil.rmtree(old, ignore_errors=True)
+    _rmtree(old)
+    if os.path.isdir(old):
+        raise SourceError("I could not remove the old source folder %s (something has files in it open). Close what uses it and try again; the new copy is waiting in %s." % (old, tmp))
     os.replace(tmp, old)
     _save_state(ws, {"url": url, "ref": ref, "commit": latest, "when": time.strftime("%Y-%m-%d %H:%M")})
     on_line("Pulled %s." % latest[:10])
@@ -195,11 +213,11 @@ def _fetch_git(url, ref, dest, on_line):
         rc, out = _git(["sparse-checkout", "set"] + list(PATHS), cwd=dest, on_line=on_line)
     if rc != 0:
         on_line("A partial fetch did not work here; fetching the whole branch instead (this is bigger).")
-        shutil.rmtree(dest, ignore_errors=True)
+        _rmtree(dest)
         rc, out = _git(["clone", "--depth", "1", "--branch", ref, url, dest], on_line=on_line)
         if rc != 0:
             raise SourceError("git could not fetch the source: %s" % _why(out))
-    shutil.rmtree(os.path.join(dest, ".git"), ignore_errors=True)
+    _rmtree(os.path.join(dest, ".git"))
 
 
 def _fetch_tarball(url, ref, dest, on_line):
@@ -341,7 +359,7 @@ def compile_and_package(ws, board, shell="android", key=None, key_id=4, password
     env = {"PURR_REPO_ROOT": t}
     ps = run or (lambda args, extra_env=None, password=None: runner.purrstrap(args, password=password, on_line=on_line, extra_env=extra_env))
     out = out or os.path.join(ws.builds, "firmware-%s" % board)
-    shutil.rmtree(out, ignore_errors=True)
+    _rmtree(out)
     os.makedirs(out)
 
     def step(i, state_, note=""):
@@ -459,7 +477,7 @@ def apply_trust(ws, keep_ours, own, run=None, on_line=print):
         shutil.copyfile(c, ours)                                # the list as pulled; kept so the choice can change later
     ps = run or (lambda args, extra_env=None, password=None: runner.purrstrap(args, on_line=on_line, extra_env=extra_env))
     tmp = os.path.join(folder(ws), "keys.work")
-    shutil.rmtree(tmp, ignore_errors=True)
+    _rmtree(tmp)
     os.makedirs(tmp)
     if keep_ours:
         with open(ours, "r", encoding="utf-8") as fh:
@@ -476,7 +494,7 @@ def apply_trust(ws, keep_ours, own, run=None, on_line=print):
     if not os.path.isfile(gen):
         raise SourceError("The key list was not written.")
     shutil.copyfile(gen, c)
-    shutil.rmtree(tmp, ignore_errors=True)
+    _rmtree(tmp)
     with open(c, "r", encoding="utf-8") as fh:
         return [k[0] for k in read_keybag(fh.read())]
 
@@ -642,7 +660,7 @@ def rebake(ws, board, key, key_id, password, on_step=None, on_line=print, run=No
     ps = run or (lambda args, extra_env=None, password=None: runner.purrstrap(args, password=password, on_line=on_line, extra_env=extra_env))
     img = formats.image()
     work = os.path.join(folder(ws), "baked.work")
-    shutil.rmtree(work, ignore_errors=True)
+    _rmtree(work)
     os.makedirs(work)
 
     def step(i, state_, note=""):
@@ -710,7 +728,7 @@ def rebake(ws, board, key, key_id, password, on_step=None, on_line=print, run=No
     if r["rc"] != 0:
         return fail("builtin", "Writing the built-in apps failed: %s" % (r["output"].strip().splitlines() or ["no reason given"])[-1])
     step("builtin", "done", "%d apps compiled" % len(cats))
-    shutil.rmtree(work, ignore_errors=True)
+    _rmtree(work)
     return {"ok": True, "count": n + len(cats), "problem": ""}
 
 

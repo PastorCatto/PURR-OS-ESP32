@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(helpers.SDK, "studio"))
 from purrsdk import emulator  # noqa: E402
 
 
+@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class EmulatorRoutes(test_studio.Studio):
     def setUp(self):
         self.tmp = helpers.tmpdir()

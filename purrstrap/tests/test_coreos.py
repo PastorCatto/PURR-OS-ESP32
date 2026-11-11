@@ -76,6 +76,14 @@ class FindIdfTests(unittest.TestCase):
         idf = coreos.find_idf(env={}, home=self.home, windows=False, which=lambda n: None)
         self.assertEqual((idf.kind, idf.version), ("export", "5.3.5"))
 
+    def test_windows_checkout_without_the_installer_manifest(self):
+        touch(self.home, "root/esp-idf-5.3.5/export.ps1")
+        idf = coreos.find_idf(env={}, home=self.home, windows=True, which=lambda n: None,
+                              win_roots=[os.path.join(self.home, "root")])
+        self.assertEqual((idf.kind, idf.version), ("export", "5.3.5"))
+        self.assertTrue(idf.activation.endswith("export.ps1"))
+        self.assertIsNone(coreos.find_idf(env={}, home=self.home, windows=True, which=lambda n: None, win_roots=[]))
+
     def test_nothing_found(self):
         self.assertIsNone(coreos.find_idf(env={}, home=self.home, windows=False,
                                           which=lambda n: None))

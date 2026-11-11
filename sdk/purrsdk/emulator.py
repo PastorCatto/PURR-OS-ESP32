@@ -436,10 +436,10 @@ def lit_fraction(png_path):
 
 def available(board="tdeck_plus"):
     """(True, "") when a built image for this board can be tested here, else (False, why in plain words)."""
-    if os.name == "nt":
-        return False, "The emulator is not available on Windows yet (the patched QEMU has no Windows build)."
     if emulator_board_for(board) is None:
         return False, "The %s board is not emulated yet." % board
+    if os.name == "nt":
+        return False, "The emulator is not available on Windows yet (the patched QEMU has no Windows build)."
     em = find()
     if em is None or not em["headless"]:
         return False, "There is no emulator in this kit. A kit built with the emulator has an emulator/ folder; set PURR_EMULATOR_DIR to use another."

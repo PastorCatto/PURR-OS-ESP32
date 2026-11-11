@@ -29,6 +29,19 @@ def make_repo(path):
 
 
 @unittest.skipUnless(shutil.which("git"), "needs git")
+class Removing(unittest.TestCase):
+    def test_a_folder_git_made_read_only_is_removed(self):
+        import stat
+        d = os.path.join(helpers.tmpdir(), "t", "objects", "ab")
+        os.makedirs(d)
+        f = os.path.join(d, "obj")
+        open(f, "w").write("x")
+        os.chmod(f, stat.S_IREAD)                # what git does to its object files (Windows then refuses to delete them)
+        os.chmod(d, stat.S_IREAD | stat.S_IEXEC)  # and, on other systems, the same effect through the folder
+        source._rmtree(os.path.dirname(os.path.dirname(d)))
+        self.assertFalse(os.path.exists(os.path.dirname(os.path.dirname(d))))
+
+
 class Pulling(unittest.TestCase):
     def setUp(self):
         self.tmp = helpers.tmpdir()

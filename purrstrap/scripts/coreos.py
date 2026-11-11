@@ -60,7 +60,7 @@ def _from_manifest(path):
                str(chosen.get("name", "")).lstrip("v"))
 
 
-def find_idf(env=None, home=None, windows=None, which=None):
+def find_idf(env=None, home=None, windows=None, which=None, win_roots=None):
     """Locate ESP-IDF in the order given in the spec, or return None."""
     env = os.environ if env is None else env
     home = home or os.path.expanduser("~")
@@ -94,6 +94,14 @@ def find_idf(env=None, home=None, windows=None, which=None):
             root = os.path.dirname(script)
             name = os.path.basename(root)[len("esp-idf"):].lstrip("-v")
             return Idf("export", root, script, _read_version(root) or name)
+    else:
+        # Windows without the installer's manifest: a plain checkout such as C:\esp-idf-5.3.5, or one under ~\esp or C:\Espressif\frameworks
+        roots = win_roots if win_roots is not None else [os.path.join(home, "esp"), "C:\\", r"C:\Espressif\frameworks"]
+        for base in roots:
+            for script in sorted(glob.glob(os.path.join(base, "esp-idf*", "export.ps1")), reverse=True):
+                root = os.path.dirname(script)
+                name = os.path.basename(root)[len("esp-idf"):].lstrip("-v")
+                return Idf("export", root, script, _read_version(root) or name)
     return None
 
 

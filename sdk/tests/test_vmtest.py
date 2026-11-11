@@ -151,6 +151,7 @@ class Helpers(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("not emulated", why)
 
+    @unittest.skipIf(os.name == "nt", "on Windows the answer is that the emulator is not available there")
     def test_no_emulator_says_so(self):
         with mock.patch.object(emulator, "find", lambda: None):
             ok, why = emulator.available("tdeck_plus")

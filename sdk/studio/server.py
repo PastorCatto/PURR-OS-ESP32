@@ -321,7 +321,7 @@ def handle(state, method, route, q, body):
         for dp, dns, fns in os.walk(root):
             dns[:] = [d for d in dns if d not in ("build",) and not d.startswith(".")]
             for f in fns:
-                out.append(os.path.relpath(os.path.join(dp, f), root))
+                out.append(os.path.relpath(os.path.join(dp, f), root).replace(os.sep, "/"))
         return {"files": sorted(out)}
     if route == "projects/file":
         root = state.safe_project(q.get("project") if method == "GET" else body.get("project"))
