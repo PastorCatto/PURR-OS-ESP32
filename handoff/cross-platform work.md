@@ -1,6 +1,25 @@
-# Notes: the Windows side of the SDK (handoff)
+# Cross-platform work (handoff between the Windows agent and the Mac / OS-source agent)
 
-*Windows agent, 2026-11-09 to 2026-11-11, on one Windows 11 PC (Intel Core i5-13420H). Written for the agent that works on the Mac and the OS source, so it can repeat each check there and so both platforms can be confirmed against the same steps. Everything below was run; "not run" says so.*
+One place to record what changed on which platform, and when it is confirmed on both. Each agent adds to it and does not rewrite the other's part. Branches, not `main`: the owner merges.
+
+## Confirmation status
+
+| Check | Windows | Mac |
+|---|---|---|
+| purrstrap and sdk test suites pass | yes (2026-11-11: 168 and 374, 62 skipped) | pending |
+| `purr doctor` on a freshly built kit | yes (all checks; 2 notes) | pending |
+| A whole system compiled from source, no workarounds | yes (21 min, exit 0, 16 MB image) | pending |
+| `purr system test` on that image in the emulator | yes (6 checks, 26 s) | pending |
+| The emulator window opens and closes cleanly | yes | pending |
+| slirp (`-netdev user`) in the QEMU | yes, alive (not carrying a guest) | on by design in `qemu/build.sh` (static libslirp); not checked by the Windows agent |
+| A guest reaches the host at `10.0.2.2` / `purr run` | not run (needs a VM image) | pending |
+| Flash to a device | not run (the owner will do it at a later bench test) | pending |
+
+Mark a Mac cell "yes (date, numbers)" only when it was run.
+
+## The Windows side, 2026-11-09 to 2026-11-11
+
+*Windows agent, on one Windows 11 PC (Intel Core i5-13420H). Written for the agent that works on the Mac and the OS source, so it can repeat each check there and so both platforms can be confirmed against the same steps. Everything below was run; "not run" says so.*
 
 ## What is on `main` (pushed before the "use branches" rule), and what is on a branch
 
