@@ -243,6 +243,9 @@ def _system_overview(ws, name, s):
         line("info", "keys", "boot %s (id %d), developer %s (id %d), PURR's keys %s" % (s["boot_key"] or "not chosen", s["boot_key_id"], s["key"] or "not chosen", s["key_id"], "kept" if s["keep_ours"] else "taken out"))
         for t in sourcemod.trust_problems(s["keep_ours"], s["boot_key"], s["boot_key_id"], s["key"], s["key_id"]):
             line("bad", "", t)
+        line("info", "restore", s["restore_url"] or "PURR's release (JumpingJaguar1 and 2)")
+        if sourcemod.restore_problem(s["restore_url"]):
+            line("bad", "", sourcemod.restore_problem(s["restore_url"]))
     line("info", "apps", ", ".join(s["apps"]) or "none")
     line("info", "drivers", ", ".join(s["drivers"]) if s["drivers_set"] else "all that fit the board")
 
@@ -265,7 +268,7 @@ def cmd_system(a):
             return 0
         if a.action == "set":
             for k, attr in (("board", "board"), ("parts_from", "parts_from"), ("source_url", "source_url"), ("source_ref", "source_ref"), ("shell", "shell"), ("version", "version"),
-                            ("boot_key", "boot_key"), ("key", "key"), ("ui", "ui"), ("parts", "parts")):
+                            ("boot_key", "boot_key"), ("key", "key"), ("ui", "ui"), ("parts", "parts"), ("restore_url", "restore_url")):
                 if getattr(a, attr, None) is not None:
                     s[k] = getattr(a, attr)
             for k in ("boot_key_id", "key_id"):
@@ -642,6 +645,7 @@ def build_parser():
     s.add_argument("--source-ref", dest="source_ref", help="the branch (default main)")
     s.add_argument("--shell", choices=sourcemod.SHELLS)
     s.add_argument("--version", help="the version the device compares, like 1.1.0")
+    s.add_argument("--restore-url", dest="restore_url", help="the folder a restore and an update fetch from (recovery.manifest, modules.manifest), like http://10.0.2.2:47801/recovery; empty: PURR's release")
     s.add_argument("--boot-key", dest="boot_key", help="name of your boot key in the keys folder (signs the firmware)")
     s.add_argument("--boot-key-id", dest="boot_key_id", type=int)
     s.add_argument("--key", help="name of your developer key (signs modules, drivers, apps)")

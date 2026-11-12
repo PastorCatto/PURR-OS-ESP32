@@ -70,7 +70,7 @@ def load(ws, name):
             "parts_from": "source" if s.get("parts_from") == "source" else "ready", "source_url": str(s.get("source_url", "") or sourcemod.DEFAULT_URL),
             "source_ref": str(s.get("source_ref", "") or sourcemod.DEFAULT_REF), "shell": str(s.get("shell", "android")) if str(s.get("shell", "android")) in sourcemod.SHELLS else "android",
             "boot_key": str(s.get("boot_key", "")), "boot_key_id": int(s.get("boot_key_id", 7)), "keep_ours": bool(s.get("keep_ours", True)),
-            "version": str(s.get("version", "") or sourcemod.DEFAULT_VERSION)}
+            "version": str(s.get("version", "") or sourcemod.DEFAULT_VERSION), "restore_url": str(s.get("restore_url", "") or "")}
 
 
 def save(ws, name, s):
@@ -79,7 +79,7 @@ def save(ws, name, s):
     doc = {"system": {"name": name, "board": s["board"], "parts": s.get("parts", ""), "key": s.get("key", ""), "key_id": int(s.get("key_id", 4)), "ui": s.get("ui", ""),
                       "parts_from": s.get("parts_from", "ready"), "source_url": s.get("source_url", "") or sourcemod.DEFAULT_URL, "source_ref": s.get("source_ref", "") or sourcemod.DEFAULT_REF,
                       "shell": s.get("shell", "android"), "boot_key": s.get("boot_key", ""), "boot_key_id": int(s.get("boot_key_id", 7)), "keep_ours": bool(s.get("keep_ours", True)),
-                      "version": s.get("version", "") or sourcemod.DEFAULT_VERSION},
+                      "version": s.get("version", "") or sourcemod.DEFAULT_VERSION, "restore_url": s.get("restore_url", "") or ""},
            "drivers": {"enabled": list(s.get("drivers", [])), "chosen": bool(s.get("drivers_set", True))}, "apps": {"include": list(s.get("apps", []))}}
     tmp = p + ".part"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
@@ -172,7 +172,8 @@ def overview(ws, name):
     folder = s["parts"] or next((f["path"] for f in folders if f["complete"]), "")
     plan = image.plan(s["board"], folder) if folder else None
     src = {"git": sourcemod.have_git(), "compiler": sourcemod.compiler(), "state": sourcemod.state(ws),
-           "trust": sourcemod.trust_problems(s["keep_ours"], s["boot_key"], s["boot_key_id"], s["key"], s["key_id"])}
+           "trust": sourcemod.trust_problems(s["keep_ours"], s["boot_key"], s["boot_key_id"], s["key"], s["key_id"]),
+           "restore": sourcemod.restore_problem(s["restore_url"])}
     return {"source": src, "system": s, "drivers": [dict(d, on=d["name"] in chosen, raw=None, path=None) for d in drivers], "apps": [{"name": a["name"], "version": a["version"], "on": a["name"] in s["apps"]} for a in apps]
             + [{"name": "src:" + n, "version": v, "on": "src:" + n in s["apps"], "from_source": True} for n, v in sourcemod.tree_apps(ws)],
             "uis": [{"name": u["name"], "on": u["name"] == s["ui"]} for u in uis], "folders": folders, "folder": folder,
@@ -287,6 +288,8 @@ def build(ws, name, password=None, on_step=None, on_line=print, boot_password=No
             return fail("source", bad[0])
         if sourcemod.version_problem(s["version"]):
             return fail("source", sourcemod.version_problem(s["version"]))
+        if sourcemod.restore_problem(s["restore_url"]):
+            return fail("source", sourcemod.restore_problem(s["restore_url"]))
         warn = sourcemod.path_warning(ws)
         if warn:
             on_line(warn)
@@ -306,7 +309,11 @@ def build(ws, name, password=None, on_step=None, on_line=print, boot_password=No
             ids = sourcemod.apply_trust(ws, s["keep_ours"], [(sourcemod.pub_path(bkey), "boot", s["boot_key_id"]), (sourcemod.pub_path(key), "developer", s["key_id"])], on_line=on_line)
         except sourcemod.SourceError as e:
             return fail("trust", str(e))
-        step("trust", "done", ("PURR's keys and yours (ids %s)" if s["keep_ours"] else "only yours (ids %s)") % ", ".join(str(i) for i in ids))
+        try:
+            restore = sourcemod.apply_restore(ws, s["restore_url"], on_line=on_line)
+        except sourcemod.SourceError as e:
+            return fail("trust", str(e))
+        step("trust", "done", (("PURR's keys and yours (ids %s)" if s["keep_ours"] else "only yours (ids %s)") % ", ".join(str(i) for i in ids)) + ("; restores from " + restore if restore else ""))
         rb = sourcemod.rebake(ws, s["board"], key, s["key_id"], password, on_step=step, on_line=on_line, base=s["version"])
         if not rb["ok"]:
             return {"ok": False, "steps": steps, "image": "", "delivery": ""}

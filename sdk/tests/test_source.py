@@ -103,6 +103,81 @@ class Pulling(unittest.TestCase):
         self.assertFalse(c["newer"])
 
 
+class RestoreAddress(unittest.TestCase):
+    DEFAULTS = (
+        'CONFIG_PURR_OTHER=y\n'
+        'CONFIG_PURR_RECOVERY_MANIFEST_URL="https://github.com/x/releases/download/JumpingJaguar1/recovery.manifest"\n'
+        'CONFIG_PURR_MODULE_INDEX_URL="https://github.com/x/releases/download/JumpingJaguar2/modules.manifest"\n'
+        'CONFIG_LAST=1\n')
+
+    def setUp(self):
+        self.tmp = helpers.tmpdir()
+        self.ws = workspace.Workspace(os.path.join(self.tmp, "ws")).ensure()
+        self.path = os.path.join(source.tree(self.ws), source.RESTORE_DEFAULTS)
+        os.makedirs(os.path.dirname(self.path))
+        open(self.path, "w", newline="\n").write(self.DEFAULTS)
+        self.sdk = os.path.join(os.path.dirname(self.path), "build", "tdeck_plus-recovery", "sdkconfig")
+        os.makedirs(os.path.dirname(self.sdk))
+        open(self.sdk, "w").write("old settings")
+
+    def text(self):
+        return open(self.path, encoding="utf-8").read()
+
+    def test_the_address_is_checked(self):
+        for ok in ("", "  ", "http://10.0.2.2:47801/recovery", "https://example.org/a/b/"):
+            self.assertEqual(source.restore_problem(ok), "", ok)
+        for bad in ("ftp://x/y", "10.0.2.2/recovery", "http://a b/c", 'http://a/"b', "http://a/b'c", "http://a\\b", "http://" + "x" * 200):
+            self.assertTrue(source.restore_problem(bad), bad)
+
+    def test_it_replaces_both_addresses_and_nothing_else(self):
+        self.assertEqual(source.apply_restore(self.ws, "http://10.0.2.2:47801/recovery/", on_line=lambda l: None), "http://10.0.2.2:47801/recovery")
+        t = self.text()
+        self.assertIn('CONFIG_PURR_RECOVERY_MANIFEST_URL="http://10.0.2.2:47801/recovery/recovery.manifest"\n', t)
+        self.assertIn('CONFIG_PURR_MODULE_INDEX_URL="http://10.0.2.2:47801/recovery/modules.manifest"\n', t)
+        self.assertTrue(t.startswith("CONFIG_PURR_OTHER=y\n") and t.endswith("CONFIG_LAST=1\n"))
+
+    def test_empty_puts_the_official_addresses_back_exactly(self):
+        source.apply_restore(self.ws, "http://a/b", on_line=lambda l: None)
+        source.apply_restore(self.ws, "http://c/d", on_line=lambda l: None)      # from the kept original, not stacked on the last change
+        self.assertIn("http://c/d/recovery.manifest", self.text())
+        self.assertNotIn("http://a/b", self.text())
+        self.assertEqual(source.apply_restore(self.ws, "", on_line=lambda l: None), "")
+        self.assertEqual(self.text(), self.DEFAULTS)
+
+    def test_a_changed_address_makes_the_build_folders_forget_their_settings(self):
+        lines = []
+        source.apply_restore(self.ws, "http://a/b", on_line=lines.append)
+        self.assertFalse(os.path.exists(self.sdk))
+        self.assertTrue(any("http://a/b" in l for l in lines))
+        open(self.sdk, "w").write("settings of the build with that address")
+        lines.clear()
+        source.apply_restore(self.ws, "http://a/b", on_line=lines.append)         # the same again: nothing to forget, nothing to say
+        self.assertTrue(os.path.exists(self.sdk))
+        self.assertEqual(lines, [])
+        source.apply_restore(self.ws, "", on_line=lambda l: None)
+        self.assertFalse(os.path.exists(self.sdk))
+
+    def test_a_source_without_the_setting_says_so(self):
+        open(self.path, "w").write("CONFIG_X=1\n")
+        with self.assertRaises(source.SourceError) as e:
+            source.apply_restore(self.ws, "http://a/b", on_line=lambda l: None)
+        self.assertIn("CONFIG_PURR_RECOVERY_MANIFEST_URL", str(e.exception))
+        with self.assertRaises(source.SourceError):
+            source.apply_restore(self.ws, "ftp://a/b", on_line=lambda l: None)
+
+    def test_the_system_remembers_it_and_a_bad_one_stops_the_road(self):
+        s = system.new_system(self.ws, "road", "tdeck_plus")
+        self.assertEqual(system.load(self.ws, "road")["restore_url"], "")
+        s.update(parts_from="source", key="developer.key", key_id=6, boot_key="boot.key", boot_key_id=7, restore_url="ftp://nope")
+        system.save(self.ws, "road", s)
+        self.assertEqual(system.load(self.ws, "road")["restore_url"], "ftp://nope")
+        with mock.patch.object(source, "pull") as pull:
+            r = system.build(self.ws, "road", on_line=lambda l: None)
+        self.assertFalse(r["ok"])
+        self.assertIn("restore address", r["steps"]["source"]["note"])
+        pull.assert_not_called()
+
+
 class Helpers(unittest.TestCase):
     def test_the_reason_is_the_fatal_line_not_the_last_one(self):
         out = "fatal: '/x' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n"

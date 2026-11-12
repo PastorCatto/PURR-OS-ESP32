@@ -54,6 +54,7 @@ Versions read `src-<seven letters of the commit>`. The image maker and the deliv
 
 The bootloader, the kernel and the boot package all check signatures against one compiled-in list of public keys (`PurrOS/components/coreos/keys/purr_default_keys.c`). A build from source writes that list before compiling:
 
+- **Restore from** (empty by default): the two addresses a restore and an update fetch from are compiled into the kernel and the loader, and they point at PURR's release (`JumpingJaguar1` and `JumpingJaguar2`) unless you say otherwise. An image you compiled with your own keys cannot use PURR's files when *Keep PURR's keys* is off, so give it the folder your build's delivery step laid out, served with `purr dev serve` (`http://10.0.2.2:47801/recovery` in the virtual device). Change the address and build again: the build folders forget their old settings by themselves.
 - **Keep PURR's keys** (on by default): the list holds PURR's five keys and yours. The image runs what you compiled and still accepts PURR's updates, so you can build your own image and keep getting ours. Give your keys ids from 6 to 31.
 - **Off:** the list holds only your boot key and developer key. The bootloader and the kernel then trust nothing signed by PURR, including its updates, until you switch it back on and build again. This is the image for someone who has vetted the source and wants nobody else's key in it.
 

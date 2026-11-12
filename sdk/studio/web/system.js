@@ -84,6 +84,10 @@ pages.system = {
         h("option", { value: "android", text: "Android 2.2 (Froyo) shell", selected: sy.shell === "android" }), h("option", { value: "w10m", text: "Windows 10 Mobile shell", selected: sy.shell === "w10m" }));
       const ver = h("input", { type: "text", class: "bx-input", value: sy.version, "aria-label": "Version", style: { flex: "0 1 110px" }, onchange: ev => save({ version: ev.target.value.trim() }) });
       box.appendChild(h("div", { class: "row" }, url, ref, shell, h("span", { class: "dim small", text: "version" }), ver));
+      const rst = h("input", { type: "text", class: "bx-input", value: sy.restore_url, placeholder: "empty: PURR's release", "aria-label": "Restore address", style: { flex: "1 1 320px" }, onchange: ev => save({ restore_url: ev.target.value.trim() }) });
+      box.appendChild(h("div", { class: "row" }, h("span", { class: "dim small", text: "restore from" }), rst));
+      box.appendChild(h("div", { class: "bx-note", text: sy.restore_url ? "A restore and an update on this image fetch from " + sy.restore_url + " (a folder with recovery.manifest and modules.manifest, like the delivery folder served by purr dev serve). In the virtual device the computer is 10.0.2.2." : "A restore and an update on this image fetch from PURR's release. To use your own build instead, give the address of a folder that has recovery.manifest and modules.manifest." }));
+      if (S.O.source.restore) box.appendChild(h("div", { class: "bx-note", style: { color: "#f0a30a" }, text: S.O.source.restore }));
       box.appendChild(trustBox());
       const status = h("p", { class: "dim", style: { margin: 0, lineHeight: 1.5, fontSize: "14px" }, text: st.commit ? "Pulled " + st.commit.slice(0, 7) + " on " + st.when + ". Build pulls again if something newer is there." : "Nothing pulled yet. Build pulls it first." });
       const comp = src.compiler;

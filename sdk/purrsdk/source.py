@@ -10,6 +10,7 @@ The result is a folder of parts named the way the image maker expects (`kernel-<
 ready-made parts. Nothing here touches your own checkout of the repository: the source lives in the workspace.
 """
 
+import glob
 import hashlib
 import io
 import json
@@ -506,6 +507,60 @@ SYSTEM_MODULES = (("about", "Modules/test/about_module.c", "about_module_entry")
                   ("apps", "Modules/appmanager/apps_module.c", "apps_module_entry"), ("fs", "Modules/coreos/fs_module.c", "fs_module_entry"),
                   ("login", "Modules/coreos/login_module.c", "login_module_entry"), ("netinstall", "Modules/netinstall/netinstall_module.c", "netinstall_module_entry"),
                   ("sysinfo", "Modules/coreos/sysinfo_module.c", "sysinfo_module_entry"), ("wifi", "Modules/network/wifi_module.c", "wifi_module_entry"))
+
+
+RESTORE_DEFAULTS = os.path.join("PurrOS", "sdkconfig.defaults")
+
+
+def restore_problem(url):
+    """"" when `url` can be the restore folder (empty means PURR's official release), else a plain sentence."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if not re.match(r"^https?://[^\s\"'\\]+$", url) or len(url) > 150:
+        return "The restore address is a web address of a folder, like http://10.0.2.2:47801/recovery (no spaces or quotes, 150 characters at most). Leave it empty to restore from PURR's release."
+    return ""
+
+
+def apply_restore(ws, url, on_line=print):
+    """Compile in where a restore and an update look for the system: `url` is a folder holding recovery.manifest and modules.manifest (what `purr dev serve`
+    hands out), or empty for PURR's own release. Rewrites the two addresses in the pulled tree's sdkconfig.defaults (the first-ever file is kept as .official, so
+    going back to empty puts the official ones back). A changed address makes the build folders forget their settings, which otherwise win over the defaults.
+    Returns the folder address, or "" for the official release."""
+    bad = restore_problem(url)
+    if bad:
+        raise SourceError(bad)
+    url = (url or "").strip().rstrip("/")
+    path = os.path.join(tree(ws), RESTORE_DEFAULTS)
+    if not os.path.isfile(path):
+        if not url:
+            return ""                                          # nothing to put back, nothing to change
+        raise SourceError("The pulled source has no %s, so the restore address cannot be set." % RESTORE_DEFAULTS.replace(os.sep, "/"))
+    keep = path + ".official"
+    if not os.path.isfile(keep):
+        shutil.copyfile(path, keep)
+    with open(keep, encoding="utf-8") as fh:
+        text = fh.read()
+    if url:
+        for key, name in (("CONFIG_PURR_RECOVERY_MANIFEST_URL", "recovery.manifest"), ("CONFIG_PURR_MODULE_INDEX_URL", "modules.manifest")):
+            pat = re.compile(r'^%s=".*"[ \t]*$' % key, re.M)
+            if not pat.search(text):
+                raise SourceError("%s is not set in sdkconfig.defaults of the pulled source, so the restore address cannot be changed." % key)
+            text = pat.sub(lambda m: '%s="%s/%s"' % (key, url, name), text, count=1)
+    marker = os.path.join(os.path.dirname(path), ".restore_url")
+    before = open(marker, encoding="utf-8").read() if os.path.isfile(marker) else ""
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    if before != url:
+        for f in glob.glob(os.path.join(os.path.dirname(path), "build", "*", "sdkconfig")):
+            try:
+                os.remove(f)                                  # the build folder's own settings would win over the defaults just changed
+            except OSError:
+                pass
+        with open(marker, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(url)
+        on_line("The restore address is now %s." % (url or "PURR's release"))
+    return url
 
 
 def driver_source(ws, name):

@@ -846,7 +846,7 @@ def handle(state, method, route, q, body):
     if route == "system/save":
         try:
             s = systemmod.load(ws, body.get("name"))
-            for k in ("board", "parts", "key", "ui", "source_url", "source_ref", "boot_key", "version"):
+            for k in ("board", "parts", "key", "ui", "source_url", "source_ref", "boot_key", "version", "restore_url"):
                 if k in body:
                     s[k] = str(body[k])
             if "parts_from" in body:

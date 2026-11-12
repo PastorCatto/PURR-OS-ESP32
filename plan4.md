@@ -159,3 +159,9 @@ recovery loader (no file system) loads it from memory and the full OS plants it 
 **Open before it can be called done:** (1) this changes the kernel, so it ships with the next kernel (1.1.x), not as 1.1; (2) the SDK must put `w5500.cat` into a VM image (and into `drivers.manifest` with abi_min 8);
 (3) a run in the emulator; (4) the compile-time Ethernet backend (`purr_net_eth.c`, `PURR_NET_ETH_W5500`) stays until (1) to (3) are proven, then it can go.
 
+## Addendum (2026-11-11, from the first Windows run of the module)
+Run in the emulator on Windows with a compiled image: the wire comes up through the module (link, DHCP 10.0.2.15, NTP synced). Two bugs of mine found from the log, both fixed: (1) `link_task`
+freed a received frame after handing it to `esp_netif_receive`, which frees it itself when it refuses a frame (double free, panic a second after the address arrived); (2) `purr_net_wired()`
+answered "no" until the network was up, and the loader asks it first, so with no saved Wi-Fi network it went into Wi-Fi setup (the OOBE) instead of the automatic restore, even after many failed boots.
+Now `purr_net_wired()` answers yes at once in a VM without a radio that has an Ethernet driver bound. Studio's system build also gained a restore address (see `sdk/NOTES-compile-from-source.md`).
+
