@@ -94,7 +94,7 @@ Projects, keys and builds live in `~/PURR-Projects` (change with `--workspace` o
 
 The owner's decision (2026-10-28, [plan5.md](../plan5.md)) was prebuilt OS parts that the kit re-packages and re-signs with the developer's keys, with a source build as a later, separate step. A flavor (your own name and colours) therefore changes the boot package, and `PURR_BRAND_*` strings in the boot package, but not the kernel's own wording.
 
-On 2026-11-09 the second road was added for a person who does not want to trust our binaries: pull the source, compile everything, sign with their own keys, choose whose keys the bootloader, kernel and boot package compile in. What it compiles: the kernel, recovery loader, KittenOS, boot package and bootloader; the eight system modules; the drivers and apps; and the 14 signed binaries that `PurrOS/main/commands.c` carries as byte arrays (the loader's display, touch and keyboard drivers among them) plus the Store. Details, and the list of mistakes made on the way, are in [sdk/NOTES-compile-from-source.md](../sdk/NOTES-compile-from-source.md).
+On 2026-11-09 the second road was added for a person who does not want to trust our binaries: pull the source, compile everything, sign with their own keys, choose whose keys the bootloader, kernel and boot package compile in. What it compiles: the kernel, recovery loader, KittenOS, boot package and bootloader; the eight system modules; the drivers and apps; and the 15 signed binaries that `PurrOS/main/commands.c` carries as byte arrays (the loader's display, touch and keyboard drivers among them) plus the Store. Details, and the list of mistakes made on the way, are in [sdk/NOTES-compile-from-source.md](../sdk/NOTES-compile-from-source.md).
 
 ### Studio
 

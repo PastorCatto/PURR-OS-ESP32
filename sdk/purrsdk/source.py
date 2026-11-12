@@ -629,7 +629,8 @@ BAKED = (("s_about_module", "Modules/test/about_module.c", "about_module_entry")
          ("s_debug_module", "Modules/test/debug_module.c", "debug_module_entry"),
          ("s_kbd_i2c_driver_module", "Modules/drivers/kbd_i2c_module.c", "kbd_i2c_entry"), ("s_gt911_driver_module", "Modules/drivers/gt911_module.c", "gt911_entry"),
          ("s_st7789_driver_module", "Modules/drivers/st7789_module.c", "st7789_entry"), ("s_battery_driver_module", "Modules/drivers/battery_module.c", "battery_entry"),
-         ("s_kbd_backlight_driver_module", "Modules/drivers/kbd_backlight_module.c", "kbd_backlight_entry"))
+         ("s_kbd_backlight_driver_module", "Modules/drivers/kbd_backlight_module.c", "kbd_backlight_entry"),
+         ("s_w5500_driver_module", "Modules/drivers/w5500_module.c", "w5500_entry"))
 BUILTIN_APPS = ("store", "storesvc")                    # purr_builtin_apps.c: the Store and its companion (unsigned: the kernel's hash vouches for them)
 KIND_OF_FLAGS = {2: "coreos", 3: "appmanager", 4: "runtime", 5: "driver", 7: "devbundle"}
 COMMANDS_C = os.path.join("PurrOS", "main", "commands.c")
