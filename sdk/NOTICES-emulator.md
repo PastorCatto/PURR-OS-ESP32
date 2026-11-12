@@ -1,6 +1,6 @@
 # Notices for the emulator in the PURR Developer Kit
 
-The kit's `emulator/` folder holds third-party programs and libraries. This page says what they are, under which licence the kit passes them on, and where their source is. The licence texts are in `emulator/licenses/`. The rest of the kit is covered by `LICENSE-TODO` and the repository's `THIRD_PARTY.md`.
+The kit's `emulator/` folder holds third-party programs and libraries. This page says what they are, under which licence the kit passes them on, and where their source is. The licence texts are in `emulator/licenses/`. The rest of the kit is covered by `LICENSE` (GPL-3.0), `NOTICE.txt` and the repository's `THIRD_PARTY.md`.
 
 Short version: the emulator application is ours (MIT OR Apache-2.0) and uses open-source Rust crates. QEMU is GPL-2.0 and ships with its source offer (`emulator/SOURCE.txt`). The libraries QEMU needs are separate files you can replace.
 

@@ -12,6 +12,8 @@ One place to record what changed on which platform, and when it is confirmed on 
 | `purr system test` on that image in the emulator | yes (6 checks, 26 s) | pending |
 | The emulator window opens and closes cleanly | yes | pending |
 | slirp (`-netdev user`) in the QEMU | yes, alive (not carrying a guest) | on by design in `qemu/build.sh` (static libslirp); not checked by the Windows agent |
+| Kit carries the prebuilt parts, fetched from the OTA release (`build-kit.py`, no local release folder) | yes (2026-11-12: 18 files, 14.9 MB, hashes match, `doctor` finds them, kernel signature ok) | pending (the Mac normally has a local `PURR-OS-release-*`, so the fetch is not used there; check `--no-fetch`/`--images` still behave) |
+| Kit carries `LICENSE` (GPL-3.0), `NOTICE.txt`, `THIRD_PARTY.md` (no more `LICENSE-TODO`) | yes | pending |
 | A guest reaches the host at `10.0.2.2` / `purr run` | not run (needs a VM image) | pending |
 | Flash to a device | not run (the owner will do it at a later bench test) | pending |
 
@@ -68,6 +70,17 @@ Not touched at all: anything under `PurrOS/`, signing, the release process, the 
 2. `bin/purr doctor` on a freshly built kit: nothing there should have changed.
 3. `purr system test <system>` on a Mac-built image: same six checks.
 4. Anything in `emulator.py` that looks different on the Mac is a bug of mine: the only intended Mac-visible change is that `_GUI_NAMES`/`_HEADLESS_NAMES` are now built from a module-level `_WINDOWS` flag.
+
+## Kit licence and prebuilt parts (branch `windows-kit-licence-and-parts`, 2026-11-12)
+
+Owner asked for the licence to be settled and for the prebuilt parts to come from the OTA release, which keeps them as separate files.
+
+- **Licence.** The repository already says GPL-3.0 (`LICENSE`, `README.md`, `OTA/legal.txt`); only the kit still carried a "not chosen" placeholder. `sdk/build-kit.py` now writes `LICENSE` (a copy of the repo's), `NOTICE.txt` (GPL-3.0, where the source is, the Apache-2.0 shell, the third-party parts) and `THIRD_PARTY.md`, and no longer writes `LICENSE-TODO`. The owner should confirm GPL-3.0 is meant for the kit too (plan5.md still lists the kit licence as undecided).
+- **Parts.** `build-kit.py`: new `fetch_release_parts(base, dest)`, `--parts-url` (default the JumpingJaguar1 release folder, or `PURR_PARTS_URL`), `--no-fetch`. Used only when `--images` is not given and no local `PURR-OS-release-*` is found, so the Mac's usual path is unchanged. It downloads `recovery.manifest`, each listed file and `legal.txt`; each file is checked against the manifest's size and sha256 (mismatch stops the build; a file name with a path is refused); it writes `images/SOURCE.txt` and records the fetch under `"parts"` in `SDK-MANIFEST.json`.
+- **`sdk/purrsdk/release.py`: `prebuilt()` now also uses `image.find_parts`** (additive: after the plain `kernel_<board>.cat` names, it asks the folder's `recovery.manifest`). The OTA files carry a hash in their name (`kernel-tdeck_plus.10a35db4cb.cat`), so without this `doctor` and `purr release` would not have found them. Same code runs on the Mac.
+- Tests: `sdk/tests/test_kit_parts.py` (6: write and describe, wrong hash, path in a name, empty manifest, missing legal text, `prebuilt` finds a fetched folder). SDK suite: 380 OK, 62 skipped.
+- Mixed releases: the OTA folder also holds `waveshare154` parts and the `ui_*` parts; they are mirrored too and not used by `release.prebuilt`.
+- The release was built with `withdrawn_versions=*@1.0.24` in its manifest; the kit copies the manifest unchanged.
 
 ## Windows-only behaviour worth knowing
 

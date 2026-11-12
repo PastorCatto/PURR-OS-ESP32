@@ -15,7 +15,7 @@ What goes in (see sdk/DESIGN.md):
     images/                              the prebuilt parts of a system (kernel, KittenOS, loader, boot package, bootloader)
     emulator/                            the standalone emulator: esp32-emulator (window), headless_tap, the patched QEMU with its own libraries
                                          (re-pointed, so the folder can be moved), boards/, licences/, source/ (the QEMU source offer), run-emulator
-    VERSION, SDK-MANIFEST.json, README.txt, LICENSE-TODO
+    VERSION, SDK-MANIFEST.json, README.txt, LICENSE (GPL-3.0), NOTICE.txt, THIRD_PARTY.md
 
 Downloads (cached in out/sdk-cache): the Python build and the `cryptography` wheels. Needs network the first time.
 The emulator is built from a checkout of the emulator project (read only; its build goes to out/sdk-cache/emulator-target) with the
@@ -737,15 +737,88 @@ READ
   reference-drivers/  those drivers already built for the T-Deck Plus (unsigned: sign them with your key)
   sdk/boards/         the T-Deck Plus, described as data
 
-Built %(date)s from PURR OS sources. See LICENSE-TODO.
+Built %(date)s from PURR OS sources. Licence: GPL-3.0 (see LICENSE and NOTICE.txt).
 """
 
-LICENSE_TODO = """The licence for the PURR Developer Kit has not been chosen yet.
-This file is a placeholder: until it is replaced, the kit is for the owner's own use.
-Third-party parts keep their own licences: Python (PSF), cryptography (Apache-2.0 / BSD), the Espressif toolchain (GPL with the GCC runtime exception).
-The emulator/ folder holds QEMU (GPL-2.0, with its source offer in emulator/SOURCE.txt), the libraries it needs and the Rust crates the emulator
-application is built from: see emulator/NOTICES-emulator.md and emulator/licenses/.
+NOTICE = """The PURR Developer Kit
+======================
+
+PURR OS, and the tools in this kit that come from its repository (purrstrap, the sdk/ folder, the starters, the boot package source, the prebuilt
+parts in images/), are free software under the GNU General Public License, version 3. The licence text is in the file LICENSE next to this one.
+There is no warranty.
+
+Source code
+    The source of everything PURR OS in this kit, including the parts in images/ and the programs in emulator/, is at
+    https://github.com/PastorCatto/PURR-OS-ESP32 (the prebuilt parts come from its release JumpingJaguar1; images/SOURCE.txt says which one).
+    The emulator's own source offer is in emulator/SOURCE.txt.
+
+Exceptions inside the repository
+    The Android 2.2 style shell and its artwork are under the Apache License 2.0. THIRD_PARTY.md lists the third-party material the system uses,
+    with its licence. images/legal.txt is the credits text the device itself shows.
+
+Parts of the kit that are not PURR OS keep their own licences
+    Python (PSF licence); the `cryptography` package (Apache-2.0 / BSD); the Espressif xtensa toolchain in toolchain/ (GPL with the GCC runtime
+    exception; its licence files are in the toolchain folders).
+    emulator/ holds QEMU (GPL-2.0), the libraries it needs and the Rust crates the emulator application is built from: see
+    emulator/NOTICES-emulator.md and emulator/licenses/.
 """
+
+OFFICIAL_PARTS_URL = "https://github.com/PastorCatto/PURR-OS-ESP32/releases/download/JumpingJaguar1/"
+
+
+def fetch_release_parts(base, dest, opener=None):
+    """Downloads the parts a recovery release names (its recovery.manifest, every file it lists, legal.txt) into `dest`.
+
+    This is the same folder the devices fetch from over the air, so the kit carries exactly the parts a device would install. Every file is
+    checked against the size and sha256 the manifest gives; a mismatch stops the build rather than ship a part nobody vouched for.
+    The files keep the names the release gives them (the manifest says which is which: the image maker reads it). Returns a small
+    description of what was fetched. `opener(url) -> bytes` is for tests."""
+    base = base.rstrip("/") + "/"
+
+    def get(name):
+        url = base + name
+        if opener:
+            return opener(url)
+        req = urllib.request.Request(url, headers={"User-Agent": "purr-sdk-build-kit"})
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return r.read()
+
+    raw = get("recovery.manifest")
+    text = raw.decode("utf-8", "replace").replace("\r\n", "\n")
+    head, entries = {}, []
+    for block in text.split("\n\n"):
+        kv = dict(line.split("=", 1) for line in block.split("\n") if "=" in line and not line.startswith("#"))
+        if "file" in kv:
+            entries.append(kv)
+        else:
+            head.update(kv)
+    if not entries:
+        raise SystemExit("The release at %s lists no files; I will not guess." % base)
+    os.makedirs(dest, exist_ok=True)
+    seen, total = set(), 0
+    for e in entries:
+        name = e["file"]
+        if name in seen:
+            continue
+        seen.add(name)
+        if "/" in name or "\\" in name or name.startswith("."):
+            raise SystemExit("The release names a file with a path (%r); refusing it." % name)
+        data = get(name)
+        if len(data) != int(e.get("size", -1)) or hashlib.sha256(data).hexdigest() != e.get("sha256", ""):
+            raise SystemExit("%s does not match the size and hash in the release's manifest; nothing was kept." % name)
+        with open(os.path.join(dest, name), "wb") as fh:
+            fh.write(data)
+        total += len(data)
+    try:
+        legal = get("legal.txt")
+        with open(os.path.join(dest, "legal.txt"), "wb") as fh:
+            fh.write(legal)
+    except Exception as exc:                          # the credits text is wanted, but a missing one does not make the parts wrong
+        say("  (legal.txt could not be fetched: %s)" % exc)
+    with open(os.path.join(dest, "recovery.manifest"), "wb") as fh:
+        fh.write(raw)
+    return {"url": base, "release": head.get("release", ""), "released": head.get("released", ""), "withdrawn_versions": head.get("withdrawn_versions", ""),
+            "files": len(seen), "bytes": total, "manifest_sha256": hashlib.sha256(raw).hexdigest()}
 
 
 def write(path, text, mode=None):
@@ -779,7 +852,9 @@ def main():
     global KIT
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", default=os.path.expanduser("~/Desktop/PURR-SDK"))
-    ap.add_argument("--images", help="the release folder with the prebuilt parts (default: the newest PURR-OS-release-* on the Desktop, its JumpingJaguar1)")
+    ap.add_argument("--images", help="the release folder with the prebuilt parts (default: the newest PURR-OS-release-* on the Desktop, its JumpingJaguar1; if there is none, they are fetched from --parts-url)")
+    ap.add_argument("--parts-url", default=os.environ.get("PURR_PARTS_URL", OFFICIAL_PARTS_URL), help="the over-the-air release folder to fetch the prebuilt parts from when there is no local release folder (default %s)" % OFFICIAL_PARTS_URL)
+    ap.add_argument("--no-fetch", action="store_true", help="do not download the prebuilt parts; the kit is made without them if no local release folder is found")
     ap.add_argument("--no-python", action="store_true")
     ap.add_argument("--no-toolchain", action="store_true")
     ap.add_argument("--no-emulator", action="store_true", help="leave out the emulator/ folder")
@@ -814,6 +889,7 @@ def main():
     shutil.rmtree(os.path.join(KIT, "sdk", "purrsdk", "__pycache__"), ignore_errors=True)
 
     say("The prebuilt parts...")
+    parts_info = None
     images = a.images
     if not images:
         cands = sorted(glob.glob(os.path.expanduser("~/Desktop/PURR-OS-release-[0-9]*")), key=lambda p: [int(x) if x.isdigit() else 0 for x in os.path.basename(p).split("-")[-1].split(".")])
@@ -827,8 +903,17 @@ def main():
                 shutil.copy2(os.path.join(images, f), os.path.join(KIT, "images", f))
                 n += 1
         say("  %d files from %s" % (n, images))
+    elif not a.no_fetch:
+        say("  no local release folder: fetching the parts from %s" % a.parts_url)
+        parts_info = fetch_release_parts(a.parts_url, os.path.join(KIT, "images"))
+        write(os.path.join(KIT, "images", "SOURCE.txt"),
+              "These parts were fetched over the network when the kit was built, from the over-the-air release folder\n%s\n"
+              "release %s (released %s). Each file was checked against the size and sha256 in recovery.manifest.\n"
+              "recovery.manifest is the release's own file, unchanged. Source: https://github.com/PastorCatto/PURR-OS-ESP32\n"
+              % (parts_info["url"], parts_info["release"] or "?", parts_info["released"] or "?"))
+        say("  %d files, %.1f MB, release %s" % (parts_info["files"], parts_info["bytes"] / 1e6, parts_info["release"] or "?"))
     else:
-        say("  (no release folder found: the kit will have no prebuilt parts; pass --images)")
+        say("  (no release folder found and --no-fetch given: the kit will have no prebuilt parts)")
 
     drivers = [f for f in glob.glob(os.path.join(ROOT, "out", "drivers", "*.cat"))]
     if drivers:
@@ -866,9 +951,12 @@ def main():
     if IS_WIN:
         readme = readme.replace("PURR-Studio.command", "PURR-Studio.cmd").replace("bin/purr", "bin\\purr").replace("emulator/run-emulator", "emulator\\run-emulator.cmd")
     write(os.path.join(KIT, "README.txt"), readme)
-    write(os.path.join(KIT, "LICENSE-TODO"), LICENSE_TODO)
+    shutil.copy2(os.path.join(ROOT, "LICENSE"), os.path.join(KIT, "LICENSE"))
+    if os.path.isfile(os.path.join(ROOT, "THIRD_PARTY.md")):
+        shutil.copy2(os.path.join(ROOT, "THIRD_PARTY.md"), os.path.join(KIT, "THIRD_PARTY.md"))
+    write(os.path.join(KIT, "NOTICE.txt"), NOTICE)
     say("Hashing the kit's own files...")
-    m = {"kit": __version__, "host": HOST, "built": time.strftime("%Y-%m-%d %H:%M:%S"), "python": py_name, "emulator": emu, "files": manifest()}
+    m = {"kit": __version__, "host": HOST, "built": time.strftime("%Y-%m-%d %H:%M:%S"), "python": py_name, "emulator": emu, "parts": parts_info, "files": manifest()}
     with open(os.path.join(KIT, "SDK-MANIFEST.json"), "w") as fh:
         json.dump(m, fh, indent=1)
         fh.write("\n")

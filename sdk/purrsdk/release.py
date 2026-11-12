@@ -7,7 +7,7 @@ flavor's boot package, and lays them out with their manifests the way `purr serv
 import os
 import shutil
 
-from . import formats, inspector, runner, workspace
+from . import formats, image, inspector, runner, workspace
 
 COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader")
 NAMES = {"kernel": "kernel_{b}.cat", "kittenos": "kittenos_{b}.kitt", "loader": "loader_{b}.cat",
@@ -26,6 +26,8 @@ def prebuilt(board="tdeck_plus"):
             p = os.path.join(root, pattern.format(b=board))
             if comp not in found and os.path.isfile(p):
                 found[comp] = p
+        for comp, p in image.find_parts(root, board).items():      # a release folder as the devices fetch it: the files carry a hash in their name, its recovery.manifest says which is which
+            found.setdefault(comp, p)
     return found
 
 
