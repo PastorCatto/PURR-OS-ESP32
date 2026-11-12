@@ -129,3 +129,33 @@ still open (real hardware shares the bus fine, so the model should too).
 The VM flavor does what it was built for: wired boot, DHCP, HTTPS and the full internet recovery run in the emulator. Left open on
 purpose, none of them blocking: the eFuse burn test (item 10), the root cause of the shared-bus stall in the emulated SPI
 controller (the VM avoids it with its own bus), and a real W5500 module. The "(not yet run)" lines further up are history.
+
+## Addendum (2026-11-11): a standard build also boots in the emulator
+The owner wants any firmware to boot in the emulator, with the radio switched off by the emulator, not by the build. A standard (Wi-Fi) kernel booted in the emulator
+stalled in `esp_wifi_init` ("phy: error: pll_cal exceeds 2ms"). Now `purr_net_init` in `purr_net_wifi.c` asks `purr_vm_info()` first: the VM-info device answering
+means a VM, and unless its flags byte carries the new bit `PURR_VM_HAS_RADIO` (0x02, set by no emulator today) the Wi-Fi stack is never started; init returns
+`ESP_ERR_NOT_SUPPORTED`, scan/connect say the same, status reads "not connected". The full OS goes on without a network (`purr_net_setup` only prints it); the
+recovery loader stops with "this virtual device has no Wi-Fi radio: boot the VM flavor for a wired network". The VM flavor (wired W5500) is still the way to get a
+network in the emulator. Applies to firmware built from this source on; a kernel built before this change (the released 1.1 included, byte for byte) still has the
+stall. **Not built or run yet** (the firmware builds are the owner's to start).
+
+## Addendum (2026-11-11, later): the W5500 as a loadable module
+The owner wants the wired network to be a module the SDK can put into any image, so a standard build also has internet in the VM. Done in source, **not yet run on a
+device or in the emulator**:
+- **Bus ABI 8** (`spi_open_bus`) and the **ETHERNET driver class** (`purr_eth_ops_t`), see `Drivers/SPEC.md` 4.6.
+- **`Modules/drivers/w5500_module.c`**: the chip's register protocol in MACRAW mode (reset, version check, buffers, MAC, OPEN, send, receive with the 2-byte length header, link
+  from PHYCFGR). 4,085 bytes built for the T-Deck Plus, freestanding. Host test `test_drv_eth.c` (93 checks) against a model of the chip, including pointer wrap, bad headers and chip
+  faults.
+- **`purr_device_add()`** and the kernel's `eth0` declaration (`declare_vm_devices`, from the VM-info device: own bus or the shared one).
+- **`purr_net_link.c`**: the kernel side, an esp_netif over the driver's frames with one task for receive and link. `purr_net_wifi.c` uses it when it runs in a VM with no radio (the
+  guard added earlier today): the wire comes up the first time an Ethernet driver is bound, whether that is at start or later (`purr_net_connect`, `purr_net_status`, `purr_net_wired`
+  ask again; a failed bring-up is not retried for 5 s).
+- Syntax-checked with the real toolchain and flags (nothing built in `out/`); C host suite and SDK suite pass.
+
+What stays in the kernel: the lwIP netif (a module cannot create one), declaring the device, the order drivers load in. What moved out: everything about the chip.
+**Baked in (2026-11-11):** the module is signed with the developer key (id 4) and carried in `commands.c` as `s_w5500_driver_module`, in `s_temp_drivers` like the display driver, so the
+recovery loader (no file system) loads it from memory and the full OS plants it into `/boot/drivers` at start. `temp_driver_wanted()` keeps it off real devices: only a VM
+(`purr_vm_info()->present`) plants and loads it. It is in `BAKED` in `sdk/purrsdk/source.py`, so a build from source signs it again with the builder's own key (15 binaries now).
+**Open before it can be called done:** (1) this changes the kernel, so it ships with the next kernel (1.1.x), not as 1.1; (2) the SDK must put `w5500.cat` into a VM image (and into `drivers.manifest` with abi_min 8);
+(3) a run in the emulator; (4) the compile-time Ethernet backend (`purr_net_eth.c`, `PURR_NET_ETH_W5500`) stays until (1) to (3) are proven, then it can go.
+

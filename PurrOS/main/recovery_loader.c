@@ -39,6 +39,7 @@
 #include "purr_netrec.h"
 #include "purr_util.h"
 #include "purr_verify.h"
+#include "purr_vm.h"
 #include "purr_wifi.h"
 
 static const char *TAG = "loader";
@@ -897,12 +898,24 @@ static void mark_install_success(bool unattended) { mark_install_success_ex(unat
  * section 2.1): no Wi-Fi shell offer, no menu -- nothing summoned a person to answer one. Only
  * the saved recovery network is tried; a full component restore follows, then a normal restart
  * lets the (hopefully now fixed) boot chain run again. */
+/* Why the network did not start, in words for the screen. A VM has no radio (purr_vm.h): say so, and say what to boot instead. */
+static const char *net_start_failed_text(void)
+{
+    if (purr_net_wired()) {
+        return "the wired network did not start";
+    }
+    if (purr_vm_info()->present) {
+        return "this virtual device has no Wi-Fi radio: boot the VM flavor for a wired network";
+    }
+    return "wifi did not start";
+}
+
 static void run_auto_mode(void)
 {
     status("automatic recovery: repeated boot failure detected");
     s_emergency_ok = true;
     if (purr_net_init(NULL) != ESP_OK) {
-        halt(purr_net_wired() ? "the wired network did not start" : "wifi did not start");
+        halt(net_start_failed_text());
     }
     if (purr_net_wired()) {
         /* Nothing to remember and nothing to type: the wire has an address or it does not. */
@@ -1259,7 +1272,7 @@ void purr_recovery_loader_main(void)
             purr_console_set_muted(0);
             wizard = 0;
         }
-        halt(purr_net_wired() ? "the wired network did not start" : "wifi did not start");
+        halt(net_start_failed_text());
     }
 
 #if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS

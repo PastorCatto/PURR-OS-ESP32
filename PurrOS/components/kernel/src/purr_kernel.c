@@ -519,6 +519,33 @@ static void bus_uart_close(uint32_t h)
     }
 }
 
+/* A bus of a device's own (ABI 8). Hosts 1 and 2 are ESP-IDF's SPI2 and SPI3; host 0 is the flash's and the board's shared host is the kernel's. Asking again
+ * for the same host with the same pins is fine (a driver probed twice); different pins on a started host are refused. */
+static struct { int used, sclk, mosi, miso; } s_own_bus[3];
+
+static int bus_spi_open_bus(int host, int sclk, int mosi, int miso, size_t max_transfer)
+{
+    const purr_board_t *b = purr_board();
+    if (host < 1 || host > 2 || (b != NULL && host == (int)b->spi.host) || max_transfer == 0 || max_transfer > 4092) {
+        return -1;
+    }
+    if (s_own_bus[host].used) {
+        return (s_own_bus[host].sclk == sclk && s_own_bus[host].mosi == mosi && s_own_bus[host].miso == miso) ? 0 : -1;
+    }
+    spi_bus_config_t cfg = {
+        .sclk_io_num = sclk, .mosi_io_num = mosi, .miso_io_num = miso,
+        .quadwp_io_num = -1, .quadhd_io_num = -1, .max_transfer_sz = (int)max_transfer,
+    };
+    if (spi_bus_initialize((spi_host_device_t)host, &cfg, SPI_DMA_CH_AUTO) != ESP_OK) {
+        return -1;
+    }
+    s_own_bus[host].used = 1;
+    s_own_bus[host].sclk = sclk;
+    s_own_bus[host].mosi = mosi;
+    s_own_bus[host].miso = miso;
+    return 0;
+}
+
 static const purr_driver_bus_table_t s_bus_table = {
     .abi_version = PURR_DRIVER_BUS_ABI_VERSION,
     .spi_add_device = bus_spi_add_device,
@@ -545,6 +572,7 @@ static const purr_driver_bus_table_t s_bus_table = {
     .uart_close = bus_uart_close,
     .spi_lock = bus_spi_lock,
     .spi_unlock = bus_spi_unlock,
+    .spi_open_bus = bus_spi_open_bus,
 };
 
 const purr_driver_bus_table_t *purr_driver_bus_table(void)
@@ -565,11 +593,55 @@ const purr_driver_t *const *purr_driver_table(int *count)
     return s_drivers;
 }
 
+/* The virtual device's Ethernet controller (purr_vm.h). The board table cannot list it: only the machine running us knows it is there, and where. It is declared
+ * as a device for "w5500", whose driver is a loadable module (Modules/drivers/w5500_module.c) found by class when the network comes up (purr_net_link.c). */
+static purr_kv_cfg_t s_nic_cfg;
+static purr_device_t s_nic_dev;
+
+static void kv_put(purr_kv_cfg_t *c, const char *key, int32_t val)
+{
+    if (c->count >= PURR_KV_MAX) {
+        return;
+    }
+    size_t i = 0;
+    for (; key[i] != '\0' && i < sizeof(c->kv[0].key) - 1; i++) {
+        c->kv[c->count].key[i] = key[i];
+    }
+    c->kv[c->count].key[i] = '\0';
+    c->kv[c->count].val = val;
+    c->count++;
+}
+
+static void declare_vm_devices(const purr_board_t *board)
+{
+    const purr_vm_info_t *vm = purr_vm_info();
+    if (!vm->present) {
+        return;
+    }
+    int own = (vm->flags & PURR_VM_NIC_OWN_BUS) != 0;
+    memset(&s_nic_cfg, 0, sizeof(s_nic_cfg));
+    kv_put(&s_nic_cfg, "cs", own ? vm->nic_cs : 9);                 /* 9: the slot a T-Deck Plus gives its LoRa module, free in a VM */
+    kv_put(&s_nic_cfg, "own_bus", own);
+    if (own) {
+        kv_put(&s_nic_cfg, "host", vm->nic_host - 1);              /* the device reports the controller number (SPI3 = 3); the bus table takes ESP-IDF's (SPI3 = 2) */
+        kv_put(&s_nic_cfg, "sclk", vm->nic_sclk);
+        kv_put(&s_nic_cfg, "mosi", vm->nic_mosi);
+        kv_put(&s_nic_cfg, "miso", vm->nic_miso);
+    }
+    kv_put(&s_nic_cfg, "hz", 20000000);
+    s_nic_dev = (purr_device_t){.name = "eth0", .compatible = "w5500", .priority = PURR_PRI_OPTIONAL, .cfg = &s_nic_cfg};
+    for (int i = 0; i < PURR_MAX_EXTRA_PINS; i++) {
+        s_nic_dev.extra_pins[i] = PURR_PIN_NONE;                   /* no pins claimed: the controller's own pins are the VM's, and pin 9 is the LoRa module's on a real board */
+    }
+    purr_device_add(board, &s_nic_dev);
+}
+
 void purr_drivers_bind_all(const purr_board_t *board)
 {
     int count = 0;
     const purr_driver_t *const *table = purr_driver_table(&count);
     purr_drivers_bind(board, table, count);
+    declare_vm_devices(board);
 }
 
 /* ---------------------------------------------------------------- init */

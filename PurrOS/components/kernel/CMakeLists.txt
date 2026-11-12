@@ -18,7 +18,7 @@ set(srcs
 if(CONFIG_PURR_NET_ETH_W5500)
     list(APPEND srcs "src/purr_net_eth.c")
 else()
-    list(APPEND srcs "src/purr_net_wifi.c")
+    list(APPEND srcs "src/purr_net_wifi.c" "src/purr_net_link.c")
 endif()
 
 if(CONFIG_PURR_BOARD_TDECK)

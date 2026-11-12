@@ -14,7 +14,9 @@
 #include "nvs_flash.h"
 
 #include "purr_fs.h"
+#include "purr_net_link.h"
 #include "purr_netrec.h"
+#include "purr_vm.h"
 #include "purr_wifi.h"
 
 static const char *TAG = "net";
@@ -27,6 +29,9 @@ static esp_netif_t *s_netif;
 static EventGroupHandle_t s_eg;
 static uint8_t s_last_reason;           /* the last WIFI_EVENT_STA_DISCONNECTED reason code */
 static volatile uint8_t s_auto;         /* a connection has succeeded once: keep it up */
+static uint8_t s_no_radio;             /* running in a VM that has no radio (purr_vm.h): the Wi-Fi stack is never started */
+static uint8_t s_wired;                /* ... and a loaded Ethernet driver (purr_net_link.c) is the network instead */
+static TickType_t s_wire_retry_at;     /* after a failed bring-up of the wire: not again before this tick */
 static volatile uint8_t s_retry_now;    /* it dropped: retry as soon as the task wakes */
 
 /* ---------------------------------------------------------------- the save file */
@@ -181,9 +186,45 @@ static void reconnect_task(void *arg)
     }
 }
 
+/* In a VM without a radio the network is a loaded Ethernet driver (a W5500 module): it may be loaded after the first call to purr_net_init, so every entry point
+ * that matters asks again, and the wire comes up the first time a driver is there. A failed bring-up is not retried for a few seconds. */
+static int wired_now(void)
+{
+    if (s_wired) {
+        return 1;
+    }
+    if (!s_no_radio || !purr_netlink_available()) {
+        return 0;
+    }
+    TickType_t now = xTaskGetTickCount();
+    if (s_wire_retry_at != 0 && (int32_t)(now - s_wire_retry_at) < 0) {
+        return 0;
+    }
+    if (purr_netlink_up() == ESP_OK) {
+        s_wired = 1;
+        return 1;
+    }
+    s_wire_retry_at = now + pdMS_TO_TICKS(5000);
+    if (s_wire_retry_at == 0) {
+        s_wire_retry_at = 1;
+    }
+    return 0;
+}
+
 esp_err_t purr_net_init(purr_fs_t *fs)
 {
     s_fs = fs;
+    /* Any firmware boots in the emulator: the emulator's VM-info device (purr_vm.h) is the flag. It has no radio, and bringing the PHY up there
+     * never finishes ("pll_cal exceeds 2ms"), so the Wi-Fi stack is not started and every Wi-Fi call says so instead of touching it. */
+    const purr_vm_info_t *vm = purr_vm_info();
+    if (vm->present && !(vm->flags & PURR_VM_HAS_RADIO)) {
+        s_no_radio = 1;
+        if (wired_now()) {
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "running in a VM with no Wi-Fi radio: the radio is not started. No Ethernet driver is loaded (yet): the wired network starts as soon as one is");
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     load_saved();
 
     esp_err_t e = nvs_flash_init();
@@ -226,6 +267,10 @@ esp_err_t purr_net_init(purr_fs_t *fs)
 
 esp_err_t purr_net_scan(purr_net_ap_t *out, int max, int *n)
 {
+    if (s_no_radio) {
+        *n = 0;                                      /* a wire has no access points */
+        return wired_now() ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+    }
     wifi_scan_config_t sc;
     memset(&sc, 0, sizeof(sc));
     esp_err_t e = esp_wifi_scan_start(&sc, true);      /* blocking */
@@ -261,11 +306,17 @@ esp_err_t purr_net_scan(purr_net_ap_t *out, int max, int *n)
 
 esp_err_t purr_net_connect(const char *ssid, const char *pass, uint32_t timeout_ms)
 {
+    if (s_no_radio) {
+        return wired_now() ? purr_netlink_wait_ip(timeout_ms) : ESP_ERR_NOT_SUPPORTED;      /* no network to pick and no password on a wire */
+    }
     return do_connect(ssid, pass, timeout_ms, 1);
 }
 
 esp_err_t purr_net_forget(const char *ssid)
 {
+    if (s_no_radio) {
+        return ESP_OK;
+    }
     if (purr_wifi_list_remove(&s_saved, ssid)) {
         save_list();
     }
@@ -282,6 +333,12 @@ void purr_net_status(purr_net_status_t *out)
 {
     memset(out, 0, sizeof(*out));
     strcpy(out->ip, "0.0.0.0");
+    if (s_no_radio) {
+        if (wired_now()) {
+            purr_netlink_status(out);
+        }
+        return;
+    }
     wifi_ap_record_t info;
     if (esp_wifi_sta_get_ap_info(&info) != ESP_OK) {
         return;
@@ -302,7 +359,7 @@ uint8_t purr_net_last_disconnect_reason(void)
 
 int purr_net_wired(void)
 {
-    return 0;
+    return s_no_radio ? wired_now() : 0;
 }
 
 int purr_net_saved(purr_net_ap_t *out, int max)

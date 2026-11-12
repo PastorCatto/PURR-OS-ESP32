@@ -20,6 +20,8 @@
 
 /* Byte 4 of the block. */
 #define PURR_VM_NIC_OWN_BUS 0x01   /* the Ethernet controller has its own SPI bus (fields below) */
+#define PURR_VM_HAS_RADIO   0x02   /* the emulated chip models a Wi-Fi radio. Not set by any emulator today: Espressif's QEMU has none, so the
+                                    * PHY never finishes calibrating and esp_wifi_init stalls the boot. Without this bit, the Wi-Fi backend stays off in a VM. */
 
 typedef struct {
     uint8_t present;           /* a VM-info device answered */
