@@ -74,6 +74,41 @@ static int fb_uart_read(uint32_t h, uint8_t *b, size_t cap, uint32_t timeout_ms)
 static int fb_uart_baud_set(uint32_t h, int baud) { (void)h; fb_uart_baud = baud; return 0; }
 static void fb_uart_close(uint32_t h) { (void)h; }
 
+/* ---- I2C: one device at a time. fb_i2c_hook is called for every write (tx, n, NULL, 0) and every write-read (tx, n, rx, rn); it returns 0, or nonzero for a NACK. */
+static int (*fb_i2c_hook)(const uint8_t *tx, size_t n, uint8_t *rx, size_t rn);
+static int fb_i2c_port, fb_i2c_sda, fb_i2c_scl, fb_i2c_hz, fb_i2c_removed;
+static uint16_t fb_i2c_addr;
+static uint32_t fb_i2c_add(int port, int sda, int scl, uint16_t addr, int hz)
+{
+    fb_i2c_port = port;
+    fb_i2c_sda = sda;
+    fb_i2c_scl = scl;
+    fb_i2c_addr = addr;
+    fb_i2c_hz = hz;
+    return 5;
+}
+static int fb_i2c_write(uint32_t h, const uint8_t *d, size_t n, int ms)
+{
+    (void)h;
+    (void)ms;
+    return fb_i2c_hook ? fb_i2c_hook(d, n, NULL, 0) : 0;
+}
+static int fb_i2c_read(uint32_t h, uint8_t *d, size_t n, int ms)
+{
+    (void)h;
+    (void)ms;
+    memset(d, 0, n);
+    return fb_i2c_hook ? fb_i2c_hook(NULL, 0, d, n) : 0;
+}
+static int fb_i2c_write_read(uint32_t h, const uint8_t *tx, size_t tn, uint8_t *rx, size_t rn, int ms)
+{
+    (void)h;
+    (void)ms;
+    memset(rx, 0, rn);
+    return fb_i2c_hook ? fb_i2c_hook(tx, tn, rx, rn) : 0;
+}
+static void fb_i2c_remove(uint32_t h) { (void)h; fb_i2c_removed++; }
+
 /* ---- clock and GPIO */
 static uint64_t fb_now;
 static int fb_gpio[64];
@@ -137,6 +172,11 @@ static purr_driver_bus_table_t fb_table(void)
     t.gpio_set_input_pullup = fb_gpio_set_input_pullup;
     t.gpio_get = fb_gpio_get;
     t.gpio_write = fb_gpio_write;
+    t.i2c_add_device = fb_i2c_add;
+    t.i2c_write = fb_i2c_write;
+    t.i2c_read = fb_i2c_read;
+    t.i2c_write_read = fb_i2c_write_read;
+    t.i2c_remove_device = fb_i2c_remove;
     t.spi_add_device = fb_spi_add;
     t.spi_transfer = fb_spi_transfer;
     t.spi_open_bus = fb_spi_open_bus;

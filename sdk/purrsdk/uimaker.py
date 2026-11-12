@@ -28,7 +28,7 @@ import zlib
 
 from . import minitoml, ui, uibuilder
 
-DEVICE_SIZES = {"tdeck_plus": (320, 240), "tdeck": (320, 240), "waveshare154": (200, 200)}
+DEVICE_SIZES = {"tdeck_plus": (320, 240), "tdeck": (320, 240), "waveshare154": (200, 200), "playtime": (320, 240)}
 
 # ---------------------------------------------------------------------------------------------------------------- PNG in and out
 

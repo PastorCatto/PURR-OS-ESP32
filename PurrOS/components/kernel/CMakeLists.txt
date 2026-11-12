@@ -33,6 +33,10 @@ if(CONFIG_PURR_BOARD_WAVESHARE154)
     list(APPEND srcs "boards/waveshare154.c")
 endif()
 
+if(CONFIG_PURR_BOARD_PLAYTIME)
+    list(APPEND srcs "boards/playtime.c")
+endif()
+
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "include"
                        REQUIRES coreos littlefs esp_partition esp_wifi esp_netif esp_event nvs_flash

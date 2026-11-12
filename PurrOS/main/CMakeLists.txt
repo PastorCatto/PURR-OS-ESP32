@@ -11,7 +11,7 @@ set(main_reqs kernel coreos littlefs esp_partition esp_system esp_timer esp_wifi
 # 0x19580 bytes once LVGL became reachable through commands.c's "lvgldemo"). Fitting it
 # there is its own later chunk (shrinking something else, or a leaner LVGL config), not
 # something to force through now.
-if(CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS)
+if(CONFIG_PURR_BOARD_COLOR_LCD)
     list(APPEND main_srcs "purr_catrt_msg.c" "purr_notify.c" "purr_lvgl.c" "purr_ui_config.c" "purr_ui_assets.c" "purr_ui_service.c"
                           # the setup wizard (recovery loader and KittenOS first boot) and what it is made of: the theme and
                           # the Settings widgets, in every profile
@@ -34,7 +34,7 @@ idf_component_register(SRCS ${main_srcs} REQUIRES ${main_reqs})
 # The Android shell's own picture pack (UI/android-assets, the Froyo art) is built here and embedded in the full OS image, next to the code that asks for the names, so a
 # kernel always carries the pictures it needs: no separate file to go missing after an update or a reset (plan7.md "The Froyo pictures travel with the kernel").
 # It sits in flash and is read in place (no internal RAM, no copy). A theme's pack still goes first (purr_ui_assets.c).
-if(CONFIG_PURR_PROFILE_FULL AND (CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS))
+if(CONFIG_PURR_PROFILE_FULL AND (CONFIG_PURR_BOARD_COLOR_LCD))
     set(android_assets_dir "${CMAKE_CURRENT_LIST_DIR}/../../UI/android-assets")
     set(android_pack "${CMAKE_CURRENT_BINARY_DIR}/android_pack.bin")
     file(GLOB android_pngs CONFIGURE_DEPENDS "${android_assets_dir}/*.png")

@@ -31,7 +31,7 @@ BODY_LEN = 108                 # offsetof(record_t, crc32)
 RECORD_LEN = 112                # sizeof(record_t)
 RECORD_FMT = f"<I{SSID_LEN}s{PASS_LEN}s6xI"   # magic, ssid, pass, pad[3]+compiler pad[3], crc32
 
-BOARDS = ("tdeck_plus", "cyd_24c", "waveshare154")
+BOARDS = ("tdeck_plus", "cyd_24c", "waveshare154", "playtime")
 
 
 def find_partition(ctx, repo_root, board, name):

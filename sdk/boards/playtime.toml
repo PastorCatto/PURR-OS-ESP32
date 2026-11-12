@@ -1,0 +1,62 @@
+# Playtime (ESP32-S3-WROOM-1-N16R8: 16 MB flash, 8 MB octal PSRAM). A handheld with a 320x240 screen, no touch, and a module slot for input.
+# A board is data. Change a pin here, run `purr board build boards/playtime.toml`, and the board file the kernel is built with
+# (and the profile a device reads at boot) are written for you.
+#
+# The pins come from the board's reference firmware. status says how far each part has got: "works" (used every day), "built" (the code runs but nobody has
+# read real values yet), "written" (the driver exists, tested against a scripted fake only), "template" (no driver yet).
+# Not yet seen on a unit running PURR OS: the display's mounting (madctl), its colour order and the SPI speed. There is no backlight pin, no touch
+# controller and no peripheral power rail on this board.
+
+[board]
+id = "playtime"
+name = "Playtime"
+chip = "esp32s3"
+flash_mb = 16
+psram_mb = 8
+power_pin = -1                 # no switched peripheral rail
+power_settle_ms = 0
+idle_high_pins = []            # the display has a bus of its own: nothing else to hold deselected
+
+[spi]
+host = 2                       # SPI3_HOST: the display's bus. Write-only: the panel has no MISO line.
+mosi = 11
+miso = -1
+sclk = 10
+
+[display]
+name = "ST7789V 320x240"
+compatible = "st7789"
+cs = 14
+dc = 13
+rst = 12
+backlight = -1                 # none in the reference firmware
+width = 320
+height = 240
+col_off = 0
+row_off = 0
+madctl = 0xA0                  # MV|MY: the panel is 240x320 native, used sideways (the reference firmware's rotation 90)
+bgr = 0                        # RGB element order
+invert = 1
+spi_hz = 40000000
+status = "built"
+
+[buttons]
+boot = -1                      # no BOOT or PWR buttons are described: input is the gamepad module
+pwr = -1
+hold_ms = 0
+
+# The gamepad module: a MCP23017 I2C expander at 0x20 on the main I2C bus. A 2x4 button matrix (row 1: UP DOWN LEFT RIGHT, row 2: A B X Y; a diode in every
+# switch, column to row), a function button on GPB6 and an active-low LED for every button. It gives the shell arrow keys, Enter, Esc (Back), Menu and Home.
+# The module can be absent at start-up and plugged in later; the driver looks again every half second.
+[[device]]
+name = "keyboard"
+compatible = "gamepad-mcp23017"
+class = "input"
+bus = "i2c"
+priority = "optional"
+port = 0
+sda = 17
+scl = 18
+addr = 0x20
+hz = 400000
+status = "written"

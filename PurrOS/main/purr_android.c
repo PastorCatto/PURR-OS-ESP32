@@ -580,13 +580,26 @@ static void home_hold(void)
     and_go_home();
 }
 
+/* Esc is Back. On a device with a gamepad instead of a touch screen the other two keys of the key strip have keys too: Home is LV_KEY_HOME and Menu is
+ * PURR_KEY_MENU (purr_lvgl.h); the gamepad driver sends them (Modules/drivers/gamepad_mcp23017_module.c: Y is Home, X is Menu). */
 static int key_hook(uint32_t key)
 {
-    if (key == LV_KEY_ESC && s_signed_in) {
+    if (!s_signed_in) {
+        return 0;
+    }
+    switch (key) {
+    case LV_KEY_ESC:
         and_back();
         return 1;
+    case LV_KEY_HOME:
+        and_go_home();
+        return 1;
+    case PURR_KEY_MENU:
+        and_menu_key();
+        return 1;
+    default:
+        return 0;
     }
-    return 0;
 }
 
 /* ---------------------------------------------------------------- brightness and orientation */

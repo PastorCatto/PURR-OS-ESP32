@@ -14,7 +14,7 @@ from lib.model import Action, Param, Script
 IDF_VERSION = "5.3.5"
 # A board decides the chip. Adding a board means adding a row here and a folder of
 # settings files in PurrOS/.
-BOARDS = {"tdeck": "esp32s3", "tdeck_plus": "esp32s3", "cyd_24c": "esp32", "waveshare154": "esp32s3"}
+BOARDS = {"tdeck": "esp32s3", "tdeck_plus": "esp32s3", "cyd_24c": "esp32", "waveshare154": "esp32s3", "playtime": "esp32s3"}
 PROFILES = ("minimal", "recovery", "full")
 PROJECT_DIR = "PurrOS"
 

@@ -19,6 +19,7 @@ BOARDS = {
     "tdeck": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
     "tdeck_plus": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
     "waveshare154": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
+    "playtime": ("xtensa-esp32s3-elf", 9, "esp32s3.ld"),
 }
 # Which pkg_hw_*.c backs a board's display/input -- the one real per-board source file
 # (the rest of sources() below is shared). "tdeck" reuses tdeck_plus's pkg_hw.c outright:
@@ -27,7 +28,7 @@ BOARDS = {
 # draw_header()), not upstream terms -- picked so a device on the bench is identifiable by
 # sight/log line, same reason the recovery releases this repo publishes are named
 # (JumpingJaguar1, ...).
-HW_SOURCE = {"tdeck": "pkg_hw.c", "tdeck_plus": "pkg_hw.c", "waveshare154": "pkg_hw_epd.c"}
+HW_SOURCE = {"tdeck": "pkg_hw.c", "tdeck_plus": "pkg_hw.c", "waveshare154": "pkg_hw_epd.c", "playtime": "pkg_hw.c"}
 VERSION = "0.3.1"
 
 # Re-exported under their original names: purrstrap/tests/test_bootpkg.py reads these.

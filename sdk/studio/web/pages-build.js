@@ -107,7 +107,7 @@ async function keyChooser() {
 }
 
 async function buildTab(root, p) {
-  const board = h("select", {}, ["tdeck_plus", "tdeck", "waveshare154"].map(b => h("option", { value: b, text: b })));
+  const board = h("select", {}, ["tdeck_plus", "tdeck", "waveshare154", "playtime"].map(b => h("option", { value: b, text: b })));
   const kc = await keyChooser();
   const log = h("div", { class: "log", hidden: true });
   const results = h("div");

@@ -7,7 +7,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
 
 #include "lvgl.h"
 

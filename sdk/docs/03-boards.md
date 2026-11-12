@@ -9,7 +9,7 @@ A board is **data**. You write down the pins, the buses and the parts, and the k
 
 ## The file
 
-`sdk/boards/tdeck_plus.toml` is the example (the reference board; the other boards in the repository, `tdeck` and `waveshare154`, are kernel board files without an SDK `.toml` yet). It has these sections:
+`sdk/boards/tdeck_plus.toml` is the example (the reference board; `sdk/boards/playtime.toml` is a second one, with no touch screen and an input module instead of a keyboard; the other boards in the repository, `tdeck` and `waveshare154`, are kernel board files without an SDK `.toml` yet). It has these sections:
 
 | Section | What it says |
 |---|---|

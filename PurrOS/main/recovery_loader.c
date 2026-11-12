@@ -948,7 +948,7 @@ static void run_auto_mode(void)
 
 /* ------------------------------------------------------------ the setup wizard (colour T-Deck boards) */
 
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
 
 #define WIZ_MAX_AP 8
 #define LEGAL_MAX (16 * 1024)
@@ -1275,7 +1275,7 @@ void purr_recovery_loader_main(void)
         halt(net_start_failed_text());
     }
 
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
     if (wizard) {
         /* The wizard: "something went wrong" (or "first time?"), Wi-Fi, the legal text, restoring. Unattended, it opens on the
          * restoring page and joins the saved network by itself. It does not return unless LVGL could not start. */

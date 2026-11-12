@@ -27,7 +27,7 @@ from . import image, minitoml, projects, runner, source as sourcemod, uimaker, w
 STEPS = (("apps", "Build your apps"), ("ui", "Draw your UI"), ("drivers", "Gather the drivers"), ("parts", "Check the system parts"), ("image", "Make the flash image"),
          ("delivery", "Lay out the delivery folder"))
 MODULES = ("about", "appmgr", "apps", "fs", "login", "netinstall", "sysinfo", "wifi")
-BOARDS = ("tdeck_plus", "tdeck", "waveshare154")
+BOARDS = ("tdeck_plus", "tdeck", "waveshare154", "playtime")
 
 
 class SystemError_(Exception):

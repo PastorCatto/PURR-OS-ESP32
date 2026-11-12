@@ -38,7 +38,7 @@ CF_RGB565 = 0                             # w*h*2 bytes
 CF_RGB565A8 = 1                           # an RGB565 plane (w*h*2) then an 8-bit alpha plane (w*h)
 ALIGN = 4                                 # every entry's data starts on a 4-byte boundary
 ENTRY_SIZE = struct.calcsize(ENTRY_FMT)
-BOARDS = ("tdeck", "tdeck_plus")          # the only boards that build LVGL in at all
+BOARDS = ("tdeck", "tdeck_plus", "playtime")          # the only boards that build LVGL in at all
 MAX_PACK_BYTES = 5 * 1024 * 1024          # a pack is a file in LittleFS now: the cap the release tools and `purr ui check` apply
 PACK_COMPONENTS = ("uiassets", "ui_w10m", "ui_android")   # the names a packed pack can carry; the last two are the per-shell packs, `uiassets` the old single one
 

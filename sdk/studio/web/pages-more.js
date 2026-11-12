@@ -210,7 +210,7 @@ pages.release = {
   title: "release",
   async render(el) {
     el.appendChild(h("p", { class: "dim", style: { maxWidth: "70ch" }, text: "A release is the set of parts a device needs to recover itself: kernel, KittenOS, the loader, the boot package and the bootloader, each signed, with their manifests. Pick the parts, sign them with your key, and serve the folder." }));
-    const board = h("select", {}, ["tdeck_plus", "tdeck", "waveshare154"].map(b => h("option", { value: b, text: b })));
+    const board = h("select", {}, ["tdeck_plus", "tdeck", "waveshare154", "playtime"].map(b => h("option", { value: b, text: b })));
     const partsEl = h("div"), boxes = {};
     const kc = await keyChooser();
     const name = h("input", { type: "text", value: new Date().toISOString().slice(0, 10), "aria-label": "Release name" });

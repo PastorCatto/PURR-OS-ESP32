@@ -23,6 +23,7 @@ The rule is plug and play: adding a board should mean adding data, not changing 
 | [tdeck_plus.c](../PurrOS/components/kernel/boards/tdeck_plus.c) | T-Deck Plus board file |
 | [tdeck.c](../PurrOS/components/kernel/boards/tdeck.c) | T-Deck board file |
 | [waveshare154.c](../PurrOS/components/kernel/boards/waveshare154.c) | Waveshare e-paper board file |
+| [playtime.c](../PurrOS/components/kernel/boards/playtime.c) | Playtime board file (branch `playtime`) |
 | [sdkconfig.board.tdeck_plus](../PurrOS/sdkconfig.board.tdeck_plus), [tdeck](../PurrOS/sdkconfig.board.tdeck), [waveshare154](../PurrOS/sdkconfig.board.waveshare154) | Per-board build options: flash size, PSRAM, partition table, fonts |
 | [PurrOS/partitions/](../PurrOS/partitions/tdeck_plus.csv) | One partition table per board |
 | [bootloader/](../bootloader/SPEC.md) | `sdkconfig.board.<board>` files; the bootloader is built once per board |
@@ -44,6 +45,7 @@ The rule is plug and play: adding a board should mean adding data, not changing 
 |---|---|---|---|---|
 | T-Deck Plus | ESP32-S3 | 16 MB, 8 MB | yes | Primary. Display, touch, keyboard and keyboard backlight "work on the device" per the SDK table; GPS, LoRa, trackball, SD are written and tested against fakes |
 | T-Deck | ESP32-S3 | see `sdkconfig.board.tdeck` | yes | Same family as the Plus; I did not compare the two board files |
+| Playtime | ESP32-S3 | 16 MB, 8 MB | yes (branch `playtime`) | New, 2026-11-12, written from the reference firmware and not yet run on a unit or in an emulator. 320x240 ST7789V on its own SPI bus, no touch, no switched rail, no backlight pin. Input is a gamepad module (MCP23017 at 0x20) driven by `Modules/drivers/gamepad_mcp23017_module.c`. SD card, sound, IMU and battery are not described yet. The colour-LCD boards share the `PURR_BOARD_COLOR_LCD` option |
 | Waveshare ESP32-S3-ePaper-1.54 | ESP32-S3 | 8 MB, 8 MB | yes | A board file and a partition table in the flash map v2 shape exist (2026-11-08); the e-paper path is still compiled into the kernel (`epd1in54.c`). The minimal and recovery builds compile; the full profile does not link yet (no UI stack for this board) |
 | CYD 2.4C | ESP32 | 4 MB, none | **no** | In `BOARDS` in `coreos.py`, a `bootloader/sdkconfig.board.cyd_24c`, and the spec; nothing in the kernel builds for it |
 

@@ -6,6 +6,7 @@ import helpers
 from purrsdk import boards, inspector, minitoml, templates
 
 REF = os.path.join(helpers.SDK, "boards", "tdeck_plus.toml")
+PLAY = os.path.join(helpers.SDK, "boards", "playtime.toml")
 
 
 def compiles(path):
@@ -41,6 +42,51 @@ class Compiles(unittest.TestCase):
                        ".sda = 18", ".scl = 8", ".addr = 0x55", ".rst_pin = 17", ".native_x_max = 311", ".native_y_max = 235"):
             self.assertIn(needle, gen, needle)
             self.assertIn(needle, re.sub(r"\s+", " ", real) if False else real, needle)
+
+
+class PlaytimeBoard(unittest.TestCase):
+    """Playtime: no touch, no switched rail, the display on SPI3, input from a gamepad module at 0x20."""
+
+    def test_the_board_file_is_clean(self):
+        b = boards.load(PLAY)
+        self.assertEqual([i for i in boards.check(b) if i["level"] == "bad"], [])
+        self.assertEqual([d["compatible"] for d in b["device"]], ["gamepad-mcp23017"])          # one input device, named "keyboard", and no second keyboard from [keyboard]
+        self.assertEqual(b["device"][0]["name"], "keyboard")
+
+    def test_the_generated_file_has_the_pins_of_the_hand_written_one(self):
+        import re
+        real = re.sub(r"\s+", " ", open(os.path.join(helpers.ROOT, "PurrOS", "components", "kernel", "boards", "playtime.c")).read())
+        gen = re.sub(r"\s+", " ", boards.to_c(boards.load(PLAY)))
+        self.assertIn(".host = 2", gen)
+        self.assertIn(".host = 2 /* SPI3_HOST", real)
+        for needle in (".mosi = 11", ".sclk = 10", ".cs = 14", ".dc = 13", ".rst = 12", ".width = 320", ".height = 240", ".madctl = 0xA0", ".bgr = 0", ".invert = 1",
+                       ".sda = 17", ".scl = 18", '.compatible = "gamepad-mcp23017"'):
+            self.assertIn(needle, gen, needle)
+            self.assertIn(needle, real, needle)
+        self.assertIn(".power_pin = PURR_PIN_NONE", real)
+        self.assertIn(".backlight = PURR_PIN_NONE", real)
+
+    @unittest.skipUnless(helpers.clang(), "needs a C compiler")
+    def test_the_generated_file_compiles(self):
+        p = os.path.join(helpers.tmpdir(), "playtime.c")
+        open(p, "w").write(boards.to_c(boards.load(PLAY)))
+        r = compiles(p)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_the_build_knows_the_board(self):
+        from purrsdk import system as systemmod, source
+        self.assertIn("playtime", systemmod.BOARDS)
+        self.assertIn("playtime", source.BOARDS_CHIP)
+        self.assertTrue(os.path.isfile(os.path.join(helpers.ROOT, "PurrOS", "sdkconfig.board.playtime")))
+        self.assertTrue(os.path.isfile(os.path.join(helpers.ROOT, "PurrOS", "partitions", "playtime.csv")))
+        self.assertTrue(os.path.isfile(os.path.join(helpers.ROOT, "bootpkg", "boards", "playtime.h")))
+        self.assertEqual(open(os.path.join(helpers.ROOT, "PurrOS", "partitions", "playtime.csv")).read(),
+                         open(os.path.join(helpers.ROOT, "PurrOS", "partitions", "tdeck_plus.csv")).read())     # the same 16 MB layout
+
+    def test_the_gamepad_driver_is_re_signed_by_a_source_build(self):
+        from purrsdk import source
+        self.assertIn(("s_gamepad_driver_module", "Modules/drivers/gamepad_mcp23017_module.c", "gamepad_mcp23017_entry"), source.BAKED)
+        self.assertTrue(os.path.isfile(os.path.join(helpers.ROOT, "Modules", "drivers", "gamepad_mcp23017_module.c")))
 
 
 class Boards(unittest.TestCase):

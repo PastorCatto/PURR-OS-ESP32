@@ -14,7 +14,7 @@ int recovery_gate_open_for(uint16_t reasons)
     return (reasons & (PURR_RR_DAMAGED | PURR_RR_NO_SYSTEM | PURR_RR_CONFIG | PURR_RR_REPEATED)) != 0;
 }
 
-#if CONFIG_PURR_PROFILE_RECOVERY && (CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS)
+#if CONFIG_PURR_PROFILE_RECOVERY && (CONFIG_PURR_BOARD_COLOR_LCD)
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"

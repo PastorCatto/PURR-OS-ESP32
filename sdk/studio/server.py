@@ -579,7 +579,7 @@ def handle(state, method, route, q, body):
 
     # ---- image maker (a whole flash image for a device)
     if route == "image/boards":
-        return {"boards": [{"id": b, "name": n} for b, n in (("tdeck_plus", "LilyGO T-Deck Plus"), ("tdeck", "LilyGO T-Deck"), ("waveshare154", "Waveshare e-paper 1.54"))]}
+        return {"boards": [{"id": b, "name": n} for b, n in (("tdeck_plus", "LilyGO T-Deck Plus"), ("tdeck", "LilyGO T-Deck"), ("waveshare154", "Waveshare e-paper 1.54"), ("playtime", "Playtime"))]}
     if route == "image/folders":
         board = q.get("board") or "tdeck_plus"
         cands = [os.environ.get("PURR_IMAGES"), workspace.kit_path("images")]

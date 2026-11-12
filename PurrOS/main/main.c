@@ -40,7 +40,7 @@
 #include "recovery_loader.h"
 #include "sdkconfig.h"
 
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
 #include "recovery_app.h"
 #if !CONFIG_PURR_PROFILE_RECOVERY
 #include "purr_shell.h"
@@ -59,7 +59,7 @@ static const char *TAG = "purros";
 
 /* The kernel-start screen (recovery_screen.c): colour T-Deck boards, full profile. BOOT_STEP sets the stage line
  * and the bar's step (of 5) while it is on screen, and does nothing otherwise. */
-#if (CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS) && CONFIG_PURR_PROFILE_FULL
+#if (CONFIG_PURR_BOARD_COLOR_LCD) && CONFIG_PURR_PROFILE_FULL
 #define BOOT_SCREEN 1
 #else
 #define BOOT_SCREEN 0
@@ -231,7 +231,7 @@ void app_main(void)
     BOOT_STEP(1, "Starting network");
     purr_net_setup(&boot_cli);
     BOOT_STEP(2, "Preparing the shell");
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
     /* mode.conf first, then only the active shell's own config: the official shell has no use for the
      * nav shell's files. A file already there is never touched, so a device that
      * switches shell later plants the new one's config on its next boot. */
@@ -279,7 +279,7 @@ void app_main(void)
      * (bootloader/SPEC.md section 6) so it doesn't keep climbing from here. */
     purr_mark_boot_healthy(&boot_cli);
 
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
     /* The real escape hatch: hold space right now, during login, to skip the LVGL shell for
      * this boot and land in the text shell instead (plantmodules, appinstall, run, and
      * everything else the graphical shell has no equivalent for yet) -- there was no way to

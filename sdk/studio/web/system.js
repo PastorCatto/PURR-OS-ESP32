@@ -11,6 +11,7 @@ const SYS_DEVICES = [
   ["tdeck_plus", "T-Deck Plus", "REFERENCE", "#0050ef", "ESP32-S3 · 16 MB · 8 MB PSRAM · 320 × 240 touch, keyboard, trackball, GPS, LoRa"],
   ["tdeck", "T-Deck", "SAME HARDWARE", "#2b2b2b", "The same board without GPS. Its set is published next to the Plus set."],
   ["waveshare154", "Waveshare e-paper 1.54", "IN PROGRESS", "#647687", "8 MB · 200 × 200 e-ink. Loader and recovery build; no shell yet."],
+  ["playtime", "Playtime", "NEW", "#a4262c", "ESP32-S3 · 16 MB · 8 MB PSRAM · 320 × 240, no touch. Gamepad module for input (d-pad, A B X Y, function key); SD, sound and sensors are not supported yet."],
 ];
 const SYS_TABS = ["device", "parts", "build", "deliver"];
 function sysScope(d) { return d.scope === "any" ? "any ESP32-S3 board" : /^tdeck/.test(d.scope) ? "T-Deck and T-Deck Plus only" : d.scope + " only"; }

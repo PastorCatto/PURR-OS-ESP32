@@ -10,7 +10,7 @@ class ImageRoutes(test_studio.Studio):
     def test_boards(self):
         st, body = self.call("GET", "/api/image/boards")
         self.assertEqual(st, 200)
-        self.assertEqual([b["id"] for b in body["boards"]], ["tdeck_plus", "tdeck", "waveshare154"])
+        self.assertEqual([b["id"] for b in body["boards"]], ["tdeck_plus", "tdeck", "waveshare154", "playtime"])
 
     def test_plan_of_an_empty_folder_lists_what_is_missing(self):
         folder = helpers.tmpdir()

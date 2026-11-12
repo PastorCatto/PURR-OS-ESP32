@@ -107,6 +107,7 @@ const BX_DEVICES = [
   { id: "tdeck_plus", name: "T-Deck Plus", size: "320 × 240 · landscape", note: "Colour touch screen, keyboard, trackball.", w: 320, h: 240, color: "#0050ef" },
   { id: "tdeck", name: "T-Deck", size: "320 × 240 · landscape", note: "The same screen and keys, without GPS.", w: 320, h: 240, color: "#60a917" },
   { id: "waveshare154", name: "Waveshare e-paper", size: "200 × 200 · black and white", note: "Two buttons, no touch. Slow refresh.", w: 200, h: 200, color: "#647687" },
+  { id: "playtime", name: "Playtime", size: "320 × 240 · landscape", note: "Colour screen, no touch. A gamepad module: d-pad, A B X Y, a function key.", w: 320, h: 240, color: "#a4262c" },
 ];
 const BX_STARTS = [
   { id: "blank", name: "blank screen", note: "An empty screen. You place everything.", d: "M4 4h16v16H4z", color: "#2b2b2b" },

@@ -24,7 +24,7 @@
 #include "purr_recovery_src.h"
 #include "purr_w10m_theme.h"
 
-#if CONFIG_PURR_PROFILE_RECOVERY && (CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS)
+#if CONFIG_PURR_PROFILE_RECOVERY && (CONFIG_PURR_BOARD_COLOR_LCD)
 
 static const char *TAG = "oobe-first";
 

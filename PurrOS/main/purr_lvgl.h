@@ -74,6 +74,9 @@ void purr_lvgl_set_edge_swipe(void (*cb)(void));
 /* A hook that sees every key before it is delivered (an LVGL key code, or the ASCII character). Return 1 to consume it. NULL turns it off. UI task. */
 void purr_lvgl_set_key_hook(int (*cb)(uint32_t key));
 
+/* The key a device with no Menu button on screen sends for it (the gamepad's X). Home is LVGL's LV_KEY_HOME. Both reach the key hook above. */
+#define PURR_KEY_MENU 1
+
 /* A hook for holding the trackball's button down for `ms` milliseconds (called once per hold, on the UI task). While it is set a tap is delivered as
  * Enter when the button is released, not when it is pressed, so a hold is never also a click. NULL turns it off. */
 void purr_lvgl_set_trackball_hold(void (*cb)(void), int ms);

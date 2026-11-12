@@ -293,7 +293,7 @@ SCRIPT = Script(
         Action("build", "Build", build,
                help="compile a shell's C sources, find its relocations and import sites, and pack it",
                params=(
-                   Param("board", "choice", default="tdeck_plus", choices=("tdeck", "tdeck_plus", "cyd_24c", "waveshare154"),
+                   Param("board", "choice", default="tdeck_plus", choices=("tdeck", "tdeck_plus", "cyd_24c", "waveshare154", "playtime"),
                          help="the board to build for (it decides the chip and compiler)"),
                    Param("source", "path", required=True, help="the shell's C source files, comma-separated, with the file that defines purr_shell_module_main"),
                    Param("kernel_build", "path", required=True, help="the build directory of a kernel built from this tree (its compile_commands.json gives the include paths and defines)"),

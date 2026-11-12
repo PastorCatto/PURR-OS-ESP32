@@ -3,7 +3,7 @@
 
 #include "sdkconfig.h"
 
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
 
 #include <stdint.h>
 #include <string.h>
@@ -20,6 +20,8 @@
 #define BOARD_HAS_KEYBOARD 1
 #if CONFIG_PURR_BOARD_TDECK_PLUS
 #define BOARD_CODENAME "BlackDeck+"
+#elif CONFIG_PURR_BOARD_PLAYTIME
+#define BOARD_CODENAME "Playtime"
 #else
 #define BOARD_CODENAME "BlackDeck"
 #endif

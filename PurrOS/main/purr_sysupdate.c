@@ -16,7 +16,7 @@
 #include "purr_fetch.h"
 #include "purr_kernel.h"
 #include "purr_manifest.h"
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
 #include "purr_notify.h"
 #endif
 #include "purr_recovery_src.h"
@@ -109,7 +109,7 @@ int purr_sysupdate_check(int use_dev, char *msg, size_t cap)
     } else {
         char moved[96];
         if (purr_recovery_check_moved(moved, sizeof(moved))) {     /* a signed move file: the next addresses are the new ones */
-#if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
+#if CONFIG_PURR_BOARD_COLOR_LCD
             purr_notify_add("Updates have moved", moved);
 #endif
         }

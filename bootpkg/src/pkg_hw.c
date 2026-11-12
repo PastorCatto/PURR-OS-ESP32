@@ -180,7 +180,9 @@ int hw_display_init(void)
     hw_fill(0, 0, LCD_W, LCD_H, 0x0000);    /* clear before turning the panel on */
     lcd_cmd(0x29);                          /* display on */
     hw_delay_ms(10);
+#ifdef PIN_BACKLIGHT
     pin_hi(PIN_BACKLIGHT);
+#endif
     return 0;
 }
 
@@ -261,20 +263,25 @@ char hw_key(void)
 void hw_init(const purr_boot_services_t *svc)
 {
     g = svc;
+#ifdef PIN_POWER                            /* a board with no peripheral rail (Playtime) leaves these out of its header */
     svc->gpio_setup(PIN_POWER, PURR_GPIO_OUT);
     pin_hi(PIN_POWER);
     hw_delay_ms(50);                        /* nothing on the rail answers before this */
-
+#endif
+#ifdef PIN_IDLE_A
     svc->gpio_setup(PIN_IDLE_A, PURR_GPIO_OUT);
     svc->gpio_setup(PIN_IDLE_B, PURR_GPIO_OUT);
     pin_hi(PIN_IDLE_A);
     pin_hi(PIN_IDLE_B);
+#endif
 
     svc->gpio_setup(PIN_MOSI, PURR_GPIO_OUT);
     svc->gpio_setup(PIN_SCLK, PURR_GPIO_OUT);
     svc->gpio_setup(PIN_CS, PURR_GPIO_OUT);
     svc->gpio_setup(PIN_DC, PURR_GPIO_OUT);
+#ifdef PIN_BACKLIGHT
     svc->gpio_setup(PIN_BACKLIGHT, PURR_GPIO_OUT);
+#endif
     svc->gpio_setup(PIN_KBD_SDA, PURR_GPIO_OPEN_DRAIN);
     svc->gpio_setup(PIN_KBD_SCL, PURR_GPIO_OPEN_DRAIN);
     pin_hi(PIN_CS);
