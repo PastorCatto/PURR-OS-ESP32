@@ -51,10 +51,7 @@ class Base(unittest.TestCase):
         self.root = os.path.join(self.tmp, "emu")
         os.makedirs(os.path.join(self.root, "boards"))
         open(os.path.join(self.root, "boards", "t-deck-plus.toml"), "w").write("# a board\n")
-        exe = os.path.join(self.root, "headless_tap")
-        with open(exe, "w") as fh:
-            fh.write(FAKE % {"python": sys.executable})
-        os.chmod(exe, os.stat(exe).st_mode | stat.S_IXUSR)
+        helpers.write_fake_runner(self.root, FAKE % {"python": sys.executable})
         self.image = os.path.join(self.tmp, "img.bin")
         with open(self.image, "wb") as fh:
             fh.write(b"\xe9" * 4096)
@@ -63,7 +60,8 @@ class Base(unittest.TestCase):
         os.environ["PURR_EMULATOR_DIR"] = self.root
         os.environ["FAKE_SERIAL"] = self.serial
         os.environ.pop("PURR_EMULATOR", None)
-        for p in (mock.patch.object(emulator, "_dev_checkout", lambda: None), mock.patch.object(emulator.workspace, "kit_path", lambda *a: os.path.join(self.tmp, "no-kit", *a))):
+        for p in (mock.patch.object(emulator, "_dev_checkout", lambda: None), mock.patch.object(emulator, "_HEADLESS_NAMES", (helpers.RUNNER_NAME,)),
+                  mock.patch.object(emulator.workspace, "kit_path", lambda *a: os.path.join(self.tmp, "no-kit", *a))):
             p.start()
             self.addCleanup(p.stop)
 
@@ -77,7 +75,6 @@ class Base(unittest.TestCase):
         return emulator.test_image(self.image, "tdeck_plus", seconds=seconds, workdir=os.path.join(self.tmp, "w"), poll=0.3, on_line=lambda s: None)
 
 
-@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Testing(Base):
     def status(self, r):
         return {c["id"]: c["status"] for c in r["checks"]}
@@ -151,7 +148,6 @@ class Helpers(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("not emulated", why)
 
-    @unittest.skipIf(os.name == "nt", "on Windows the answer is that the emulator is not available there")
     def test_no_emulator_says_so(self):
         with mock.patch.object(emulator, "find", lambda: None):
             ok, why = emulator.available("tdeck_plus")
@@ -159,7 +155,6 @@ class Helpers(unittest.TestCase):
         self.assertIn("no emulator", why.lower())
 
 
-@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Routes(test_studio.Studio, Base):
     """The Studio routes behind the deliver page's test button."""
     def setUp(self):

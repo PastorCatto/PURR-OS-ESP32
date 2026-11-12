@@ -21,7 +21,7 @@ record = os.environ.get("FAKE_RECORD")
 panic = os.environ.get("FAKE_PANIC")
 if os.environ.get("FAKE_CHILD"):                      # like the real runner: QEMU is its child
     import subprocess
-    kid = subprocess.Popen(["sleep", "300"])
+    kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
     open(os.environ["FAKE_CHILD"], "w").write(str(kid.pid))
 t0 = time.time()
 PNG = bytes.fromhex("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000001e221bc330000000049454e44ae426082")
@@ -45,15 +45,34 @@ while time.time() - t0 < secs:
 '''
 
 
+FAKE_NAME = helpers.RUNNER_NAME           # the name the SDK looks for; on Windows a .cmd stands in for the .exe
+
+
 def make_emulator(root, record=None):
     os.makedirs(os.path.join(root, "boards"))
     with open(os.path.join(root, "boards", "t-deck-plus-vm.toml"), "w") as fh:
         fh.write("# a board\n")
-    exe = os.path.join(root, "headless_tap")
-    with open(exe, "w") as fh:
-        fh.write(FAKE % {"python": sys.executable})
-    os.chmod(exe, os.stat(exe).st_mode | stat.S_IXUSR)
-    return exe
+    return helpers.write_fake_runner(root, FAKE % {"python": sys.executable})
+
+
+def process_alive(pid):
+    """Whether a process is still running. (os.kill(pid, 0) would end the process on Windows.)"""
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = ctypes.c_void_p
+    handle = k32.OpenProcess(0x1000, False, pid)                  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    code = ctypes.c_ulong()
+    k32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))
+    k32.CloseHandle(ctypes.c_void_p(handle))
+    return code.value == 259                                      # STILL_ACTIVE
 
 
 class Base(unittest.TestCase):
@@ -70,6 +89,7 @@ class Base(unittest.TestCase):
         os.environ.pop("PURR_EMULATOR", None)
         os.environ.pop("PURR_VM_IMAGE", None)
         for p in (mock.patch.object(emulator, "_dev_checkout", lambda: None),                      # only the folder the test made counts, not this machine's
+                  mock.patch.object(emulator, "_HEADLESS_NAMES", (FAKE_NAME,)),
                   mock.patch.object(emulator.workspace, "kit_path", lambda *a: os.path.join(self.tmp, "no-kit", *a))):
             p.start()
             self.addCleanup(p.stop)
@@ -79,7 +99,6 @@ class Base(unittest.TestCase):
         os.environ.update(self._env)
 
 
-@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Finding(Base):
     def test_finds_the_folder_named_in_the_environment(self):
         em = emulator.find()
@@ -110,7 +129,6 @@ class Finding(Base):
         self.assertIn("no emulator", str(cm.exception).lower())
 
 
-@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Session(Base):
     def test_a_run_takes_pictures_and_reads_the_serial_log(self):
         work = os.path.join(self.tmp, "w")
@@ -156,10 +174,13 @@ class Session(Base):
             time.sleep(0.1)
         with open(pidfile) as fh:
             kid = int(fh.read())
+        self.assertTrue(process_alive(kid))
         h.stop(grace=5)                                          # the runner quits on "quit"; its child would live on without the group stop
-        time.sleep(0.5)
-        with self.assertRaises(OSError):
-            os.kill(kid, 0)
+        for _ in range(30):
+            if not process_alive(kid):
+                break
+            time.sleep(0.1)
+        self.assertFalse(process_alive(kid))
 
     def test_each_session_has_its_own_temp_folder_and_its_guest_flash(self):
         h1 = emulator.Headless(self.image, workdir=os.path.join(self.tmp, "w11"), seconds=30).start()
@@ -189,7 +210,6 @@ class Session(Base):
             emulator.Headless(self.image, workdir=os.path.join(self.tmp, "w6"))
 
 
-@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Serving(Base):
     def test_a_taken_port_is_refused_and_named(self):
         sock = socket.socket()
@@ -210,7 +230,6 @@ class Serving(Base):
         self.assertFalse(emulator._port_busy(port))
 
 
-@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class Steps(Base):
     def test_steps_run_in_order_and_pictures_come_back(self):
         rec = os.path.join(self.tmp, "rec.txt")

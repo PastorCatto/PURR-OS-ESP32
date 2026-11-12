@@ -196,9 +196,7 @@ def _emulator_status(state):
     em = emulator.find()
     image = emulator.vm_image()
     why = ""
-    if os.name == "nt":
-        why = "The emulator is not available on Windows yet (the patched QEMU has no Windows build)."
-    elif em is None:
+    if em is None:
         why = "There is no emulator in this kit. A kit built with the emulator has an emulator/ folder; set PURR_EMULATOR_DIR to use another."
     elif not (em["gui"] or em["headless"]):
         why = "The emulator folder has no program to run."

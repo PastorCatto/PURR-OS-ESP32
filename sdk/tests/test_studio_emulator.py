@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.join(helpers.SDK, "studio"))
 from purrsdk import emulator  # noqa: E402
 
 
-@unittest.skipIf(os.name == "nt", "no emulator on Windows")
 class EmulatorRoutes(test_studio.Studio):
     def setUp(self):
         self.tmp = helpers.tmpdir()
@@ -22,6 +21,7 @@ class EmulatorRoutes(test_studio.Studio):
         os.environ.pop("PURR_VM_IMAGE", None)
         os.environ.pop("PURR_EMULATOR_DIR", None)
         for p in (mock.patch.object(emulator, "_dev_checkout", lambda: None),
+                  mock.patch.object(emulator, "_HEADLESS_NAMES", (helpers.RUNNER_NAME,)),
                   mock.patch.object(emulator.workspace, "kit_path", lambda *a: os.path.join(self.tmp, "no-kit", *a))):
             p.start()
             self.addCleanup(p.stop)
@@ -59,8 +59,6 @@ class EmulatorRoutes(test_studio.Studio):
     def test_with_emulator_and_image(self):
         self.have_emulator()
         st, body = self.call("GET", "/api/emulator")
-        if os.name == "nt":
-            self.skipTest("no emulator on Windows")
         self.assertTrue(body["available"], body["why"])
         self.assertTrue(body["headless"])
         self.assertFalse(body["window"])
@@ -78,8 +76,6 @@ class EmulatorRoutes(test_studio.Studio):
         self.assertIn("error", body)
 
     def test_run_wiring_and_pictures(self):
-        if os.name == "nt":
-            self.skipTest("no emulator on Windows")
         self.have_emulator()
         cat = os.path.join(self.tmp, "hello.cat")
         with open(cat, "wb") as fh:
@@ -108,8 +104,6 @@ class EmulatorRoutes(test_studio.Studio):
         self.assertEqual(self.call("GET", "/api/emulator/shot?name=../../etc/passwd")[0], 400)
 
     def test_a_second_run_is_refused_while_busy(self):
-        if os.name == "nt":
-            self.skipTest("no emulator on Windows")
         self.have_emulator()
         cat = os.path.join(self.tmp, "hello.cat")
         with open(cat, "wb") as fh:

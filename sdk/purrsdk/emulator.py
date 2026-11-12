@@ -30,8 +30,11 @@ DEFAULT_BOARD = "t-deck-plus-vm"          # the board with the VM hardware: the 
 HOST_ADDRESS = "10.0.2.2"                  # where the guest sees the computer running the emulator (QEMU's user-mode network)
 SCREEN = (320, 240)
 
-_GUI_NAMES = ("run-emulator", "esp32-emulator")          # the launcher first: it takes the board as an argument, the bare app does not read BOARD_TOML
-_HEADLESS_NAMES = ("headless_tap",)
+_WINDOWS = os.name == "nt"
+# The launcher first: it takes the board as an argument, the bare app does not read BOARD_TOML. On Windows the launcher is a .cmd for people; the SDK starts
+# the program itself (it is given the board file explicitly, and finds its QEMU in vendor/qemu/bin next to it).
+_GUI_NAMES = ("esp32-emulator.exe",) if _WINDOWS else ("run-emulator", "esp32-emulator")
+_HEADLESS_NAMES = ("headless_tap.exe",) if _WINDOWS else ("headless_tap",)
 _SUBDIRS = ("", "bin", "target/release", "target/release/examples", "target/debug", "target/debug/examples")
 
 
@@ -64,8 +67,6 @@ def _find_exe(root, names):
 def find():
     """Where the emulator is. Returns {"root", "gui", "headless", "boards"} (a path or None for each part), or None when there is no emulator.
     Looked for in: $PURR_EMULATOR_DIR, the kit's emulator/ folder, a checkout of the emulator project. $PURR_EMULATOR names a launcher for the window."""
-    if os.name == "nt":                                  # the emulator (patched QEMU) is not built for Windows yet; its process-group handling is POSIX only
-        return None
     launcher = os.environ.get("PURR_EMULATOR")
     for root in _roots():
         gui = launcher if launcher and os.path.isfile(launcher) else _find_exe(root, _GUI_NAMES)
@@ -116,8 +117,75 @@ def open_window(image=None, board=DEFAULT_BOARD, workdir=None):
     flash = _scratch_copy(image, work)
     board_path = board_file(em, board)
     env = dict(os.environ, BOARD_TOML=board_path)
-    cmd = [em["gui"], flash, board_path] + (["--run"] if os.path.basename(em["gui"]) == "esp32-emulator" else [])    # the app classifies files like a drop
+    cmd = [em["gui"], flash, board_path] + (["--run"] if os.path.splitext(os.path.basename(em["gui"]))[0] == "esp32-emulator" else [])    # the app classifies files like a drop
     return subprocess.Popen(cmd, cwd=em["root"], env=env)
+
+
+class _WinJob:
+    """A Windows job object holding the headless runner and everything it starts (QEMU is its child). Windows has no process groups to signal:
+    ending the job ends exactly the processes this session started, never any other. KILL_ON_JOB_CLOSE also takes them if this program dies first."""
+
+    def __init__(self, proc):
+        import ctypes
+        from ctypes import wintypes
+        self._ct = ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self._k32 = k32
+
+        class Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64), ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t), ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in ("Read", "Write", "Other", "ReadBytes", "WriteBytes", "OtherBytes")]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [("Basic", Basic), ("Io", IoCounters), ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [("TotalUserTime", ctypes.c_int64), ("TotalKernelTime", ctypes.c_int64), ("ThisPeriodUserTime", ctypes.c_int64),
+                        ("ThisPeriodKernelTime", ctypes.c_int64), ("TotalPageFaultCount", wintypes.DWORD), ("TotalProcesses", wintypes.DWORD),
+                        ("ActiveProcesses", wintypes.DWORD), ("TotalTerminatedProcesses", wintypes.DWORD)]
+        self._Accounting = Accounting
+        self.handle = k32.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError("CreateJobObject failed (%d)" % ctypes.get_last_error())
+        info = Extended()
+        info.Basic.LimitFlags = 0x2000                                  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not k32.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info)):       # JobObjectExtendedLimitInformation
+            self.close()
+            raise OSError("SetInformationJobObject failed (%d)" % ctypes.get_last_error())
+        if not k32.AssignProcessToJobObject(self.handle, wintypes.HANDLE(int(proc._handle))):
+            err = ctypes.get_last_error()
+            self.close()
+            raise OSError("AssignProcessToJobObject failed (%d)" % err)
+
+    def active(self):
+        """How many processes of the job are still running."""
+        if not self.handle:
+            return 0
+        acc = self._Accounting()
+        if not self._k32.QueryInformationJobObject(self.handle, 1, self._ct.byref(acc), self._ct.sizeof(acc), None):         # JobObjectBasicAccountingInformation
+            return 0
+        return int(acc.ActiveProcesses)
+
+    def terminate(self):
+        if self.handle:
+            self._k32.TerminateJobObject(self.handle, 1)
+
+    def close(self):
+        if getattr(self, "handle", None):
+            self._k32.CloseHandle(self.handle)
+            self.handle = None
 
 
 class Headless:
@@ -151,11 +219,21 @@ class Headless:
         self.tmpdir = os.path.join(self.workdir, "tmp")
         os.makedirs(self.tmpdir, exist_ok=True)
         env = dict(os.environ, BOARD_TOML=self.board, HEADLESS_CMD=self.cmd_file, TMPDIR=self.tmpdir)
+        if _WINDOWS:
+            env.update(TMP=self.tmpdir, TEMP=self.tmpdir)               # Windows takes its temp folder from TMP/TEMP, not TMPDIR
+            own = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        else:
+            own = {"start_new_session": True}                           # its own process group: QEMU is a child, and stopping must take it too
         with open(self.log, "w") as lg:
             self.proc = subprocess.Popen([self.exe, flash, str(self.seconds), self.stem + ".png"], cwd=self.root, env=env,
-                                         stdout=lg, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                         start_new_session=True)          # its own process group: QEMU is a child, and stopping must take it too
+                                         stdout=lg, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **own)
         self.pgid = self.proc.pid
+        self._job = None
+        if _WINDOWS:                                                    # the Windows equivalent of the group: a job object holding the runner and its children
+            try:
+                self._job = _WinJob(self.proc)
+            except OSError:
+                self._job = None                                        # then stop() falls back to taskkill on the runner's tree
         return self
 
     def running(self):
@@ -182,15 +260,39 @@ class Headless:
         self.proc = None
 
     def _group_alive(self):
+        if _WINDOWS:
+            job = getattr(self, "_job", None)
+            return (job.active() > 0) if job else self.running()
         try:
             os.killpg(self.pgid, 0)
             return True
         except OSError:
             return False
 
+    def _reap_job(self):
+        """Windows: the runner starts QEMU as its child, inside this session's job. If the runner is gone but QEMU is not, the job
+        (only the one this object started, never another process) is ended."""
+        job = getattr(self, "_job", None)
+        if job is not None:
+            if job.active() > 0:
+                job.terminate()
+                end = time.time() + 5
+                while time.time() < end and job.active() > 0:
+                    time.sleep(0.1)
+            job.close()
+            self._job = None
+        elif self.running():                                           # no job (it could not be made): end the runner and what it started
+            subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T", "/F"], capture_output=True)
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
     def _reap_group(self):
         """The runner starts QEMU as its child, in the same new process group. If the runner is gone but QEMU is not, the group
         (only the one this object started, never another) is stopped: first politely, then hard."""
+        if _WINDOWS:
+            return self._reap_job()
         pgid = getattr(self, "pgid", None)
         if pgid and pgid != os.getpgrp():
             for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -438,8 +540,6 @@ def available(board="tdeck_plus"):
     """(True, "") when a built image for this board can be tested here, else (False, why in plain words)."""
     if emulator_board_for(board) is None:
         return False, "The %s board is not emulated yet." % board
-    if os.name == "nt":
-        return False, "The emulator is not available on Windows yet (the patched QEMU has no Windows build)."
     em = find()
     if em is None or not em["headless"]:
         return False, "There is no emulator in this kit. A kit built with the emulator has an emulator/ folder; set PURR_EMULATOR_DIR to use another."

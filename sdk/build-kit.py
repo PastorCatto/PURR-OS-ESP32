@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds the PURR Developer Kit: one self-contained folder (the kit's root is laid out like the repository, trimmed to what the tools need).
 
-    python3 sdk/build-kit.py [--out ~/Desktop/PURR-SDK] [--images DIR] [--no-python] [--no-toolchain] [--no-emulator] [--emulator-src DIR] [--keep-cache]
+    python3 sdk/build-kit.py [--out ~/Desktop/PURR-SDK] [--images DIR] [--no-python] [--no-toolchain] [--no-emulator] [--emulator-src DIR] [--emulator-win DIR] [--keep-cache]
 
 What goes in (see sdk/DESIGN.md):
     bin/purr, PURR-Studio.command        launchers (use the bundled Python)
@@ -20,6 +20,9 @@ What goes in (see sdk/DESIGN.md):
 Downloads (cached in out/sdk-cache): the Python build and the `cryptography` wheels. Needs network the first time.
 The emulator is built from a checkout of the emulator project (read only; its build goes to out/sdk-cache/emulator-target) with the
 compiler on THIS computer; the kit's user needs no compiler. The patched QEMU is taken from that checkout's vendor/qemu.
+On Windows nothing is compiled by this script: the emulator is taken from a folder built by the emulator project (its docs/NOTES-windows-qemu-build.md:
+qemu-system-xtensa.exe with its DLLs, esp32-emulator.exe, headless_tap.exe, share/qemu, licences/, SHA256SUMS.txt), given with --emulator-win or found as the
+newest dist/release/esp32-emulator-windows-x86_64-* in the --emulator-src checkout. Without one the Windows kit is made without an emulator.
 """
 import argparse
 import glob
@@ -40,7 +43,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 from purrsdk import __version__  # noqa: E402
 
-IS_WIN = sys.platform == "win32"                 # a Windows kit is built on a Windows computer (written 2026-11-08, NOT yet run on Windows)
+IS_WIN = sys.platform == "win32"                 # a Windows kit is built on a Windows computer (run on Windows 11 since 2026-11-09)
 HOST = "windows-x86_64" if IS_WIN else "macos-x86_64"
 PBS_API = "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
 PY_MINOR = "cpython-3.12"
@@ -543,6 +546,132 @@ Program built into this folder: qemu-system-xtensa sha256 %(sha)s
     return {"qemu_sha256": sha, "emulator_commit": emu_commit, "emulator_uncommitted_changes": app_dirty, "qemu_base": qemu_base}
 
 
+EMU_WIN_PACKAGE_GLOB = "esp32-emulator-windows-x86_64-*"
+
+EMU_WIN_LAUNCHER = """@echo off
+rem Starts the emulator from the PURR Developer Kit.
+rem   run-emulator FLASH-IMAGE BOARD [SD-IMAGE]                      open the window and boot
+rem   run-emulator --headless FLASH-IMAGE BOARD [SECONDS] [OUT.png]  no window: a script presses the screen and takes pictures
+rem BOARD is a name from boards\\ (t-deck-plus-vm, t-deck-plus, ...) or the path of a board .toml file. Nothing outside this folder is used.
+setlocal
+set "HERE=%~dp0"
+set "ESP32_EMULATOR_QEMU=%HERE%vendor\\qemu\\bin\\qemu-system-xtensa.exe"
+if /i "%~1"=="--headless" goto headless
+if "%~2"=="" goto usage
+if not exist "%~f1" (echo run-emulator: no such flash image: %~1 1>&2 & exit /b 1)
+set "FLASH=%~f1"
+set "BOARD=%HERE%boards\\%~2.toml"
+if exist "%~f2" if not exist "%~f2\\" set "BOARD=%~f2"
+if not exist "%BOARD%" (echo run-emulator: no board "%~2" 1>&2 & goto usage)
+if not exist "%HERE%run" mkdir "%HERE%run"
+cd /d "%HERE%run"
+"%HERE%esp32-emulator.exe" "%FLASH%" "%BOARD%" %3 %4 %5 %6 %7 %8 %9 --run
+exit /b %ERRORLEVEL%
+:headless
+if "%~3"=="" goto usage
+if not exist "%~f2" (echo run-emulator: no such flash image: %~2 1>&2 & exit /b 1)
+set "FLASH=%~f2"
+set "BOARD=%HERE%boards\\%~3.toml"
+if exist "%~f3" if not exist "%~f3\\" set "BOARD=%~f3"
+if not exist "%BOARD%" (echo run-emulator: no board "%~3" 1>&2 & goto usage)
+set "SECONDS_TO_RUN=%~4"
+if "%SECONDS_TO_RUN%"=="" set "SECONDS_TO_RUN=120"
+set "OUT=%HERE%run\\shot.png"
+if not "%~5"=="" set "OUT=%~f5"
+if not exist "%HERE%run" mkdir "%HERE%run"
+cd /d "%HERE%run"
+set "BOARD_TOML=%BOARD%"
+"%HERE%headless_tap.exe" "%FLASH%" %SECONDS_TO_RUN% "%OUT%"
+exit /b %ERRORLEVEL%
+:usage
+echo usage: run-emulator FLASH-IMAGE BOARD [SD-IMAGE]
+echo        run-emulator --headless FLASH-IMAGE BOARD [SECONDS] [OUT.png]
+echo boards: t-deck-plus-vm t-deck-plus generic-esp32s3 (the files in the boards folder)
+exit /b 2
+"""
+
+
+def find_emulator_windows_package(src, given=None):
+    """The folder with the built Windows emulator: the one given, or the newest dist/release/esp32-emulator-windows-x86_64-* in the emulator checkout. None when there is none."""
+    if given:
+        return os.path.abspath(os.path.expanduser(given))
+    found = [p for p in glob.glob(os.path.join(os.path.abspath(os.path.expanduser(src)), "dist", "release", EMU_WIN_PACKAGE_GLOB)) if os.path.isdir(p)]
+    return max(found, key=os.path.getmtime) if found else None
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def bundle_emulator_windows(src, pkg):
+    """Lays the Windows emulator out the way the Rust programs look for it: the programs in emulator/, QEMU and its DLLs in emulator/vendor/qemu/bin (Windows loads a
+    DLL from the folder of the program), the ROM images in emulator/vendor/qemu/share/qemu. `pkg` is a folder built by the emulator project (flat: the .exe files,
+    the DLLs, share/qemu, licences/, SHA256SUMS.txt). Nothing is compiled here."""
+    say("Emulator (Windows)...")
+    pkg = os.path.abspath(pkg)
+    src = os.path.abspath(os.path.expanduser(src))
+    need = ["qemu-system-xtensa.exe", "esp32-emulator.exe", "headless_tap.exe", os.path.join("share", "qemu", "esp32s3_rev0_rom.bin")]
+    missing = [n for n in need if not os.path.isfile(os.path.join(pkg, n))]
+    if missing:
+        raise SystemExit("the Windows emulator folder %s lacks: %s" % (pkg, ", ".join(missing)))
+    if not os.path.isdir(os.path.join(src, "boards")):
+        raise SystemExit("no emulator checkout with a boards/ folder at %s (pass --emulator-src, or --no-emulator)" % src)
+    sums = os.path.join(pkg, "SHA256SUMS.txt")
+    if os.path.isfile(sums):                                       # what was built is what is bundled
+        bad, n = [], 0
+        with open(sums, encoding="utf-8") as fh:
+            for line in fh:
+                digest, _sep, rel = line.strip().partition("  ")
+                if not rel:
+                    continue
+                path = os.path.join(pkg, *rel.split("/"))
+                n += 1
+                if not os.path.isfile(path) or _sha256_file(path) != digest:
+                    bad.append(rel)
+        if bad:
+            raise SystemExit("these files in %s do not match its SHA256SUMS.txt: %s" % (pkg, ", ".join(bad[:8])))
+        say("  %d files match SHA256SUMS.txt" % n)
+    dst = os.path.join(KIT, "emulator")
+    qbin = os.path.join(dst, "vendor", "qemu", "bin")
+    qrom = os.path.join(dst, "vendor", "qemu", "share", "qemu")
+    os.makedirs(qbin)
+    os.makedirs(qrom)
+    for n in ("esp32-emulator.exe", "headless_tap.exe"):
+        shutil.copy2(os.path.join(pkg, n), os.path.join(dst, n))
+    dlls = sorted(n for n in os.listdir(pkg) if n.lower().endswith(".dll"))
+    for n in ["qemu-system-xtensa.exe"] + dlls:
+        shutil.copy2(os.path.join(pkg, n), os.path.join(qbin, n))
+    roms = [n for n in EMU_ROMS if os.path.isfile(os.path.join(pkg, "share", "qemu", n))]
+    for n in roms:
+        shutil.copy2(os.path.join(pkg, "share", "qemu", n), os.path.join(qrom, n))
+    say("  QEMU with %d DLLs, ROMs: %s" % (len(dlls), ", ".join(roms)))
+    os.makedirs(os.path.join(dst, "boards"))
+    for b in EMU_BOARDS:
+        if os.path.isfile(os.path.join(src, "boards", b + ".toml")):
+            shutil.copy2(os.path.join(src, "boards", b + ".toml"), os.path.join(dst, "boards", b + ".toml"))
+    if os.path.isdir(os.path.join(pkg, "licences")):
+        shutil.copytree(os.path.join(pkg, "licences"), os.path.join(dst, "licenses"))
+        if os.path.isfile(os.path.join(pkg, "licences", "SOURCE-WINDOWS.txt")):
+            shutil.copy2(os.path.join(pkg, "licences", "SOURCE-WINDOWS.txt"), os.path.join(dst, "SOURCE.txt"))
+    else:
+        say("  WARNING: the emulator folder has no licences/: the kit's emulator/ has no licence texts")
+    if os.path.isdir(os.path.join(src, "qemu")):
+        shutil.copytree(os.path.join(src, "qemu"), os.path.join(dst, "source", "qemu-patches"), ignore=IGNORE)      # the device models and apply.sh: what is ours in the QEMU build
+    if os.path.isfile(os.path.join(src, "scripts", "fetch-qemu-src.sh")):
+        shutil.copy2(os.path.join(src, "scripts", "fetch-qemu-src.sh"), os.path.join(dst, "source", "fetch-qemu-src.sh"))
+    shutil.copy2(os.path.join(ROOT, "sdk", "NOTICES-emulator.md"), os.path.join(dst, "NOTICES-emulator.md"))
+    with open(os.path.join(dst, "run-emulator.cmd"), "w", newline="\r\n") as fh:           # a batch file with LF-only lines can lose its labels; CRLF is safe
+        fh.write(EMU_WIN_LAUNCHER)
+    sha = _sha256_file(os.path.join(qbin, "qemu-system-xtensa.exe"))
+    size = sum(os.path.getsize(os.path.join(r, f)) for r, _d, fs in os.walk(dst) for f in fs)
+    say("  emulator/ %.1f MB" % (size / 1048576.0))
+    return {"qemu_sha256": sha, "emulator_package": os.path.basename(pkg), "emulator_commit": _git(src, "rev-parse", "HEAD"), "platform": "windows"}
+
+
 LAUNCHER = """#!/bin/sh
 # The PURR Developer Kit's command. Uses the kit's own Python and compiler; nothing else on this computer is touched.
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -568,7 +697,7 @@ exec "$PY" "$HERE/sdk/purr.py" "$@"
 """
 
 WIN_LAUNCHER = """@echo off
-rem The PURR Developer Kit launcher for Windows. Written 2026-11-08, not yet run on Windows.
+rem The PURR Developer Kit launcher for Windows.
 set "HERE=%~dp0.."
 set "PURR_PYTHON=%HERE%\\python\\python.exe"
 set "PATH=%HERE%\\toolchain\\bin;%PATH%"
@@ -655,6 +784,7 @@ def main():
     ap.add_argument("--no-toolchain", action="store_true")
     ap.add_argument("--no-emulator", action="store_true", help="leave out the emulator/ folder")
     ap.add_argument("--emulator-src", default=os.environ.get("PURR_EMULATOR_SRC", EMU_SRC_DEFAULT), help="a checkout of the emulator project with vendor/qemu built (default %s)" % EMU_SRC_DEFAULT)
+    ap.add_argument("--emulator-win", default=os.environ.get("PURR_EMULATOR_WIN"), help="Windows only: the folder with the built Windows emulator (default: the newest dist/release/esp32-emulator-windows-x86_64-* in --emulator-src)")
     a = ap.parse_args()
 
     name = "purr-sdk-%s-%s" % (__version__, HOST)
@@ -713,9 +843,17 @@ def main():
         py_name = bundle_python()
     if not a.no_toolchain:
         bundle_toolchain()
-    if IS_WIN and not a.no_emulator:
-        say("The emulator is not part of the Windows kit yet (it needs a Windows build of the patched QEMU).")
-    emu = None if (a.no_emulator or IS_WIN) else bundle_emulator(a.emulator_src)
+    emu = None
+    if not a.no_emulator:
+        if IS_WIN:
+            pkg = find_emulator_windows_package(a.emulator_src, a.emulator_win)
+            if pkg and os.path.isdir(pkg):
+                emu = bundle_emulator_windows(a.emulator_src, pkg)
+            else:
+                say("The emulator is left out of this Windows kit: no Windows emulator folder was found (build one as the emulator project's docs/NOTES-windows-qemu-build.md "
+                    "says, then pass --emulator-win DIR, or put it in dist/release of the --emulator-src checkout).")
+        else:
+            emu = bundle_emulator(a.emulator_src)
 
     if IS_WIN:
         write(os.path.join(KIT, "bin", "purr.cmd"), WIN_LAUNCHER)
@@ -726,7 +864,7 @@ def main():
     write(os.path.join(KIT, "VERSION"), __version__ + "\n")
     readme = README % {"version": __version__, "host": HOST, "date": time.strftime("%Y-%m-%d")}
     if IS_WIN:
-        readme = readme.replace("PURR-Studio.command", "PURR-Studio.cmd").replace("bin/purr", "bin\\purr")
+        readme = readme.replace("PURR-Studio.command", "PURR-Studio.cmd").replace("bin/purr", "bin\\purr").replace("emulator/run-emulator", "emulator\\run-emulator.cmd")
     write(os.path.join(KIT, "README.txt"), readme)
     write(os.path.join(KIT, "LICENSE-TODO"), LICENSE_TODO)
     say("Hashing the kit's own files...")

@@ -1,6 +1,7 @@
 """Shared test helpers: a throwaway key, synthetic images, and where the headers live."""
 import os
 import shutil
+import stat
 import sys
 import tempfile
 
@@ -23,6 +24,26 @@ INCLUDES = [os.path.join(ROOT, "PurrOS", "components", "kernel", "include"), os.
 
 def clang():
     return shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
+
+
+# The name the SDK looks for when it wants the emulator's headless runner. On Windows that is headless_tap.exe, which a test cannot fake with a script,
+# so a .cmd that starts a Python file stands in (the tests point emulator._HEADLESS_NAMES at it).
+RUNNER_NAME = "headless_tap.cmd" if os.name == "nt" else "headless_tap"
+
+
+def write_fake_runner(root, text):
+    """Write a fake headless runner (the text is a Python program) into root; returns the file the SDK should start."""
+    exe = os.path.join(root, RUNNER_NAME)
+    if os.name == "nt":
+        with open(os.path.join(root, "headless_tap.py"), "w") as fh:
+            fh.write(text)
+        with open(exe, "w") as fh:
+            fh.write('@"%s" "%%~dp0headless_tap.py" %%*\r\n' % sys.executable)
+        return exe
+    with open(exe, "w") as fh:
+        fh.write(text)
+    os.chmod(exe, os.stat(exe).st_mode | stat.S_IXUSR)
+    return exe
 
 
 def tmpdir():

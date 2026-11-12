@@ -54,5 +54,29 @@ macOS system libraries and frameworks (libSystem, AppKit, CoreFoundation, OpenGL
 
 ## 4. Platform notes
 
+- The emulator folder of the **Windows** kit is for 64-bit Windows 10 or 11; see section 5. The rest of this section is about the macOS kit.
 - The emulator folder is for macOS on Intel (x86_64); QEMU and its libraries were built for macOS 26 or newer.
 - Programs from an archive that was downloaded carry macOS's quarantine mark. If macOS refuses to start one, remove the mark from the kit folder once: `xattr -dr com.apple.quarantine <kit folder>`.
+
+## 5. The Windows build
+
+The Windows kit carries the same QEMU source (section 1) built with MSYS2's MINGW64 toolchain (gcc 16.2.0) on Windows 11 (build log and every mistake: the emulator project's `docs/NOTES-windows-qemu-build.md`), and the same Rust application (section 3) built with Rust 1.99.1 for the MSVC target. `emulator/SOURCE.txt` is the written offer for this build; the licence texts are in `emulator/licenses/` (`libraries/` holds the ones MSYS2 ships with each package).
+
+The libraries are unmodified MSYS2 MINGW64 packages, in `emulator/vendor/qemu/bin/` next to `qemu-system-xtensa.exe` (Windows loads a DLL from the folder of the program). The licence column is what MSYS2 reports for the package, not a legal reading:
+
+| DLL | MSYS2 package | Version | Licence |
+|---|---|---|---|
+| libbz2-1.dll | mingw-w64-x86_64-bzip2 | 1.0.8-4 | bzip2 licence (BSD-style) |
+| libffi-8.dll | mingw-w64-x86_64-libffi | 3.8.0-1 | MIT |
+| libgcrypt-20.dll | mingw-w64-x86_64-libgcrypt | 1.12.4-2 | LGPL-2.1-or-later and GPL-2.0-or-later |
+| libgio-2.0-0.dll, libglib-2.0-0.dll, libgmodule-2.0-0.dll, libgobject-2.0-0.dll | mingw-w64-x86_64-glib2 | 2.90.1-1 | LGPL-2.1-or-later |
+| libgpg-error-0.dll | mingw-w64-x86_64-libgpg-error | 1.61-1 | LGPL-2.1-or-later |
+| libiconv-2.dll | mingw-w64-x86_64-libiconv | 1.19.1-1 | LGPL-2.1-or-later |
+| libintl-8.dll | mingw-w64-x86_64-gettext-runtime | 1.0-1 | GPL-3.0-or-later and LGPL-2.1-or-later (to be checked before a public release) |
+| libpcre2-8-0.dll | mingw-w64-x86_64-pcre2 | 10.49-2 | BSD-3-Clause |
+| libpixman-1-0.dll | mingw-w64-x86_64-pixman | 0.46.4-3 | MIT |
+| libwinpthread-1.dll | mingw-w64-x86_64-libwinpthread | 14.0.0.r598.ge3d18511f-1 | MIT and BSD-3-Clause |
+| libz-1.dll, zlib1.dll | mingw-w64-x86_64-zlib | 1.4-2 | zlib |
+| libzstd.dll | mingw-w64-x86_64-zstd | 1.5.7-2 | BSD-3-Clause or GPL-2.0-or-later (used under BSD) |
+
+User-mode networking (libslirp) is off in this build. The Windows programs are **not signed**: Windows's Smart App Control blocks them while it is on (turn it off in Windows Security), and SmartScreen may warn on first start. The Rust programs link the Microsoft C runtime dynamically, so a PC without the Visual C++ Redistributable may refuse to start them.
