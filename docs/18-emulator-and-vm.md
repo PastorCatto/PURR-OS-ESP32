@@ -47,7 +47,7 @@ It does **not** model Wi-Fi, Bluetooth, LoRa, GPS, trackball, microphone, speake
 | What | Where |
 |---|---|
 | Wired backend selected | `CONFIG_PURR_NET_ETH_W5500=y` |
-| Default shell | `CONFIG_PURR_UI_DEFAULT_MODE="w10m"` |
+| Default shell | `CONFIG_PURR_UI_DEFAULT_MODE="android"` |
 | Recovery and module index | `http://10.0.2.2:47801/recovery-vm/...` on the host's dev server |
 | Build | `purrstrap coreos build --board tdeck_plus --profile full --flavor vm` |
 

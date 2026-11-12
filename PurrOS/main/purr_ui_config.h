@@ -120,7 +120,7 @@ typedef enum {
  * start. */
 purr_ui_mode_t purr_ui_mode_get(void);
 
-/* Writes a default /ui/mode.conf (CONFIG_PURR_UI_DEFAULT_MODE, "w10m") if (and only if) nothing is there yet --
+/* Writes a default /ui/mode.conf (CONFIG_PURR_UI_DEFAULT_MODE, "android") if (and only if) nothing is there yet --
  * same missing-only convention every other *_setup() in this file already uses. Call
  * alongside purr_ui_config_setup(), same timing requirement. */
 void purr_ui_mode_setup(purr_cli_t *cli);
