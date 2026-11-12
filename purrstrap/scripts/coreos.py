@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import shutil
+import sys
 from dataclasses import dataclass
 
 from lib import image as pimg
@@ -110,11 +111,39 @@ def _psq(text):
     return "'" + text.replace("'", "''") + "'"
 
 
+def _idf_py_command(argv, env=None, which=None):
+    """`idf.py ...` as something Windows can start. idf.py is a Python script: Unix runs it through its #! line, but CreateProcess
+    cannot ([WinError 193] "not a valid Win32 application"; a bare "idf.py" resolves to the script, not to the idf.py.exe launcher
+    the ESP-IDF installer also puts on PATH). So: use the launcher by its full path when there is one; otherwise run the script with
+    the Python of the active ESP-IDF environment (IDF_PYTHON_ENV_PATH, which ESP-IDF's export sets) or the first python on PATH.
+    Anything that is not idf.py is returned unchanged."""
+    env = os.environ if env is None else env
+    which = which or shutil.which
+    if not argv or argv[0] != "idf.py":
+        return list(argv)
+    script = which("idf.py")
+    if not script and env.get("IDF_PATH"):
+        candidate = os.path.join(env["IDF_PATH"], "tools", "idf.py")
+        script = candidate if os.path.isfile(candidate) else None
+    if not script:
+        return list(argv)               # let the caller report "cannot run idf.py" as before
+    if script.lower().endswith(".exe"):
+        # ESP-IDF's installer puts a real launcher, idf.py.exe, on PATH; a bare "idf.py" would find the script before it
+        return [script] + list(argv[1:])
+    python = ""
+    if env.get("IDF_PYTHON_ENV_PATH"):
+        python = os.path.join(env["IDF_PYTHON_ENV_PATH"], "Scripts", "python.exe")
+        if not os.path.isfile(python):
+            python = ""
+    python = python or which("python") or sys.executable
+    return [python, script] + list(argv[1:])
+
+
 def wrap(idf, argv, windows=None):
     """Wrap a command so it runs with ESP-IDF activated."""
     windows = (os.name == "nt") if windows is None else windows
     if idf.kind == "active":
-        return list(argv)
+        return _idf_py_command(argv) if windows else list(argv)
     if windows:
         script = (f". {_psq(idf.activation)} *> $null; {argv[0]} "
                   + " ".join(_psq(a) for a in argv[1:])

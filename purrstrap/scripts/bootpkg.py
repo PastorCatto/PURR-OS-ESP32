@@ -54,12 +54,20 @@ def make_image(text, data, bss_size, entry, chip_id, version=VERSION):
 
 
 # -- tools -------------------------------------------------------------
+def _lower_exe(path):
+    """shutil.which returns .EXE on Windows; ESP-IDF's compiler drivers pick their chip configuration from their own file name and
+    fall back to the default (big-endian) one when it is spelled .EXE. Same helper as in modules.py."""
+    if os.name == "nt" and path.lower().endswith(".exe") and not path.endswith(".exe"):
+        return path[:-4] + ".exe"
+    return path
+
+
 def find_tool(prefix, name, env=None):
     """Find prefix-name in PATH or in the usual ESP-IDF tools folders."""
     exe = f"{prefix}-{name}"
     found = shutil.which(exe)
     if found:
-        return found
+        return _lower_exe(found)
     roots = [os.environ.get("IDF_TOOLS_PATH", ""), r"C:\Espressif",
              os.path.expanduser("~/.espressif")]
     for root in roots:

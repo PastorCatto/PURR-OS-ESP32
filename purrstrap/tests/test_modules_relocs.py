@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import unittest
+from unittest import mock
 
 from helpers import TOOL_DIR, make_ctx
 
@@ -20,6 +21,26 @@ Symbol table '.symtab' contains 6 entries:
 
 def words(*ws):
     return b"".join(w.to_bytes(4, "little") for w in ws)
+
+
+class FindToolTests(unittest.TestCase):
+    """On Windows shutil.which hands back ...gcc.EXE, and ESP-IDF's compiler picks its chip configuration from its own file name:
+    spelled .EXE it falls back to the default big-endian one and a link takes the wrong libgcc.a."""
+
+    def test_the_extension_comes_back_in_lowercase_on_windows(self):
+        with mock.patch.object(modules.os, "name", "nt"):
+            self.assertEqual(modules._lower_exe(r"C:\t\bin\xtensa-esp32s3-elf-gcc.EXE"), r"C:\t\bin\xtensa-esp32s3-elf-gcc.exe")
+            self.assertEqual(modules._lower_exe(r"C:\t\bin\gcc.exe"), r"C:\t\bin\gcc.exe")
+            self.assertEqual(modules._lower_exe(r"C:\t\bin\gcc"), r"C:\t\bin\gcc")
+
+    def test_other_systems_are_left_alone(self):
+        with mock.patch.object(modules.os, "name", "posix"):
+            self.assertEqual(modules._lower_exe("/x/gcc.EXE"), "/x/gcc.EXE")
+
+    def test_find_tool_gives_the_lowercase_name(self):
+        with mock.patch.object(modules.os, "name", "nt"), \
+                mock.patch.object(modules.shutil, "which", return_value=r"C:\t\bin\xtensa-esp32s3-elf-gcc.EXE"):
+            self.assertEqual(modules.find_tool("xtensa-esp32s3-elf", "gcc"), r"C:\t\bin\xtensa-esp32s3-elf-gcc.exe")
 
 
 class CodeAddressTests(unittest.TestCase):

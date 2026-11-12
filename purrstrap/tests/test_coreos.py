@@ -129,7 +129,45 @@ class CommandTests(unittest.TestCase):
 
     def test_wrap_active_is_unchanged(self):
         idf = coreos.Idf("active")
-        self.assertEqual(coreos.wrap(idf, ["idf.py", "build"]), ["idf.py", "build"])
+        self.assertEqual(coreos.wrap(idf, ["idf.py", "build"], windows=False), ["idf.py", "build"])
+
+    def test_wrap_active_on_windows_runs_idf_py_with_the_idf_python(self):
+        # CreateProcess cannot start a .py file ([WinError 193]); an active ESP-IDF shell must not mean "run idf.py directly"
+        with tempfile.TemporaryDirectory() as env_dir:
+            py = touch(env_dir, os.path.join("Scripts", "python.exe"))
+            env = {"IDF_PYTHON_ENV_PATH": env_dir}
+            which = lambda name: {"idf.py": r"C:\esp\tools\idf.py", "python": r"C:\kit\python\python.exe"}.get(name)
+            self.assertEqual(coreos._idf_py_command(["idf.py", "-B", "d", "build"], env=env, which=which),
+                             [py, r"C:\esp\tools\idf.py", "-B", "d", "build"])
+
+    def test_idf_py_exe_launcher_is_used_by_its_full_path(self):
+        # the installer's idf.py.exe is found by shutil.which as idf.py.EXE: run it, do not hand it to python
+        which = lambda name: {"idf.py": r"C:\Users\x\.espressif\tools\idf-exe\1.0.3\idf.py.EXE", "python": r"C:\p\python.exe"}.get(name)
+        self.assertEqual(coreos._idf_py_command(["idf.py", "-B", "d"], env={}, which=which),
+                         [r"C:\Users\x\.espressif\tools\idf-exe\1.0.3\idf.py.EXE", "-B", "d"])
+
+    def test_idf_py_script_is_found_through_idf_path_when_not_on_path(self):
+        with tempfile.TemporaryDirectory() as idf_dir:
+            script = touch(idf_dir, os.path.join("tools", "idf.py"))
+            which = lambda name: {"python": r"C:\p\python.exe"}.get(name)
+            self.assertEqual(coreos._idf_py_command(["idf.py", "build"], env={"IDF_PATH": idf_dir}, which=which), [r"C:\p\python.exe", script, "build"])
+
+    def test_idf_py_without_the_idf_environment_uses_the_python_on_path(self):
+        which = lambda name: {"idf.py": r"C:\esp\tools\idf.py", "python": r"C:\p\python.exe"}.get(name)
+        self.assertEqual(coreos._idf_py_command(["idf.py", "build"], env={}, which=which), [r"C:\p\python.exe", r"C:\esp\tools\idf.py", "build"])
+        # a stale IDF_PYTHON_ENV_PATH (no python there) falls back the same way
+        self.assertEqual(coreos._idf_py_command(["idf.py", "build"], env={"IDF_PYTHON_ENV_PATH": r"C:\gone"}, which=which)[0], r"C:\p\python.exe")
+
+    def test_idf_py_not_found_or_another_command_is_unchanged(self):
+        self.assertEqual(coreos._idf_py_command(["idf.py", "build"], env={}, which=lambda n: None), ["idf.py", "build"])
+        self.assertEqual(coreos._idf_py_command(["cmake", "--version"], env={}, which=lambda n: r"C:\x"), ["cmake", "--version"])
+
+    def test_wrap_active_on_windows_goes_through_the_helper(self):
+        with mock.patch.object(coreos.shutil, "which", side_effect=lambda n: {"idf.py": r"C:\t\idf.py", "python": r"C:\p\python.exe"}.get(n)), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("IDF_PYTHON_ENV_PATH", None)
+            cmd = coreos.wrap(coreos.Idf("active"), ["idf.py", "build"], windows=True)
+        self.assertEqual(cmd, [r"C:\p\python.exe", r"C:\t\idf.py", "build"])
 
     def test_wrap_powershell_quotes_arguments(self):
         idf = coreos.Idf("manifest", activation=r"C:\it's\act.ps1")
