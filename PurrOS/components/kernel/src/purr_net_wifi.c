@@ -359,7 +359,19 @@ uint8_t purr_net_last_disconnect_reason(void)
 
 int purr_net_wired(void)
 {
-    return s_no_radio ? wired_now() : 0;
+    if (s_wired) {
+        return 1;
+    }
+    if (!s_no_radio) {
+        /* Asked before purr_net_init() has run: the recovery loader decides between "join the wire" and "ask for a Wi-Fi network" first. A virtual device without a
+         * radio (purr_vm.h) has no Wi-Fi to ask about, so the answer must not wait for the wire to be up. */
+        const purr_vm_info_t *vm = purr_vm_info();
+        if (!vm->present || (vm->flags & PURR_VM_HAS_RADIO)) {
+            return 0;
+        }
+        s_no_radio = 1;
+    }
+    return wired_now() || purr_netlink_available();       /* an Ethernet driver is bound: this is a wired device, up yet or not */
 }
 
 int purr_net_saved(purr_net_ap_t *out, int max)
