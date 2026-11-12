@@ -147,6 +147,14 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
 - **What sits on top** (main/purr_sd.c): FatFs, mounted as `/sd` through the C library's file calls, over the `sd0` device's block ops. Nothing formats a card. FAT12/16/32 only: ESP-IDF's FatFs has no exFAT, so a card of 64 GB
   or more has to be formatted FAT32 on a computer first.
 
+### 4.6 Bus ABI 8, a bus of the device's own, and the ETHERNET class (2026-11-11)
+- **`spi_open_bus(host, sclk, mosi, miso, max_transfer)`** (appended; `PURR_DRIVER_BUS_ABI_VERSION` is 8, `_MIN` stays 4). Starts an SPI bus for a chip that is not on the board's shared one. The kernel refuses the flash host (0) and the board's
+  own host, and a second call with the same host and pins is fine. After it, `spi_add_device(host, ...)` adds the chip.
+- **Class `ETHERNET` (7)**, `purr_eth_ops_t`: `start(mac)`, `stop`, `link` (bits `PURR_ETH_LINK_UP`, `_SPEED_100`, `_FULL`), `send_frame`, `recv_frame`. The driver moves raw Ethernet frames; the kernel's TCP/IP stack sits on top (`purr_net_link.c` makes an esp_netif of it).
+- **`purr_device_add()`** declares a device the board table cannot list (only the machine running the OS knows it is there). The kernel uses it for a virtual device's Ethernet controller (`eth0`, compatible `w5500`, from the VM-info device), and a
+  module registered later finds it like any board device.
+- **The first driver of the class** is `Modules/drivers/w5500_module.c` (a W5500 in MACRAW mode, same register sequence as ESP-IDF's driver). Host test: `test_drv_eth.c`, which plays the chip.
+
 ## 6a. Reference drivers by class (2026-10-28)
 | Driver | Class | Bus | Notes |
 |---|---|---|---|

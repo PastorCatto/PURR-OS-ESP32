@@ -22,7 +22,7 @@ const purr_driver_t *gnss_mine_entry(const purr_driver_bus_table_t *bus) { s_bus
 - **remove** lets go of everything.
 - **class_id** and **ops** say what kind of driver it is, so the rest of the system can use it without knowing which chip it is.
 
-## The bus table (ABI 7)
+## The bus table (ABI 8)
 
 | Group | Functions |
 |---|---|
@@ -35,6 +35,7 @@ const purr_driver_t *gnss_mine_entry(const purr_driver_bus_table_t *bus) { s_bus
 | ADC | `adc_read_mv` |
 | UART | `uart_open`, `uart_write`, `uart_read`, `uart_set_baud`, `uart_close` |
 | Shared SPI bus | `spi_lock`, `spi_unlock` (hold the bus across several transfers; recursive) |
+| A bus of the device's own | `spi_open_bus` (ABI 8: start an SPI bus for a chip that is not on the board's shared one, then `spi_add_device` on it) |
 
 The full list, with what each argument means, is in `PurrOS/components/kernel/include/purr_driver_bus.h`.
 
@@ -71,6 +72,7 @@ A class is a typed interface. Every driver of a class does the same job, so the 
 | `lora` | a LoRa packet radio | `purr_lora_ops_t`: configure, send, receive, sleep |
 | `modem` | a cellular (LTE, LTE-M, NB-IoT) modem | `purr_modem_ops_t`: power, status, connect, disconnect, at |
 | `wifi` | Wi-Fi that is not the chip's own | `purr_wifi_ops_t`: power, scan, connect, status, sockets |
+| `ethernet` | a wired network chip that moves raw frames | `purr_eth_ops_t`: start, stop, link, send_frame, recv_frame |
 | `bluetooth` | a Bluetooth controller, as an HCI transport | `purr_hci_ops_t`: reset, write, read |
 | `storage` (`BLOCK`) | a card or disk, as 512-byte sectors | `purr_block_ops_t`: info, read, write, sync |
 
@@ -86,6 +88,7 @@ They are all in `PurrOS/components/kernel/include/purr_driver_class.h`. The firs
 - `modem_at_module.c`: a cellular modem over AT commands (SIMCom, Quectel, u-blox): registration, signal, operator, IMEI, a data session.
 - `wifi_esp_at_module.c`: a second ESP chip running ESP-AT: scan, join, TCP sockets.
 - `hci_h4_module.c`: a Bluetooth controller on a UART: HCI framing and reset.
+- `w5500_module.c`: a W5500 wired Ethernet chip used as a plain MAC (class `ethernet`): it moves raw frames and the kernel's TCP/IP stack does the rest. It can sit on the board's shared bus or, with `own_bus=1`, on a bus of its own. The tests play the part of the chip (`test_drv_eth.c`).
 - `sd_spi_module.c`: an SD card in SPI mode. It drives its own chip select and holds the bus lock for a whole command, and the tests play the part of the card (`FakeSdCard` in `sdk/tests/test_drivers_host.py`).
 
 ## Build, sign, hand it over

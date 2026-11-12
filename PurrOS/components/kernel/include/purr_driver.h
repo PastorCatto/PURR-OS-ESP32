@@ -102,6 +102,11 @@ const purr_driver_t *const *purr_driver_table(int *count);
  * device to PURR_DEV_UNBOUND first, so calling this twice re-binds cleanly. */
 void purr_drivers_bind(const purr_board_t *board, const purr_driver_t *const *table, int table_count);
 
+/* Declares a device the board table does not list, because only the machine it runs on knows it is there (a virtual device's Ethernet controller). `dev` and
+ * everything it points to must stay valid for good. It is tracked, bound and found by class like any other device: now if a driver for its `compatible` is
+ * already registered, and when one is registered later. -1 if the name is taken (by the board or an earlier call) or the table is full. */
+int purr_device_add(const purr_board_t *board, const purr_device_t *dev);
+
 /* The real one: purr_driver_table() as the driver list. */
 void purr_drivers_bind_all(const purr_board_t *board);
 

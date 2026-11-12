@@ -16,6 +16,16 @@ def nmea(body):
     return ("$%s*%02X\r\n" % (body, cs)).encode()
 
 
+
+def current_bus_abi():
+    """PURR_DRIVER_BUS_ABI_VERSION as purr_driver_bus.h defines it."""
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+    hdr = os.path.join(here, "..", "..", "PurrOS", "components", "kernel", "include", "purr_driver_bus.h")
+    with open(hdr, encoding="utf-8") as fh:
+        return int(re.search(r"#define\s+PURR_DRIVER_BUS_ABI_VERSION\s+(\d+)u", fh.read()).group(1))
+
+
 class FakeGps(dh.Bus):
     def __init__(self):
         super().__init__()
@@ -866,7 +876,7 @@ class SdSpi(unittest.TestCase):
     def test_it_is_a_block_driver_for_the_current_bus(self):
         ld, bus, ops = self.load()
         self.assertEqual(ld.drv.class_id, 6)
-        self.assertEqual(ld.drv.bus_abi, 7)
+        self.assertEqual(ld.drv.bus_abi, current_bus_abi())          # whatever the header says: a module reports the ABI it was built against
         self.assertEqual(ld.drv.name, b"sd-spi")
 
     def test_the_slot_is_not_touched_until_someone_wants_the_card(self):

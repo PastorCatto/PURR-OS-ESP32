@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define PURR_DRIVER_BUS_ABI_VERSION 7u
+#define PURR_DRIVER_BUS_ABI_VERSION 8u
 /* The oldest bus table layout this kernel still serves. The table only ever grows at the end (see Drivers/SPEC.md section 4.1), so a driver
  * built against any version from this one up to the current works unchanged: the driver's version is independent of the OS's. Raise this
  * only if a slot is ever moved, which the append-only rule forbids. */
@@ -112,6 +112,13 @@ typedef struct {
      * unlock as many times as you locked. Keep it short: nothing else draws while it is held. */
     void (*spi_lock)(void);
     void (*spi_unlock)(void);
+
+    /* ABI 8: starts an SPI bus of the device's own, for a chip that is not on the board's shared bus (the Ethernet controller of a virtual device, a
+     * module on a header). `host` is the SPI controller as spi_add_device() takes it (ESP-IDF's host number: SPI2 = 1, SPI3 = 2); the pins are the ones
+     * the device's board entry claimed (PURR_PIN_NONE for a line the chip does not use). The board's own shared host is refused, and so is the flash's
+     * (host 0). `max_transfer` is the longest single spi_transfer() the driver will make, in bytes. 0 on success or when this driver's earlier call
+     * already started the same host with the same pins; < 0 otherwise. After it, spi_add_device(host, ...) adds the chip to that bus. */
+    int (*spi_open_bus)(int host, int sclk, int mosi, int miso, size_t max_transfer);
 } purr_driver_bus_table_t;
 
 /* core -> module direction (Modules/SPEC.md section 6, scoped to drivers): called once per

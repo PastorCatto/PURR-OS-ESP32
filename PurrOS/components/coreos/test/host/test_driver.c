@@ -528,6 +528,46 @@ static void test_kv_config(void)
     CHECK_EQ((int)purr_kv(NULL, "tx", 5), 5);
 }
 
+/* ---------------------------------------------------------------- devices the kernel declares at run time (purr_device_add) */
+
+static void test_a_device_added_at_run_time_binds_and_is_found_by_a_later_driver(void)
+{
+    purr_pins_reset();
+    purr_driver_registry_reset();
+    s_swap_probe_calls = 0;
+    purr_device_t devs[] = {basic_device("gadget", "fake-ok", PURR_PRI_OPTIONAL)};
+    purr_board_t b = make_board(devs, 1);
+    purr_drivers_bind(&b, s_table, 3);
+    static purr_device_t nic;
+    nic = basic_device("eth0", "fake-swap", PURR_PRI_OPTIONAL);
+
+    CHECK_EQ(purr_device_add(&b, &nic), 0);                              /* nobody offers fake-swap yet */
+    CHECK_EQ(purr_device_state("eth0"), PURR_DEV_NO_DRIVER);
+    CHECK_EQ(purr_device_add(&b, &nic), -1);                             /* the name is taken */
+    static purr_device_t dup;
+    dup = basic_device("gadget", "fake-swap", PURR_PRI_OPTIONAL);
+    CHECK_EQ(purr_device_add(&b, &dup), -1);                             /* so is a name the board lists */
+
+    CHECK_EQ(purr_driver_register(&b, &s_swap_driver_a), 0);             /* the module arrives later and finds it */
+    CHECK_EQ(purr_device_state("eth0"), PURR_DEV_BOUND);
+    CHECK_EQ(s_swap_probe_calls, 1);
+    CHECK(purr_device_driver("eth0") == &s_swap_driver_a);
+    CHECK_EQ(purr_device_state("gadget"), PURR_DEV_BOUND);               /* the board's own device is untouched */
+
+    /* and when the driver is there first, the device binds at once */
+    purr_driver_registry_reset();
+    purr_drivers_bind(&b, s_table, 3);
+    CHECK_EQ(purr_driver_register(&b, &s_swap_driver_a), 0);
+    static purr_device_t nic2;
+    nic2 = basic_device("eth1", "fake-swap", PURR_PRI_OPTIONAL);
+    CHECK_EQ(purr_device_add(&b, &nic2), 0);
+    CHECK_EQ(purr_device_state("eth1"), PURR_DEV_BOUND);
+
+    /* a full rebind starts the declared list over */
+    purr_drivers_bind(&b, s_table, 3);
+    CHECK_EQ(purr_device_add(&b, &nic2), 0);
+}
+
 int main(void)
 {
     test_matching_binds_a_device();
@@ -553,5 +593,6 @@ int main(void)
     test_register_after_unregister_rebinds_to_the_new_driver();
     test_driver_classes();
     test_kv_config();
+    test_a_device_added_at_run_time_binds_and_is_found_by_a_later_driver();
     TK_DONE("test_driver");
 }

@@ -62,6 +62,12 @@ typedef struct {
 static device_record_t s_records[MAX_TRACKED_DEVICES];
 static int s_record_count;
 
+/* Devices the kernel declares at run time (purr_device_add): a chip the board table cannot list because only the machine it is running on knows it is there (the
+ * Ethernet controller of a virtual device). They bind exactly like the board's own devices, and a module registered later finds them too. */
+#define MAX_EXTRA_DEVICES 4
+static const purr_device_t *s_extra[MAX_EXTRA_DEVICES];
+static int s_extra_count;
+
 static device_record_t *record_for(const char *name)
 {
     for (int i = 0; i < s_record_count; i++) {
@@ -147,6 +153,7 @@ void purr_drivers_bind(const purr_board_t *board, const purr_driver_t *const *ta
     s_boot_table = table;
     s_boot_table_count = table_count;
     s_record_count = 0;
+    s_extra_count = 0;
     if (board == NULL) {
         return;
     }
@@ -194,6 +201,43 @@ int purr_driver_register(const purr_board_t *board, const purr_driver_t *drv)
         }
         bind_device(rec, dev, board, &drv, 1);
     }
+    for (int i = 0; i < s_extra_count; i++) {
+        const purr_device_t *dev = s_extra[i];
+        device_record_t *rec = record_for(dev->name);
+        if (rec == NULL || rec->state == PURR_DEV_BOUND || strcmp(dev->compatible, drv->compatible) != 0) {
+            continue;
+        }
+        bind_device(rec, dev, board, &drv, 1);
+    }
+    return 0;
+}
+
+int purr_device_add(const purr_board_t *board, const purr_device_t *dev)
+{
+    if (dev == NULL || dev->name == NULL || dev->compatible == NULL || s_extra_count >= MAX_EXTRA_DEVICES) {
+        return -1;
+    }
+    for (int i = 0; i < s_extra_count; i++) {
+        if (strcmp(s_extra[i]->name, dev->name) == 0) {
+            return -1;                /* declared already */
+        }
+    }
+    if (board != NULL) {
+        for (int i = 0; i < board->device_count; i++) {
+            if (strcmp(board->devices[i].name, dev->name) == 0) {
+                return -1;            /* the board's own table has it */
+            }
+        }
+    }
+    device_record_t *rec = record_for(dev->name);
+    if (rec == NULL) {
+        return -1;
+    }
+    s_extra[s_extra_count++] = dev;
+    bind_device(rec, dev, board, s_registered, s_registered_count);          /* a module already loaded */
+    if (rec->state == PURR_DEV_NO_DRIVER && s_boot_table != NULL) {
+        bind_device(rec, dev, board, s_boot_table, s_boot_table_count);      /* or one built into the kernel */
+    }
     return 0;
 }
 
@@ -211,6 +255,13 @@ void purr_drivers_bind_extra(const purr_board_t *board)
 {
     if (board == NULL) {
         return;
+    }
+    for (int i = 0; i < s_extra_count; i++) {
+        const purr_device_t *dev = s_extra[i];
+        device_record_t *rec = record_for(dev->name);
+        if (rec != NULL && rec->state != PURR_DEV_BOUND) {
+            bind_device(rec, dev, board, s_registered, s_registered_count);
+        }
     }
     for (int i = 0; i < board->device_count; i++) {
         const purr_device_t *dev = &board->devices[i];
@@ -321,6 +372,7 @@ const char *purr_drv_class_name(uint32_t class_id)
     case 4: return "wifi";
     case 5: return "hci";
     case 6: return "block";
+    case 7: return "ethernet";
     default: return "?";
     }
 }

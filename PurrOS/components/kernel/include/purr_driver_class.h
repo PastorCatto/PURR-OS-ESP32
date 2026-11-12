@@ -28,6 +28,7 @@ extern "C" {
 #define PURR_DRV_CLASS_WIFI   4     /* a Wi-Fi interface that is not the chip's own */
 #define PURR_DRV_CLASS_HCI    5     /* a Bluetooth controller, as an HCI transport */
 #define PURR_DRV_CLASS_BLOCK  6     /* a block device: an SD card, an eMMC, a flash chip with sectors */
+#define PURR_DRV_CLASS_ETHERNET 7   /* a wired network chip that moves raw Ethernet frames (the kernel's own TCP/IP stack sits on top) */
 
 const char *purr_drv_class_name(uint32_t class_id);   /* "gnss", "lora", "modem", "wifi", "hci", "block", "none", "?" */
 
@@ -163,6 +164,22 @@ typedef struct {
     int (*send_frame)(void *h, const uint8_t *frame, size_t len);                    /* a raw Ethernet frame, for a MAC-level chip; NULL when not offered */
     int (*recv_frame)(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms);       /* a frame, 0 if none in time; NULL when not offered */
 } purr_wifi_ops_t;
+
+/* ---------------------------------------------------------------- wired Ethernet, a MAC-level chip (a W5500 in raw-frame mode) */
+
+#define PURR_ETH_LINK_UP   0x01     /* a cable and a partner */
+#define PURR_ETH_SPEED_100 0x02     /* 100 Mbit/s (clear: 10) */
+#define PURR_ETH_FULL      0x04     /* full duplex (clear: half) */
+#define PURR_ETH_MAX_FRAME 1514     /* a frame without its CRC: the longest send_frame() takes and recv_frame() returns */
+
+typedef struct {
+    uint32_t version;                                       /* 1 */
+    int (*start)(void *h, const uint8_t mac[6]);            /* resets the chip, checks it answers, sets the station address, opens the receive path; 0 or < 0 */
+    int (*stop)(void *h);                                   /* closes it; 0 or < 0 */
+    int (*link)(void *h);                                   /* PURR_ETH_* bits (0 = no link), or < 0 when the chip does not answer. Cheap: it is polled */
+    int (*send_frame)(void *h, const uint8_t *frame, size_t len);              /* one frame, 14 to PURR_ETH_MAX_FRAME bytes, sent before it returns; 0 or < 0 */
+    int (*recv_frame)(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms); /* one frame (its length), 0 if none arrived in time, < 0 on a chip error. A longer frame is cut to cap */
+} purr_eth_ops_t;
 
 /* ---------------------------------------------------------------- Bluetooth: an HCI transport */
 

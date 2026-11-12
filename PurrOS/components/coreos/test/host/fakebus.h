@@ -104,6 +104,23 @@ static int fb_spi_transfer(uint32_t h, const uint8_t *tx, uint8_t *rx, size_t n)
     return 0;
 }
 
+/* ABI 8: the driver's own SPI bus. The test sees what was asked for. */
+static int fb_bus_calls, fb_bus_host, fb_bus_sclk, fb_bus_mosi, fb_bus_miso, fb_bus_fail;
+static size_t fb_bus_max;
+static int fb_spi_open_bus(int host, int sclk, int mosi, int miso, size_t max_transfer)
+{
+    fb_bus_calls++;
+    fb_bus_host = host;
+    fb_bus_sclk = sclk;
+    fb_bus_mosi = mosi;
+    fb_bus_miso = miso;
+    fb_bus_max = max_transfer;
+    return fb_bus_fail ? -1 : 0;
+}
+static int fb_lock_depth;
+static void fb_spi_lock(void) { fb_lock_depth++; }
+static void fb_spi_unlock(void) { fb_lock_depth--; }
+
 static purr_driver_bus_table_t fb_table(void)
 {
     purr_driver_bus_table_t t;
@@ -122,6 +139,9 @@ static purr_driver_bus_table_t fb_table(void)
     t.gpio_write = fb_gpio_write;
     t.spi_add_device = fb_spi_add;
     t.spi_transfer = fb_spi_transfer;
+    t.spi_open_bus = fb_spi_open_bus;
+    t.spi_lock = fb_spi_lock;
+    t.spi_unlock = fb_spi_unlock;
     return t;
 }
 
