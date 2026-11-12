@@ -126,9 +126,9 @@ static void link_task(void *arg)
             uint8_t *copy = malloc((size_t)n);                 /* the stack owns this buffer until it calls link_free_rx */
             if (copy != NULL) {
                 memcpy(copy, s_rx, (size_t)n);
-                if (esp_netif_receive(s_netif, copy, (size_t)n, NULL) != ESP_OK) {
-                    free(copy);
-                }
+                /* From here the buffer is the stack's, whatever this returns: esp_netif frees it itself when it refuses a frame (netif not up yet, no pbuf), through
+                 * link_free_rx. Freeing it here as well was a double free that corrupted the heap. */
+                (void)esp_netif_receive(s_netif, copy, (size_t)n, NULL);
             }
             continue;                                         /* more may be waiting: do not sleep */
         }
