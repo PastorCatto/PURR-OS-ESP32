@@ -13,7 +13,6 @@ set(main_reqs kernel coreos littlefs esp_partition esp_system esp_timer esp_wifi
 # something to force through now.
 if(CONFIG_PURR_BOARD_TDECK OR CONFIG_PURR_BOARD_TDECK_PLUS)
     list(APPEND main_srcs "purr_catrt_msg.c" "purr_notify.c" "purr_lvgl.c" "purr_ui_config.c" "purr_ui_assets.c" "purr_ui_service.c"
-                          "purr_card_shell.c"
                           # the setup wizard (recovery loader and KittenOS first boot) and what it is made of: the theme and
                           # the Settings widgets, in every profile
                           "purr_w10m_theme.c" "purr_w10m_widgets.c" "purr_oobe.c" "purr_wallpaper.c")

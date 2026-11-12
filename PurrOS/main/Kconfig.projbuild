@@ -112,9 +112,9 @@ menu "PURR OS user interface"
 
     config PURR_UI_DEFAULT_MODE
         string "Shell planted in /ui/mode.conf on first boot"
-        default "card_shell"
+        default "w10m"
         help
-            card_shell, nav or w10m (the Windows 10 Mobile style shell). Only used when
+            w10m (the official shell: the built-in Android 2.2 one, or an installed one) or nav. Only used when
             /ui/mode.conf does not exist yet; edit that file to switch afterwards.
 
     # The built-in shell is the Android 2.2 style one (purr_android*.c), in every image: the one that always works (the fallback). Any other shell, the Windows

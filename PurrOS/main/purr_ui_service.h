@@ -37,16 +37,6 @@ typedef enum {
     PURR_UI_OP_SET_BACKGROUND,   /* widget.color is the new background */
     PURR_UI_OP_ADD_WIDGET,       /* widget describes what to create, same shape purr_ui_
                                     config.h's parser already fills in */
-    /* Builds the card-based Home shell (purr_card_shell.c, memory/
-     * [[project_card_shell_ui_redesign]]'s gesture-UI redesign) -- gesture state, rounded
-     * card containers and coordinated multi-object positioning don't fit the declarative
-     * label/button/image/app_grid/navbar widget model above, so this is real construction
-     * code living here (same invariant as everything else in this file: only the service
-     * task calls lv_*), not a config block on its own. The *structure* (which edges have
-     * panels, their size/color, the title) now comes from `card_shell_screen` below, parsed
-     * from /ui/cardshell.conf by purr_card_shell_start() -- the engine driving it (drag/
-     * reveal/carousel/overview/minimize) is still compiled C. */
-    PURR_UI_OP_BUILD_CARD_SHELL,
     /* Runs fn(arg) on the service task, the only place LVGL may be called from, and returns what
      * it returns. This is how a shell (purr_w10m.c) does its work without this file knowing
      * anything about it. */
@@ -56,11 +46,6 @@ typedef enum {
 typedef struct {
     purr_ui_op_t op;
     purr_ui_widget_t widget;     /* PURR_UI_OP_ADD_WIDGET / SET_BACKGROUND (widget.color) */
-    /* PURR_UI_OP_BUILD_CARD_SHELL only. May be NULL (build_card_shell() falls back to its own
-     * built-in defaults if so, e.g. the config failed to load) -- the caller owns this and
-     * purr_ui_service_request() blocks until the request is handled, so a stack-local pointer
-     * is safe to pass here. */
-    const purr_ui_screen_t *card_shell_screen;
     /* PURR_UI_OP_CALL only. */
     void *(*call_fn)(void *);
     void *call_arg;

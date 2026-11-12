@@ -2448,7 +2448,7 @@ static int shell_set(const char *v, char *e, size_t c)
 static const purr_setting_t s_w10m_keys[] = {
     {"display.brightness", "backlight", "1-255", 0, bright_get, bright_set},
     {"display.rotation", "screen orientation in degrees", "0|90|180|270", 0, rot_get, rot_set},
-    {"ui.shell", "which shell starts (next boot)", "builtin|<id>|nav|card_shell", 1, shell_get, shell_set},
+    {"ui.shell", "which shell starts (next boot)", "builtin|<id>|nav", 1, shell_get, shell_set},
 };
 
 void w10m_place_sheet(lv_obj_t *sheet)

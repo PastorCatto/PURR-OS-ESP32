@@ -37,7 +37,7 @@ The way that works: an app asks for a widget by **role** ("a button", "a list ro
 | Android shell | [purr_android_home.c](../PurrOS/main/purr_android_home.c) | Home pages, dock, app drawer, options menu |
 | Android shell | [purr_android_shade.c](../PurrOS/main/purr_android_shade.c) | Notification shade |
 | Android shell | [purr_android_lock.c](../PurrOS/main/purr_android_lock.c) | Lock screen and sign-in |
-| Old shells | [purr_card_shell.c](../PurrOS/main/purr_card_shell.c), [purr_ui_config.c](../PurrOS/main/purr_ui_config.c) | The card stack and the text-config "nav" screen; the fallbacks |
+| Old shell | [purr_ui_config.c](../PurrOS/main/purr_ui_config.c) | The text-config "nav" screen; the fallback (the card stack was removed) |
 | Art | [purr_ui_assets.c](../PurrOS/main/purr_ui_assets.c) | Finds a picture in a pack (a raw flash partition up to 1.0.28; files in LittleFS from 1.0.29, see [chapter 12](12-picture-pack-and-fonts.md)) |
 | Wallpaper | [purr_wallpaper.c](../PurrOS/main/purr_wallpaper.c) | The device-wide `display.wallpaper` choice |
 | Shell registry | [purr_shell.c](../PurrOS/main/purr_shell.c) | The built-in shell, the installed shells, the choice and the way out |
@@ -63,7 +63,7 @@ The full walk-through is section 3 of [SHELL-OPTIMIZATION.md](../UI/SHELL-OPTIMI
 ### Which shell starts
 
 - The **Android style shell is built into every image** (the one that always works). Any other shell, the Windows 10 Mobile style one first, is a **loadable module** (subtype `PURR_MOD_SHELL`) installed under `/ui/shells/<id>/` and chosen in Settings, Interface; the choice (`/ui/active-shell.conf`) takes effect at the next restart, and a shell that does not come up (two starts that never reached the screen, or a bad signature) is given up for the built-in one. Built with `purrstrap shells build`; the interface it links against is `PurrOS/main/purr_shell_exports.def`. Owner decisions, 2026-11-04 and 2026-11-06 ([plan7.md](../plan7.md), "Shells as installable items").
-- `/ui/mode.conf` still exists. In `main.c` the value `nav` runs the text-config screen, the official shell runs `purr_shell_start()`, and anything else runs the card shell. The names `w10m`, `android` and `shell` all mean "the official shell".
+- `/ui/mode.conf` still exists. In `main.c` the value `nav` runs the text-config screen, the official shell runs `purr_shell_start()`, and anything else (a missing file, or the retired `card_shell`) also runs the official shell. The names `w10m`, `android` and `shell` all mean "the official shell". The card stack no longer exists in the source.
 - A shell that fails to start falls back to the text shell. The recovery profile (KittenOS) shows the recovery app instead of a shell.
 - `ui.shell` is a settings key that writes `/ui/mode.conf` and takes effect on the next boot.
 

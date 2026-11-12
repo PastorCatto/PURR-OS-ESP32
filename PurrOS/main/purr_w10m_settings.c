@@ -389,7 +389,7 @@ static void rotation_cb(lv_event_t *e)
     w10m_apply_orientation((int)lv_dropdown_get_selected(lv_event_get_target(e)) * 90);
 }
 
-/* The Interface dropdown: the built-in shell, every installed shell (/ui/shells/<id>/), Navigation and Card stack. s_shell_ids[i] is what entry i chooses. */
+/* The Interface dropdown: the built-in shell, every installed shell (/ui/shells/<id>/), Navigation. s_shell_ids[i] is what entry i chooses. */
 #define SHELL_MAX 6
 static purr_shell_info_t s_shells[SHELL_MAX];
 static int s_shell_n;
@@ -405,8 +405,6 @@ static void shell_cb(lv_event_t *e)
         mode = s_shells[sel - 1].id;
     } else if (sel == s_shell_n + 1) {
         mode = "nav";
-    } else if (sel == s_shell_n + 2) {
-        mode = "card_shell";
     }
     char err[64] = "";
     if (s != NULL && mode != NULL && s->set(mode, err, sizeof(err)) == 0) {
@@ -480,10 +478,10 @@ static void page_system(void)
                  s_shells[i].state == PURR_SHELL_STATE_NEEDS_UPDATE ? " (needs an update)" : s_shells[i].state == PURR_SHELL_STATE_BAD ? " (damaged)" : "");
     }
     size_t nn = strlen(names);
-    snprintf(names + nn, sizeof(names) - nn, "\nNavigation\nCard stack");
+    snprintf(names + nn, sizeof(names) - nn, "\nNavigation");
     char cur[24] = "builtin";
     purr_shell_mode_get(cur, sizeof(cur));
-    int sel = strcmp(cur, "nav") == 0 ? s_shell_n + 1 : strcmp(cur, "card_shell") == 0 ? s_shell_n + 2 : 0;
+    int sel = strcmp(cur, "nav") == 0 ? s_shell_n + 1 : 0;
     for (int i = 0; i < s_shell_n; i++) {
         if (strcmp(s_shells[i].id, cur) == 0) {
             sel = i + 1;
@@ -492,7 +490,7 @@ static void page_system(void)
     char chosen[24];
     purr_shell_chosen(chosen, sizeof(chosen));
     for (int i = 0; i < s_shell_n; i++) {                                          /* what is chosen shows, even before the restart that makes it the running one */
-        if (strcmp(cur, "nav") != 0 && strcmp(cur, "card_shell") != 0 && strcmp(s_shells[i].id, chosen) == 0) {
+        if (strcmp(cur, "nav") != 0 && strcmp(s_shells[i].id, chosen) == 0) {
             sel = i + 1;
         }
     }

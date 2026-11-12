@@ -1,6 +1,6 @@
 /*
  * purr_wallpaper.h - which wallpaper the device shows. Not part of any shell: the choice is the device-wide setting `display.wallpaper`
- * in /etc/system.conf, so it survives a reboot and stays when the user switches the shell (Windows 10 Mobile, navigation, card stack).
+ * in /etc/system.conf, so it survives a reboot and stays when the user switches the shell (the Android and Windows 10 Mobile shells, navigation).
  * A shell asks which picture to draw on each surface and draws it; it listens with purr_wallpaper_set_listener() to redraw when the
  * choice changes.
  *

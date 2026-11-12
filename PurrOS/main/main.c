@@ -41,7 +41,6 @@
 #include "sdkconfig.h"
 
 #if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
-#include "purr_card_shell.h"
 #include "recovery_app.h"
 #if !CONFIG_PURR_PROFILE_RECOVERY
 #include "purr_shell.h"
@@ -233,20 +232,17 @@ void app_main(void)
     purr_net_setup(&boot_cli);
     BOOT_STEP(2, "Preparing the shell");
 #if CONFIG_PURR_BOARD_TDECK || CONFIG_PURR_BOARD_TDECK_PLUS
-    /* mode.conf first, then only the active shell's own config: a W10M device has no use for the
-     * card stack's or the nav shell's files. A file already there is never touched, so a device that
+    /* mode.conf first, then only the active shell's own config: the official shell has no use for the
+     * nav shell's files. A file already there is never touched, so a device that
      * switches shell later plants the new one's config on its next boot. */
-#if !CONFIG_PURR_PROFILE_RECOVERY           /* KittenOS shows the recovery app, not a shell: no card stack or nav config */
+#if !CONFIG_PURR_PROFILE_RECOVERY           /* KittenOS shows the recovery app, not a shell: no nav config */
     purr_ui_mode_setup(&boot_cli);
     purr_shell_select();                /* the shell the user chose (a loadable one, if installed and trusted) or the built-in one: before the theme and the pictures are set up */
     switch (purr_ui_mode_get()) {
     case PURR_UI_MODE_NAV:
         purr_ui_config_setup(&boot_cli);
         break;
-    case PURR_UI_MODE_CARD_SHELL:
-        purr_ui_card_shell_config_setup(&boot_cli);
-        break;
-    default:                            /* W10M keeps its settings in the theme files */
+    default:                            /* the official shell keeps its settings in the theme files */
         break;
     }
 #endif
@@ -354,30 +350,16 @@ void app_main(void)
              * properties in the config can't be found (purr_ui_assets.h's own comment) --
              * never critical. */
             purr_ui_assets_init();
-            /* Which screen actually boots is itself a choice now (/ui/mode.conf, planted by
-             * purr_ui_mode_setup() above) -- two real, compiled engines, not a general
-             * scripting format (memory/[[project_card_shell_ui_redesign]]'s own note on why
-             * only this much, not more, is a config decision). card_shell is the gesture-
-             * driven full-screen-card shell (its own separate /ui/cardshell.conf, loaded by
-             * purr_card_shell_start() itself); nav is this file's older declarative
-             * label/button/image/app_grid/navbar screen (/ui/shell.conf, planted above by
-             * purr_ui_config_setup()) -- real nav buttons already exist there, it just
-             * wasn't reachable from the normal boot path until now. */
+            /* Which screen boots is a choice (/ui/mode.conf, planted by purr_ui_mode_setup() above): nav is the declarative
+             * label/button/image/app_grid/navbar screen (/ui/shell.conf, planted above by purr_ui_config_setup()); anything else is the
+             * official shell (the built-in Android 2.2 one, or an installed one). */
 #if CONFIG_PURR_PROFILE_RECOVERY
             recovery_app_start();
 #else
             if (purr_ui_mode_get() == PURR_UI_MODE_NAV) {
                 purr_ui_load_and_build("/ui/shell.conf");
-            } else if (purr_ui_mode_get() == PURR_UI_MODE_W10M) {
-#if CONFIG_PURR_PROFILE_RECOVERY
-                purr_card_shell_start();
-#else
-                if (purr_shell_start() == ESP_OK) {
-                    purr_shell_started();       /* on screen: clears the count of failed starts of a chosen shell */
-                }
-#endif
-            } else {
-                purr_card_shell_start();
+            } else if (purr_shell_start() == ESP_OK) {
+                purr_shell_started();           /* on screen: clears the count of failed starts of a chosen shell */
             }
 #endif
             purr_lvgl_run();

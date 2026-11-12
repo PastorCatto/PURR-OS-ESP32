@@ -108,11 +108,11 @@ line is reported, never fatal.
 ## UI model: apps do not know which UI they are on (owner decision, 2026-10-26)
 
 Apps are written against an abstract surface and the `ui` catcall (`UI/SPEC.md`: widgets plus a canvas,
-events through the app's normal queue), never against LVGL or a particular shell. The **card stack** (the
-LVGL card shell: Home card, edge panels, carousel/overview/minimize gestures) is the primary backend, and the
+events through the app's normal queue), never against LVGL or a particular shell. The **Android shell** (the
+card stack that was the first backend is removed, 2026-11-12) is the primary backend, and the
 text console is a second one, so an app written once runs on either.
 
-The way the two meet the manager: **a UI is just a client of the control surface.** The card stack subscribes
+The way the two meet the manager: **a UI is just a client of the control surface.** A shell subscribes
 to the event stream (`openapp`, `closeapp`, `focus`, `state`, `killed`) to create, reorder and remove cards,
 and a gesture calls a dispatcher (swipe to dismiss = `close`, tap a card = `focus`, minimize = `background`).
 The text shell does the same through `purrctl`. So the manager never imports a UI, and a new UI needs no

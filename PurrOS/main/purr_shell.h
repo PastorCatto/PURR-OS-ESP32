@@ -68,7 +68,7 @@ void purr_shell_chosen(char *id, size_t cap);
 /* Chooses a shell for the next start: "builtin" or the id of an installed one. Saved; takes effect at the next restart. 0 on success, -1 if it is not installed. */
 int purr_shell_choose(const char *id);
 
-/* The `ui.shell` setting for every shell: "builtin" (also "android"), an installed id, "nav" or "card_shell". get gives what is chosen. */
+/* The `ui.shell` setting for every shell: "builtin" (also "android"), an installed id or "nav". get gives what is chosen. */
 int purr_shell_mode_get(char *out, size_t cap);
 int purr_shell_mode_set(const char *v, char *err, size_t cap);
 

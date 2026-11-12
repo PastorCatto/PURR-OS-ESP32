@@ -10,7 +10,7 @@
 CONFIG_PURR_NET_ETH_W5500=y
 
 
-# The VM boots into the Windows 10 Mobile style shell (plan7.md) until it replaces the card stack.
+# The VM boots into the official shell (the built-in Android 2.2 one, plan7.md).
 CONFIG_PURR_UI_DEFAULT_MODE="w10m"
 
 # The VM has its own folder (recovery-vm) on the dev server: it needs the VM kernel, KittenOS and loader (virtual Ethernet, no Wi-Fi), not the real device's.

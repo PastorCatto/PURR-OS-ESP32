@@ -183,20 +183,13 @@ esp_err_t purr_ui_config_parse(char *text, purr_ui_screen_t *out)
                     cur = NULL;
                 } else if (strcmp(word, "label") == 0 || strcmp(word, "button") == 0 ||
                           strcmp(word, "image") == 0 || strcmp(word, "app_grid") == 0 ||
-                          strcmp(word, "navbar") == 0 || strcmp(word, "panel") == 0 ||
-                          strcmp(word, "carousel") == 0 || strcmp(word, "overview") == 0 ||
-                          strcmp(word, "minimize") == 0 || strcmp(word, "gesture") == 0) {
+                          strcmp(word, "navbar") == 0) {
                     cur = &out->widgets[out->widget_count++];
                     memset(cur, 0, sizeof(*cur));
                     cur->type = strcmp(word, "button") == 0 ? PURR_UI_WIDGET_BUTTON
                                : strcmp(word, "image") == 0 ? PURR_UI_WIDGET_IMAGE
                                : strcmp(word, "app_grid") == 0 ? PURR_UI_WIDGET_APP_GRID
                                : strcmp(word, "navbar") == 0 ? PURR_UI_WIDGET_NAVBAR
-                               : strcmp(word, "panel") == 0 ? PURR_UI_WIDGET_PANEL
-                               : strcmp(word, "carousel") == 0 ? PURR_UI_WIDGET_CAROUSEL
-                               : strcmp(word, "overview") == 0 ? PURR_UI_WIDGET_OVERVIEW
-                               : strcmp(word, "minimize") == 0 ? PURR_UI_WIDGET_MINIMIZE
-                               : strcmp(word, "gesture") == 0 ? PURR_UI_WIDGET_GESTURE
                                : PURR_UI_WIDGET_LABEL;
                     cur->color = PURR_UI_COLOR_UNSET;
                     snprintf(cur->name, sizeof(cur->name), "%s", name);
@@ -235,12 +228,6 @@ esp_err_t purr_ui_config_parse(char *text, purr_ui_screen_t *out)
             } else if (n >= 2 && strcmp(key, "size") == 0) {
                 cur->w = atoi(vals[0]);
                 cur->h = atoi(vals[1]);
-            } else if (n >= 1 && strcmp(key, "size") == 0) {
-                /* panel: one value, its thickness -- the rest of its rect is derived from
-                 * the screen size and `edge` at build time, not stored here. */
-                cur->h = atoi(vals[0]);
-            } else if (n >= 1 && strcmp(key, "edge") == 0) {
-                snprintf(cur->edge, sizeof(cur->edge), "%s", vals[0]);
             } else if (n >= 1 && (strcmp(key, "text") == 0 || strcmp(key, "label") == 0)) {
                 snprintf(cur->text, sizeof(cur->text), "%s", vals[0]);
             } else if (n >= 1 && strcmp(key, "asset") == 0) {
@@ -251,25 +238,8 @@ esp_err_t purr_ui_config_parse(char *text, purr_ui_screen_t *out)
                 }
             } else if (n >= 1 && strcmp(key, "scale") == 0) {
                 cur->scale = atoi(vals[0]);
-            } else if (n >= 1 && (strcmp(key, "columns") == 0 || strcmp(key, "capacity") == 0 ||
-                                  strcmp(key, "close_lift") == 0 ||
-                                  strcmp(key, "tolerance") == 0)) {
+            } else if (n >= 1 && strcmp(key, "columns") == 0) {
                 cur->columns = atoi(vals[0]);
-            } else if (n >= 1 && (strcmp(key, "hold_ms") == 0 || strcmp(key, "slide_ms") == 0)) {
-                cur->anim_duration_ms = atoi(vals[0]);
-            } else if (n >= 3 && strcmp(key, "step") == 0) {
-                cur->step_x = atoi(vals[0]);
-                cur->step_shrink_w = atoi(vals[1]);
-                cur->step_shrink_h = atoi(vals[2]);
-            } else if (n >= 1 && strcmp(key, "max_side_steps") == 0) {
-                cur->max_side_steps = atoi(vals[0]);
-            } else if (n >= 3 && strcmp(key, "zone") == 0) {
-                /* minimize only: height from the bottom edge, then the x range the drag has
-                 * to start inside of -- reuses w/x/y, none of which minimize needs for
-                 * anything else. */
-                cur->w = atoi(vals[0]);
-                cur->x = atoi(vals[1]);
-                cur->y = atoi(vals[2]);
             } else if (n >= 3 && strcmp(key, "animation") == 0) {
                 snprintf(cur->anim_type, sizeof(cur->anim_type), "%s", vals[0]);
                 cur->anim_duration_ms = atoi(vals[1]);
@@ -502,93 +472,10 @@ void purr_ui_config_setup(purr_cli_t *cli)
     purr_cli_puts(cli, "ui: planted the default /ui/shell.conf\n");
 }
 
-/* Default /ui/cardshell.conf -- exactly the values that used to be hardcoded #defines and
- * literal colors in purr_ui_service.c's build_card_shell() (SHELL_TOP_H=70/SHELL_BOTTOM_H=60/
- * SHELL_LEFT_W=70 and the three panel colors), so planting this changes nothing visible on a
- * fresh device; it's the structural piece of the card shell (which edges have panels, their
- * thickness/color, the title) that's data now instead of compiled constants. The gesture
- * engine itself (drag/reveal/carousel/overview/minimize) is still compiled C -- see
- * memory/[[project_card_shell_ui_redesign]]'s own note on why only this part moved first. */
-static const char s_default_cardshell_conf[] =
-    "# Card shell structural config. Edit freely -- netinstall never overwrites a file\n"
-    "# that's already here, and neither does this planting step on a later boot.\n"
-    "#\n"
-    "# The gesture engine (drag/reveal/carousel/multitasking overview/minimize animation)\n"
-    "# is compiled code, not described here -- this file covers which edges have panels,\n"
-    "# how thick/what color they are, the title, and a few tuning numbers for the carousel/\n"
-    "# overview/minimize animation.\n"
-    "screen \"cardshell\" {\n"
-    "    panel \"notifications\" {\n"
-    "        edge  = top\n"
-    "        size  = 70\n"
-    "        color = #2a2a3a\n"
-    "        text  = \"Notifications\"\n"
-    "    }\n"
-    "\n"
-    "    panel \"apps\" {\n"
-    "        edge  = bottom\n"
-    "        size  = 60\n"
-    "        color = #8a3fd1\n"
-    "    }\n"
-    "\n"
-    "    panel \"status\" {\n"
-    "        edge  = left\n"
-    "        size  = 70\n"
-    "        color = #1e5a4a\n"
-    "    }\n"
-    "\n"
-    "    label \"title\" {\n"
-    "        text     = \"[AdultSwim]\"\n"
-    "        position = 16, 12\n"
-    "        color    = #fda000\n"
-    "        scale    = 2\n"
-    "    }\n"
-    "\n"
-    "    carousel \"apps_open\" {\n"
-    "        capacity = 12\n"
-    "    }\n"
-    "\n"
-    "    overview \"multitask\" {\n"
-    "        hold_ms        = 450\n"
-    "        size           = 200, 160\n"
-    "        step           = 60, 30, 24\n"
-    "        max_side_steps = 2\n"
-    "        close_lift     = 20\n"
-    "    }\n"
-    "\n"
-    "    minimize \"home_slide\" {\n"
-    "        slide_ms = 300\n"
-    "        # zone: height from the bottom edge, then the x range (min, max) a swipe-up has\n"
-    "        # to start inside of to be recognized as \"go home\" at all\n"
-    "        zone     = 48, 80, 240\n"
-    "    }\n"
-    "\n"
-    "    gesture \"touch\" {\n"
-    "        tolerance = 3\n"
-    "    }\n"
-    "}\n";
-
-void purr_ui_card_shell_config_setup(purr_cli_t *cli)
-{
-    purr_fs_t *fs = purr_login_fs();
-    static const char path[] = "/ui/cardshell.conf";
-    if (purr_fs_stat(fs, path, NULL, NULL) == 0) {
-        return;                            /* already there -- never overwrite */
-    }
-    purr_fs_mkdir(fs, "/ui");              /* ignore the error if it already exists */
-    if (purr_fs_write(fs, path, s_default_cardshell_conf,
-                      sizeof(s_default_cardshell_conf) - 1) != 0) {
-        purr_cli_puts(cli, "ui: could not plant the default cardshell.conf\n");
-        return;
-    }
-    purr_cli_puts(cli, "ui: planted the default /ui/cardshell.conf\n");
-}
-
 /* ---------------------------------------------------------------- UI mode selector
  *
- * Which top-level engine main.c boots into -- a fixed, compiled choice between two real
- * screens (card_shell / nav), not an open-ended format. purr_ui_config.h's own note has the
- * full reasoning (the Hyprland precedent: compiled layouts, picked and tuned by config). */
+ * Which top-level engine main.c boots into: the official shell (the built-in Android 2.2 one, or an installed one) or the declarative "nav" screen. The card
+ * stack that used to be the third is gone: a /ui/mode.conf that still says "card_shell" now starts the official shell. */
 #define PURR_UI_MODE_PATH "/ui/mode.conf"
 
 purr_ui_mode_t purr_ui_mode_get(void)
@@ -597,7 +484,7 @@ purr_ui_mode_t purr_ui_mode_get(void)
     char buf[16];
     read_ctx_t rc = {buf, sizeof(buf), 0};
     if (purr_fs_read(fs, PURR_UI_MODE_PATH, read_cb, &rc) != 0) {
-        return PURR_UI_MODE_CARD_SHELL;        /* missing or unreadable -- the safe default */
+        return PURR_UI_MODE_W10M;               /* missing or unreadable: the official shell */
     }
     buf[rc.got] = '\0';
     /* trim() only strips spaces/tabs -- its one existing caller already splits on '\n'
@@ -611,10 +498,7 @@ purr_ui_mode_t purr_ui_mode_get(void)
     if (strcmp(t, "nav") == 0) {
         return PURR_UI_MODE_NAV;
     }
-    if (strcmp(t, "w10m") == 0 || strcmp(t, "android") == 0 || strcmp(t, "shell") == 0) {
-        return PURR_UI_MODE_W10M;          /* the official shell: a loaded one if /ui/active-shell.conf names one, else the built-in Android shell (purr_shell.c) */
-    }
-    return PURR_UI_MODE_CARD_SHELL;            /* "card_shell", empty, or anything unrecognized */
+    return PURR_UI_MODE_W10M;                  /* "w10m", "android", "shell", the retired "card_shell", empty or anything else: the official shell, a loaded one if /ui/active-shell.conf names one, else the built-in Android shell (purr_shell.c) */
 }
 
 void purr_ui_mode_setup(purr_cli_t *cli)

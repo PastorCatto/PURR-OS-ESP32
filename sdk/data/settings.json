@@ -72,7 +72,7 @@
  {
   "key": "ui.shell",
   "help": "which shell starts (next boot)",
-  "values": "w10m|nav|card_shell",
+  "values": "builtin|<id>|nav",
   "admin": true,
   "file": "PurrOS/main/purr_w10m.c"
  },

@@ -367,7 +367,7 @@ Before a shell is merged:
 | Power and the panel sleep | `PurrOS/main/purr_power_plat.c` |
 | Game surface | `PurrOS/main/purr_catrt_game.c` |
 | Host layout previewer | `tools/lvgl_host/` |
-| Shell choice | the `ui.shell` setting (read at start; `w10m`, `nav`, `card_shell` today) |
+| Shell choice | the `ui.shell` setting (read at start; `w10m` (the official shell) and `nav` today) |
 | Plans | `plan7.md` (shell), `plan6.md` (runtime and games), `plan9.md` (ui and files catcalls), `plan10.md` (power) |
 
 Adding a shell means: a new `purr_<name>.c` set that exports the same start and layer contracts, a theme file, an entry in the `ui.shell` setting, and a block in `PurrOS/main/CMakeLists.txt`. The runtime, the catcalls, the settings store and the panel path are shared and should not need changes. If you find you need to change them, that is a finding to write down in the plan, not a reason to fork them.

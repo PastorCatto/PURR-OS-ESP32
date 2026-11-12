@@ -279,7 +279,7 @@ int purr_shell_mode_get(char *out, size_t cap)
 {
     char mode[16];
     word_of(MODE_PATH, mode, sizeof(mode));
-    if (strcmp(mode, "nav") == 0 || strcmp(mode, "card_shell") == 0) {
+    if (strcmp(mode, "nav") == 0) {
         snprintf(out, cap, "%s", mode);
     } else {
         snprintf(out, cap, "%s", s_mod != NULL ? s_mod_id : "builtin");
@@ -289,7 +289,7 @@ int purr_shell_mode_get(char *out, size_t cap)
 
 int purr_shell_mode_set(const char *v, char *err, size_t cap)
 {
-    if (strcmp(v, "nav") == 0 || strcmp(v, "card_shell") == 0) {
+    if (strcmp(v, "nav") == 0) {
         if (put_line(MODE_PATH, v) != 0) {
             snprintf(err, cap, "could not save");
             return -1;
@@ -300,7 +300,7 @@ int purr_shell_mode_set(const char *v, char *err, size_t cap)
         v = "builtin";
     }
     if (purr_shell_choose(v) != 0) {
-        snprintf(err, cap, "no such shell is installed (builtin, nav, card_shell or an installed id)");
+        snprintf(err, cap, "no such shell is installed (builtin, nav or an installed id)");
         return -1;
     }
     return 0;

@@ -7,7 +7,7 @@
  * switching and focus, saved state, the out-of-memory killer and teardown, and a Hyprland-style
  * control surface: text config with rules and binds, dispatchers, queries and an event stream.
  *
- * It never knows about a UI. A UI (the card stack, the text shell) is a client: it subscribes to
+ * It never knows about a UI. A UI (the Android shell, the text shell) is a client: it subscribes to
  * the event stream to follow what runs, and calls dispatchers to change it.
  */
 #ifndef PURR_RUNTIME_H

@@ -87,5 +87,5 @@ The Android pack from `tools/ui/froyo_pack.py` provides all 31 required names, `
 
 ## Not in this list
 
-- **Picture widgets of the card shell and the config UI** (`purr_ui_config.c`, `purr_card_shell.c`): they name any asset in a `/ui` config (`asset = "name"`), so their names are the config's, not a fixed list.
+- **Picture widgets of the config UI** (`purr_ui_config.c`): they name any asset in a `/ui` config (`asset = "name"`), so their names are the config's, not a fixed list.
 - **Fonts**: a pack holds pictures only; fonts are separate (`docs/21-fonts.md`).

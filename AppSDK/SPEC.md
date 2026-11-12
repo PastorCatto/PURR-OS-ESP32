@@ -99,7 +99,7 @@ permission covers which catcall) is its own chunk, Permissions.
 The description file in each app project, `manifest.toml` at the project root. **Decided**
 2026-10-18 (section 10 used to leave the format open): **TOML**, since purrstrap now requires
 Python 3.11+ (`tomllib`, stdlib, read-only parsing is all the build side needs). This also
-matches the Hyprland-style `key = value` config philosophy already proven for `/ui/cardshell.conf`.
+matches the Hyprland-style `key = value` config philosophy already proven for the UI config files.
 
 ```toml
 name = "myapp"

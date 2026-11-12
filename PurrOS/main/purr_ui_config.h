@@ -51,39 +51,6 @@ typedef enum {
      * callback would call back into the UI service task from itself and deadlock -- real
      * fix needed there too, not attempted here. */
     PURR_UI_WIDGET_NAVBAR,
-    /* Card shell edge panel (memory/[[project_card_shell_ui_redesign]]'s Hyprland-style
-     * migration -- the engine that drags/reveals/hides a panel stays compiled C in
-     * purr_ui_service.c, but which edges have panels, how thick they are, and what color
-     * they are is data now). `edge` picks which of the shell's edges this is (top/bottom/
-     * left for now; the engine already knows what content each edge gets) and `size` (into
-     * `h`, reused regardless of edge) is the panel's thickness along that edge -- the rest
-     * of its rect is derived from the screen size at build time, not stored here. */
-    PURR_UI_WIDGET_PANEL,
-    /* Right-side open-app carousel's capacity (`capacity`, reuses `columns` -- not a grid
-     * column count here, just the nearest existing "a small int" field). The hard ceiling on
-     * how many cards can ever exist (currently 12, N_PLACEHOLDER_APPS in purr_ui_service.c)
-     * stays a compile-time array size, never configurable -- `capacity` can only dial that
-     * ceiling *down*, same as a user closing an app from the multitasking overview already
-     * does (both end up marking the excess slots closed+hidden at build time, reusing that
-     * exact mechanism rather than adding a second one). */
-    PURR_UI_WIDGET_CAROUSEL,
-    /* Multitasking overview's tuning: `hold_ms` (reuses `anim_duration_ms`) is how long the
-     * swipe-up-and-hold gesture takes to commit; `size` (reuses `w,h`) is the focused card's
-     * size; `step` (reuses the new `step_x`/`step_shrink_w`/`step_shrink_h` below) is how far
-     * sideways and how much smaller each neighboring card is per step away from focus;
-     * `max_side_steps` is how many neighbors show on each side; `close_lift` (reuses
-     * `columns`) is how far an upward drag on a tile inside the overview must travel before
-     * it's armed to close that card. */
-    PURR_UI_WIDGET_OVERVIEW,
-    /* Minimize-to-home push animation: `slide_ms` (reuses `anim_duration_ms`) is the slide
-     * duration; `zone` (reuses `w,x,y` as height/x_min/x_max) is the bottom-center touch
-     * zone a swipe-up has to start inside of to be recognized as "minimize" at all, rather
-     * than the ordinary left/right carousel drag. */
-    PURR_UI_WIDGET_MINIMIZE,
-    /* Generic touch-recognition sensitivity, shared by every drag handler in the gesture
-     * engine (not owned by any one screen element): `tolerance` (reuses `columns`) is how
-     * many pixels of movement are needed before a drag commits to a direction/axis at all. */
-    PURR_UI_WIDGET_GESTURE,
 } purr_ui_widget_type_t;
 
 typedef struct {
@@ -91,7 +58,7 @@ typedef struct {
     char name[PURR_UI_NAME_LEN];
     int x, y;                 /* position; 0,0 if not set. app_grid: the grid's origin. */
     int w, h;                 /* size; 0,0 means "auto" (let LVGL size it from content).
-                                * app_grid: one cell's size. panel: h holds the thickness. */
+                                * app_grid: one cell's size. */
     char text[PURR_UI_TEXT_LEN];
     char asset[PURR_UI_NAME_LEN];   /* image widgets only: looked up via purr_ui_assets_find() */
     uint32_t color;           /* PURR_UI_COLOR_UNSET if not set */
@@ -99,11 +66,7 @@ typedef struct {
     char anim_type[PURR_UI_WORD_LEN];     /* "" = no animation; else e.g. "fade_in" */
     int anim_duration_ms;
     char anim_easing[PURR_UI_WORD_LEN];   /* "linear", "ease_in", "ease_out", "ease_in_out" */
-    int columns;                /* app_grid only; 0 means "not set" (the builder defaults it).
-                                  * carousel: `capacity` reuses this field too. */
-    char edge[8];               /* panel only: "top", "bottom", "left" (empty = not set) */
-    int step_x, step_shrink_w, step_shrink_h;   /* overview only: `step` property's 3 values */
-    int max_side_steps;         /* overview only; 0 means "not set" */
+    int columns;                /* app_grid only; 0 means "not set" (the builder defaults it). */
 } purr_ui_widget_t;
 
 typedef struct {
@@ -144,39 +107,22 @@ esp_err_t purr_ui_load_and_build(const char *path);
  * filesystem is mounted, before purr_ui_load_and_build(). */
 void purr_ui_config_setup(purr_cli_t *cli);
 
-/* Same missing-only plant as purr_ui_config_setup(), but for /ui/cardshell.conf -- the card
- * shell's own structural config (which edges have panels, their size/color, the title),
- * loaded by purr_card_shell.c instead of this file's own purr_ui_load_and_build() path. A
- * separate file from /ui/shell.conf on purpose: the two formats don't share a widget model
- * (this one's panel/carousel/overview/minimize blocks vs. shell.conf's label/button/image/
- * app_grid/navbar). Call alongside purr_ui_config_setup(), same timing requirement (after the
- * root filesystem is mounted, before the card shell is built). */
-void purr_ui_card_shell_config_setup(purr_cli_t *cli);
-
-/* Which top-level UI engine main.c boots into -- two fixed, compiled "modes" (the Hyprland
- * precedent: a fixed set of compiled layouts/engines, picked and tuned by config, not an
- * open-ended scripting format -- see memory/[[project_card_shell_ui_redesign]]'s own note on
- * why). CARD_SHELL is the gesture-driven full-screen-card engine (purr_card_shell.c); NAV is
- * this file's own older declarative label/button/image/app_grid/navbar screen
- * (purr_ui_load_and_build("/ui/shell.conf")), which already exists and already has real nav
- * buttons -- reactivated as a real second mode instead of staying dead code. */
+/* Which top-level UI engine main.c boots into: the official shell (the built-in Android 2.2 one, or an installed one: purr_shell.h, plan7.md) or NAV, this file's
+ * own declarative label/button/image/app_grid/navbar screen (purr_ui_load_and_build("/ui/shell.conf")). The card stack is gone. */
 typedef enum {
-    PURR_UI_MODE_CARD_SHELL,
     PURR_UI_MODE_NAV,
-    PURR_UI_MODE_W10M,          /* the official shell compiled into the image: Windows 10 Mobile style or Android style (purr_shell.h, plan7.md) */
+    PURR_UI_MODE_W10M,          /* the official shell compiled into the image */
 } purr_ui_mode_t;
 
 /* Reads /ui/mode.conf (plain text, just the mode name on its own line) -- missing, empty, or
- * unrecognized content all fall back to PURR_UI_MODE_CARD_SHELL (the existing default), so an
- * upgraded device with no mode.conf yet doesn't change behavior. Call after
+ * unrecognized content all give PURR_UI_MODE_W10M, the official shell (so a device whose file still says "card_shell" starts it). Call after
  * purr_ui_mode_setup() has had a chance to plant the default, before deciding which engine to
  * start. */
 purr_ui_mode_t purr_ui_mode_get(void);
 
-/* Writes a default /ui/mode.conf ("card_shell\n") if (and only if) nothing is there yet --
+/* Writes a default /ui/mode.conf (CONFIG_PURR_UI_DEFAULT_MODE, "w10m") if (and only if) nothing is there yet --
  * same missing-only convention every other *_setup() in this file already uses. Call
- * alongside purr_ui_config_setup()/purr_ui_card_shell_config_setup(), same timing
- * requirement. */
+ * alongside purr_ui_config_setup(), same timing requirement. */
 void purr_ui_mode_setup(purr_cli_t *cli);
 
 #ifdef __cplusplus

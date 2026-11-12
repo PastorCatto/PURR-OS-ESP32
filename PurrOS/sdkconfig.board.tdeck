@@ -26,7 +26,7 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
 
 # The shell planted in /ui/mode.conf on first boot: the Windows 10 Mobile style one (plan7.md).
-# Edit /ui/mode.conf to card_shell, nav or w10m to switch.
+# Edit /ui/mode.conf to nav or w10m to switch.
 CONFIG_PURR_UI_DEFAULT_MODE="w10m"
 
 # Internal RAM is scarce once Wi-Fi is up: TLS buffers and mid-size allocations (4 KB and up) go to PSRAM; DMA and Wi-Fi keep internal.

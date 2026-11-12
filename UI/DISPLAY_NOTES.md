@@ -13,9 +13,9 @@ or what the owner said; open questions are marked as such.
 
 ## What the repo shows
 
-- **Current UI:** LVGL, with the card shell. Files in `PurrOS/main/`: `purr_lvgl.c`,
-  `purr_card_shell.c`, `purr_ui_service.c`, `purr_ui_config.c`, `purr_ui_assets.c` (and their
-  headers). Configured at runtime from `/ui/cardshell.conf` and `/ui/mode.conf`. Only built for
+- **Current UI:** LVGL, with the Android 2.2 (Froyo) style shell built in (the card stack was removed). Files in `PurrOS/main/`: `purr_lvgl.c`,
+  `purr_ui_service.c`, `purr_ui_config.c`, `purr_ui_assets.c`, `purr_android*.c` (and their
+  headers). The shell is chosen by `/ui/mode.conf`. Only built for
   the T-Deck and T-Deck Plus boards.
 - **LovyanGFX:** not present anywhere in the repo or its history (checked with a file and
   commit search).
@@ -39,7 +39,7 @@ or what the owner said; open questions are marked as such.
 
 ## Open questions (not answered yet)
 
-1. Replace LVGL inside the existing card shell, or bring MiniWin back as the window manager
+1. Replace LVGL inside the existing shell, or bring MiniWin back as the window manager
    on top of a new graphics layer? These are different jobs.
 2. Where would the new graphics layer sit relative to the driver-bus ABI: a loadable module,
    or part of the kernel? The module system's rules (relocatable, `-nostdlib`) constrain a
