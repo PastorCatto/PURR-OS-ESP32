@@ -87,6 +87,44 @@ def vm_image():
     return None
 
 
+def latest_built_image(ws):
+    """The newest whole flash image a system build left in the workspace (builds/system-*/*.img), or None."""
+    found = []
+    try:
+        for d in os.listdir(ws.builds):
+            folder = os.path.join(ws.builds, d)
+            if d.startswith("system-") and os.path.isdir(folder):
+                found += [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".img") and os.path.isfile(os.path.join(folder, f))]
+    except OSError:
+        return None
+    return max(found, key=os.path.getmtime) if found else None
+
+
+def adopt_image(src, force=False):
+    """Put a copy of a built flash image where Run and the emulator look for it: the kit's images/vm-flash.bin.
+
+    A file already there that this function did not put there (an image the kit shipped, or one the person placed) is left alone unless `force`;
+    an earlier copy of ours is replaced by the newer image. Returns {"status": "placed" | "kept" | "unavailable", "path", "reason"}; it never raises."""
+    dst = workspace.kit_path("images", "vm-flash.bin")
+    marker = dst + ".from"
+    if not os.path.isfile(src):
+        return {"status": "unavailable", "path": dst, "reason": "there is no image at %s" % src}
+    if not os.path.isfile(workspace.kit_path("SDK-MANIFEST.json")):
+        return {"status": "unavailable", "path": dst, "reason": "this is not a built kit, so there is no images/ folder to put it in (set PURR_VM_IMAGE instead)"}
+    if os.path.isfile(dst) and not os.path.isfile(marker) and not force:
+        return {"status": "kept", "path": dst, "reason": "an image is already there that was not put there by a build"}
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        tmp = dst + ".new"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(os.path.abspath(src) + "\n")
+    except OSError as e:
+        return {"status": "unavailable", "path": dst, "reason": str(e)}
+    return {"status": "placed", "path": dst, "reason": ""}
+
+
 def board_file(em, board=DEFAULT_BOARD):
     if os.path.isfile(board):
         return os.path.abspath(board)

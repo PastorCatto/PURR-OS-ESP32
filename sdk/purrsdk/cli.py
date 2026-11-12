@@ -447,6 +447,20 @@ def cmd_emulator(a):
     return proc.wait()
 
 
+def cmd_vm_image(a):
+    """Put a built image where Run and the emulator look for it (the kit's images/vm-flash.bin)."""
+    src = a.image or emulator.latest_built_image(ws_of(a))
+    if not src:
+        print(paint("Not this time: ", "bad") + "there is no built image in your workspace yet (a system build leaves one in builds/system-<name>/). Name an image to use instead.")
+        return 1
+    res = emulator.adopt_image(src, force=True)
+    if res["status"] != "placed":
+        print(paint("Not this time: ", "bad") + res["reason"])
+        return 1
+    print(paint("Done.", "ok") + " %s is now the emulator's image (a copy at %s). Run and `purr emulator` use it." % (os.path.basename(src), res["path"]))
+    return 0
+
+
 def cmd_run(a):
     """Build and sign an app, serve it, boot the VM, and put the app on it through the Developer Portal."""
     ws = ws_of(a)
@@ -698,6 +712,10 @@ def build_parser():
     s.add_argument("image", nargs="?", help="a flash image (default: the kit's VM image)")
     s.add_argument("--board", default=emulator.DEFAULT_BOARD, help="the emulator's board file name (default %s)" % emulator.DEFAULT_BOARD)
     s.set_defaults(fn=cmd_emulator)
+
+    s = sub.add_parser("vm-image", help="use a built image in the emulator: copy it to the kit's images/vm-flash.bin (default: your newest system build)")
+    s.add_argument("image", nargs="?", help="a flash image (default: the newest .img under your workspace's builds/system-*)")
+    s.set_defaults(fn=cmd_vm_image)
 
     s = sub.add_parser("run", help="build an app, put it on the emulated device and show it")
     s.add_argument("target", help="a project folder or name, or a signed .cat file")

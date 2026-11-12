@@ -82,6 +82,16 @@ Owner asked for the licence to be settled and for the prebuilt parts to come fro
 - Mixed releases: the OTA folder also holds `waveshare154` parts and the `ui_*` parts; they are mirrored too and not used by `release.prebuilt`.
 - The release was built with `withdrawn_versions=*@1.0.24` in its manifest; the kit copies the manifest unchanged.
 
+## The emulator's image (same branch, 2026-11-12)
+
+Owner's wish: the SDK should find the newest built image and put it where Run looks (`images/vm-flash.bin`), without being told.
+
+- `sdk/purrsdk/emulator.py`: `latest_built_image(ws)` (newest `builds/system-*/*.img`) and `adopt_image(src, force=False)` (copies to the kit's `images/vm-flash.bin`, writes `vm-flash.bin.from`; never overwrites a file it did not place unless `force`; returns a status, never raises; does nothing outside a built kit, i.e. without `SDK-MANIFEST.json`).
+- `sdk/purrsdk/system.py`: `build` calls `adopt_image` after the image step and says so. `sdk/purrsdk/cli.py`: new `purr vm-image [IMAGE]` (forces).
+- Tests: `sdk/tests/test_vm_image.py` (6). SDK suite 386 OK, 62 skipped. Run for real on a freshly built kit: `doctor` "VM image: Found".
+- **Limit:** a system build makes the standard-flavour image (Wi-Fi, no W5500), so this gives the emulator an image to boot, not the VM flavour that `purr run` needs for networking. The VM flavour (`coreos build --flavor vm`, then parts and a signed image) is still the OS side.
+- A Mac kit behaves the same: the same code, no Windows branch.
+
 ## Windows-only behaviour worth knowing
 
 - The desktop may be redirected by OneDrive: the visible Desktop is `C:\Users\<name>\OneDrive\Desktop`, while `%USERPROFILE%\Desktop` is another folder.

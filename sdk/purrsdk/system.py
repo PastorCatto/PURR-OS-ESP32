@@ -22,7 +22,7 @@ import shutil
 import socket
 import time
 
-from . import image, minitoml, projects, runner, source as sourcemod, uimaker, workspace
+from . import emulator, image, minitoml, projects, runner, source as sourcemod, uimaker, workspace
 
 STEPS = (("apps", "Build your apps"), ("ui", "Draw your UI"), ("drivers", "Gather the drivers"), ("parts", "Check the system parts"), ("image", "Make the flash image"),
          ("delivery", "Lay out the delivery folder"))
@@ -400,6 +400,9 @@ def build(ws, name, password=None, on_step=None, on_line=print, boot_password=No
     except image.ImageError as e:
         return fail("image", str(e))
     step("image", "done", "%d MB" % (res["bytes"] >> 20))
+    put = emulator.adopt_image(img)                                    # so Run and the emulator find the newest image without being told
+    if put["status"] == "placed" and on_line:
+        on_line("The emulator will use this image: a copy is at %s." % put["path"])
 
     # 6 delivery
     step("delivery", "run", "")
