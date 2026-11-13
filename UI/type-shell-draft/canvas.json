@@ -1,0 +1,39 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-11-12T22:10:00Z"},
+  "title": "Playtime launcher, final design",
+  "launch": {"view": "canvas"},
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {"x": 0, "y": 0, "w": 640, "h": 480, "title": "Home", "is_interactive": true},
+    "Apps.dc.html": {"x": 720, "y": 0, "w": 640, "h": 480, "title": "Apps", "is_interactive": true},
+    "Music.dc.html": {"x": 1440, "y": 0, "w": 640, "h": 480, "title": "Music, now playing", "is_interactive": true},
+    "HomePlaying.dc.html": {"x": 0, "y": 800, "w": 640, "h": 480, "title": "Home, music playing", "is_interactive": true},
+    "AppsPlaying.dc.html": {"x": 720, "y": 800, "w": 640, "h": 480, "title": "Apps, music playing", "is_interactive": true},
+    "Controls.dc.html": {"x": 0, "y": 1600, "w": 640, "h": 480, "title": "Controls"},
+    "Motion.dc.html": {"x": 720, "y": 1600, "w": 640, "h": 480, "title": "Motion: Home to Apps (loops)"},
+    "HomeV2.dc.html": {"x": 0, "y": 2400, "w": 640, "h": 480, "title": "Home v2: app list and three shortcuts", "is_interactive": true},
+    "HomeV2Playing.dc.html": {"x": 720, "y": 2400, "w": 640, "h": 480, "title": "Home v2, music playing", "is_interactive": true},
+    "Lock.dc.html": {"x": 0, "y": 3200, "w": 640, "h": 480, "title": "Lock screen"},
+    "LockPlaying.dc.html": {"x": 720, "y": 3200, "w": 640, "h": 480, "title": "Lock screen, music playing"},
+    "SignIn.dc.html": {"x": 0, "y": 4000, "w": 640, "h": 480, "title": "Sign in: choose an account", "is_interactive": true},
+    "Password.dc.html": {"x": 720, "y": 4000, "w": 640, "h": 480, "title": "Sign in: password with the d-pad keyboard"},
+    "Pin.dc.html": {"x": 1440, "y": 4000, "w": 640, "h": 480, "title": "Optional PIN"}
+  },
+  "order": ["Main.dc.html", "Apps.dc.html", "Music.dc.html", "HomePlaying.dc.html", "AppsPlaying.dc.html", "Controls.dc.html", "Motion.dc.html", "HomeV2.dc.html", "HomeV2Playing.dc.html", "Lock.dc.html", "LockPlaying.dc.html", "SignIn.dc.html", "Password.dc.html", "Pin.dc.html"],
+  "notes": {
+    "t1": {"x": 0, "y": -300, "text": "Everyday", "kind": "title1", "maxW": 2080},
+    "t2": {"x": 0, "y": 500, "text": "While music plays", "kind": "title1", "maxW": 2080},
+    "t3": {"x": 0, "y": 1300, "text": "Reference", "kind": "title1", "maxW": 2080},
+    "t4": {"x": 0, "y": 2100, "text": "Home, new version", "kind": "title1", "maxW": 2080},
+    "v2": {"x": 1440, "y": 2400, "w": 360, "text": "The four pins are gone. Tile 1 is the app list (A). Tiles 2 to 4 are shortcuts for planned features, shown here as Weather, Music and Friends. Each tile shows one glanceable fact instead of an icon: 18 degrees, resume, 2 friends online. d-pad left and right choose a tile, A opens it. Holding FUNC and pressing A, B, X or Y still jumps straight to tile 1 to 4.", "fill": "purple"},
+    "t5": {"x": 0, "y": 2900, "text": "Lock screen", "kind": "title1", "maxW": 2080},
+    "lock": {"x": 1440, "y": 3200, "w": 360, "text": "Shown after the screen timeout, and when you wake the device. Dark on purpose: it is easy on the eyes at night and saves power. Hours in paper, minutes in the accent colour. Tap FUNC to play or pause, hold FUNC for a second to unlock (the bar fills as you hold). While music plays the cover takes the clock's place and the time moves to the side.", "fill": "green"},
+    "t6": {"x": 0, "y": 3700, "text": "Sign in", "kind": "title1", "maxW": 2080},
+    "signin": {"x": 2160, "y": 4000, "w": 360, "text": "Sign in works with the d-pad and with touch. The on-screen keyboard moves with the d-pad (A types the key, B deletes, X shifts, FUNC signs in) and every key can also be tapped. The same keyboard will be used wherever the OS needs text. The optional PIN is a quick unlock for the lock screen; the account password is still what signs in after a restart.", "fill": "blue"},
+    "how": {"x": 2160, "y": 0, "w": 360, "text": "Every frame is the real 320 x 240 screen at 2x. Press Play on a frame, then click All apps, the Music row or Back to walk the flow.", "fill": "gray"},
+    "cover": {"x": 1440, "y": 800, "w": 360, "text": "While music plays, the cover art takes the clock's place: the big clock on Home, the side panel in Apps. The time moves into the title bar. The cover shown is a placeholder.", "fill": "orange"},
+    "build": {"x": 1440, "y": 1600, "w": 360, "text": "Mockups only. Nothing here is built into the OS yet. The accent colour is a tweak on each frame.", "fill": "teal"}
+  },
+  "designSystems": []
+}

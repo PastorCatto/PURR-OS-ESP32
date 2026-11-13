@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Motion, home and drawer</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap">
+<style>
+body{margin:0}
+.k-list{transform:translateX(-440px);animation:kList 9s infinite cubic-bezier(.65,0,.35,1)}
+.k-panel{transform:translateX(220px);animation:kPanel 9s infinite cubic-bezier(.65,0,.35,1)}
+.k-big{transform:none;animation:kBig 9s infinite cubic-bezier(.65,0,.35,1);transform-origin:left top}
+.k-stack{opacity:0;animation:kStack 9s infinite cubic-bezier(.65,0,.35,1)}
+.k-home{transform:none;animation:kHome 9s infinite cubic-bezier(.65,0,.35,1)}
+.k-homehint{animation:kHintHome 9s infinite linear}
+.k-drawerhint{opacity:0;animation:kHintDrawer 9s infinite linear}
+.k-homebar{animation:kHintHome 9s infinite linear}
+.k-drawerbar{opacity:0;animation:kHintDrawer 9s infinite linear}
+@keyframes kList{0%,18%{transform:translateX(-440px)}26%,70%{transform:translateX(0)}78%,100%{transform:translateX(-440px)}}
+@keyframes kPanel{0%,18%{transform:translateX(220px)}26%,70%{transform:translateX(0)}78%,100%{transform:translateX(220px)}}
+@keyframes kBig{0%,18%{opacity:1;transform:none}25%,71%{opacity:0;transform:translate(412px,52px) scale(.62)}78%,100%{opacity:1;transform:none}}
+@keyframes kStack{0%,21%{opacity:0;transform:translateX(-28px) scale(1.12)}28%,69%{opacity:1;transform:none}73%,100%{opacity:0;transform:translateX(-28px) scale(1.12)}}
+@keyframes kHome{0%,18%{opacity:1;transform:none}26%,70%{opacity:0;transform:translateY(130px)}78%,100%{opacity:1;transform:none}}
+@keyframes kHintHome{0%,20%{opacity:1}24%,74%{opacity:0}78%,100%{opacity:1}}
+@keyframes kHintDrawer{0%,20%{opacity:0}24%,74%{opacity:1}78%,100%{opacity:0}}
+@media (prefers-reduced-motion: reduce){.k-list,.k-panel,.k-big,.k-stack,.k-home,.k-homehint,.k-drawerhint,.k-homebar,.k-drawerbar{animation:none}}
+</style>
+</helmet>
+<div style="width: 640px; height: 480px; box-sizing: border-box; background: #f4f1ea; color: #14120f; font-family: 'Space Grotesk', system-ui, sans-serif; position: relative; overflow: hidden">
+
+<div style="position: absolute; left: 0; top: 0; width: 640px; height: 44px; box-sizing: border-box; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 4px solid #14120f; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.08em; background: #f4f1ea; z-index: 5">
+<span style="position: relative; width: 300px; height: 24px">
+<span class="k-homebar" style="position: absolute; left: 0; top: 0">THU 12 NOV</span>
+<span class="k-drawerbar" style="position: absolute; left: 0; top: 0; letter-spacing: 0.1em">APPS</span>
+</span>
+<span style="display: flex; align-items: center; gap: 12px">WI-FI
+<span style="display: inline-block; width: 44px; height: 14px; border: 3px solid #14120f; box-sizing: border-box" aria-label="Battery 87 percent" role="img"><span style="display: block; width: 87%; height: 100%; background: #14120f"></span></span>
+87%</span>
+</div>
+
+<div style="position: absolute; left: 0; top: 44px; width: 640px; height: 384px; overflow: hidden">
+
+<div class="k-list" style="position: absolute; left: 0; top: 0; width: 420px; height: 384px; box-sizing: border-box; padding-top: 6px; display: flex; flex-direction: column">
+<sc-for list="{{rows}}" as="row" hint-placeholder-count="6">
+<div style="height: 62px; box-sizing: border-box; display: flex; align-items: center; padding: 0 18px 0 24px; background: {{row.bg}}; color: {{row.fg}}; border-bottom: 2px solid #14120f">
+<span style="font-size: 38px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; flex-grow: 1">{{row.name}}</span>
+<span style="font-size: 26px; color: {{row.chev}}" aria-hidden="true">▸</span>
+</div>
+</sc-for>
+</div>
+
+<div class="k-panel" style="position: absolute; left: 420px; top: 0; width: 220px; height: 384px; box-sizing: border-box; background: {{accent}}; border-left: 4px solid #14120f; padding: 20px 20px 16px">
+<div style="font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.08em">THU 12 NOV</div>
+<div class="k-stack" style="font-size: 124px; font-weight: 700; line-height: 0.82; letter-spacing: -0.05em; margin-top: 14px">20<br>59</div>
+<div style="position: absolute; left: 20px; right: 20px; bottom: 16px">
+<div style="font-family: 'Space Mono', monospace; font-size: 16px; font-weight: 700; letter-spacing: 0.08em">BATTERY 87%</div>
+<div style="margin-top: 6px; height: 12px; border: 3px solid #14120f; box-sizing: border-box"><div style="width: 87%; height: 100%; background: #14120f"></div></div>
+</div>
+</div>
+
+<div class="k-big" style="position: absolute; left: 20px; top: 12px; font-size: 190px; font-weight: 700; line-height: 0.82; letter-spacing: -0.06em; white-space: nowrap">20:59</div>
+
+<div class="k-home" style="position: absolute; left: 28px; right: 28px; top: 190px">
+<div style="display: flex; gap: 12px; align-items: stretch">
+<div style="flex-grow: 1; height: 44px; box-sizing: border-box; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; background: {{accent}}; border: 3px solid #14120f; font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.06em">
+<span>UPDATE READY</span>
+<span>STORE · 2 APPS</span>
+</div>
+<div style="width: 200px; height: 44px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; background: #14120f; color: #f4f1ea; border: 3px solid #14120f; font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.06em">
+<span><span style="color: {{accent}}">A</span> ALL APPS</span>
+<span aria-hidden="true">▸</span>
+</div>
+</div>
+<div style="margin-top: 22px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px">
+<sc-for list="{{pins}}" as="pin" hint-placeholder-count="4">
+<div style="box-sizing: border-box; height: 84px; border: 3px solid #14120f; display: flex; align-items: flex-end; justify-content: space-between; padding: 6px 10px 8px">
+<span style="font-size: 64px; font-weight: 700; line-height: 0.8; letter-spacing: -0.04em">{{pin.key}}</span>
+<span style="font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.04em">{{pin.name}}</span>
+</div>
+</sc-for>
+</div>
+</div>
+
+</div>
+
+<div style="position: absolute; left: 0; top: 428px; width: 640px; height: 52px; box-sizing: border-box; padding: 0 28px; display: flex; align-items: center; background: #14120f; color: #f4f1ea; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.06em; z-index: 5">
+<span class="k-homehint" style="position: absolute; left: 28px; display: flex; gap: 26px"><span><span style="color: {{accent}}">A</span> ALL APPS</span><span><span style="color: {{accent}}">X</span> MENU</span><span><span style="color: {{accent}}">◀ ▶</span> ALERTS</span></span>
+<span class="k-drawerhint" style="position: absolute; left: 28px; display: flex; gap: 24px"><span><span style="color: {{accent}}">▲▼</span> SCROLL</span><span><span style="color: {{accent}}">A</span> OPEN</span><span><span style="color: {{accent}}">B</span> BACK</span><span><span style="color: {{accent}}">X</span> MENU</span></span>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#ff5a1f","options":["#ff5a1f","#2b59ff","#1f9d55","#e0268f"]},"$preview":{"width":640,"height":480}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const accent = this.props.accent ?? '#ff5a1f';
+    const names = ['Clock', 'Files', 'Games', 'Images', 'Music', 'Notes'];
+    const rows = names.map((name) => {
+      const on = name === 'Music';
+      return {
+        name,
+        bg: on ? '#14120f' : 'transparent',
+        fg: on ? '#f4f1ea' : '#14120f',
+        chev: on ? accent : '#14120f'
+      };
+    });
+    const pins = [
+      { key: 'A', name: 'NOTES' },
+      { key: 'B', name: 'FILES' },
+      { key: 'X', name: 'MUSIC' },
+      { key: 'Y', name: 'GAMES' }
+    ];
+    return { rows, pins, accent };
+  }
+}
+</script>
+</body>
+</html>

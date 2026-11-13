@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Home</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a.btn{text-decoration:none;color:inherit}
+</style>
+</helmet>
+<div style="width: 640px; height: 480px; box-sizing: border-box; background: #f4f1ea; color: #14120f; font-family: 'Space Grotesk', system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+<div style="height: 44px; box-sizing: border-box; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 4px solid #14120f; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.06em">
+<span>THU 12 NOV</span>
+<span style="display: flex; align-items: center; gap: 12px">WI-FI
+<span style="display: inline-block; width: 44px; height: 14px; border: 3px solid #14120f; box-sizing: border-box" aria-label="Battery 87 percent" role="img"><span style="display: block; width: 87%; height: 100%; background: #14120f"></span></span>
+87%</span>
+</div>
+
+<div style="flex-grow: 1; box-sizing: border-box; padding: 12px 28px 0; display: flex; flex-direction: column; min-height: 0">
+<div style="font-size: 190px; font-weight: 700; line-height: 0.82; letter-spacing: -0.06em; margin-left: -8px">20:59</div>
+
+<div style="margin-top: 14px; display: flex; gap: 12px; align-items: stretch">
+<div style="flex-grow: 1; height: 44px; box-sizing: border-box; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; background: {{accent}}; border: 3px solid #14120f; font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.06em">
+<span>UPDATE READY</span>
+<span>STORE · 2 APPS</span>
+</div>
+<a class="btn" href="Apps.dc.html" style="width: 200px; height: 44px; box-sizing: border-box; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; background: #14120f; color: #f4f1ea; border: 3px solid #14120f; font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.06em">
+<span><span style="color: {{accent}}">A</span> ALL APPS</span>
+<span aria-hidden="true">▸</span>
+</a>
+</div>
+
+<div style="margin-top: auto; padding-bottom: 14px">
+<div style="font-family: 'Space Mono', monospace; font-size: 15px; font-weight: 700; letter-spacing: 0.1em; margin-bottom: 8px">HOLD FUNC, THEN PRESS</div>
+<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px">
+<sc-for list="{{pins}}" as="pin" hint-placeholder-count="4">
+<div style="box-sizing: border-box; height: 84px; border: 3px solid #14120f; display: flex; align-items: flex-end; justify-content: space-between; padding: 6px 10px 8px">
+<span style="font-size: 64px; font-weight: 700; line-height: 0.8; letter-spacing: -0.04em">{{pin.key}}</span>
+<span style="font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.04em">{{pin.name}}</span>
+</div>
+</sc-for>
+</div>
+</div>
+</div>
+
+<div style="height: 52px; box-sizing: border-box; padding: 0 28px; display: flex; align-items: center; gap: 26px; background: #14120f; color: #f4f1ea; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.06em">
+<span><span style="color: {{accent}}">A</span> ALL APPS</span>
+<span><span style="color: {{accent}}">X</span> MENU</span>
+<span><span style="color: {{accent}}">◀ ▶</span> ALERTS</span>
+<span style="margin-left: auto"><span style="color: {{accent}}">FUNC+ABXY</span> PINS</span>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#ff5a1f","options":["#ff5a1f","#2b59ff","#1f9d55","#e0268f"]},"$preview":{"width":640,"height":480}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const pins = [
+      { key: 'A', name: 'NOTES' },
+      { key: 'B', name: 'FILES' },
+      { key: 'X', name: 'MUSIC' },
+      { key: 'Y', name: 'GAMES' }
+    ];
+    return { pins, accent: this.props.accent ?? '#ff5a1f' };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Home, app list and three shortcuts</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a.btn{text-decoration:none;color:inherit}
+</style>
+</helmet>
+<div style="width: 640px; height: 480px; box-sizing: border-box; background: #f4f1ea; color: #14120f; font-family: 'Space Grotesk', system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+<div style="height: 44px; box-sizing: border-box; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 4px solid #14120f; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.06em">
+<span>THU 12 NOV</span>
+<span style="display: flex; align-items: center; gap: 12px">WI-FI
+<span style="display: inline-block; width: 44px; height: 14px; border: 3px solid #14120f; box-sizing: border-box" aria-label="Battery 87 percent" role="img"><span style="display: block; width: 87%; height: 100%; background: #14120f"></span></span>
+87%</span>
+</div>
+
+<div style="flex-grow: 1; box-sizing: border-box; padding: 12px 28px 0; display: flex; flex-direction: column; min-height: 0">
+<div style="font-size: 190px; font-weight: 700; line-height: 0.82; letter-spacing: -0.06em; margin-left: -8px">20:59</div>
+
+<div style="margin-top: 14px; height: 40px; box-sizing: border-box; padding: 0 14px; display: flex; align-items: center; justify-content: space-between; background: {{accent}}; border: 3px solid #14120f; font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.06em">
+<span>UPDATE READY</span>
+<span>STORE · 2 APPS</span>
+</div>
+
+<div style="margin-top: auto; padding: 0 0 16px">
+<div style="display: grid; grid-template-columns: 1.7fr 1fr 1fr 1fr; gap: 12px">
+<sc-for list="{{tiles}}" as="tile" hint-placeholder-count="4">
+<a class="btn" href="{{tile.href}}" style="box-sizing: border-box; height: 116px; background: {{tile.bg}}; border: {{tile.border}}; box-shadow: {{tile.shadow}}; transform: {{tile.move}}; padding: 8px 10px 8px; display: flex; flex-direction: column; justify-content: space-between; min-width: 0">
+<span style="display: flex; align-items: center; justify-content: space-between; font-family: 'Space Mono', monospace; font-size: 15px; font-weight: 700; letter-spacing: 0.08em">
+<span>{{tile.name}}</span>
+<span style="width: 22px; height: 22px; box-sizing: border-box; background: #14120f; color: #f4f1ea; display: flex; align-items: center; justify-content: center; font-size: 14px">{{tile.key}}</span>
+</span>
+<span>
+<sc-if value="{{tile.isList}}" hint-placeholder-val="{{ false }}">
+<svg width="64" height="44" viewBox="0 0 64 44" fill="none" stroke="#14120f" stroke-width="6" stroke-linecap="square" aria-hidden="true"><path d="M20 8h40 M20 22h40 M20 36h40 M4 8h2 M4 22h2 M4 36h2"/></svg>
+</sc-if>
+<sc-if value="{{tile.isText}}" hint-placeholder-val="{{ true }}">
+<span style="display: block; font-size: 54px; font-weight: 700; line-height: 0.85; letter-spacing: -0.04em">{{tile.big}}</span>
+</sc-if>
+<span style="display: block; font-family: 'Space Mono', monospace; font-size: 14px; font-weight: 700; letter-spacing: 0.08em; margin-top: 4px">{{tile.sub}}</span>
+</span>
+</a>
+</sc-for>
+</div>
+</div>
+</div>
+
+<div style="height: 52px; box-sizing: border-box; padding: 0 28px; display: flex; align-items: center; gap: 26px; background: #14120f; color: #f4f1ea; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.06em">
+<span><span style="color: {{accent}}">◀ ▶</span> CHOOSE</span>
+<span><span style="color: {{accent}}">A</span> OPEN</span>
+<span><span style="color: {{accent}}">X</span> MENU</span>
+<span style="margin-left: auto"><span style="color: {{accent}}">FUNC+ABXY</span> SHORTCUT</span>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#ff5a1f","options":["#ff5a1f","#2b59ff","#1f9d55","#e0268f"]},"$preview":{"width":640,"height":480}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const accent = this.props.accent ?? '#ff5a1f';
+    const defs = [
+      { key: 'A', name: 'APPS', big: '', sub: '11 APPS', href: 'Apps.dc.html', isList: true },
+      { key: 'B', name: 'WEATHER', big: '18°', sub: 'CLEAR', href: '#', isList: false },
+      { key: 'X', name: 'MUSIC', big: '▶', sub: 'RESUME', href: 'Music.dc.html', isList: false },
+      { key: 'Y', name: 'FRIENDS', big: '2', sub: 'ONLINE', href: '#', isList: false }
+    ];
+    const tiles = defs.map((t, i) => {
+      const on = i === 0;
+      return {
+        key: t.key,
+        name: t.name,
+        big: t.big,
+        sub: t.sub,
+        href: t.href,
+        isList: t.isList,
+        isText: !t.isList,
+        bg: on ? accent : 'transparent',
+        border: on ? '4px solid #14120f' : '3px solid #14120f',
+        shadow: on ? '6px 6px 0 #14120f' : 'none',
+        move: on ? 'translate(-3px, -3px)' : 'none'
+      };
+    });
+    return { tiles, accent };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>App drawer</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a.btn{text-decoration:none;color:inherit}
+</style>
+</helmet>
+<div style="width: 640px; height: 480px; box-sizing: border-box; background: #f4f1ea; color: #14120f; font-family: 'Space Grotesk', system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+<div style="height: 44px; box-sizing: border-box; padding: 0 24px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; border-bottom: 4px solid #14120f; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.1em">
+<span></span>
+<span>APPS</span>
+<span style="justify-self: end; display: flex; align-items: center; gap: 10px">
+<span style="display: inline-block; width: 44px; height: 14px; border: 3px solid #14120f; box-sizing: border-box" aria-label="Battery 87 percent" role="img"><span style="display: block; width: 87%; height: 100%; background: #14120f"></span></span>
+</span>
+</div>
+
+<div style="flex-grow: 1; display: flex; min-height: 0">
+
+<div style="width: 420px; box-sizing: border-box; display: flex; min-height: 0">
+<div style="flex-grow: 1; display: flex; flex-direction: column; padding-top: 6px">
+<sc-for list="{{rows}}" as="row" hint-placeholder-count="6">
+<div style="height: 62px; box-sizing: border-box; display: flex; align-items: center; padding: 0 18px 0 24px; background: {{row.bg}}; color: {{row.fg}}; border-bottom: 2px solid #14120f">
+<span style="font-size: 38px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; flex-grow: 1">{{row.name}}</span>
+<span style="font-size: 26px; color: {{row.chev}}" aria-hidden="true">▸</span>
+</div>
+</sc-for>
+</div>
+<div style="width: 18px; box-sizing: border-box; margin: 6px 6px 8px 0; border: 2px solid #14120f; position: relative" aria-label="Scroll position" role="img">
+<div style="position: absolute; left: 0; right: 0; top: 18%; height: 36%; background: #14120f"></div>
+</div>
+</div>
+
+<div style="flex-grow: 1; box-sizing: border-box; background: {{accent}}; border-left: 4px solid #14120f; padding: 20px 20px 16px; display: flex; flex-direction: column">
+<div style="font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.08em">THU 12 NOV</div>
+<div style="font-size: 124px; font-weight: 700; line-height: 0.82; letter-spacing: -0.05em; margin-top: 14px">20<br>59</div>
+<div style="margin-top: auto">
+<div style="font-family: 'Space Mono', monospace; font-size: 16px; font-weight: 700; letter-spacing: 0.08em">BATTERY 87%</div>
+<div style="margin-top: 6px; height: 12px; border: 3px solid #14120f; box-sizing: border-box"><div style="width: 87%; height: 100%; background: #14120f"></div></div>
+<div style="margin-top: 12px; font-family: 'Space Mono', monospace; font-size: 16px; font-weight: 700; letter-spacing: 0.08em">WI-FI ON</div>
+</div>
+</div>
+
+</div>
+
+<div style="height: 52px; box-sizing: border-box; padding: 0 28px; display: flex; align-items: center; gap: 24px; background: #14120f; color: #f4f1ea; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.06em">
+<span><span style="color: {{accent}}">▲▼</span> SCROLL</span>
+<a class="btn" href="Music.dc.html"><span style="color: {{accent}}">A</span> OPEN</a>
+<a class="btn" href="Main.dc.html"><span style="color: {{accent}}">B</span> BACK</a>
+<span><span style="color: {{accent}}">X</span> MENU</span>
+<span style="margin-left: auto"><span style="color: {{accent}}">FUNC</span> A–Z</span>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#ff5a1f","options":["#ff5a1f","#2b59ff","#1f9d55","#e0268f"]},"$preview":{"width":640,"height":480}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const accent = this.props.accent ?? '#ff5a1f';
+    const names = ['Clock', 'Files', 'Games', 'Images', 'Music', 'Notes'];
+    const rows = names.map((name) => {
+      const on = name === 'Music';
+      return {
+        name,
+        bg: on ? '#14120f' : 'transparent',
+        fg: on ? '#f4f1ea' : '#14120f',
+        chev: on ? accent : '#14120f'
+      };
+    });
+    return { rows, accent };
+  }
+}
+</script>
+</body>
+</html>

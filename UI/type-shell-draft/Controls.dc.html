@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Controls</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 640px; height: 480px; box-sizing: border-box; background: #f4f1ea; color: #14120f; font-family: 'Space Grotesk', system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+<div style="height: 44px; box-sizing: border-box; padding: 0 24px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; border-bottom: 4px solid #14120f; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.1em">
+<span></span>
+<span>CONTROLS</span>
+<span style="justify-self: end">
+<span style="display: inline-block; width: 44px; height: 14px; border: 3px solid #14120f; box-sizing: border-box" aria-label="Battery 87 percent" role="img"><span style="display: block; width: 87%; height: 100%; background: #14120f"></span></span>
+</span>
+</div>
+
+<div style="flex-grow: 1; box-sizing: border-box; padding: 20px 28px 0; display: flex; flex-direction: column; gap: 16px; min-height: 0">
+
+<div style="display: flex; gap: 28px">
+<div style="width: 200px; flex-shrink: 0">
+<div style="display: grid; grid-template-columns: repeat(3, 60px); grid-template-rows: repeat(3, 60px); gap: 6px; margin-left: 2px">
+<div></div>
+<div style="border: 3px solid #14120f; display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 700" aria-label="Up">▲</div>
+<div></div>
+<div style="border: 3px solid #14120f; display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 700" aria-label="Left">◀</div>
+<div style="background: #14120f"></div>
+<div style="border: 3px solid #14120f; display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 700" aria-label="Right">▶</div>
+<div></div>
+<div style="border: 3px solid #14120f; display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 700" aria-label="Down">▼</div>
+<div></div>
+</div>
+<div style="margin-top: 12px; font-family: 'Space Mono', monospace; font-size: 15px; font-weight: 700; letter-spacing: 0.08em; line-height: 1.4">D-PAD<br>MOVE · SCROLL · BROWSE</div>
+</div>
+
+<div style="flex-grow: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0">
+<sc-for list="{{keys}}" as="k" hint-placeholder-count="4">
+<div style="display: flex; align-items: center; gap: 16px; height: 56px; box-sizing: border-box; border-bottom: 2px solid #14120f">
+<span style="width: 52px; height: 48px; box-sizing: border-box; background: #14120f; color: {{accent}}; font-size: 38px; font-weight: 700; display: flex; align-items: center; justify-content: center; line-height: 1">{{k.key}}</span>
+<span style="flex-grow: 1; min-width: 0">
+<span style="font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1">{{k.name}}</span>
+<span style="display: block; font-family: 'Space Mono', monospace; font-size: 14px; font-weight: 700; letter-spacing: 0.04em; margin-top: 2px">{{k.note}}</span>
+</span>
+</div>
+</sc-for>
+</div>
+</div>
+
+<div style="margin-top: auto; margin-bottom: 14px; box-sizing: border-box; background: {{accent}}; border: 3px solid #14120f; padding: 10px 16px; display: flex; align-items: center; gap: 18px">
+<span style="font-size: 38px; font-weight: 700; letter-spacing: -0.03em; line-height: 1">FUNC</span>
+<span style="font-family: 'Space Mono', monospace; font-size: 15px; font-weight: 700; letter-spacing: 0.04em; line-height: 1.45">TAP: PLAY/PAUSE WHILE MUSIC PLAYS, ELSE JUMP A PAGE OR LETTER<br>HOLD, THEN A / B / X / Y: OPEN THAT PINNED APP</span>
+</div>
+
+</div>
+
+<div style="height: 52px; box-sizing: border-box; padding: 0 28px; display: flex; align-items: center; background: #14120f; color: #f4f1ea; font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; letter-spacing: 0.04em">
+<span><span style="color: {{accent}}">LEDS</span> LIGHT ONLY THE BUTTONS THAT DO SOMETHING HERE</span>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#ff5a1f","options":["#ff5a1f","#2b59ff","#1f9d55","#e0268f"]},"$preview":{"width":640,"height":480}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const keys = [
+      { key: 'A', name: 'Open', note: 'SELECT · OPEN · PAUSE IN MUSIC' },
+      { key: 'B', name: 'Back', note: 'ONE STEP BACK' },
+      { key: 'X', name: 'Menu', note: 'OPTIONS FOR THIS SCREEN' },
+      { key: 'Y', name: 'Home', note: 'ALWAYS GOES HOME' }
+    ];
+    return { keys, accent: this.props.accent ?? '#ff5a1f' };
+  }
+}
+</script>
+</body>
+</html>

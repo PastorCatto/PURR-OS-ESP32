@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Music, now playing</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap">
+<style>
+body{margin:0}
+a.btn{text-decoration:none;color:inherit}
+</style>
+</helmet>
+<div style="width: 640px; height: 480px; box-sizing: border-box; background: #f4f1ea; color: #14120f; font-family: 'Space Grotesk', system-ui, sans-serif; display: flex; flex-direction: column; overflow: hidden">
+
+<div style="height: 44px; box-sizing: border-box; padding: 0 24px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; border-bottom: 4px solid #14120f; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.1em">
+<span style="display: flex; align-items: center; gap: 12px"><span style="color: {{accent}}; -webkit-text-stroke: 1px #14120f" aria-label="Playing" role="img">▶</span>20:59</span>
+<span>NOW PLAYING</span>
+<span style="justify-self: end">
+<span style="display: inline-block; width: 44px; height: 14px; border: 3px solid #14120f; box-sizing: border-box" aria-label="Battery 87 percent" role="img"><span style="display: block; width: 87%; height: 100%; background: #14120f"></span></span>
+</span>
+</div>
+
+<div style="flex-grow: 1; box-sizing: border-box; padding: 26px 28px 0; display: flex; gap: 28px; min-height: 0">
+<div style="width: 232px; height: 232px; flex-shrink: 0; position: relative; overflow: hidden; background: #14120f; border: 6px solid #14120f; box-sizing: border-box; box-shadow: 10px 10px 0 #14120f; margin: 0 10px 10px 0" role="img" aria-label="Cover art placeholder">
+<div style="position: absolute; left: 34px; top: 18px; width: 148px; height: 148px; border-radius: 74px; background: #f4f1ea"></div>
+<div style="position: absolute; left: 0; right: 0; bottom: 0; height: 88px; background: repeating-linear-gradient(180deg, #14120f 0, #14120f 11px, {{accent}} 11px, {{accent}} 22px)"></div>
+</div>
+<div style="display: flex; flex-direction: column; min-width: 0; flex-grow: 1; padding-top: 2px">
+<div style="font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.08em">TRACK 03 / 11</div>
+<div style="font-size: 72px; font-weight: 700; line-height: 0.92; letter-spacing: -0.04em; margin-top: 8px">Night Shift</div>
+<div style="font-family: 'Space Mono', monospace; font-size: 19px; font-weight: 700; letter-spacing: 0.06em; margin-top: 10px; line-height: 1.4">THE BENCH NOTES<br>BENCH SESSIONS</div>
+<div style="margin-top: auto; display: flex; align-items: center; gap: 10px; font-family: 'Space Mono', monospace; font-size: 16px; font-weight: 700; letter-spacing: 0.08em" aria-label="Volume 4 of 6" role="img">
+VOL
+<span style="display: flex; gap: 4px">
+<span style="width: 18px; height: 18px; background: #14120f"></span>
+<span style="width: 18px; height: 18px; background: #14120f"></span>
+<span style="width: 18px; height: 18px; background: #14120f"></span>
+<span style="width: 18px; height: 18px; background: #14120f"></span>
+<span style="width: 18px; height: 18px; border: 3px solid #14120f; box-sizing: border-box"></span>
+<span style="width: 18px; height: 18px; border: 3px solid #14120f; box-sizing: border-box"></span>
+</span>
+</div>
+</div>
+</div>
+
+<div style="box-sizing: border-box; padding: 6px 28px 16px">
+<div style="height: 18px; border: 3px solid #14120f; box-sizing: border-box"><div style="width: 43%; height: 100%; background: {{accent}}; border-right: 3px solid #14120f; box-sizing: border-box"></div></div>
+<div style="display: flex; justify-content: space-between; font-family: 'Space Mono', monospace; font-size: 17px; font-weight: 700; margin-top: 6px"><span>1:42</span><span>-2:16</span></div>
+</div>
+
+<div style="height: 52px; box-sizing: border-box; padding: 0 28px; display: flex; align-items: center; gap: 22px; background: #14120f; color: #f4f1ea; font-family: 'Space Mono', monospace; font-size: 18px; font-weight: 700; letter-spacing: 0.06em">
+<span><span style="color: {{accent}}">A</span> PAUSE</span>
+<span><span style="color: {{accent}}">◀ ▶</span> TRACK</span>
+<span><span style="color: {{accent}}">▲▼</span> VOLUME</span>
+<a class="btn" href="AppsPlaying.dc.html"><span style="color: {{accent}}">B</span> BACK</a>
+<span style="margin-left: auto"><span style="color: {{accent}}">X</span> QUEUE</span>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#ff5a1f","options":["#ff5a1f","#2b59ff","#1f9d55","#e0268f"]},"$preview":{"width":640,"height":480}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#ff5a1f' };
+  }
+}
+</script>
+</body>
+</html>
