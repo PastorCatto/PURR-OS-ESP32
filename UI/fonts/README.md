@@ -17,10 +17,10 @@ To make them again:
 ```sh
 python3 -m venv /tmp/fontenv && /tmp/fontenv/bin/pip install freetype-py
 G=tools/ui/gen_lvgl_font.py; O=PurrOS/main/tpfonts; B=SpaceGrotesk-Bold.ttf; M=SpaceMono-Bold.ttf
-/tmp/fontenv/bin/python $G --ttf $B --size 92  --bpp 2 --chars "0123456789:" --name tp_font_clock_xl    --out $O/tp_font_clock_xl.c
-/tmp/fontenv/bin/python $G --ttf $B --size 116 --bpp 2 --chars "0123456789"  --name tp_font_clock_lock  --out $O/tp_font_clock_lock.c
-/tmp/fontenv/bin/python $G --ttf $B --size 60  --bpp 2 --chars "0123456789"  --name tp_font_clock_panel --out $O/tp_font_clock_panel.c
-/tmp/fontenv/bin/python $G --ttf $B --size 56  --bpp 2 --chars "0123456789"  --name tp_font_date_big    --out $O/tp_font_date_big.c
+/tmp/fontenv/bin/python $G --ttf $B --size 92  --bpp 4 --chars "0123456789:" --name tp_font_clock_xl    --out $O/tp_font_clock_xl.c
+/tmp/fontenv/bin/python $G --ttf $B --size 116 --bpp 4 --chars "0123456789"  --name tp_font_clock_lock  --out $O/tp_font_clock_lock.c
+/tmp/fontenv/bin/python $G --ttf $B --size 60  --bpp 4 --chars "0123456789"  --name tp_font_clock_panel --out $O/tp_font_clock_panel.c
+/tmp/fontenv/bin/python $G --ttf $B --size 56  --bpp 4 --chars "0123456789"  --name tp_font_date_big    --out $O/tp_font_date_big.c
 /tmp/fontenv/bin/python $G --ttf $B --size 26  --bpp 4 --range 0x20-0x7E     --name tp_font_bold_26     --out $O/tp_font_bold_26.c
 /tmp/fontenv/bin/python $G --ttf $B --size 20  --bpp 4 --range 0x20-0x7E     --name tp_font_bold_20     --out $O/tp_font_bold_20.c
 /tmp/fontenv/bin/python $G --ttf $B --size 16  --bpp 4 --range 0x20-0x7E     --name tp_font_bold_16     --out $O/tp_font_bold_16.c
@@ -28,5 +28,5 @@ G=tools/ui/gen_lvgl_font.py; O=PurrOS/main/tpfonts; B=SpaceGrotesk-Bold.ttf; M=S
 /tmp/fontenv/bin/python $G --ttf $M --size 12  --bpp 4 --range 0x20-0x7E     --name tp_font_mono_12     --out $O/tp_font_mono_12.c
 ```
 
-About 52 KB of bitmap in all, in flash, read in place. The shared screens (Settings, the portal, app windows) still use Montserrat; moving them is a theme job
+About 70 KB of bitmap in all, in flash, read in place. The shared screens (Settings, the portal, app windows) still use Montserrat; moving them is a theme job
 (plan7.md).

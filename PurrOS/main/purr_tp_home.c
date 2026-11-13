@@ -544,8 +544,8 @@ static void home_fill(void)
         lv_obj_set_style_text_color(kl, tp_paper(), 0);
         lv_obj_center(kl);
         int sym = (unsigned char)f.big[0] >= 0x80;           /* a symbol is drawn from the symbol font */
-        lv_obj_t *b = tp_label(t, f.big, sym ? &lv_font_montserrat_28 : &tp_font_bold_26, NULL);
-        lv_obj_align(b, LV_ALIGN_LEFT_MID, 4, sym ? 2 : 0);
+        lv_obj_t *b = tp_label(t, f.big, sym ? &lv_font_montserrat_20 : &tp_font_bold_20, NULL);
+        lv_obj_align(b, LV_ALIGN_TOP_LEFT, 4, 19);           /* between the name and the small line, which has the bottom to itself */
         lv_obj_t *s = tp_label(t, f.sub, &tp_font_mono_12, NULL);
         lv_label_set_long_mode(s, LV_LABEL_LONG_CLIP);
         lv_obj_align(s, LV_ALIGN_BOTTOM_LEFT, 4, -3);
@@ -593,7 +593,7 @@ void tp_home_layout(void)
     lv_obj_set_size(s_home, w, h);
     int m = 12;
     lv_obj_set_pos(s_clock_big, m - 2, 4);               /* the big clock, set in the bold face at its own size */
-    int tile_h = 58;
+    int tile_h = 62;
     int ty = h - TP_FOOT_H - tile_h - 9;                    /* a margin under the tiles for the chosen one's shadow */
     int ny = ty - 6 - 20;
     lv_obj_set_pos(s_notice, m, ny);
