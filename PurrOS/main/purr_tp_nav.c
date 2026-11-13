@@ -64,6 +64,17 @@ static int head_h(void)
     return s_root_fn != NULL ? s_root_head : HEAD_H;
 }
 
+/* Where the controls start: under the sheet's title bar. Settings starts under the status strip and its bar is at its top; an app window covers the whole screen
+ * and puts its bar under the strip, so the bar ends further down than the sheet's top plus its height. */
+static int controls_top(const lv_area_t *root)
+{
+    int top = root->y1 + head_h();
+    if (head_h() > 0 && top < TP_STRIP_H + head_h()) {
+        top = TP_STRIP_H + head_h();
+    }
+    return top;
+}
+
 static lv_obj_t *front_root(void)
 {
     if (s_root_fn != NULL) {
@@ -141,7 +152,7 @@ static lv_obj_t *first_control(lv_obj_t *root)
     int by = 0, bx = 0;
     for (int i = 0; i < s_nc; i++) {
         lv_obj_get_coords(s_c[i], &a);
-        if ((a.y1 + a.y2) / 2 < r.y1 + head_h()) {          /* inside the title bar */
+        if ((a.y1 + a.y2) / 2 < controls_top(&r)) {         /* inside the title bar */
             continue;
         }
         if (best == NULL || a.y1 < by || (a.y1 == by && a.x1 < bx)) {
@@ -210,7 +221,7 @@ static void ring_update(lv_obj_t *root)
     lv_area_t a, r;
     lv_obj_get_coords(s_cur, &a);
     lv_obj_get_coords(root, &r);
-    if (a.y2 < r.y1 + head_h() / 2 || a.y1 > r.y2 || a.x2 < r.x1 || a.x1 > r.x2) {       /* scrolled out of the sheet: no ring */
+    if (a.y2 < controls_top(&r) - head_h() / 2 || a.y1 > r.y2 || a.x2 < r.x1 || a.x1 > r.x2) {       /* scrolled out of the sheet: no ring */
         ring_hide();
         return;
     }
