@@ -74,3 +74,13 @@ The kit's `emulator/` folder (`sdk/build-kit.py`, Showtime Plan 1 part A) carrie
 - **Libraries bundled with QEMU** (macOS, from MacPorts, unchanged, as separate files in `emulator/vendor/qemu/lib/` so an LGPL library can be replaced): glib 2.88.3, libgcrypt 1.12.4, libgpg-error 1.61, libiconv 1.19 and libintl (gettext 1.0) under **LGPL-2.1-or-later**; pcre2 10.48 and libslirp 4.9.1 (BSD-3-Clause); libffi 3.4.8 and pixman 0.46.0 (MIT); zlib 1.3.2 (zlib licence); zstd 1.5.7 (BSD-3-Clause, used under BSD); bzip2 1.0.8 (bzip2 licence).
 - **The emulator application** (`esp32-emulator`, `headless_tap`) is **MIT OR Apache-2.0**, built with about 190 Rust crates (all MIT, Apache-2.0, BSD, ISC, Zlib, Unlicense, CC0, 0BSD or Unicode-3.0; none copyleft) and the fonts of `epaint_default_fonts` (SIL OFL 1.1, Ubuntu Font Licence 1.0, MIT). The list and the licence texts are generated at kit build time: `emulator/licenses/RUST-CRATES.txt` and `RUST-LICENSES.txt`.
 - **ROM images** (`emulator/vendor/qemu/share/qemu/*.bin`) are the chip ROM images that Espressif's QEMU repository carries in its `pc-bios` folder, loaded unchanged.
+
+
+## Typefaces of the Type shell (Space Grotesk, Space Mono)
+
+The Type shell (plan7.md, "The Type shell") draws its clocks, dates, list names and small labels in two typefaces, both under the **SIL Open Font License 1.1**:
+
+- **Space Grotesk** Bold 2.0.0, copyright 2020 The Space Grotesk Project Authors, <https://github.com/floriankarsten/space-grotesk>. Licence text: [`UI/fonts/OFL-SpaceGrotesk.txt`](UI/fonts/OFL-SpaceGrotesk.txt).
+- **Space Mono** Bold, copyright 2016 The Space Mono Project Authors, <https://github.com/googlefonts/spacemono>. Licence text: [`UI/fonts/OFL-SpaceMono.txt`](UI/fonts/OFL-SpaceMono.txt).
+
+They are in the firmware as bitmap renderings at fixed sizes (`PurrOS/main/tpfonts/`, made by `tools/ui/gen_lvgl_font.py`; how to make them again is in [`UI/fonts/README.md`](UI/fonts/README.md)). The TrueType files are not in the repository. The generated files carry the licence with them, as a note at the top of each and here; they are not sold on their own.

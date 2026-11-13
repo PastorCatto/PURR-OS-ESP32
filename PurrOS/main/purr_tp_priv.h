@@ -27,6 +27,7 @@
 #include "purr_driver_class.h"
 #include "purr_w10m_priv.h"
 #include "purr_w10m_theme.h"
+#include "purr_tp_fonts.h"
 
 #define TP_INK    0x14120F
 #define TP_PAPER  0xF4F1EA
@@ -72,6 +73,15 @@ lv_obj_t *tp_box(lv_obj_t *parent, int fill);
 #define TP_FILL_INK  2
 /* A label; a NULL colour inherits the text colour of its box (which is what makes the focused look read). */
 lv_obj_t *tp_label(lv_obj_t *parent, const char *text, const lv_font_t *font, const lv_color_t *color);
+
+/* (purr_tp.c) The footer of the design: an ink bar with the keys in the accent and what they do in paper ("A OPEN"). A key that is a symbol (LV_SYMBOL_*) is drawn in the symbol font.
+ * The caller places it (it is TP_FOOT_H high and as wide as its parent is told to make it). */
+#define TP_FOOT_H 22
+typedef struct {
+    const char *key;
+    const char *text;
+} tp_hint_t;
+lv_obj_t *tp_footer(lv_obj_t *parent, const tp_hint_t *hints, int n);
 
 /* The key grid: a keyboard (letters, capitals, symbols) or a PIN pad (digits), drawn in a given area, clickable and focusable. */
 typedef enum { TP_KEY_CHAR, TP_KEY_DEL, TP_KEY_SHIFT, TP_KEY_OK, TP_KEY_SPACE } tp_key_kind_t;

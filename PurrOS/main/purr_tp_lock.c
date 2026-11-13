@@ -36,6 +36,7 @@
 #include "purr_brand.h"
 #include "purr_fs.h"
 #include "purr_lvgl.h"
+#include "purr_net.h"
 #include "purr_pin.h"
 #include "purr_resetnote_os.h"
 #include "purr_ui_service.h"
@@ -127,14 +128,33 @@ static void root_hide(void)
     tp_pad_hint(-1);
 }
 
-static lv_obj_t *big(lv_obj_t *parent, const char *text, lv_color_t color, int x, int y, int scale)
+static lv_obj_t *big(lv_obj_t *parent, const char *text, const lv_font_t *font, lv_color_t color, int x, int y)
 {
-    lv_obj_t *l = tp_label(parent, text, &lv_font_montserrat_40, &color);
-    lv_obj_set_style_transform_scale(l, scale, 0);
-    lv_obj_set_style_transform_pivot_x(l, 0, 0);
-    lv_obj_set_style_transform_pivot_y(l, 0, 0);
+    lv_obj_t *l = tp_label(parent, text, font, &color);
+    lv_obj_set_style_text_letter_space(l, -3, 0);
     lv_obj_set_pos(l, x, y);
     return l;
+}
+
+/* The padlock of the design: a filled body under an open shackle, in the accent. */
+static void padlock(lv_obj_t *parent, int x, int y)
+{
+    lv_obj_t *sh = lv_obj_create(parent);
+    lv_obj_remove_style_all(sh);
+    lv_obj_clear_flag(sh, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(sh, 9, 9);
+    lv_obj_set_pos(sh, x + 2, y);
+    lv_obj_set_style_border_width(sh, 2, 0);
+    lv_obj_set_style_border_color(sh, tp_accent(), 0);
+    lv_obj_set_style_border_side(sh, (lv_border_side_t)(LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT), 0);
+    lv_obj_set_style_radius(sh, 4, 0);
+    lv_obj_t *bd = lv_obj_create(parent);
+    lv_obj_remove_style_all(bd);
+    lv_obj_clear_flag(bd, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(bd, 13, 9);
+    lv_obj_set_pos(bd, x, y + 7);
+    lv_obj_set_style_bg_color(bd, tp_accent(), 0);
+    lv_obj_set_style_bg_opa(bd, LV_OPA_COVER, 0);
 }
 
 static void mono(lv_obj_t *l)
@@ -152,7 +172,7 @@ static lv_obj_t *title_bar(const char *title)
     lv_obj_set_style_border_width(b, 1, 0);
     lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_color(b, tp_ink(), 0);
-    lv_obj_t *l = tp_label(b, title, &lv_font_montserrat_12, NULL);
+    lv_obj_t *l = tp_label(b, title, &tp_font_mono_12, NULL);
     lv_obj_set_style_text_letter_space(l, 2, 0);
     lv_obj_center(l);
     return b;
@@ -179,13 +199,13 @@ static void date_parts(char *dow, size_t dc, char *day, size_t yc, char *mon, si
 /* The stacked clock in a side panel (the sign-in list's, as the app list has it); refreshed by the poll timer. */
 static void panel_clock(lv_obj_t *panel)
 {
-    s_clk_d = tp_label(panel, "", &lv_font_montserrat_12, NULL);
+    s_clk_d = tp_label(panel, "", &tp_font_mono_12, NULL);
     mono(s_clk_d);
     lv_obj_align(s_clk_d, LV_ALIGN_TOP_LEFT, 8, 8);
-    s_clk_h = tp_label(panel, "", &lv_font_montserrat_40, NULL);
+    s_clk_h = tp_label(panel, "", &tp_font_clock_panel, NULL);
     lv_obj_align(s_clk_h, LV_ALIGN_TOP_LEFT, 6, 28);
-    s_clk_m = tp_label(panel, "", &lv_font_montserrat_40, NULL);
-    lv_obj_align(s_clk_m, LV_ALIGN_TOP_LEFT, 6, 72);
+    s_clk_m = tp_label(panel, "", &tp_font_clock_panel, NULL);
+    lv_obj_align(s_clk_m, LV_ALIGN_TOP_LEFT, 6, 28 + 47);
 }
 
 static void clock_refresh(void)
@@ -313,22 +333,22 @@ static void lock_screen(void)
     s_modal = M_LOCK;
     root_prepare(1);
     int w = w10m_disp_w(), h = w10m_disp_h();
-    int side = w > 260 ? 100 : 0;
+    int side = w > 260 ? 80 : 0;                        /* the design: a 240 px dark side and an 80 px paper panel */
     int lw = w - side;
 
-    lv_obj_t *lock = tp_label(s_root, LV_SYMBOL_EYE_CLOSE "  LOCKED", &lv_font_montserrat_12, NULL);
-    lv_obj_set_style_text_color(lock, tp_accent(), 0);
+    padlock(s_root, 16, 10);
+    lv_obj_t *lock = tp_label(s_root, "LOCKED", &tp_font_mono_12, NULL);
     mono(lock);
-    lv_obj_set_pos(lock, 14, 10);
+    lv_obj_set_pos(lock, 36, 9);
     int n = tp_note_count();
     char tag[24];
     snprintf(tag, sizeof(tag), n > 0 ? "%d NEW" : "NOTHING NEW", n);
-    lv_obj_t *tg = tp_label(s_root, tag, &lv_font_montserrat_12, NULL);
+    lv_obj_t *tg = tp_label(s_root, tag, &tp_font_mono_12, NULL);
     mono(tg);
     lv_obj_set_style_border_width(tg, 1, 0);
     lv_obj_set_style_border_color(tg, tp_paper(), 0);
     lv_obj_set_style_pad_hor(tg, 5, 0);
-    lv_obj_set_pos(tg, lw - 14 - 78, 8);
+    lv_obj_set_pos(tg, lw - 14 - lv_obj_get_width(tg) - 12, 7);
 
     char tb[16], db[24];
     tp_clock_strings(tb, sizeof(tb), db, sizeof(db));
@@ -339,22 +359,22 @@ static void lock_screen(void)
         mm[0] = tb[3];
         mm[1] = tb[4];
     }
-    int line = lv_font_get_line_height(&lv_font_montserrat_40) * 435 / 256;
-    s_clk_h = big(s_root, hh, tp_paper(), 12, 30, 435);
-    s_clk_m = big(s_root, mm, tp_accent(), 12, 30 + line - 10, 435);
+    int line = tp_font_clock_lock.line_height;          /* the hours in paper over the minutes in the accent, stacked tight */
+    s_clk_h = big(s_root, hh, &tp_font_clock_lock, tp_paper(), 14, 28);
+    s_clk_m = big(s_root, mm, &tp_font_clock_lock, tp_accent(), 14, 28 + line - 2);
     s_clk_d = NULL;
 
-    lv_obj_t *cap = tp_label(s_root, tp_pad() != NULL ? "HOLD FUNC TO UNLOCK" : "HOLD TO UNLOCK", &lv_font_montserrat_12, NULL);
+    lv_obj_t *cap = tp_label(s_root, tp_pad() != NULL ? "HOLD FUNC TO UNLOCK" : "HOLD TO UNLOCK", &tp_font_mono_12, NULL);
     mono(cap);
-    lv_obj_set_pos(cap, 14, h - 44);
-    s_bar_w = lw - 28;
+    lv_obj_set_pos(cap, 16, h - 40);
+    s_bar_w = lw - 32;
     s_bar = lv_obj_create(s_root);                      /* a finger can hold it too */
     lv_obj_remove_style_all(s_bar);
     lv_obj_clear_flag(s_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(s_bar, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_pos(s_bar, 14, h - 26);
+    lv_obj_set_pos(s_bar, 16, h - 24);
     lv_obj_set_size(s_bar, s_bar_w, 14);
-    lv_obj_set_style_border_width(s_bar, 1, 0);
+    lv_obj_set_style_border_width(s_bar, 2, 0);
     lv_obj_set_style_border_color(s_bar, tp_paper(), 0);
     s_bar_fill = lv_obj_create(s_bar);
     lv_obj_remove_style_all(s_bar_fill);
@@ -378,20 +398,40 @@ static void lock_screen(void)
         lv_obj_set_style_text_color(p, tp_ink(), 0);
         char dow[8], day[4], mon[8];
         date_parts(dow, sizeof(dow), day, sizeof(day), mon, sizeof(mon));
-        lv_obj_t *l1 = tp_label(p, dow, &lv_font_montserrat_28, NULL);
-        lv_obj_set_pos(l1, 10, 16);
-        lv_obj_t *l2 = tp_label(p, day, &lv_font_montserrat_40, NULL);
-        lv_obj_set_pos(l2, 8, 52);
-        lv_obj_t *l3 = tp_label(p, mon, &lv_font_montserrat_28, NULL);
-        lv_obj_set_pos(l3, 10, 102);
+        lv_obj_t *l1 = tp_label(p, dow, &tp_font_bold_26, NULL);
+        lv_obj_set_pos(l1, 10, 14);
+        lv_obj_t *l2 = tp_label(p, day, &tp_font_date_big, NULL);
+        lv_obj_set_style_text_letter_space(l2, -2, 0);
+        lv_obj_set_pos(l2, 8, 44);
+        lv_obj_t *l3 = tp_label(p, mon, &tp_font_bold_26, NULL);
+        lv_obj_set_pos(l3, 10, 90);
         int pct;
         char bt[16] = "";
         if (purr_battery_get(&pct, NULL)) {
             snprintf(bt, sizeof(bt), "BATTERY %d%%", pct);
         }
-        lv_obj_t *bl = tp_label(p, bt, &lv_font_montserrat_12, NULL);
+        lv_obj_t *bl = tp_label(p, bt, &tp_font_mono_12, NULL);
         mono(bl);
-        lv_obj_set_pos(bl, 10, h - 40);
+        lv_obj_set_pos(bl, 10, h - 56);
+        lv_obj_t *bb = lv_obj_create(p);                /* the battery bar of the design, and under it whether the wire or the radio is up */
+        lv_obj_remove_style_all(bb);
+        lv_obj_clear_flag(bb, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(bb, 10, h - 40);
+        lv_obj_set_size(bb, side - 20, 10);
+        lv_obj_set_style_border_width(bb, 2, 0);
+        lv_obj_set_style_border_color(bb, tp_ink(), 0);
+        lv_obj_t *bf = lv_obj_create(bb);
+        lv_obj_remove_style_all(bf);
+        lv_obj_clear_flag(bf, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(bf, tp_ink(), 0);
+        lv_obj_set_style_bg_opa(bf, LV_OPA_COVER, 0);
+        lv_obj_set_size(bf, bt[0] ? (side - 24) * pct / 100 + 1 : 1, 6);
+        lv_obj_align(bf, LV_ALIGN_LEFT_MID, 0, 0);
+        purr_net_status_t ns;
+        purr_net_status(&ns);
+        lv_obj_t *wl = tp_label(p, ns.connected ? "WI-FI ON" : "WI-FI OFF", &tp_font_mono_12, NULL);
+        mono(wl);
+        lv_obj_set_pos(wl, 10, h - 24);
     }
     tp_pad_hint(1 << PURR_PAD_FUNC);                    /* only FUNC does anything here */
 }
@@ -486,29 +526,28 @@ static void pin_screen(modal_t mode)
     root_prepare(1);
     int w = w10m_disp_w(), h = w10m_disp_h();
     int pw = w > 260 ? 176 : w - 20;
-    lv_obj_t *lock = tp_label(s_root, LV_SYMBOL_EYE_CLOSE "  PIN", &lv_font_montserrat_12, NULL);
-    lv_obj_set_style_text_color(lock, tp_accent(), 0);
+    padlock(s_root, 14, 10);                            /* the padlock and the name of the job, then the question, as in the design */
+    lv_obj_t *lock = tp_label(s_root, pin_title(mode), &tp_font_mono_12, NULL);
     mono(lock);
-    lv_obj_set_pos(lock, 14, 10);
-    lv_obj_t *t = tp_label(s_root, pin_title(mode), &lv_font_montserrat_20, NULL);
-    lv_obj_set_pos(t, 14, 36);
-    lv_obj_t *q = tp_label(s_root, mode == M_PIN_NEW ? "Choose four\ndigits" : (mode == M_PIN_REPEAT ? "Once more" : "Enter your\nPIN"), &lv_font_montserrat_28, NULL);
-    lv_obj_set_pos(q, 14, 64);
+    lv_obj_set_pos(lock, 34, 9);
+    lv_obj_t *q = tp_label(s_root, mode == M_PIN_NEW ? "Choose four\ndigits" : (mode == M_PIN_REPEAT ? "Once more" : "Enter your\nPIN"), &tp_font_bold_26, NULL);
+    lv_obj_set_style_text_letter_space(q, -1, 0);
+    lv_obj_set_pos(q, 14, 40);
     for (int i = 0; i < PURR_PIN_LEN; i++) {
         lv_obj_t *d = lv_obj_create(s_root);
         lv_obj_remove_style_all(d);
         lv_obj_clear_flag(d, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_size(d, 22, 28);
-        lv_obj_set_pos(d, 14 + i * 28, 138);
+        lv_obj_set_pos(d, 14 + i * 28, 116);
         lv_obj_set_style_border_width(d, 2, 0);
         lv_obj_set_style_border_color(d, tp_paper(), 0);
         s_pin_dot[i] = d;
     }
-    s_pin_msg = tp_label(s_root, "", &lv_font_montserrat_12, NULL);
+    s_pin_msg = tp_label(s_root, "", &tp_font_mono_12, NULL);
     mono(s_pin_msg);
     lv_obj_set_style_text_color(s_pin_msg, lv_color_hex(TP_MUTED), 0);
-    lv_obj_set_pos(s_pin_msg, 14, 172);
-    lv_obj_t *hint = tp_label(s_root, mode == M_PIN_UNLOCK ? "FUNC  USE PASSWORD\nB  DELETE" : "B  DELETE, OR BACK OUT", &lv_font_montserrat_12, NULL);
+    lv_obj_set_pos(s_pin_msg, 14, 154);
+    lv_obj_t *hint = tp_label(s_root, mode == M_PIN_UNLOCK ? "FUNC  USE PASSWORD\nB  DELETE" : "B  DELETE, OR BACK OUT", &tp_font_mono_12, NULL);
     mono(hint);
     lv_obj_set_pos(hint, 14, h - 36);
 
@@ -797,28 +836,28 @@ static void signin_pass_for(const char *name, const char *role, int fixed)
     lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
     char ini[2] = {(char)toupper((unsigned char)(name[0] ? name[0] : '?')), 0};
     lv_color_t acc = tp_accent();
-    lv_obj_t *il = tp_label(av, ini, &lv_font_montserrat_20, &acc);
+    lv_obj_t *il = tp_label(av, ini, &tp_font_bold_20, &acc);
     lv_obj_center(il);
-    lv_obj_t *nm = tp_label(s_root, name, &lv_font_montserrat_20, NULL);
+    lv_obj_t *nm = tp_label(s_root, name, &tp_font_bold_20, NULL);
     lv_obj_set_pos(nm, 46, 22);
-    lv_obj_t *rl = tp_label(s_root, role, &lv_font_montserrat_12, NULL);
+    lv_obj_t *rl = tp_label(s_root, role, &tp_font_mono_12, NULL);
     mono(rl);
     lv_obj_set_pos(rl, 47, 44);
 
     lv_obj_t *back = tp_box(s_root, TP_FILL_SAND);
     lv_obj_set_pos(back, w - 8 - 64 - 4 - 64, 26);
     lv_obj_set_size(back, 64, 26);
-    lv_obj_t *bl = tp_label(back, "BACK", &lv_font_montserrat_12, NULL);
+    lv_obj_t *bl = tp_label(back, "BACK", &tp_font_mono_12, NULL);
     lv_obj_center(bl);
     lv_obj_add_event_cb(back, pw_back_clicked, LV_EVENT_CLICKED, NULL);
     lv_obj_t *go = tp_box(s_root, TP_FILL_INK);
     lv_obj_set_pos(go, w - 8 - 64, 26);
     lv_obj_set_size(go, 64, 26);
-    lv_obj_t *gl = tp_label(go, "SIGN IN", &lv_font_montserrat_12, NULL);
+    lv_obj_t *gl = tp_label(go, "SIGN IN", &tp_font_mono_12, NULL);
     lv_obj_center(gl);
     lv_obj_add_event_cb(go, pw_go_clicked, LV_EVENT_CLICKED, NULL);
 
-    s_pw_msg = tp_label(s_root, "", &lv_font_montserrat_12, NULL);
+    s_pw_msg = tp_label(s_root, "", &tp_font_mono_12, NULL);
     mono(s_pw_msg);
     lv_obj_set_pos(s_pw_msg, 8, 60);
     lv_label_set_long_mode(s_pw_msg, LV_LABEL_LONG_DOT);
@@ -873,7 +912,7 @@ static void signin_list(void)
     lv_obj_t *list = lv_obj_create(s_root);
     lv_obj_remove_style_all(list);
     lv_obj_set_pos(list, 0, TP_STRIP_H);
-    lv_obj_set_size(list, w - pw, h - TP_STRIP_H - 36);
+    lv_obj_set_size(list, w - pw, h - TP_STRIP_H - TP_FOOT_H - 30);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
@@ -903,11 +942,11 @@ static void signin_list(void)
         lv_obj_set_style_bg_opa(av, LV_OPA_COVER, 0);
         lv_obj_align(av, LV_ALIGN_LEFT_MID, 0, 0);
         char ini[2] = {(char)toupper((unsigned char)(ul->users[i].name[0] ? ul->users[i].name[0] : '?')), 0};
-        lv_obj_t *il = tp_label(av, ini, &lv_font_montserrat_20, &acc);
+        lv_obj_t *il = tp_label(av, ini, &tp_font_bold_20, &acc);
         lv_obj_center(il);
-        lv_obj_t *nm = tp_label(b, ul->users[i].name, &lv_font_montserrat_20, NULL);
+        lv_obj_t *nm = tp_label(b, ul->users[i].name, &tp_font_bold_20, NULL);
         lv_obj_align(nm, LV_ALIGN_LEFT_MID, 38, -7);
-        lv_obj_t *rl = tp_label(b, role_text(ul->users[i].role), &lv_font_montserrat_12, NULL);
+        lv_obj_t *rl = tp_label(b, role_text(ul->users[i].role), &tp_font_mono_12, NULL);
         mono(rl);
         lv_obj_align(rl, LV_ALIGN_LEFT_MID, 38, 10);
         lv_obj_t *c = tp_label(b, LV_SYMBOL_RIGHT, &lv_font_montserrat_12, NULL);
@@ -926,17 +965,17 @@ static void signin_list(void)
     } else if (purr_login_default_account(dn, sizeof(dn))) {
         snprintf(note, sizeof(note), "DEFAULT ACCOUNT: MEOW, PASSWORD MEOW. CHANGE IT IN SETTINGS.");
     }
-    lv_obj_t *nl = tp_label(s_root, note, &lv_font_montserrat_12, NULL);
+    lv_obj_t *nl = tp_label(s_root, note, &tp_font_mono_12, NULL);
     lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);        /* dots need a fixed height: two lines of 12 pixels, then "..." */
     lv_obj_set_size(nl, w - pw - 16, 30);
-    lv_obj_set_pos(nl, 8, h - 34);
+    lv_obj_set_pos(nl, 8, h - TP_FOOT_H - 30);
 
     if (pw > 0) {
         lv_obj_t *p = lv_obj_create(s_root);
         lv_obj_remove_style_all(p);
         lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_pos(p, w - pw, TP_STRIP_H);
-        lv_obj_set_size(p, pw, h - TP_STRIP_H);
+        lv_obj_set_size(p, pw, h - TP_STRIP_H - TP_FOOT_H);
         lv_obj_set_style_bg_color(p, tp_accent(), 0);
         lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
         lv_obj_set_style_border_width(p, 1, 0);
@@ -944,9 +983,15 @@ static void signin_list(void)
         lv_obj_set_style_border_color(p, tp_ink(), 0);
         lv_obj_set_style_text_color(p, tp_on_accent(), 0);
         panel_clock(p);
-        lv_obj_t *who = tp_label(p, "WHO IS\nSIGNING IN?", &lv_font_montserrat_12, NULL);
+        lv_obj_t *who = tp_label(p, "WHO IS\nSIGNING IN?", &tp_font_mono_12, NULL);
         mono(who);
         lv_obj_align(who, LV_ALIGN_BOTTOM_LEFT, 8, -8);
+    }
+    {
+        static const tp_hint_t keys[] = {{LV_SYMBOL_UP LV_SYMBOL_DOWN, "CHOOSE"}, {"A", "OPEN"}};
+        lv_obj_t *fb = tp_footer(s_root, keys, 2);
+        lv_obj_set_pos(fb, 0, h - TP_FOOT_H);
+        lv_obj_set_width(fb, w);
     }
     clock_refresh();
     tp_focus_set(first);

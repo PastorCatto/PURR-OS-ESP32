@@ -46,6 +46,34 @@ static const char *TAG = "type-shell";
 #define BANNER_MS 5000
 #define NOTES_MAX 8
 
+/* ---------------------------------------------------------------- the footer: an ink bar with the keys in the accent */
+
+/* One row of hints on an ink bar along the bottom: the key in the accent, what it does in paper, as in the design. A symbol key is set in the symbol font. */
+lv_obj_t *tp_footer(lv_obj_t *parent, const tp_hint_t *h, int n)
+{
+    lv_obj_t *bar = lv_obj_create(parent);
+    lv_obj_remove_style_all(bar);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_height(bar, TP_FOOT_H);
+    lv_obj_set_style_bg_color(bar, tp_ink(), 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_hor(bar, 8, 0);
+    lv_obj_set_flex_flow(bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(bar, 3, 0);
+    lv_color_t acc = tp_accent(), paper = tp_paper();
+    for (int i = 0; i < n; i++) {
+        int sym = (unsigned char)h[i].key[0] >= 0x80;
+        lv_obj_t *k = tp_label(bar, h[i].key, sym ? &lv_font_montserrat_12 : &tp_font_mono_12, &acc);
+        lv_obj_t *t = tp_label(bar, h[i].text, &tp_font_mono_12, &paper);
+        if (i + 1 < n) {
+            lv_obj_set_style_pad_right(t, 8, 0);
+        }
+        (void)k;
+    }
+    return bar;
+}
+
 /* ---------------------------------------------------------------- pictures (Settings and the windows draw the shared icons through this) */
 
 typedef struct {
@@ -224,7 +252,7 @@ static void strip_refresh(lv_timer_t *t)
     }
     char tb[16], db[24];
     tp_clock_strings(tb, sizeof(tb), db, sizeof(db));
-    lv_label_set_text(s_clock, tb);
+    lv_label_set_text(s_clock, tp_home_showing() ? db : (tp_drawer_is_open() ? "" : tb));        /* on the home screen the clock is the big one below: the strip says the date, as in the design */
     int pct;
     if (purr_battery_get(&pct, NULL)) {
         char p[8];
@@ -257,6 +285,7 @@ void tp_strip_title(const char *t)
         lv_obj_remove_flag(s_title, LV_OBJ_FLAG_HIDDEN);
         lv_obj_align(s_title, LV_ALIGN_CENTER, 0, 0);
     }
+    strip_refresh(NULL);                                            /* the left side follows the screen: the date on home, nothing in a list (its panel has the clock), the time elsewhere */
 }
 
 void w10m_dev_badge_update(void)
@@ -278,20 +307,20 @@ static void build_strip(void)
     lv_obj_clear_flag(s_strip, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(s_strip, tp_paper(), 0);
     lv_obj_set_style_bg_opa(s_strip, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_strip, 1, 0);
+    lv_obj_set_style_border_width(s_strip, 2, 0);
     lv_obj_set_style_border_side(s_strip, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_color(s_strip, tp_ink(), 0);
     lv_obj_set_style_text_color(s_strip, tp_ink(), 0);
-    lv_obj_set_style_text_font(s_strip, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_strip, &tp_font_mono_12, 0);
 
-    s_clock = tp_label(s_strip, "--:--", &lv_font_montserrat_12, NULL);
+    s_clock = tp_label(s_strip, "--:--", &tp_font_mono_12, NULL);
     lv_obj_set_style_text_letter_space(s_clock, 1, 0);
-    s_title = tp_label(s_strip, "", &lv_font_montserrat_12, NULL);
+    s_title = tp_label(s_strip, "", &tp_font_mono_12, NULL);
     lv_obj_set_style_text_letter_space(s_title, 2, 0);
     lv_obj_add_flag(s_title, LV_OBJ_FLAG_HIDDEN);
     s_wifi = tp_label(s_strip, LV_SYMBOL_WIFI, &lv_font_montserrat_12, NULL);
     lv_obj_add_flag(s_wifi, LV_OBJ_FLAG_HIDDEN);
-    s_pct = tp_label(s_strip, "", &lv_font_montserrat_12, NULL);
+    s_pct = tp_label(s_strip, "", &tp_font_mono_12, NULL);
 
     s_batt = lv_obj_create(s_strip);                    /* the battery: an outline with a fill that is as wide as the charge */
     lv_obj_remove_style_all(s_batt);
@@ -306,7 +335,7 @@ static void build_strip(void)
     lv_obj_set_size(s_batt_fill, 1, 5);
     lv_obj_align(s_batt_fill, LV_ALIGN_LEFT_MID, 1, 0);
 
-    s_dev = tp_label(s_strip, "DEV", &lv_font_montserrat_12, NULL);
+    s_dev = tp_label(s_strip, "DEV", &tp_font_mono_12, NULL);
     lv_obj_set_style_bg_color(s_dev, tp_ink(), 0);
     lv_obj_set_style_bg_opa(s_dev, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(s_dev, tp_paper(), 0);
@@ -319,7 +348,7 @@ static void build_strip(void)
     lv_obj_set_style_bg_color(s_ticker, tp_paper(), 0);
     lv_obj_set_style_bg_opa(s_ticker, LV_OPA_COVER, 0);
     lv_obj_add_flag(s_ticker, LV_OBJ_FLAG_HIDDEN);
-    s_ticker_lbl = tp_label(s_ticker, "", &lv_font_montserrat_12, NULL);
+    s_ticker_lbl = tp_label(s_ticker, "", &tp_font_mono_12, NULL);
     lv_label_set_long_mode(s_ticker_lbl, LV_LABEL_LONG_DOT);
     lv_obj_set_width(s_ticker_lbl, LV_PCT(100));
     lv_obj_align(s_ticker_lbl, LV_ALIGN_LEFT_MID, 3, 0);

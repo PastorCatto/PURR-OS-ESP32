@@ -30,6 +30,8 @@
 #include "commands.h"
 #include "login.h"
 #include "purr_appmgr.h"
+#include "purr_battery.h"
+#include "purr_net.h"
 #include "purr_catrt.h"
 #include "purr_lvgl.h"
 #include "purr_settings.h"
@@ -214,7 +216,7 @@ typedef struct {
 } lrow_t;
 
 static struct {
-    lv_obj_t *root, *list, *panel, *clk_h, *clk_m, *clk_d;
+    lv_obj_t *root, *list, *panel, *clk_h, *clk_m, *clk_d, *foot, *bat_lbl, *bat_bar, *bat_fill, *wifi_lbl;
     lrow_t rows[MAX_ROWS];
     int n;
     int clock;                          /* 1: the clock in a side panel */
@@ -257,13 +259,23 @@ static void list_layout(void)
     }
     int w = w10m_disp_w(), h = w10m_disp_h() - TP_STRIP_H;
     int pw = s_ls.clock ? (w > 260 ? 110 : 0) : 0;
+    int bh = h - TP_FOOT_H;                                                    /* the body: the footer takes the bottom */
     lv_obj_set_pos(s_ls.root, 0, TP_STRIP_H);
     lv_obj_set_size(s_ls.root, w, h);
     lv_obj_set_pos(s_ls.list, 0, 0);
-    lv_obj_set_size(s_ls.list, w - pw, h);
+    lv_obj_set_size(s_ls.list, w - pw, bh);
     if (s_ls.panel != NULL) {
         lv_obj_set_pos(s_ls.panel, w - pw, 0);
-        lv_obj_set_size(s_ls.panel, pw, h);
+        lv_obj_set_size(s_ls.panel, pw, bh);
+        if (s_ls.bat_lbl != NULL) {
+            lv_obj_align(s_ls.bat_lbl, LV_ALIGN_BOTTOM_LEFT, 8, -34);
+            lv_obj_align(s_ls.bat_bar, LV_ALIGN_BOTTOM_LEFT, 8, -22);
+            lv_obj_align(s_ls.wifi_lbl, LV_ALIGN_BOTTOM_LEFT, 8, -6);
+        }
+    }
+    if (s_ls.foot != NULL) {
+        lv_obj_set_pos(s_ls.foot, 0, bh);
+        lv_obj_set_width(s_ls.foot, w);
     }
 }
 
@@ -299,7 +311,7 @@ static void list_open(const char *title, const lrow_t *rows, int n, void (*pick)
     lv_obj_t *first = NULL, *want = NULL;
     for (int i = 0; i < s_ls.n; i++) {
         lv_obj_t *b = tp_box(s_ls.list, TP_FILL_NONE);
-        lv_obj_set_size(b, LV_PCT(100), 34);
+        lv_obj_set_size(b, LV_PCT(100), 32);
         lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
         lv_obj_set_style_pad_hor(b, 10, 0);
         static const lv_state_t chosen[2] = {LV_STATE_FOCUSED, LV_STATE_PRESSED};     /* the iPod's way: the chosen row is an ink bar with paper text, not the accent */
@@ -321,16 +333,23 @@ static void list_open(const char *title, const lrow_t *rows, int n, void (*pick)
                 ix = 26;
             }
         }
-        lv_obj_t *l = tp_label(b, s_ls.rows[i].label, &lv_font_montserrat_20, NULL);
+        char shown[PURR_APP_NAME_LEN];                      /* "store" is shown as "Store" */
+        snprintf(shown, sizeof(shown), "%s", s_ls.rows[i].label);
+        if (shown[0] >= 'a' && shown[0] <= 'z') {
+            shown[0] = (char)(shown[0] - 32);
+        }
+        lv_obj_t *l = tp_label(b, shown, &tp_font_bold_20, NULL);
         lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
         int row_w = w10m_disp_w() - ((with_clock && w10m_disp_w() > 260) ? 110 : 0);
         int lab_w = row_w - 20 - ix - (s_ls.rows[i].sub[0] != '\0' ? 76 : 28);        /* the row, less its padding, the icon, and the chevron (and the small text) */
         lv_obj_set_width(l, lab_w < 40 ? 40 : lab_w);                               /* exact pixels: a percentage minus pixels is not a width */
         lv_obj_align(l, LV_ALIGN_LEFT_MID, ix, 0);
         lv_obj_t *c = tp_label(b, LV_SYMBOL_RIGHT, &lv_font_montserrat_12, NULL);
+        lv_obj_set_style_text_color(c, tp_accent(), LV_STATE_FOCUSED);        /* the chosen row's chevron is the accent, as in the design */
+        lv_obj_set_style_text_color(c, tp_accent(), LV_STATE_PRESSED);
         lv_obj_align(c, LV_ALIGN_RIGHT_MID, 0, 0);
         if (s_ls.rows[i].sub[0] != '\0') {
-            lv_obj_t *s = tp_label(b, s_ls.rows[i].sub, &lv_font_montserrat_12, NULL);
+            lv_obj_t *s = tp_label(b, s_ls.rows[i].sub, &tp_font_mono_12, NULL);
             lv_obj_align(s, LV_ALIGN_RIGHT_MID, -16, 0);
         }
         lv_obj_add_event_cb(b, row_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -352,13 +371,30 @@ static void list_open(const char *title, const lrow_t *rows, int n, void (*pick)
         lv_obj_set_style_border_side(s_ls.panel, LV_BORDER_SIDE_LEFT, 0);
         lv_obj_set_style_border_color(s_ls.panel, tp_ink(), 0);
         lv_obj_set_style_text_color(s_ls.panel, tp_on_accent(), 0);
-        s_ls.clk_d = tp_label(s_ls.panel, "", &lv_font_montserrat_12, NULL);
-        lv_obj_set_style_text_letter_space(s_ls.clk_d, 1, 0);
+        s_ls.clk_d = tp_label(s_ls.panel, "", &tp_font_mono_12, NULL);
         lv_obj_align(s_ls.clk_d, LV_ALIGN_TOP_LEFT, 8, 8);
-        s_ls.clk_h = tp_label(s_ls.panel, "", &lv_font_montserrat_40, NULL);
+        s_ls.clk_h = tp_label(s_ls.panel, "", &tp_font_clock_panel, NULL);
         lv_obj_align(s_ls.clk_h, LV_ALIGN_TOP_LEFT, 6, 28);
-        s_ls.clk_m = tp_label(s_ls.panel, "", &lv_font_montserrat_40, NULL);
-        lv_obj_align(s_ls.clk_m, LV_ALIGN_TOP_LEFT, 6, 72);
+        s_ls.clk_m = tp_label(s_ls.panel, "", &tp_font_clock_panel, NULL);
+        lv_obj_align(s_ls.clk_m, LV_ALIGN_TOP_LEFT, 6, 28 + 45 + 2);
+        s_ls.bat_lbl = tp_label(s_ls.panel, "", &tp_font_mono_12, NULL);                    /* BATTERY 87%, its bar, WI-FI ON */
+        s_ls.bat_bar = lv_obj_create(s_ls.panel);
+        lv_obj_remove_style_all(s_ls.bat_bar);
+        lv_obj_clear_flag(s_ls.bat_bar, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(s_ls.bat_bar, 94, 10);
+        lv_obj_set_style_border_width(s_ls.bat_bar, 2, 0);
+        lv_obj_set_style_border_color(s_ls.bat_bar, tp_ink(), 0);
+        s_ls.bat_fill = lv_obj_create(s_ls.bat_bar);
+        lv_obj_remove_style_all(s_ls.bat_fill);
+        lv_obj_set_style_bg_color(s_ls.bat_fill, tp_ink(), 0);
+        lv_obj_set_style_bg_opa(s_ls.bat_fill, LV_OPA_COVER, 0);
+        lv_obj_set_size(s_ls.bat_fill, 1, 6);
+        lv_obj_align(s_ls.bat_fill, LV_ALIGN_LEFT_MID, 0, 0);
+        s_ls.wifi_lbl = tp_label(s_ls.panel, "", &tp_font_mono_12, NULL);
+    }
+    {
+        static const tp_hint_t keys[] = {{LV_SYMBOL_UP LV_SYMBOL_DOWN, "SCROLL"}, {"A", "OPEN"}, {"B", "BACK"}, {"X", "MENU"}};
+        s_ls.foot = tp_footer(s_ls.root, keys, 4);
     }
     list_layout();
     clock_refresh();
@@ -484,9 +520,17 @@ static void home_fill(void)
         tile_face_t f;
         tile_face(i, &f);
         lv_obj_t *t = tp_box(s_home, TP_FILL_NONE);
-        lv_obj_set_style_border_width(t, 1, 0);
         s_tile[i] = t;
-        lv_obj_t *n = tp_label(t, f.name, &lv_font_montserrat_12, NULL);
+        lv_obj_set_style_border_width(t, 2, 0);
+        lv_obj_set_style_translate_x(t, -2, LV_STATE_FOCUSED);        /* the chosen tile lifts: it moves up and left and throws a hard shadow, as in the design */
+        lv_obj_set_style_translate_y(t, -2, LV_STATE_FOCUSED);
+        lv_obj_set_style_shadow_width(t, 1, LV_STATE_FOCUSED);
+        lv_obj_set_style_shadow_spread(t, 1, LV_STATE_FOCUSED);
+        lv_obj_set_style_shadow_offset_x(t, 4, LV_STATE_FOCUSED);
+        lv_obj_set_style_shadow_offset_y(t, 4, LV_STATE_FOCUSED);
+        lv_obj_set_style_shadow_color(t, tp_ink(), LV_STATE_FOCUSED);
+        lv_obj_set_style_shadow_opa(t, LV_OPA_COVER, LV_STATE_FOCUSED);
+        lv_obj_t *n = tp_label(t, f.name, &tp_font_mono_12, NULL);
         lv_label_set_long_mode(n, LV_LABEL_LONG_CLIP);
         lv_obj_align(n, LV_ALIGN_TOP_LEFT, 4, 3);
         lv_obj_t *k = lv_obj_create(t);                 /* the button that opens it with FUNC held */
@@ -496,12 +540,13 @@ static void home_fill(void)
         lv_obj_set_style_bg_color(k, tp_ink(), 0);
         lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
         lv_obj_align(k, LV_ALIGN_BOTTOM_RIGHT, -3, -3);            /* bottom right: the name has the top row to itself */
-        lv_obj_t *kl = tp_label(k, k_tile_key[i], &lv_font_montserrat_12, NULL);
+        lv_obj_t *kl = tp_label(k, k_tile_key[i], &tp_font_mono_12, NULL);
         lv_obj_set_style_text_color(kl, tp_paper(), 0);
         lv_obj_center(kl);
-        lv_obj_t *b = tp_label(t, f.big, &lv_font_montserrat_28, NULL);
-        lv_obj_align(b, LV_ALIGN_LEFT_MID, 4, 2);
-        lv_obj_t *s = tp_label(t, f.sub, &lv_font_montserrat_12, NULL);
+        int sym = (unsigned char)f.big[0] >= 0x80;           /* a symbol is drawn from the symbol font */
+        lv_obj_t *b = tp_label(t, f.big, sym ? &lv_font_montserrat_28 : &tp_font_bold_26, NULL);
+        lv_obj_align(b, LV_ALIGN_LEFT_MID, 4, sym ? 2 : 0);
+        lv_obj_t *s = tp_label(t, f.sub, &tp_font_mono_12, NULL);
         lv_label_set_long_mode(s, LV_LABEL_LONG_CLIP);
         lv_obj_align(s, LV_ALIGN_BOTTOM_LEFT, 4, -3);
         lv_obj_add_event_cb(t, tile_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -546,17 +591,14 @@ void tp_home_layout(void)
     int w = w10m_disp_w(), h = w10m_disp_h() - TP_STRIP_H;
     lv_obj_set_pos(s_home, 0, TP_STRIP_H);
     lv_obj_set_size(s_home, w, h);
-    int m = 6;
-    int line = lv_font_get_line_height(&lv_font_montserrat_40);
-    int cy = 0, ch = line * 440 / 256;                  /* the big clock: the font at 1.7 times */
-    lv_obj_set_pos(s_clock_big, m, cy);
-    lv_obj_set_pos(s_date, m + 2, cy + ch - 2);
-    int tile_h = 62, hint_h = 14;
-    int ty = h - hint_h - tile_h - 2;
-    int ny = ty - 26;
+    int m = 12;
+    lv_obj_set_pos(s_clock_big, m - 2, 4);               /* the big clock, set in the bold face at its own size */
+    int tile_h = 58;
+    int ty = h - TP_FOOT_H - tile_h - 9;                    /* a margin under the tiles for the chosen one's shadow */
+    int ny = ty - 6 - 20;
     lv_obj_set_pos(s_notice, m, ny);
-    lv_obj_set_size(s_notice, w - 2 * m, 22);
-    int gap = 4, total = w - 2 * m - 3 * gap;
+    lv_obj_set_size(s_notice, w - 2 * m, 20);
+    int gap = 6, total = w - 2 * m - 3 * gap;
     int unit = total * 10 / 45;                          /* the first tile is one and a half units */
     int first = total - 3 * unit;
     int x = m;
@@ -568,7 +610,8 @@ void tp_home_layout(void)
         }
         x += tw + gap;
     }
-    lv_obj_align(s_hint, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_pos(s_hint, 0, h - TP_FOOT_H);
+    lv_obj_set_width(s_hint, w);
     list_layout();
 }
 
@@ -578,7 +621,6 @@ static void clock_refresh(void)
     tp_clock_strings(tb, sizeof(tb), db, sizeof(db));
     if (s_clock_big != NULL) {
         lv_label_set_text(s_clock_big, tb);
-        lv_label_set_text(s_date, db);
     }
     if (s_ls.open && s_ls.clk_h != NULL) {
         char hh[4] = {tb[0], tb[1], 0, 0}, mm[4] = {0, 0, 0, 0};
@@ -594,6 +636,21 @@ static void clock_refresh(void)
         lv_label_set_text(s_ls.clk_h, hh);
         lv_label_set_text(s_ls.clk_m, mm);
         lv_label_set_text(s_ls.clk_d, db);
+        if (s_ls.bat_lbl != NULL) {
+            int pct;
+            char bl[24];
+            if (purr_battery_get(&pct, NULL)) {
+                snprintf(bl, sizeof(bl), "BATTERY %d%%", pct);
+                lv_obj_set_width(s_ls.bat_fill, (lv_coord_t)(pct * 90 / 100 < 1 ? 1 : pct * 90 / 100));
+            } else {
+                snprintf(bl, sizeof(bl), "BATTERY --");
+                lv_obj_set_width(s_ls.bat_fill, 1);
+            }
+            lv_label_set_text(s_ls.bat_lbl, bl);
+            purr_net_status_t ns;
+            purr_net_status(&ns);
+            lv_label_set_text(s_ls.wifi_lbl, ns.connected ? "WI-FI ON" : "WI-FI OFF");
+        }
     }
 }
 
@@ -906,29 +963,27 @@ void tp_home_build(lv_obj_t *screen)
     lv_obj_clear_flag(s_home, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(s_home, LV_OPA_TRANSP, 0);
 
-    /* the big clock is the font at 1.7 times, drawn from its top left corner */
-    s_clock_big = tp_label(s_home, "--:--", &lv_font_montserrat_40, NULL);
+    /* the big clock: Space Grotesk Bold at 92 px (the date is in the strip above, as in the design) */
+    s_clock_big = tp_label(s_home, "--:--", &tp_font_clock_xl, NULL);
     lv_obj_set_style_text_color(s_clock_big, tp_ink(), 0);
-    lv_obj_set_style_transform_scale(s_clock_big, 440, 0);
-    lv_obj_set_style_transform_pivot_x(s_clock_big, 0, 0);
-    lv_obj_set_style_transform_pivot_y(s_clock_big, 0, 0);
-    s_date = tp_label(s_home, "", &lv_font_montserrat_12, NULL);
-    lv_obj_set_style_text_color(s_date, tp_ink(), 0);
-    lv_obj_set_style_text_letter_space(s_date, 2, 0);
+    lv_obj_set_style_text_letter_space(s_clock_big, -3, 0);
+    s_date = NULL;
 
     s_notice = tp_box(s_home, TP_FILL_SAND);
     lv_obj_set_style_pad_hor(s_notice, 6, 0);
-    s_notice_lbl = tp_label(s_notice, "", &lv_font_montserrat_12, NULL);
+    lv_obj_set_style_border_width(s_notice, 2, 0);
+    s_notice_lbl = tp_label(s_notice, "", &tp_font_mono_12, NULL);
     lv_label_set_long_mode(s_notice_lbl, LV_LABEL_LONG_DOT);
     lv_obj_set_width(s_notice_lbl, LV_PCT(88));
     lv_obj_align(s_notice_lbl, LV_ALIGN_LEFT_MID, 0, 0);
-    s_notice_cnt = tp_label(s_notice, "", &lv_font_montserrat_12, NULL);
+    s_notice_cnt = tp_label(s_notice, "", &tp_font_mono_12, NULL);
     lv_obj_align(s_notice_cnt, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_add_event_cb(s_notice, notice_clicked, LV_EVENT_CLICKED, NULL);
 
-    s_hint = tp_label(s_home, "A OPEN     X MENU     FUNC+ABXY SHORTCUT", &lv_font_montserrat_12, NULL);
-    lv_obj_set_style_text_color(s_hint, tp_ink(), 0);
-    lv_obj_set_style_text_opa(s_hint, LV_OPA_70, 0);
+    {
+        static const tp_hint_t keys[] = {{LV_SYMBOL_LEFT LV_SYMBOL_RIGHT, "CHOOSE"}, {"A", "OPEN"}, {"X", "MENU"}, {"FUNC+ABXY", "SHORTCUT"}};
+        s_hint = tp_footer(s_home, keys, 4);
+    }
 
     load_apps();
     home_fill();

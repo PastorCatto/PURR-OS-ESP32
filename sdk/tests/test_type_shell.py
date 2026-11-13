@@ -167,6 +167,24 @@ class TheTheme(unittest.TestCase):
         self.assertIn("COL_MASK   0x3Cu", read("Modules", "drivers", "gamepad_mcp23017_module.c"))
         self.assertIn("FUNC_BIT   0x40u", read("Modules", "drivers", "gamepad_mcp23017_module.c"))
 
+    def test_every_declared_font_exists_and_carries_its_licence(self):
+        header = read("PurrOS", "main", "purr_tp_fonts.h")
+        declared = re.findall(r"extern const lv_font_t (tp_font_\w+);", header)
+        self.assertGreaterEqual(len(declared), 9)
+        for name in declared:
+            text = read("PurrOS", "main", "tpfonts", name + ".c")
+            self.assertIn("const lv_font_t %s = {" % name, text)
+            self.assertIn("SIL Open Font License", text)                       # the licence travels with the rendering
+        self.assertIn("tpfonts/*.c", read("PurrOS", "main", "CMakeLists.txt"))
+        third = read("THIRD_PARTY.md")
+        self.assertIn("Space Grotesk", third)
+        self.assertIn("Space Mono", third)
+        for f in ("OFL-SpaceGrotesk.txt", "OFL-SpaceMono.txt", "README.md"):
+            self.assertTrue(os.path.isfile(os.path.join(helpers.ROOT, "UI", "fonts", f)), f)
+        # the images with no Type shell have the key grid and the navigation but not the fonts, so those two files must not use them
+        for n in ("purr_tp_kbd.c", "purr_tp_nav.c", "purr_tp_shim.c"):
+            self.assertNotIn("tp_font_", read("PurrOS", "main", n), n)
+
     def test_warnings_use_the_theme_colour(self):
         """Amber on paper does not read; the screens ask the theme."""
         for n in ("purr_w10m_settings.c", "purr_w10m_devportal.c"):

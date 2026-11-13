@@ -27,6 +27,9 @@ if(CONFIG_PURR_BOARD_COLOR_LCD)
         if(CONFIG_PURR_SHELL_TYPE)
             # The Type shell (plan7.md "The Type shell"): the same entry points, its own files. The Android shell's files are left out of this image, not changed.
             list(APPEND main_srcs "purr_tp.c" "purr_tp_home.c" "purr_tp_lock.c" "purr_tp_slot.c")
+            # the typefaces (UI/fonts/README.md): generated bitmap fonts, one file per size
+            file(GLOB tp_font_srcs CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/tpfonts/*.c")
+            list(APPEND main_srcs ${tp_font_srcs})
         else()
             list(APPEND main_srcs "purr_android.c" "purr_android_home.c" "purr_android_shade.c" "purr_android_lock.c")
         endif()
