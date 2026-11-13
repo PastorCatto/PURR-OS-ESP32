@@ -37,12 +37,13 @@
 #define N_BUTTONS  9             /* 0..3 UP DOWN LEFT RIGHT, 4..7 A B X Y, 8 FUNC */
 #define BTN_FUNC   8
 
-#define SCAN_US        8000      /* at most one scan this often, however often read() is called */
+#define SCAN_US        8000      /* at most one scan this often while a button is down, however often read() is called */
+#define SCAN_IDLE_US   24000     /* and this often while none is: one bus read per look, 40 a second, not hundreds (an emulated I2C controller crashed the guest under load) */
 #define ATTACH_US      500000    /* how soon an absent module is looked for again, the first time: it doubles after each miss ... */
 #define ATTACH_MAX_US  8000000   /* ... up to this, so a board with no module costs a probe every eight seconds, not every half second */
 #define REPEAT_FIRST_US 400000
 #define REPEAT_NEXT_US  120000
-#define I2C_MS         20
+#define I2C_MS         60        /* a real transfer takes a millisecond; the rest is for an emulator on a busy computer, where a timeout leaves a late interrupt behind */
 
 static const uint8_t s_key[N_BUTTONS] = {17, 18, 20, 19, '\n', 27, 1, 2, '\t'};
 
@@ -127,10 +128,22 @@ static int attach(void)
     return wr(MCP_IODIRB, (uint8_t)~(ROW_MASK | LED_UP_BIT));   /* the rows are released until a scan drives one */
 }
 
-/* Reads the nine buttons into a bitmask, or returns -1 if the module stopped answering. */
+/* Reads the nine buttons into a bitmask, or returns -1 if the module stopped answering. With both rows driven low (the idle state attach() leaves), one read
+ * of GPIOB says whether any column or FUNC is pulled low; with none, nothing is pressed and that is all it costs. Only a press starts the row-by-row scan
+ * that tells which button it is, and the rows go back to idle afterwards. */
 static int scan(void)
 {
     uint16_t mask = 0;
+    uint8_t any;
+    if (rd(MCP_GPIOB, &any) != 0) {
+        return -1;
+    }
+    if ((any & (COL_MASK | FUNC_BIT)) == (COL_MASK | FUNC_BIT)) {
+        return 0;
+    }
+    if (!(any & FUNC_BIT)) {
+        mask |= (uint16_t)(1u << BTN_FUNC);                  /* FUNC has a pin of its own: no row needed */
+    }
     for (int r = 0; r < 2; r++) {
         if (wr(MCP_IODIRB, (uint8_t)~((1u << r) | LED_UP_BIT)) != 0) {
             return -1;
@@ -144,9 +157,9 @@ static int scan(void)
                 mask |= (uint16_t)(1u << (r * 4 + c));
             }
         }
-        if (r == 0 && !(v & FUNC_BIT)) {
-            mask |= (uint16_t)(1u << BTN_FUNC);
-        }
+    }
+    if (wr(MCP_IODIRB, (uint8_t)~(ROW_MASK | LED_UP_BIT)) != 0) {      /* both rows low again: the idle state */
+        return -1;
     }
     return (int)mask;
 }
@@ -177,7 +190,7 @@ static int service(void)
         s_present = 1;
         s_last_scan_us = 0;
     }
-    if (s_last_scan_us == 0 || now - s_last_scan_us >= SCAN_US) {
+    if (s_last_scan_us == 0 || now - s_last_scan_us >= (s_down != 0 ? SCAN_US : SCAN_IDLE_US)) {
         s_last_scan_us = now;
         int m = scan();
         if (m < 0) {

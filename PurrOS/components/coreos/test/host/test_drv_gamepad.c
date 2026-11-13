@@ -126,10 +126,10 @@ static int poll_key(void)
     return n == 1 ? k : 0;
 }
 
-/* One tick later (past the scan interval), then read. */
+/* One tick later (past the scan interval, which is longer while nothing is down), then read. */
 static int tick_key(void)
 {
-    fb_now += 10000;
+    fb_now += s_down != 0 ? 10000 : SCAN_IDLE_US + 1000;
     return poll_key();
 }
 
@@ -156,6 +156,40 @@ static void test_probe(void)
     CHECK_EQ(drv->probe(&dev, NULL, &h2), 0);
     CHECK_EQ(fb_i2c_addr, 0x22);
     CHECK_EQ(fb_i2c_sda, 5);
+}
+
+/* The idle look costs one read and nothing else, and a press goes back to the idle wiring afterwards: an emulated I2C controller crashed the guest when the
+ * driver polled four times as often, so this is what keeps the traffic low. */
+static void test_idle_traffic(void)
+{
+    start(1);
+    CHECK_EQ(tick_key(), 0);                                     /* attaches and looks once */
+    int w0 = pad.writes, r0 = pad.reads;
+    for (int i = 0; i < 20; i++) {
+        CHECK_EQ(tick_key(), 0);
+    }
+    CHECK_EQ(pad.writes, w0);                                    /* no writes at all while idle */
+    CHECK_EQ(pad.reads - r0, 20);                                /* one read per look */
+    /* two reads a second apart in time: faster polling does not scan faster than the idle interval */
+    int r1 = pad.reads;
+    for (int i = 0; i < 10; i++) {
+        fb_now += 5000;                                          /* 5 ms, well inside the idle interval */
+        poll_key();
+    }
+    CHECK(pad.reads - r1 <= 3);
+
+    press(0);                                                    /* UP: now it identifies the button, and puts the rows back */
+    int key = tick_key();
+    CHECK_EQ(key, 17);
+    CHECK_EQ(pad.iodirb, 0x7C);                                  /* both rows driven low again: the idle wiring */
+    release(0);
+    CHECK_EQ(tick_key(), 0);
+    press(8);                                                    /* FUNC has its own pin: no row scan needed for it */
+    int w1 = pad.writes;
+    int fk = tick_key();
+    CHECK_EQ(fk, '\t');
+    CHECK(pad.writes > w1);                                      /* the row scan and the light: a press costs more than a look, which is fine */
+    release(8);
 }
 
 static void test_setup_and_idle(void)
@@ -372,18 +406,18 @@ static void test_class_ops_state(void)
 {
     start(1);
     const purr_gamepad_ops_t *ops = pad_ops();
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     CHECK_EQ(ops->present(handle), 1);
     CHECK_EQ(ops->buttons(handle), 0u);
     press(8);                                                    /* FUNC held */
     press(4);                                                    /* and A: the chord a shell reads as a pinned-app shortcut */
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     CHECK_EQ(ops->buttons(handle), (1u << PURR_PAD_FUNC) | (1u << PURR_PAD_A));
     release(4);
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     CHECK_EQ(ops->buttons(handle), 1u << PURR_PAD_FUNC);         /* still held: the shell times the hold itself */
     release(8);
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     CHECK_EQ(ops->buttons(handle), 0u);
 
     /* The keys still come through read(), whoever looks at the state: two readers do not steal from each other. The earlier presses are waiting in the queue
@@ -392,7 +426,7 @@ static void test_class_ops_state(void)
     CHECK_EQ(poll_key(), '\t');
     CHECK_EQ(poll_key(), 0);
     press(3);                                                    /* RIGHT */
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     CHECK_EQ(ops->buttons(handle), 1u << PURR_PAD_RIGHT);
     CHECK_EQ(poll_key(), 19);
 }
@@ -401,34 +435,34 @@ static void test_class_ops_lights(void)
 {
     start(1);
     const purr_gamepad_ops_t *ops = pad_ops();
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     ops->present(handle);
     ops->set_leds(handle, (1 << PURR_PAD_A) | (1 << PURR_PAD_B));       /* the shell lights the buttons that do something here */
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     ops->buttons(handle);
     CHECK(led_on_of(PURR_PAD_A));
     CHECK(led_on_of(PURR_PAD_B));
     CHECK(!led_on_of(PURR_PAD_X));
     CHECK(!led_on_of(PURR_PAD_UP));
     press(6);                                                    /* pressing X does not light it while the shell is in charge */
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     ops->buttons(handle);
     CHECK(!led_on_of(PURR_PAD_X));
     CHECK(led_on_of(PURR_PAD_A));
     release(6);
 
     ops->set_leds(handle, 1 << PURR_PAD_UP);                     /* the UP light is on the other register */
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     ops->buttons(handle);
     CHECK(led_on_of(PURR_PAD_UP));
     CHECK(!led_on_of(PURR_PAD_A));
 
     ops->set_leds(handle, -1);                                   /* handed back: a light follows its button again */
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     ops->buttons(handle);
     CHECK(!led_on_of(PURR_PAD_UP));
     press(5);
-    fb_now += 10000;
+    fb_now += SCAN_IDLE_US + 1000;
     ops->buttons(handle);
     CHECK(led_on_of(PURR_PAD_B));
 }
@@ -460,6 +494,7 @@ int main(void)
 {
     test_probe();
     test_setup_and_idle();
+    test_idle_traffic();
     test_every_button();
     test_leds();
     test_two_buttons_at_once();
