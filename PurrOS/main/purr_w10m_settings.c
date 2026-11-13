@@ -358,6 +358,37 @@ static void page_main(void)
         lv_obj_add_event_cb(row, sec_clicked, LV_EVENT_CLICKED, (void *)sec);
         s_rows[i] = row;
 
+        if (purr_theme_type_look()) {                   /* the Type layout: a letter in an ink square for an icon (no pictures), the name, what is in it, a chevron */
+            lv_obj_set_height(row, 46);
+            purr_theme_row_divider(row);
+            lv_obj_t *badge = lv_obj_create(row);
+            lv_obj_remove_style_all(badge);
+            lv_obj_clear_flag(badge, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_size(badge, 30, 30);
+            lv_obj_align(badge, LV_ALIGN_LEFT_MID, 6, 0);
+            lv_obj_set_style_bg_color(badge, lv_color_hex(0x14120F), 0);
+            lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
+            lv_obj_t *bl = lv_label_create(badge);
+            char letter[2] = {sec->title[0], '\0'};
+            lv_label_set_text(bl, letter);
+            lv_obj_set_style_text_font(bl, &lv_font_montserrat_16, 0);
+            lv_obj_set_style_text_color(bl, lv_color_hex(0xF4F1EA), 0);
+            lv_obj_center(bl);
+            lv_obj_t *tt = cm_text(row, sec->title);
+            lv_obj_set_style_text_font(tt, &lv_font_montserrat_16, 0);
+            lv_obj_align(tt, LV_ALIGN_LEFT_MID, 46, -9);
+            lv_obj_t *dd = lv_label_create(row);
+            lv_label_set_text(dd, sec->desc);
+            lv_obj_set_style_text_font(dd, &lv_font_montserrat_12, 0);
+            purr_theme_apply(dd, PURR_TH_DIM);
+            lv_obj_align(dd, LV_ALIGN_LEFT_MID, 46, 10);
+            lv_obj_t *ch = lv_label_create(row);
+            lv_label_set_text(ch, LV_SYMBOL_RIGHT);
+            lv_obj_set_style_text_font(ch, &lv_font_montserrat_14, 0);
+            lv_obj_align(ch, LV_ALIGN_RIGHT_MID, -6, 0);
+            continue;
+        }
+
         const lv_image_dsc_t *ic = sec->icon ? w10m_img(sec->icon) : NULL;
         if (ic != NULL) {
             lv_obj_t *im = lv_image_create(row);
@@ -2141,7 +2172,18 @@ static void show_page(page_t page)
     lv_group_remove_all_objs(s_group);
     lv_obj_clean(s_body);
     lv_obj_scroll_to(s_body, 0, 0, LV_ANIM_OFF);
-    lv_label_set_text(s_head_title, page_title(page));
+    if (purr_theme_type_look()) {                       /* the Type layout sets the titles in capitals */
+        char up[48];
+        const char *pt = page_title(page);
+        size_t k = 0;
+        for (; pt[k] != '\0' && k < sizeof(up) - 1; k++) {
+            up[k] = (pt[k] >= 'a' && pt[k] <= 'z') ? (char)(pt[k] - 32) : pt[k];
+        }
+        up[k] = '\0';
+        lv_label_set_text(s_head_title, up);
+    } else {
+        lv_label_set_text(s_head_title, page_title(page));
+    }
     switch (page) {
     case PAGE_SYSTEM:    page_system(); break;
     case PAGE_DEVICES:   page_devices(); break;
@@ -2262,7 +2304,7 @@ void w10m_settings_build(void)
     purr_theme_apply(arrow, PURR_TH_TEXT);
     lv_obj_align(arrow, LV_ALIGN_LEFT_MID, 8, 0);
     s_head_title = lv_label_create(s_head);
-    lv_label_set_text(s_head_title, "Settings");
+    lv_label_set_text(s_head_title, purr_theme_type_look() ? "SETTINGS" : "Settings");
     lv_obj_set_style_text_font(s_head_title, &lv_font_montserrat_16, 0);
     purr_theme_apply(s_head_title, PURR_TH_TEXT);
     lv_obj_align(s_head_title, LV_ALIGN_LEFT_MID, 34, 0);

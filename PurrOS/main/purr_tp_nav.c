@@ -23,7 +23,7 @@
 #include "purr_lvgl.h"
 
 #define NAV_MAX     96
-#define HEAD_H      52                          /* the top of a sheet is its title bar: the highlight starts under it */
+#define HEAD_H      32                          /* the top of a sheet is its title bar (30 px in the shared sheets): the highlight starts under it */
 #define RING_PAD    2
 
 static lv_obj_t *s_c[NAV_MAX];                  /* the controls of the sheet in front, in tree order */

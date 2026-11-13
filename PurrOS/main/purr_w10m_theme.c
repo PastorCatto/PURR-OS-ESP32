@@ -79,6 +79,19 @@ static lv_color_t c_on_accent(void)
 }
 
 lv_color_t purr_theme_accent_color(void) { return c_accent(); }
+int purr_theme_type_look(void) { return s_type; }
+
+/* The hairline under a list row in the Type look (the other looks draw their rows without one, or through the row role). */
+void purr_theme_row_divider(lv_obj_t *obj)
+{
+    if (s_type) {
+        lv_obj_set_style_border_side(obj, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(obj, 1, 0);
+        lv_obj_set_style_border_color(obj, c_dim(), 0);
+        lv_obj_set_style_border_opa(obj, LV_OPA_50, 0);
+    }
+}
+
 /* Text that warns: amber on a dark sheet, a darker amber on paper (the Type look), where 0xFFB900 would not read. */
 lv_color_t purr_theme_warn_color(void) { return lv_color_hex(s_type && !s_dark ? 0x9A5B00 : 0xFFB900); }
 lv_color_t purr_theme_text_color(void) { return c_text(); }
@@ -406,6 +419,7 @@ void purr_theme_title_bar(lv_obj_t *head, lv_obj_t *arrow, lv_obj_t *title)
 {
     purr_theme_apply(head, PURR_TH_TITLE_BAR);
     if (s_type) {
+        lv_obj_set_style_text_letter_space(title, 2, 0);                    /* the titles are set in capitals, spaced */
         lv_obj_set_style_text_color(title, lv_color_hex(0xF4F1EA), 0);      /* the bar is ink in both bases */
         lv_obj_set_style_text_color(arrow, lv_color_hex(0xF4F1EA), 0);
     }

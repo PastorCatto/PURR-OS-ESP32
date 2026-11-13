@@ -130,6 +130,21 @@ class TheTheme(unittest.TestCase):
         self.assertIn("0xF4F1EA", theme)
         self.assertEqual(re.search(r"#define TP_INK\s+(0x\w+)", read("PurrOS", "main", "purr_tp_priv.h")).group(1).upper(), "0X14120F")
 
+    def test_settings_has_a_type_layout_decided_by_the_theme(self):
+        """The layout lives in the shared primitives and one branch of the main page, chosen by the theme at run time, so no other build changes."""
+        widgets = read("PurrOS", "main", "purr_w10m_widgets.c")
+        self.assertGreaterEqual(widgets.count("purr_theme_type_look()"), 3)           # title, switch row, tappable row
+        settings = read("PurrOS", "main", "purr_w10m_settings.c")
+        i = settings.index("static void page_main(void)")
+        main = settings[i:i + 4200]
+        branch = main[main.index("if (purr_theme_type_look())"):]
+        self.assertLess(branch.index("continue;"), branch.index("w10m_img(sec->icon)"))     # no Windows-style pictures in the Type layout
+        self.assertIn("purr_theme_type_look() ? \"SETTINGS\"", settings)
+        theme = read("PurrOS", "main", "purr_w10m_theme.c")
+        self.assertRegex(theme, r"void purr_theme_row_divider\(lv_obj_t \*obj\)\s*\{\s*if \(s_type\)")   # no effect in any other look
+        nav = read("PurrOS", "main", "purr_tp_nav.c")
+        self.assertGreater(int(re.search(r"#define HEAD_H\s+(\d+)", nav).group(1)), int(re.search(r"#define HEAD_H (\d+)", settings).group(1)))   # the first control is the one under the title bar
+
     def test_warnings_use_the_theme_colour(self):
         """Amber on paper does not read; the screens ask the theme."""
         for n in ("purr_w10m_settings.c", "purr_w10m_devportal.c"):

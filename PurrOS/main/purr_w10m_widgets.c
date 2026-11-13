@@ -28,6 +28,15 @@ lv_obj_t *w10m_title(lv_obj_t *parent, const char *text)
     lv_obj_t *l = lv_label_create(parent);
     lv_label_set_text(l, text);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+    if (purr_theme_type_look()) {                       /* ink, spaced, with a short rule in the accent under it (the accent as text may not read on paper) */
+        purr_theme_apply(l, PURR_TH_TEXT);
+        lv_obj_set_style_text_letter_space(l, 2, 0);
+        lv_obj_set_style_border_side(l, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(l, 3, 0);
+        lv_obj_set_style_border_color(l, purr_theme_accent_color(), 0);
+        lv_obj_set_style_pad_bottom(l, 2, 0);
+        return l;
+    }
     purr_theme_apply(l, PURR_TH_ACCENT_TEXT);
     return l;
 }
@@ -43,7 +52,8 @@ lv_obj_t *w10m_switch(lv_obj_t *parent, const char *text, int on, lv_event_cb_t 
 {
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, LV_PCT(100), 30);
+    lv_obj_set_size(row, LV_PCT(100), purr_theme_type_look() ? 36 : 30);
+    purr_theme_row_divider(row);
     lv_obj_t *l = w10m_text(row, text);
     lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_t *sw = lv_switch_create(row);
@@ -144,14 +154,28 @@ lv_obj_t *w10m_row(lv_obj_t *parent, const char *title, const char *sub, int ena
         lv_obj_add_event_cb(row, cb, LV_EVENT_CLICKED, ud);
     }
     lv_obj_set_style_opa(row, enabled ? LV_OPA_COVER : LV_OPA_40, 0);
+    int type = purr_theme_type_look();
+    if (type) {                                         /* the Type layout: taller, the title larger, a hairline under it and a chevron when it opens something */
+        lv_obj_set_height(row, 46);
+        purr_theme_row_divider(row);
+    }
     lv_obj_t *t = w10m_text(row, title);
-    lv_obj_align(t, LV_ALIGN_LEFT_MID, 2, sub ? -8 : 0);
+    if (type) {
+        lv_obj_set_style_text_font(t, &lv_font_montserrat_16, 0);
+    }
+    lv_obj_align(t, LV_ALIGN_LEFT_MID, type ? 6 : 2, sub ? (type ? -9 : -8) : 0);
     if (sub != NULL) {
         lv_obj_t *d = lv_label_create(row);
         lv_label_set_text(d, sub);
         lv_obj_set_style_text_font(d, &lv_font_montserrat_12, 0);
         purr_theme_apply(d, PURR_TH_DIM);
-        lv_obj_align(d, LV_ALIGN_LEFT_MID, 2, 9);
+        lv_obj_align(d, LV_ALIGN_LEFT_MID, type ? 6 : 2, type ? 10 : 9);
+    }
+    if (type && cb != NULL && enabled) {
+        lv_obj_t *c = lv_label_create(row);
+        lv_label_set_text(c, LV_SYMBOL_RIGHT);
+        lv_obj_set_style_text_font(c, &lv_font_montserrat_14, 0);
+        lv_obj_align(c, LV_ALIGN_RIGHT_MID, -6, 0);
     }
     return row;
 }

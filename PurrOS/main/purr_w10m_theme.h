@@ -86,6 +86,8 @@ int purr_theme_transparency(void);              /* 1 = see-through sheets, 0 = s
 int purr_theme_tile_opacity(void);              /* 0..255 */
 
 lv_color_t purr_theme_accent_color(void);
+int purr_theme_type_look(void);                 /* 1 in the Type shell: the shared primitives lay themselves out the Type way */
+void purr_theme_row_divider(lv_obj_t *obj);     /* the hairline under a list row (Type look only; no effect in the other looks) */
 lv_color_t purr_theme_warn_color(void);        /* warning text on a sheet */
 lv_color_t purr_theme_text_color(void);
 lv_color_t purr_theme_dim_color(void);
