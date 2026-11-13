@@ -348,7 +348,7 @@ static void lock_screen(void)
     lv_obj_set_style_border_width(tg, 1, 0);
     lv_obj_set_style_border_color(tg, tp_paper(), 0);
     lv_obj_set_style_pad_hor(tg, 5, 0);
-    lv_obj_set_pos(tg, lw - 14 - lv_obj_get_width(tg) - 12, 7);
+    lv_obj_align(tg, LV_ALIGN_TOP_RIGHT, -(side + 14), 7);          /* from the right edge of the dark side: its width is not known yet */
 
     char tb[16], db[24];
     tp_clock_strings(tb, sizeof(tb), db, sizeof(db));
@@ -405,15 +405,19 @@ static void lock_screen(void)
         lv_obj_set_pos(l2, 8, 44);
         lv_obj_t *l3 = tp_label(p, mon, &tp_font_bold_26, NULL);
         lv_obj_set_pos(l3, 10, 90);
-        int pct;
+        int pct = 0;
         char bt[16] = "";
-        if (purr_battery_get(&pct, NULL)) {
+        int have_batt = purr_battery_get(&pct, NULL);       /* a board with no gauge (Playtime today) shows no battery at all, not an empty one */
+        if (have_batt) {
             snprintf(bt, sizeof(bt), "BATTERY %d%%", pct);
         }
         lv_obj_t *bl = tp_label(p, bt, &tp_font_mono_12, NULL);
         mono(bl);
         lv_obj_set_pos(bl, 10, h - 56);
         lv_obj_t *bb = lv_obj_create(p);                /* the battery bar of the design, and under it whether the wire or the radio is up */
+        if (!have_batt) {
+            lv_obj_add_flag(bb, LV_OBJ_FLAG_HIDDEN);
+        }
         lv_obj_remove_style_all(bb);
         lv_obj_clear_flag(bb, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_pos(bb, 10, h - 40);

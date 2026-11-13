@@ -130,7 +130,13 @@ static int poll_key(void)
 static int tick_key(void)
 {
     fb_now += s_down != 0 ? 10000 : SCAN_IDLE_US + 1000;
-    return poll_key();
+    int k = poll_key();
+    if (s_settling) {                                            /* a change is believed on the second scan: it comes a moment later */
+        fb_now += SCAN_US + 1000;
+        int k2 = poll_key();
+        k = k != 0 ? k : k2;
+    }
+    return k;
 }
 
 static void press(int n) { pad.down[n] = 1; }
@@ -190,6 +196,34 @@ static void test_idle_traffic(void)
     CHECK_EQ(fk, '\t');
     CHECK(pad.writes > w1);                                      /* the row scan and the light: a press costs more than a look, which is fine */
     release(8);
+}
+
+/* A change on the bus is believed only when two scans in a row agree: a glitch (a bounce, or a bad read) that is gone on the next look is no key press. */
+static void test_debounce(void)
+{
+    start(1);
+    CHECK_EQ(tick_key(), 0);
+    press(4);                                                    /* A, for one scan only */
+    fb_now += SCAN_IDLE_US + 1000;
+    CHECK_EQ(poll_key(), 0);                                     /* seen once: not yet a key */
+    release(4);
+    fb_now += SCAN_US + 1000;
+    CHECK_EQ(poll_key(), 0);                                     /* gone again: it never was */
+    for (int i = 0; i < 5; i++) {
+        CHECK_EQ(tick_key(), 0);
+    }
+    press(8);                                                    /* FUNC glitch, the same */
+    fb_now += SCAN_IDLE_US + 1000;
+    CHECK_EQ(poll_key(), 0);
+    release(8);
+    fb_now += SCAN_US + 1000;
+    CHECK_EQ(poll_key(), 0);
+    CHECK_EQ(tick_key(), 0);
+    press(4);                                                    /* held: two scans agree, one key */
+    CHECK_EQ(tick_key(), '\n');
+    CHECK_EQ(tick_key(), 0);
+    release(4);
+    CHECK_EQ(tick_key(), 0);
 }
 
 static void test_setup_and_idle(void)
@@ -402,22 +436,25 @@ static const purr_gamepad_ops_t *pad_ops(void)
     return ops;
 }
 
+/* A change is believed on the second scan: look once now, and the call that follows is the confirming look. */
+#define SETTLE(ops) do { fb_now += SCAN_IDLE_US + 1000; (ops)->buttons(handle); fb_now += SCAN_US + 1000; } while (0)
+
 static void test_class_ops_state(void)
 {
     start(1);
     const purr_gamepad_ops_t *ops = pad_ops();
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     CHECK_EQ(ops->present(handle), 1);
     CHECK_EQ(ops->buttons(handle), 0u);
     press(8);                                                    /* FUNC held */
     press(4);                                                    /* and A: the chord a shell reads as a pinned-app shortcut */
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     CHECK_EQ(ops->buttons(handle), (1u << PURR_PAD_FUNC) | (1u << PURR_PAD_A));
     release(4);
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     CHECK_EQ(ops->buttons(handle), 1u << PURR_PAD_FUNC);         /* still held: the shell times the hold itself */
     release(8);
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     CHECK_EQ(ops->buttons(handle), 0u);
 
     /* The keys still come through read(), whoever looks at the state: two readers do not steal from each other. The earlier presses are waiting in the queue
@@ -426,7 +463,7 @@ static void test_class_ops_state(void)
     CHECK_EQ(poll_key(), '\t');
     CHECK_EQ(poll_key(), 0);
     press(3);                                                    /* RIGHT */
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     CHECK_EQ(ops->buttons(handle), 1u << PURR_PAD_RIGHT);
     CHECK_EQ(poll_key(), 19);
 }
@@ -435,34 +472,34 @@ static void test_class_ops_lights(void)
 {
     start(1);
     const purr_gamepad_ops_t *ops = pad_ops();
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     ops->present(handle);
     ops->set_leds(handle, (1 << PURR_PAD_A) | (1 << PURR_PAD_B));       /* the shell lights the buttons that do something here */
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     ops->buttons(handle);
     CHECK(led_on_of(PURR_PAD_A));
     CHECK(led_on_of(PURR_PAD_B));
     CHECK(!led_on_of(PURR_PAD_X));
     CHECK(!led_on_of(PURR_PAD_UP));
     press(6);                                                    /* pressing X does not light it while the shell is in charge */
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     ops->buttons(handle);
     CHECK(!led_on_of(PURR_PAD_X));
     CHECK(led_on_of(PURR_PAD_A));
     release(6);
 
     ops->set_leds(handle, 1 << PURR_PAD_UP);                     /* the UP light is on the other register */
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     ops->buttons(handle);
     CHECK(led_on_of(PURR_PAD_UP));
     CHECK(!led_on_of(PURR_PAD_A));
 
     ops->set_leds(handle, -1);                                   /* handed back: a light follows its button again */
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     ops->buttons(handle);
     CHECK(!led_on_of(PURR_PAD_UP));
     press(5);
-    fb_now += SCAN_IDLE_US + 1000;
+    SETTLE(ops);
     ops->buttons(handle);
     CHECK(led_on_of(PURR_PAD_B));
 }
@@ -495,6 +532,7 @@ int main(void)
     test_probe();
     test_setup_and_idle();
     test_idle_traffic();
+    test_debounce();
     test_every_button();
     test_leds();
     test_two_buttons_at_once();

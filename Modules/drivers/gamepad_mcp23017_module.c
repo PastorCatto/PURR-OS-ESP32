@@ -54,6 +54,8 @@ static uint64_t s_next_attach_us;
 static uint32_t s_attach_gap_us = ATTACH_US;
 static uint64_t s_last_scan_us;
 static uint16_t s_down;          /* bit n: button n is down, from the last scan */
+static uint16_t s_raw;           /* what the last scan read: a change is believed only when two scans in a row agree (switch bounce, and a bad read on the bus) */
+static int s_settling;           /* the last scan disagreed with what is believed: look again soon */
 static uint64_t s_repeat_at_us;
 static uint8_t s_q[8];
 static uint8_t s_q_head, s_q_count;
@@ -168,6 +170,8 @@ static void lost(void)
 {
     s_present = 0;
     s_down = 0;
+    s_raw = 0;
+    s_settling = 0;
     s_led = 0;
     s_q_count = 0;
 }
@@ -190,14 +194,22 @@ static int service(void)
         s_present = 1;
         s_last_scan_us = 0;
     }
-    if (s_last_scan_us == 0 || now - s_last_scan_us >= (s_down != 0 ? SCAN_US : SCAN_IDLE_US)) {
+    if (s_last_scan_us == 0 || now - s_last_scan_us >= ((s_down != 0 || s_settling) ? SCAN_US : SCAN_IDLE_US)) {
         s_last_scan_us = now;
         int m = scan();
         if (m < 0) {
             lost();
             return 0;
         }
-        uint16_t down = (uint16_t)m;
+        uint16_t seen = (uint16_t)m;
+        if (seen != s_down && seen != s_raw) {          /* a change nobody has confirmed: remember it, look again in a moment */
+            s_raw = seen;
+            s_settling = 1;
+            return 1;
+        }
+        s_raw = seen;
+        s_settling = 0;
+        uint16_t down = seen;
         uint16_t fresh = (uint16_t)(down & ~s_down);
         for (int n = 0; n < N_BUTTONS; n++) {
             if (fresh & (1u << n)) {
@@ -290,6 +302,8 @@ static int pad_probe(const purr_device_t *dev, const purr_board_t *board, void *
     s_next_attach_us = 0;
     s_attach_gap_us = ATTACH_US;
     s_down = 0;
+    s_raw = 0;
+    s_settling = 0;
     s_led = 0;
     s_led_override = 0;
     s_q_head = 0;

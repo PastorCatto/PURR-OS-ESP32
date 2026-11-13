@@ -455,7 +455,7 @@ static void tile_face(int idx, tile_face_t *f)
     } else if (strcmp(id, "music") == 0) {
         snprintf(f->name, sizeof(f->name), "MUSIC");
         snprintf(f->big, sizeof(f->big), LV_SYMBOL_PLAY);
-        snprintf(f->sub, sizeof(f->sub), find_app("Music") >= 0 ? "OPEN" : "NO APP");
+        snprintf(f->sub, sizeof(f->sub), find_app("Music") >= 0 ? "OPEN" : "NONE");
     } else if (strcmp(id, "none") == 0) {
         snprintf(f->name, sizeof(f->name), "EMPTY");
         snprintf(f->big, sizeof(f->big), "+");
@@ -639,12 +639,14 @@ static void clock_refresh(void)
         if (s_ls.bat_lbl != NULL) {
             int pct;
             char bl[24];
-            if (purr_battery_get(&pct, NULL)) {
+            int have = purr_battery_get(&pct, NULL);          /* no gauge (Playtime today): no battery block, only the Wi-Fi line */
+            if (have) {
                 snprintf(bl, sizeof(bl), "BATTERY %d%%", pct);
                 lv_obj_set_width(s_ls.bat_fill, (lv_coord_t)(pct * 90 / 100 < 1 ? 1 : pct * 90 / 100));
+                lv_obj_remove_flag(s_ls.bat_bar, LV_OBJ_FLAG_HIDDEN);
             } else {
-                snprintf(bl, sizeof(bl), "BATTERY --");
-                lv_obj_set_width(s_ls.bat_fill, 1);
+                bl[0] = '\0';
+                lv_obj_add_flag(s_ls.bat_bar, LV_OBJ_FLAG_HIDDEN);
             }
             lv_label_set_text(s_ls.bat_lbl, bl);
             purr_net_status_t ns;
