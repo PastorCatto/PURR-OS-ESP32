@@ -110,6 +110,42 @@ static void load_apps(void)
     }
 }
 
+/* The picture for an app: fr_<name in lower case letters and digits>, with a few apps sharing another's, or the generic app icon (the same rule the Android
+ * shell uses, so the one icon pack serves both). */
+static const char *icon_for(const char *name, int system, char *buf, size_t cap)
+{
+    if (system == 1) {
+        return "fr_settings";
+    }
+    if (system == 2) {
+        return "fr_app";
+    }
+    static const struct { const char *app, *icon; } alias[] = {
+        {"files", "fr_folder"}, {"devices", "fr_settings"}, {"notes", "fr_app"}, {"store", "fr_app"},
+        {"photos", "fr_gallery"}, {"gallery", "fr_gallery"}, {"messages", "fr_messaging"}, {"sms", "fr_messaging"},
+    };
+    size_t n = (size_t)snprintf(buf, cap, "fr_");
+    for (const char *s = name; *s != '\0' && n + 1 < cap; s++) {
+        if (isalnum((unsigned char)*s)) {
+            buf[n++] = (char)tolower((unsigned char)*s);
+        }
+    }
+    buf[n] = '\0';
+    for (size_t i = 0; i < sizeof(alias) / sizeof(alias[0]); i++) {
+        if (strcmp(buf + 3, alias[i].app) == 0) {
+            return alias[i].icon;
+        }
+    }
+    return w10m_img(buf) != NULL ? buf : "fr_app";
+}
+
+const lv_image_dsc_t *and_app_icon(const char *app)
+{
+    char buf[40];
+    const lv_image_dsc_t *d = w10m_img(icon_for(app, 0, buf, sizeof(buf)));
+    return d != NULL ? d : w10m_img("fr_app");
+}
+
 static int find_app(const char *name)
 {
     for (int i = 0; i < s_napps; i++) {
@@ -172,6 +208,8 @@ void tp_open_app(const char *name, int system)
 typedef struct {
     char label[PURR_APP_NAME_LEN];
     char sub[20];
+    char icon[PURR_APP_NAME_LEN];       /* the name of an app whose icon the row shows; empty for none */
+    int system;
     int tag;
 } lrow_t;
 
@@ -264,10 +302,24 @@ static void list_open(const char *title, const lrow_t *rows, int n, void (*pick)
         lv_obj_set_size(b, LV_PCT(100), 34);
         lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
         lv_obj_set_style_pad_hor(b, 10, 0);
+        int ix = 0;
+        if (s_ls.rows[i].icon[0] != '\0') {                /* the app's icon from the pack, at 20 pixels */
+            char nb[40];
+            const lv_image_dsc_t *ic = w10m_img(icon_for(s_ls.rows[i].icon, s_ls.rows[i].system, nb, sizeof(nb)));
+            if (ic != NULL) {
+                lv_obj_t *im = lv_image_create(b);
+                lv_image_set_src(im, ic);
+                lv_image_set_scale(im, 107);                /* 48 pixels at 107/256 */
+                lv_obj_set_size(im, 20, 20);
+                lv_obj_remove_flag(im, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_align(im, LV_ALIGN_LEFT_MID, 0, 0);
+                ix = 26;
+            }
+        }
         lv_obj_t *l = tp_label(b, s_ls.rows[i].label, &lv_font_montserrat_20, NULL);
         lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(l, LV_PCT(70));
-        lv_obj_align(l, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_set_width(l, LV_PCT(70) - ix);
+        lv_obj_align(l, LV_ALIGN_LEFT_MID, ix, 0);
         lv_obj_t *c = tp_label(b, LV_SYMBOL_RIGHT, &lv_font_montserrat_12, NULL);
         lv_obj_align(c, LV_ALIGN_RIGHT_MID, 0, 0);
         if (s_ls.rows[i].sub[0] != '\0') {
@@ -624,6 +676,8 @@ void tp_drawer_open(void)
     for (int i = 0; i < s_napps; i++) {
         memset(&rows[i], 0, sizeof(rows[i]));
         snprintf(rows[i].label, sizeof(rows[i].label), "%s", s_apps[i].name);
+        snprintf(rows[i].icon, sizeof(rows[i].icon), "%s", s_apps[i].name);
+        rows[i].system = s_apps[i].system;
         if (s_apps[i].dev) {
             snprintf(rows[i].sub, sizeof(rows[i].sub), "DEV");
         }

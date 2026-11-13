@@ -37,31 +37,24 @@ class Contract(unittest.TestCase):
             self.assertIn(fn + "(", shell, fn)
             self.assertRegex(slot, r"esp_err_t %s\(" % fn)
 
-    def test_the_android_shell_is_not_defined_twice(self):
-        """An image has one built-in shell: nothing the Type shell defines may also be defined by a Froyo file (a duplicate symbol is a link error)."""
-        _files, code = tp_sources()
-        froyo = "\n".join(read("PurrOS", "main", n) for n in os.listdir(MAIN) if n.startswith("purr_android") and n.endswith(".c"))
-        for fn in ("purr_android_start", "purr_android_lock", "w10m_banner", "w10m_img", "purr_shell_notified"):
-            in_tp = re.search(r"^[\w\s\*]*\b%s(?:_droid)?\(" % fn, code, re.M) is not None
-            in_froyo = re.search(r"^[\w\s\*]*\b%s\(" % fn, froyo, re.M) is not None
-            self.assertTrue(in_tp or fn.startswith("purr_android") or True)
-            self.assertFalse(in_tp and in_froyo and fn.startswith("purr_android") and False)
-
-    def test_nothing_outside_the_froyo_files_needs_a_froyo_symbol(self):
-        """If another file called a Froyo-only function, the Type shell image would not link. None does, and this keeps it so."""
+    def test_every_froyo_symbol_the_rest_of_the_firmware_uses_is_defined_by_the_type_shell(self):
+        """An image has either Froyo or the Type shell. If a file that is in both images (the shared window code, say) calls a function only a Froyo file defines,
+        the Type shell image does not link: found for real, 2026-11-12, with and_app_icon(). Every such function must be defined by the Type shell too."""
         froyo_defs = set()
         for n in os.listdir(MAIN):
             if n.startswith("purr_android") and n.endswith(".c"):
-                froyo_defs |= set(re.findall(r"^(?:void|int|lv_obj_t \*|esp_err_t)\s+((?:and_|purr_android_)\w+)\(", read("PurrOS", "main", n), re.M))
-        self.assertTrue(froyo_defs)
-        slot_ok = {"purr_android_start", "purr_android_set_orientation", "purr_android_lock", "purr_android_notify", "purr_android_refresh_apps"}
-        for n in os.listdir(MAIN):
-            if not n.endswith((".c", ".h")) or n.startswith("purr_android") or n.startswith("purr_tp"):
+                froyo_defs |= set(re.findall(r"^[A-Za-z_][\w\s\*]*?\b((?:and_|purr_android_)\w+)\(", read("PurrOS", "main", n), re.M))
+        froyo_defs -= {m for m in froyo_defs if re.search(r"^static\b[^\n]*\b%s\(" % m, "\n".join(read("PurrOS", "main", n) for n in os.listdir(MAIN) if n.startswith("purr_android") and n.endswith(".c")), re.M)}
+        self.assertIn("and_app_icon", froyo_defs)
+        _files, code = tp_sources()
+        for n in sorted(os.listdir(MAIN)):
+            if not n.endswith(".c") or n.startswith("purr_android") or n.startswith("purr_tp"):
                 continue
             text = read("PurrOS", "main", n)
-            for sym in froyo_defs - slot_ok:
-                if sym.startswith("and_"):
-                    self.assertIsNone(re.search(r"\b%s\(" % sym, text), "%s uses the Froyo-only %s" % (n, sym))
+            for sym in sorted(froyo_defs):
+                if re.search(r"(?<![\w])%s\(" % sym, re.sub(r"/\*.*?\*/", "", text, flags=re.S)):
+                    defined = re.search(r"^[A-Za-z_][\w\s\*]*?\b%s\(" % sym, code, re.M) is not None
+                    self.assertTrue(defined, "%s calls %s, which only the Froyo files define: the Type shell image will not link" % (n, sym))
 
 
 class Build(unittest.TestCase):

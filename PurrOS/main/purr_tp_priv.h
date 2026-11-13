@@ -101,6 +101,11 @@ void tp_home_menu_toggle(void);             /* the quick menu */
 /* What is playing, for the cover art in place of the clock: 0 while nothing is (no music app reports this yet). */
 int tp_now_playing(char *title, size_t tcap, char *artist, size_t acap);
 
+/* The picture for an app, from the icon pack in the image (the Froyo pictures today; a pack the owner swaps in later takes their place without a code change):
+ * fr_<name>, an alias, or the generic one. The shared window code (purr_catrt_ui.c) asks for it too, in the Android skin. Same name and meaning as the Android
+ * shell's function, which this image does not have. NULL only if the pack has no generic icon. */
+const lv_image_dsc_t *and_app_icon(const char *app);
+
 /* ---- the entry points purr_tp_slot.c gives the names the shell dispatcher calls */
 esp_err_t purr_tp_start(void);
 esp_err_t purr_tp_set_orientation(int degrees);
