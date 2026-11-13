@@ -71,6 +71,13 @@ class Choices(Setup):
         self.assertEqual((again["drivers"], again["apps"], again["ui"], again["key_id"]), (["bme280"], ["hello"], "moonlit", 4))
         self.assertEqual([x["name"] for x in system.list_systems(self.ws)], ["lunar"])
 
+    def test_a_playtime_system_starts_from_source_with_the_type_shell(self):
+        """There are no ready-made Playtime parts and the board has its own launcher, so a new Playtime system is set up for that; other boards are not."""
+        p = system.new_system(self.ws, "play", "playtime")
+        self.assertEqual((p["board"], p["parts_from"], p["shell"]), ("playtime", "source", "type"))
+        t = system.new_system(self.ws, "deck", "tdeck_plus")
+        self.assertEqual((t["parts_from"], t["shell"]), ("ready", "android"))
+
     def test_bad_names_and_boards_are_refused(self):
         for bad in ("", "../x", ".hidden", "a/b"):
             with self.assertRaises(system.SystemError_):

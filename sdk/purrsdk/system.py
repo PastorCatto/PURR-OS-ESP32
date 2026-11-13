@@ -92,7 +92,11 @@ def new_system(ws, name, board):
         raise SystemError_("The board is one of %s." % ", ".join(BOARDS))
     if os.path.isfile(_path(ws, name)):
         raise SystemError_("There is already a system called %s." % name)
-    save(ws, name, {"board": board, "drivers": [], "apps": [], "drivers_set": False, "key_id": 6, "boot_key_id": 7})
+    d = {"board": board, "drivers": [], "apps": [], "drivers_set": False, "key_id": 6, "boot_key_id": 7}
+    if board == "playtime":
+        d["parts_from"] = "source"                       # there are no ready-made Playtime parts: it is compiled
+        d["shell"] = "type"                              # and it has its own launcher (plan7.md, "The Type shell")
+    save(ws, name, d)
     return load(ws, name)
 
 
