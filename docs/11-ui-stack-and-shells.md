@@ -37,6 +37,7 @@ The way that works: an app asks for a widget by **role** ("a button", "a list ro
 | Android shell | [purr_android_home.c](../PurrOS/main/purr_android_home.c) | Home pages, dock, app drawer, options menu |
 | Android shell | [purr_android_shade.c](../PurrOS/main/purr_android_shade.c) | Notification shade |
 | Android shell | [purr_android_lock.c](../PurrOS/main/purr_android_lock.c) | Lock screen and sign-in |
+| Type shell (Playtime) | [purr_tp.c](../PurrOS/main/purr_tp.c), [purr_tp_home.c](../PurrOS/main/purr_tp_home.c), [purr_tp_lock.c](../PurrOS/main/purr_tp_lock.c), [purr_tp_kbd.c](../PurrOS/main/purr_tp_kbd.c), [purr_tp_slot.c](../PurrOS/main/purr_tp_slot.c) | The typographic launcher: compiled in instead of Froyo with `CONFIG_PURR_SHELL_TYPE` (`--shell type`); d-pad and touch; see plan7.md |
 | Old shell | [purr_ui_config.c](../PurrOS/main/purr_ui_config.c) | The text-config "nav" screen; the fallback (the card stack was removed) |
 | Art | [purr_ui_assets.c](../PurrOS/main/purr_ui_assets.c) | Finds a picture in a pack (a raw flash partition up to 1.0.28; files in LittleFS from 1.0.29, see [chapter 12](12-picture-pack-and-fonts.md)) |
 | Wallpaper | [purr_wallpaper.c](../PurrOS/main/purr_wallpaper.c) | The device-wide `display.wallpaper` choice |

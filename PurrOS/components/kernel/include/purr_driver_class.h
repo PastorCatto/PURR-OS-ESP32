@@ -29,6 +29,7 @@ extern "C" {
 #define PURR_DRV_CLASS_HCI    5     /* a Bluetooth controller, as an HCI transport */
 #define PURR_DRV_CLASS_BLOCK  6     /* a block device: an SD card, an eMMC, a flash chip with sectors */
 #define PURR_DRV_CLASS_ETHERNET 7   /* a wired network chip that moves raw Ethernet frames (the kernel's own TCP/IP stack sits on top) */
+#define PURR_DRV_CLASS_GAMEPAD 8    /* a gamepad module: nine buttons and a light for each (the Playtime board's input module) */
 
 const char *purr_drv_class_name(uint32_t class_id);   /* "gnss", "lora", "modem", "wifi", "hci", "block", "none", "?" */
 
@@ -180,6 +181,29 @@ typedef struct {
     int (*send_frame)(void *h, const uint8_t *frame, size_t len);              /* one frame, 14 to PURR_ETH_MAX_FRAME bytes, sent before it returns; 0 or < 0 */
     int (*recv_frame)(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms); /* one frame (its length), 0 if none arrived in time, < 0 on a chip error. A longer frame is cut to cap */
 } purr_eth_ops_t;
+
+/* ---------------------------------------------------------------- gamepad */
+
+/* The keys the gamepad sends through its plain read() (the "keyboard" device, so every shell and app that reads keys works) leave a shell with two things
+ * missing: which buttons are down right now (FUNC held, FUNC plus a face button) and control of the lights. This is that. Buttons are numbered as in the module:
+ * 0 UP, 1 DOWN, 2 LEFT, 3 RIGHT, 4 A, 5 B, 6 X, 7 Y, 8 FUNC. */
+#define PURR_PAD_UP    0
+#define PURR_PAD_DOWN  1
+#define PURR_PAD_LEFT  2
+#define PURR_PAD_RIGHT 3
+#define PURR_PAD_A     4
+#define PURR_PAD_B     5
+#define PURR_PAD_X     6
+#define PURR_PAD_Y     7
+#define PURR_PAD_FUNC  8
+#define PURR_PAD_COUNT 9
+
+typedef struct {
+    uint32_t version;                                       /* 1 */
+    uint32_t (*buttons)(void *h);                           /* bit n set: button n is down (as of the last scan, at most 8 ms old); 0 while no module is attached */
+    int (*present)(void *h);                                /* 1 while the module answers */
+    void (*set_leds)(void *h, int mask);                    /* bit n set: light the light of button n. A negative mask hands the lights back to the driver (a light is on while its button is down) */
+} purr_gamepad_ops_t;
 
 /* ---------------------------------------------------------------- Bluetooth: an HCI transport */
 

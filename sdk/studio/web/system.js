@@ -82,7 +82,7 @@ pages.system = {
       const url = h("input", { type: "text", class: "bx-input", value: sy.source_url, "aria-label": "Source address", style: { flex: "2 1 300px" }, onchange: ev => save({ source_url: ev.target.value.trim() }) });
       const ref = h("input", { type: "text", class: "bx-input", value: sy.source_ref, "aria-label": "Branch", style: { flex: "0 1 140px" }, onchange: ev => save({ source_ref: ev.target.value.trim() }) });
       const shell = h("select", { class: "bx-input", "aria-label": "Shell", style: { flex: "0 1 220px" }, onchange: ev => save({ shell: ev.target.value }) },
-        h("option", { value: "android", text: "Android 2.2 (Froyo) shell", selected: sy.shell === "android" }), h("option", { value: "w10m", text: "Windows 10 Mobile shell", selected: sy.shell === "w10m" }));
+        h("option", { value: "android", text: "Android 2.2 (Froyo) shell", selected: sy.shell === "android" }), h("option", { value: "w10m", text: "Windows 10 Mobile shell", selected: sy.shell === "w10m" }), h("option", { value: "type", text: "Type shell (Playtime launcher)", selected: sy.shell === "type" }));
       const ver = h("input", { type: "text", class: "bx-input", value: sy.version, "aria-label": "Version", style: { flex: "0 1 110px" }, onchange: ev => save({ version: ev.target.value.trim() }) });
       box.appendChild(h("div", { class: "row" }, url, ref, shell, h("span", { class: "dim small", text: "version" }), ver));
       const rst = h("input", { type: "text", class: "bx-input", value: sy.restore_url, placeholder: "empty: PURR's release", "aria-label": "Restore address", style: { flex: "1 1 320px" }, onchange: ev => save({ restore_url: ev.target.value.trim() }) });

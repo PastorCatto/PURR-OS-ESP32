@@ -24,7 +24,12 @@ if(CONFIG_PURR_BOARD_COLOR_LCD)
                               "purr_w10m_devportal.c" "purr_catrt_ui.c" "purr_w10m_perm.c" "purr_w10m_tasks.c" "purr_systasks.c" "purr_catrt_game.c")
         # The Android style shell is built into every image: it is the one that always works. Any other shell (the Windows 10 Mobile one, purr_w10m.c) is a loadable
         # module built by `purrstrap shells build` from its own source and installed under /ui/shells/ (plan7.md); it is not part of the kernel.
-        list(APPEND main_srcs "purr_android.c" "purr_android_home.c" "purr_android_shade.c" "purr_android_lock.c")
+        if(CONFIG_PURR_SHELL_TYPE)
+            # The Type shell (plan7.md "The Type shell"): the same entry points, its own files. The Android shell's files are left out of this image, not changed.
+            list(APPEND main_srcs "purr_tp.c" "purr_tp_home.c" "purr_tp_lock.c" "purr_tp_kbd.c" "purr_tp_slot.c")
+        else()
+            list(APPEND main_srcs "purr_android.c" "purr_android_home.c" "purr_android_shade.c" "purr_android_lock.c")
+        endif()
     endif()
     list(APPEND main_reqs lvgl)
 endif()

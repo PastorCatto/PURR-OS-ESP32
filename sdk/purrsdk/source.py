@@ -31,7 +31,7 @@ DEFAULT_REF = "main"
 PATHS = ("PurrOS", "UI", "purrstrap", "bootloader", "bootpkg", "Modules", "Apps", "tools/release")      # what a build reads from the repository
 IDF_VERSION = "5.3.5"
 PROFILES = (("full", "the kernel"), ("minimal", "the recovery loader"), ("recovery", "KittenOS"))
-SHELLS = ("w10m", "android")
+SHELLS = ("w10m", "android", "type")
 BOARDS_CHIP = {"tdeck_plus": "esp32s3", "tdeck": "esp32s3", "waveshare154": "esp32s3", "playtime": "esp32s3"}
 
 

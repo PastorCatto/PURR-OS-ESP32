@@ -1,0 +1,4 @@
+# The Type shell (plan7.md "The Type shell"): the typographic launcher of the Playtime board, in place of the Android 2.2 (Froyo) shell. Add this fragment to
+# SDKCONFIG_DEFAULTS after the profile. Only one built-in shell is compiled per image. "android" in the mode below means "the official shell", whichever it is.
+CONFIG_PURR_SHELL_TYPE=y
+CONFIG_PURR_UI_DEFAULT_MODE="android"

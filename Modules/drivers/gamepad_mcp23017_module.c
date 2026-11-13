@@ -13,10 +13,13 @@
  * the shell reads it the same way (purr_kernel_key() -> LVGL keypad):
  *     UP 17, DOWN 18, RIGHT 19, LEFT 20 (LVGL's arrow keys), A Enter (10), B Esc (27, the Back key), X Menu (1), Y Home (2), FUNC Tab (9, next field).
  * A direction repeats while it is held. The button's LED lights while it is down.
+ * It is also a gamepad-class driver (PURR_DRV_CLASS_GAMEPAD): a shell that needs the raw state (FUNC held, FUNC plus a face button) or the lights (a hint for each
+ * button that does something on the current screen) uses that through purr_class_ops(); the keys above keep working for everything else.
  *
  * Freestanding module: no libc, only the bus table. The state lives in this file's statics (one gamepad per board). */
 #include "purr_driver.h"
 #include "purr_driver_bus.h"
+#include "purr_driver_class.h"
 
 #define MCP_IODIRA 0x00
 #define MCP_IODIRB 0x01
@@ -52,6 +55,8 @@ static uint64_t s_repeat_at_us;
 static uint8_t s_q[8];
 static uint8_t s_q_head, s_q_count;
 static uint16_t s_led;           /* bit n: the LED of button n is lit */
+static int s_led_override;       /* the shell drives the lights (set_leds); otherwise a light is on while its button is down */
+static uint16_t s_led_want;      /* what the shell asked for */
 
 static void q_push(uint8_t k)
 {
@@ -148,12 +153,10 @@ static void lost(void)
     s_q_count = 0;
 }
 
-static int pad_read(void *handle, uint8_t *data, size_t len)
+/* Looks for the module while it is absent, scans it while it is there (at most once every SCAN_US, however often this is called), queues the new key presses
+ * and keeps the lights right. 1 while the module is there. Called from read() (keys) and from the class ops (state), always on the UI task. */
+static int service(void)
 {
-    (void)handle;
-    if (len == 0) {
-        return -1;
-    }
     uint64_t now = s_bus->now_us();
     if (!s_present) {
         if (now < s_next_attach_us) {
@@ -193,13 +196,26 @@ static int pad_read(void *handle, uint8_t *data, size_t len)
             s_repeat_at_us = now + REPEAT_NEXT_US;
         }
         s_down = down;
-        if (s_led != down) {
-            s_led = down;
+        uint16_t want = s_led_override ? s_led_want : down;
+        if (s_led != want) {
+            s_led = want;
             if (leds_write() != 0) {
                 lost();
                 return 0;
             }
         }
+    }
+    return 1;
+}
+
+static int pad_read(void *handle, uint8_t *data, size_t len)
+{
+    (void)handle;
+    if (len == 0) {
+        return -1;
+    }
+    if (!service()) {
+        return 0;
     }
     int k = q_pop();
     if (k == 0) {
@@ -208,6 +224,36 @@ static int pad_read(void *handle, uint8_t *data, size_t len)
     data[0] = (uint8_t)k;
     return 1;
 }
+
+/* The class ops (purr_driver_class.h, PURR_DRV_CLASS_GAMEPAD): the raw state and the lights, for a shell that needs more than keys. */
+static uint32_t pad_buttons(void *handle)
+{
+    (void)handle;
+    return service() ? s_down : 0;
+}
+
+static int pad_present(void *handle)
+{
+    (void)handle;
+    service();
+    return s_present;
+}
+
+static void pad_set_leds(void *handle, int mask)
+{
+    (void)handle;
+    if (mask < 0) {
+        s_led_override = 0;
+    } else {
+        s_led_override = 1;
+        s_led_want = (uint16_t)(mask & 0x1FF);
+    }
+    s_last_scan_us = 0;                                   /* the next service() writes the lights now */
+}
+
+static const purr_gamepad_ops_t s_pad_ops = {
+    .version = 1, .buttons = pad_buttons, .present = pad_present, .set_leds = pad_set_leds,
+};
 
 static int pad_probe(const purr_device_t *dev, const purr_board_t *board, void **out_handle)
 {
@@ -223,6 +269,7 @@ static int pad_probe(const purr_device_t *dev, const purr_board_t *board, void *
     s_next_attach_us = 0;
     s_down = 0;
     s_led = 0;
+    s_led_override = 0;
     s_q_head = 0;
     s_q_count = 0;
     *out_handle = (void *)(uintptr_t)h;
@@ -243,6 +290,7 @@ static const purr_driver_t s_pad_driver = {
     .name = "gamepad-mcp23017", .compatible = "gamepad-mcp23017",
     .probe = pad_probe, .remove = pad_remove, .read = pad_read,
     .bus_abi = PURR_DRIVER_BUS_ABI_VERSION,
+    .class_id = PURR_DRV_CLASS_GAMEPAD, .ops = &s_pad_ops,
 };
 
 __attribute__((used))

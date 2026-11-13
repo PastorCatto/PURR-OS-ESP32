@@ -373,6 +373,7 @@ const char *purr_drv_class_name(uint32_t class_id)
     case 5: return "hci";
     case 6: return "block";
     case 7: return "ethernet";
+    case 8: return "gamepad";
     default: return "?";
     }
 }

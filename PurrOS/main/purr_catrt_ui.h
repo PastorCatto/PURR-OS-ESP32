@@ -13,6 +13,9 @@ void purr_catrt_ui_layout(void);
 /* The Back key: the window that is on screen goes back or closes, as its header does. 1 if there was one. UI task. */
 int purr_catrt_ui_back(void);
 
+/* 1 while an app's window is on screen (a shell leaves the keys to it). UI task. */
+int purr_catrt_ui_is_open(void);
+
 /* Scrolls the window that is on screen, if an app's window is: dy > 0 shows what is further down. 1 if there was one to scroll. UI task. */
 int purr_catrt_ui_scroll(int dy);
 

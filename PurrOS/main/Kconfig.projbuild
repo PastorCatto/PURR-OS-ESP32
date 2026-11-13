@@ -121,6 +121,15 @@ menu "PURR OS user interface"
     # 10 Mobile style one (purr_w10m.c) for instance, is a loadable module installed from the Store or the hub under /ui/shells/ and chosen in Settings
     # (plan7.md, "Shells as installable items"). There is nothing to configure: it used to be a choice between the two (PURR_OFFICIAL_SHELL).
 
+    config PURR_SHELL_TYPE
+        bool "Build the Type shell instead of Android 2.2 (Froyo) as the built-in shell"
+        default n
+        help
+            The Type shell is the typographic launcher made for the Playtime board (plan4.md, plan7.md): paper, ink and one accent colour, a home screen with an
+            app list and three shortcut tiles, an iPod-style app list, a lock screen with an optional PIN, and a sign-in that works with the d-pad and with touch.
+            It takes the place of the Android shell in the image (the same entry points, purr_tp*.c instead of purr_android*.c); the Android shell's files are not
+            changed. Only one built-in shell is compiled per image. Set by the overlay sdkconfig.shell.type (`purrstrap coreos build --shell type`).
+
     config PURR_W10M_ROTATE_DEMO
         bool "Turn the Windows 10 Mobile style shell through every orientation (test only)"
         default n

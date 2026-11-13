@@ -173,7 +173,7 @@ FLAVORS = ("standard", "vm")
 
 
 # The official shell compiled into an image (plan7.md): the Windows 10 Mobile style one (no overlay) or the Android 2.2 style one.
-SHELLS = ("w10m", "android")
+SHELLS = ("w10m", "android", "type")
 
 
 def build_dir_name(board, profile, flavor="standard", shell="w10m"):
@@ -511,7 +511,7 @@ SCRIPT = Script(
                        Param("flavor", "choice", default="standard", choices=FLAVORS,
                              help="standard, or vm: no radio, a W5500 Ethernet controller instead"),
                        Param("shell", "choice", default="w10m", choices=SHELLS,
-                             help="the official shell to compile in: w10m or android"))),
+                             help="the official shell to compile in: w10m, android (Froyo) or type (the Playtime launcher)"))),
         Action("clean", "Clean", clean,
                help="delete one build directory", params=(_BOARD, _PROFILE)),
         Action("size", "Size", size,

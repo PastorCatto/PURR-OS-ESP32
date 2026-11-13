@@ -94,6 +94,16 @@ static void back_clicked(lv_event_t *e)
     }
 }
 
+int purr_catrt_ui_is_open(void)
+{
+    for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
+        if (s_win[i].used && s_win[i].open) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int purr_catrt_ui_back(void)
 {
     for (int i = 0; i < PURR_RT_MAX_APPS; i++) {

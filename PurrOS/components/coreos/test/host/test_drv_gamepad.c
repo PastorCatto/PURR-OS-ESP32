@@ -6,6 +6,7 @@
 
 #include "fakebus.h"
 #include "testkit.h"
+#include "purr_driver_class.h"
 #include "../../../../../Modules/drivers/gamepad_mcp23017_module.c"
 
 /* ---------------------------------------------------------------- the chip and the module */
@@ -317,6 +318,102 @@ static void test_scan_rate(void)
     CHECK(pad.reads - before <= 2);
 }
 
+static const purr_gamepad_ops_t *pad_ops(void)
+{
+    CHECK_EQ(purr_driver_class_id(drv), PURR_DRV_CLASS_GAMEPAD);
+    const purr_gamepad_ops_t *ops = drv->ops;
+    CHECK(ops != NULL && ops->version == 1 && ops->buttons != NULL && ops->present != NULL && ops->set_leds != NULL);
+    return ops;
+}
+
+static void test_class_ops_state(void)
+{
+    start(1);
+    const purr_gamepad_ops_t *ops = pad_ops();
+    fb_now += 10000;
+    CHECK_EQ(ops->present(handle), 1);
+    CHECK_EQ(ops->buttons(handle), 0u);
+    press(8);                                                    /* FUNC held */
+    press(4);                                                    /* and A: the chord a shell reads as a pinned-app shortcut */
+    fb_now += 10000;
+    CHECK_EQ(ops->buttons(handle), (1u << PURR_PAD_FUNC) | (1u << PURR_PAD_A));
+    release(4);
+    fb_now += 10000;
+    CHECK_EQ(ops->buttons(handle), 1u << PURR_PAD_FUNC);         /* still held: the shell times the hold itself */
+    release(8);
+    fb_now += 10000;
+    CHECK_EQ(ops->buttons(handle), 0u);
+
+    /* The keys still come through read(), whoever looks at the state: two readers do not steal from each other. The earlier presses are waiting in the queue
+     * (A's Enter and FUNC's Tab), as they must: a shell that only watches the state loses nothing. */
+    CHECK_EQ(poll_key(), '\n');                                  /* a scan queues the face buttons first, FUNC last */
+    CHECK_EQ(poll_key(), '\t');
+    CHECK_EQ(poll_key(), 0);
+    press(3);                                                    /* RIGHT */
+    fb_now += 10000;
+    CHECK_EQ(ops->buttons(handle), 1u << PURR_PAD_RIGHT);
+    CHECK_EQ(poll_key(), 19);
+}
+
+static void test_class_ops_lights(void)
+{
+    start(1);
+    const purr_gamepad_ops_t *ops = pad_ops();
+    fb_now += 10000;
+    ops->present(handle);
+    ops->set_leds(handle, (1 << PURR_PAD_A) | (1 << PURR_PAD_B));       /* the shell lights the buttons that do something here */
+    fb_now += 10000;
+    ops->buttons(handle);
+    CHECK(led_on_of(PURR_PAD_A));
+    CHECK(led_on_of(PURR_PAD_B));
+    CHECK(!led_on_of(PURR_PAD_X));
+    CHECK(!led_on_of(PURR_PAD_UP));
+    press(6);                                                    /* pressing X does not light it while the shell is in charge */
+    fb_now += 10000;
+    ops->buttons(handle);
+    CHECK(!led_on_of(PURR_PAD_X));
+    CHECK(led_on_of(PURR_PAD_A));
+    release(6);
+
+    ops->set_leds(handle, 1 << PURR_PAD_UP);                     /* the UP light is on the other register */
+    fb_now += 10000;
+    ops->buttons(handle);
+    CHECK(led_on_of(PURR_PAD_UP));
+    CHECK(!led_on_of(PURR_PAD_A));
+
+    ops->set_leds(handle, -1);                                   /* handed back: a light follows its button again */
+    fb_now += 10000;
+    ops->buttons(handle);
+    CHECK(!led_on_of(PURR_PAD_UP));
+    press(5);
+    fb_now += 10000;
+    ops->buttons(handle);
+    CHECK(led_on_of(PURR_PAD_B));
+}
+
+static void test_class_ops_absent(void)
+{
+    start(0);
+    const purr_gamepad_ops_t *ops = pad_ops();
+    fb_now += 10000;
+    CHECK_EQ(ops->present(handle), 0);
+    CHECK_EQ(ops->buttons(handle), 0u);
+    ops->set_leds(handle, 0x1FF);                                /* nothing to light: no crash, nothing written */
+    fb_now += 10000;
+    CHECK_EQ(ops->buttons(handle), 0u);
+    CHECK_EQ(pad.writes, 0);
+    pad.present = 1;                                             /* plugged in: the lights the shell asked for come on */
+    int tries = 0;
+    while (!ops->present(handle) && tries++ < 50) {
+        fb_now += 100000;
+    }
+    fb_now += 10000;
+    ops->buttons(handle);
+    for (int n = 0; n < PURR_PAD_COUNT; n++) {
+        CHECK(led_on_of(n));
+    }
+}
+
 int main(void)
 {
     test_probe();
@@ -328,5 +425,8 @@ int main(void)
     test_absent_then_attached();
     test_module_unplugged();
     test_scan_rate();
+    test_class_ops_state();
+    test_class_ops_lights();
+    test_class_ops_absent();
     TK_DONE("test_drv_gamepad");
 }
