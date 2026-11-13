@@ -135,7 +135,9 @@ static const section_t *sections(int *n)
 static lv_obj_t *s_set;                 /* the whole sheet */
 static lv_obj_t *s_head, *s_head_title;
 static lv_obj_t *s_body;
+#if !CONFIG_PURR_SHELL_TYPE                      /* the Type shell's Settings has no search bar (owner, 2026-11-13); every other build keeps it */
 static lv_obj_t *s_search;
+#endif
 static lv_obj_t *s_rows[16];            /* the main page's rows, for the filter */
 static lv_obj_t *s_status;              /* the page's one-line result area, or NULL */
 static lv_group_t *s_group;
@@ -296,6 +298,7 @@ static void sec_clicked(lv_event_t *e)
     }
 }
 
+#if !CONFIG_PURR_SHELL_TYPE
 static int contains_ci(const char *hay, const char *needle)
 {
     size_t n = strlen(needle);
@@ -330,10 +333,14 @@ static void search_changed(lv_event_t *e)
     }
 }
 
+#endif /* !CONFIG_PURR_SHELL_TYPE: the search bar's helpers */
+
 static void page_main(void)
 {
+#if !CONFIG_PURR_SHELL_TYPE
     s_search = cm_input(s_body, "Find a setting", 0);
     lv_obj_add_event_cb(s_search, search_changed, LV_EVENT_VALUE_CHANGED, NULL);
+#endif
 
     memset(s_rows, 0, sizeof(s_rows));
     int nsec;

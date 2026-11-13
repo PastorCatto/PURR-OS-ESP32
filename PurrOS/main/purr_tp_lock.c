@@ -682,7 +682,7 @@ static void *signin_done_cb(void *arg)
         }
     } else if (j->result == PURR_LOGIN_WAIT) {
         char msg[40];
-        snprintf(msg, sizeof(msg), "TOO MANY TRIES. WAIT %u S", (unsigned)j->wait_s);
+        snprintf(msg, sizeof(msg), "WAIT %u S", (unsigned)j->wait_s);
         s_npw = 0;
         memset(s_pw, 0, sizeof(s_pw));
         pw_dots();
@@ -691,7 +691,7 @@ static void *signin_done_cb(void *arg)
         s_npw = 0;
         memset(s_pw, 0, sizeof(s_pw));
         pw_dots();
-        pw_say("THAT PASSWORD IS WRONG. AGAIN");
+        pw_say("WRONG PASSWORD");
     }
     memset(j, 0, sizeof(*j));
     free(j);
@@ -713,7 +713,7 @@ static void pw_submit(void)
         return;
     }
     if (s_npw == 0) {
-        pw_say("TYPE YOUR PASSWORD");
+        pw_say("TYPE PASSWORD");
         return;
     }
     signin_job_t *j = calloc(1, sizeof(*j));
@@ -728,7 +728,7 @@ static void pw_submit(void)
     pw_say("SIGNING IN...");
     if (xTaskCreate(signin_task, "tp-signin", 6144, j, 4, NULL) != pdPASS) {
         s_si_busy = 0;
-        pw_say("COULD NOT START THE SIGN-IN");
+        pw_say("TRY AGAIN");
         free(j);
     }
 }
@@ -821,9 +821,9 @@ static void signin_pass_for(const char *name, const char *role, int fixed)
     s_pw_msg = tp_label(s_root, "", &lv_font_montserrat_12, NULL);
     mono(s_pw_msg);
     lv_obj_set_pos(s_pw_msg, 8, 60);
-    lv_obj_set_width(s_pw_msg, w - 8 - 10 * 14 - 12);
     lv_label_set_long_mode(s_pw_msg, LV_LABEL_LONG_DOT);
-    lv_label_set_text(s_pw_msg, "TYPE YOUR PASSWORD");
+    lv_obj_set_size(s_pw_msg, w - 8 - 10 * 14 - 16, 16);   /* one line, so it can never run under the keys */
+    lv_label_set_text(s_pw_msg, "TYPE PASSWORD");
     for (int i = 0; i < 10; i++) {
         lv_obj_t *d = lv_obj_create(s_root);
         lv_obj_remove_style_all(d);
@@ -873,7 +873,7 @@ static void signin_list(void)
     lv_obj_t *list = lv_obj_create(s_root);
     lv_obj_remove_style_all(list);
     lv_obj_set_pos(list, 0, TP_STRIP_H);
-    lv_obj_set_size(list, w - pw, h - TP_STRIP_H - 28);
+    lv_obj_set_size(list, w - pw, h - TP_STRIP_H - 36);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
@@ -890,6 +890,11 @@ static void signin_list(void)
         lv_obj_set_size(b, LV_PCT(100), 42);
         lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
         lv_obj_set_style_pad_hor(b, 8, 0);
+        static const lv_state_t chosen[2] = {LV_STATE_FOCUSED, LV_STATE_PRESSED};     /* the chosen row is an ink bar with paper text, as in the app list */
+        for (int k = 0; k < 2; k++) {
+            lv_obj_set_style_bg_color(b, tp_ink(), chosen[k]);
+            lv_obj_set_style_text_color(b, tp_paper(), chosen[k]);
+        }
         lv_obj_t *av = lv_obj_create(b);
         lv_obj_remove_style_all(av);
         lv_obj_clear_flag(av, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
@@ -922,9 +927,9 @@ static void signin_list(void)
         snprintf(note, sizeof(note), "DEFAULT ACCOUNT: MEOW, PASSWORD MEOW. CHANGE IT IN SETTINGS.");
     }
     lv_obj_t *nl = tp_label(s_root, note, &lv_font_montserrat_12, NULL);
-    lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(nl, w - pw - 16);
-    lv_obj_set_pos(nl, 8, h - 22);
+    lv_label_set_long_mode(nl, LV_LABEL_LONG_DOT);        /* dots need a fixed height: two lines of 12 pixels, then "..." */
+    lv_obj_set_size(nl, w - pw - 16, 30);
+    lv_obj_set_pos(nl, 8, h - 34);
 
     if (pw > 0) {
         lv_obj_t *p = lv_obj_create(s_root);

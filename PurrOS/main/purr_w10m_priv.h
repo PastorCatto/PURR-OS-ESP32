@@ -49,6 +49,7 @@ void w10m_place_sheet(lv_obj_t *sheet);
 /* The permission prompt (purr_w10m_perm.c): registers how the runtime asks the user. */
 void w10m_perm_init(void);
 int w10m_perm_is_open(void);                        /* a question is on screen: it has to be answered first */
+int w10m_perm_key(uint32_t key);                    /* its keys for a board with no touch (d-pad moves, Enter answers, Esc denies); 1 while it is open */
 
 /* Rebuilds the tiles and the app list from the installed apps. UI task only. */
 void w10m_apps_changed(void);

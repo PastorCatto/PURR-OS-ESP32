@@ -510,6 +510,9 @@ static int button_of_key(uint32_t key)
  * shortcut; with a sheet or an app window in front the keys are theirs (apart from Back, Home and Menu); otherwise the home screen and its lists use them. */
 static int key_hook(uint32_t key)
 {
+    if (w10m_perm_key(key)) {                           /* a permission question is up: it is answered first, by whatever is on screen (a gamepad has no touch) */
+        return 1;
+    }
     if (tp_modal_key(key)) {
         return 1;
     }

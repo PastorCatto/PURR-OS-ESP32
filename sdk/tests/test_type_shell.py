@@ -57,6 +57,23 @@ class Contract(unittest.TestCase):
                     self.assertTrue(defined, "%s calls %s, which only the Froyo files define: the Type shell image will not link" % (n, sym))
 
 
+class SharedScreens(unittest.TestCase):
+    def test_the_permission_prompt_can_be_answered_without_touch(self):
+        """On a board with a gamepad the permission prompt (modal) was impossible to answer, which locked the whole UI behind it (found in the first emulator run)."""
+        perm = read("PurrOS", "main", "purr_w10m_perm.c")
+        self.assertIn("int w10m_perm_key(uint32_t key)", perm)
+        self.assertIn("perm_focus(2);", perm)                                   # it starts on "Don't allow": a stray Enter never grants anything
+        self.assertIn("LV_KEY_ESC", perm)
+        hook = read("PurrOS", "main", "purr_tp.c")
+        self.assertRegex(hook, r"static int key_hook\(uint32_t key\)\s*\{\s*if \(w10m_perm_key\(key\)\)")   # first, before the lock screen and everything else
+
+    def test_the_settings_search_bar_is_removed_in_the_type_build_only(self):
+        text = read("PurrOS", "main", "purr_w10m_settings.c")
+        self.assertIn("#if !CONFIG_PURR_SHELL_TYPE", text)
+        i = text.index("static void page_main(void)")
+        self.assertRegex(text[i:i + 400], r"#if !CONFIG_PURR_SHELL_TYPE\s+s_search = cm_input\(s_body, \"Find a setting\", 0\);")      # still there for every other build
+
+
 class Build(unittest.TestCase):
     def test_the_option_the_overlay_and_the_sources(self):
         kconfig = read("PurrOS", "main", "Kconfig.projbuild")

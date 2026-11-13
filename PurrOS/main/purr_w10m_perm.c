@@ -19,6 +19,19 @@
 static lv_obj_t *s_scrim, *s_card, *s_text, *s_deny_label;
 static lv_obj_t *s_btn_parent;                  /* where the three buttons go: the card (stacked) or a row of their own (the Android skin) */
 static int s_never;                             /* the third button currently means "don't ask again" */
+static lv_obj_t *s_btns[3];                     /* the three buttons, for a board with no touch screen (w10m_perm_key) */
+static int s_nbtn, s_focus = 2;                 /* which one the d-pad has highlighted: it starts on "Don't allow" */
+
+static void perm_focus(int i)
+{
+    for (int k = 0; k < s_nbtn; k++) {
+        lv_obj_remove_state(s_btns[k], LV_STATE_FOCUSED);
+    }
+    s_focus = i;
+    if (i >= 0 && i < s_nbtn) {
+        lv_obj_add_state(s_btns[i], LV_STATE_FOCUSED);
+    }
+}
 
 static void fill(const char *app, int perm, int denials)
 {
@@ -28,6 +41,7 @@ static void fill(const char *app, int perm, int denials)
     lv_label_set_text(s_deny_label, s_never ? "Don't ask again" : "Don't allow");
     lv_obj_remove_flag(s_scrim, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_scrim);
+    perm_focus(2);                                      /* "Don't allow": a stray Enter never grants anything */
 }
 
 static void answered(lv_event_t *e)
@@ -60,6 +74,12 @@ static lv_obj_t *button(const char *text, int choice, lv_obj_t **label_out)
     lv_obj_set_style_text_font(l, android ? &lv_font_montserrat_12 : &lv_font_montserrat_14, 0);
     lv_obj_center(l);
     lv_obj_add_event_cb(b, answered, LV_EVENT_CLICKED, (void *)(intptr_t)choice);
+    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUSED);      /* the d-pad's highlight */
+    lv_obj_set_style_outline_color(b, lv_color_white(), LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_pad(b, 1, LV_STATE_FOCUSED);
+    if (s_nbtn < 3) {
+        s_btns[s_nbtn++] = b;
+    }
     if (label_out) {
         *label_out = l;
     }
@@ -171,6 +191,37 @@ static void show(const char *app, int perm, int denials)
 int w10m_perm_is_open(void)
 {
     return s_scrim != NULL && !lv_obj_has_flag(s_scrim, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* The prompt for a board with no touch screen (a gamepad): up and left, or down and right, move the highlight over the three buttons, Enter answers with the
+ * highlighted one, Esc and Back say "Don't allow". Without this the prompt could not be answered at all, and it is modal, so nothing else could be done either.
+ * While it is open every key is its own: 1 always (0 only when it is not open). A shell calls this first from its key hook. */
+int w10m_perm_key(uint32_t key)
+{
+    if (!w10m_perm_is_open() || s_nbtn < 3) {
+        return 0;
+    }
+    switch (key) {
+    case LV_KEY_UP:
+    case LV_KEY_LEFT:
+    case LV_KEY_PREV:
+        perm_focus((s_focus + 2) % 3);
+        break;
+    case LV_KEY_DOWN:
+    case LV_KEY_RIGHT:
+    case LV_KEY_NEXT:
+        perm_focus((s_focus + 1) % 3);
+        break;
+    case LV_KEY_ENTER:
+        lv_obj_send_event(s_btns[s_focus], LV_EVENT_CLICKED, NULL);
+        break;
+    case LV_KEY_ESC:
+        lv_obj_send_event(s_btns[2], LV_EVENT_CLICKED, NULL);
+        break;
+    default:
+        break;
+    }
+    return 1;
 }
 
 void w10m_perm_init(void)
