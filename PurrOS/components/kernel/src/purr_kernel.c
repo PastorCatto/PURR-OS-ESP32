@@ -119,7 +119,9 @@ const purr_vm_info_t *purr_vm_info(void)
     }
     s_vm_probed = true;
     const purr_board_t *b = purr_board();
-    if (b == NULL || b->keyboard.addr == 0) {
+    /* The probe goes out on the board's own I2C bus (the pins of its keyboard entry). A board with no I2C bus at all (the e-paper board) has that entry all zero.
+     * A board with an I2C bus but no keyboard chip (Playtime: its input module is a gamepad) gives the pins and a zero address, and is probed all the same. */
+    if (b == NULL || (b->keyboard.addr == 0 && b->keyboard.sda == 0 && b->keyboard.scl == 0)) {
         return &s_vm;
     }
     i2c_master_bus_handle_t bus;
