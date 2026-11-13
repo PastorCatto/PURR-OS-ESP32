@@ -59,6 +59,9 @@ static int chip(const uint8_t *tx, size_t n, uint8_t *rx, size_t rn)
     if (!pad.present) {
         return -1;
     }
+    if (tx == NULL && n == 0 && rn == 0) {
+        return 0;                                        /* an empty transaction: the chip acknowledges its address (a probe) */
+    }
     if (tx != NULL && n >= 2 && rn == 0) {
         pad.writes++;
         for (size_t i = 1; i < n; i++) {
@@ -318,6 +321,45 @@ static void test_scan_rate(void)
     CHECK(pad.reads - before <= 2);
 }
 
+static void test_an_absent_module_is_probed_quietly_and_less_and_less_often(void)
+{
+    start(0);
+    fb_i2c_probes = 0;
+    uint64_t t0 = fb_now;
+    while (fb_now - t0 < 60000000) {                             /* a minute with nothing plugged in */
+        tick_key();
+    }
+    CHECK(fb_i2c_probes >= 5 && fb_i2c_probes <= 14);            /* 0.5 s, 1, 2, 4, 8, 8, ...: about eleven, not a hundred and twenty */
+    CHECK_EQ(pad.writes, 0);                                     /* nothing was written to an address nobody answers: no error lines on a real bus */
+
+    pad.present = 1;                                             /* plugged in: found within the longest wait */
+    int got = 0;
+    uint64_t t1 = fb_now;
+    fb_i2c_probes = 0;
+    press(2);                                                    /* LEFT, held as it goes in */
+    while (!got && fb_now - t1 < 9000000) {
+        fb_now += 100000;
+        got = poll_key();
+    }
+    CHECK_EQ(got, 20);
+    CHECK(fb_i2c_probes <= 2);
+
+    pad.present = 0;                                             /* unplugged and plugged back: the wait starts again from the short one */
+    for (int i = 0; i < 5; i++) {
+        tick_key();
+    }
+    pad_reset();
+    release(2);
+    press(3);                                                    /* RIGHT */
+    got = 0;
+    t1 = fb_now;
+    while (!got && fb_now - t1 < 1200000) {
+        fb_now += 100000;
+        got = poll_key();
+    }
+    CHECK_EQ(got, 19);                                           /* found within 1.2 s, not after the long wait */
+}
+
 static const purr_gamepad_ops_t *pad_ops(void)
 {
     CHECK_EQ(purr_driver_class_id(drv), PURR_DRV_CLASS_GAMEPAD);
@@ -425,6 +467,7 @@ int main(void)
     test_absent_then_attached();
     test_module_unplugged();
     test_scan_rate();
+    test_an_absent_module_is_probed_quietly_and_less_and_less_often();
     test_class_ops_state();
     test_class_ops_lights();
     test_class_ops_absent();

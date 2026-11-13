@@ -22,7 +22,7 @@ const purr_driver_t *gnss_mine_entry(const purr_driver_bus_table_t *bus) { s_bus
 - **remove** lets go of everything.
 - **class_id** and **ops** say what kind of driver it is, so the rest of the system can use it without knowing which chip it is.
 
-## The bus table (ABI 8)
+## The bus table (ABI 9)
 
 | Group | Functions |
 |---|---|
@@ -36,6 +36,7 @@ const purr_driver_t *gnss_mine_entry(const purr_driver_bus_table_t *bus) { s_bus
 | UART | `uart_open`, `uart_write`, `uart_read`, `uart_set_baud`, `uart_close` |
 | Shared SPI bus | `spi_lock`, `spi_unlock` (hold the bus across several transfers; recursive) |
 | A bus of the device's own | `spi_open_bus` (ABI 8: start an SPI bus for a chip that is not on the board's shared one, then `spi_add_device` on it) |
+| Is it there? | `i2c_probe` (ABI 9: does the I2C device answer its address? No data and no error line in the log, for a module that may be unplugged) |
 
 The full list, with what each argument means, is in `PurrOS/components/kernel/include/purr_driver_bus.h`.
 

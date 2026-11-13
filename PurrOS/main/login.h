@@ -45,6 +45,9 @@ int purr_login_has_accounts(void);
 int purr_login_store_unreadable(void);
 /* 1 (and the account's name in `name`) while the default administrator, MEOW with the password MEOW, is still in force; 0 once its password has been changed or it has been removed. */
 int purr_login_default_account(char *name, size_t cap);
+/* A device with no accounts and no way to type one (a gamepad is its only input): makes the default administrator, MEOW with the password MEOW, and signs nobody in.
+ * 1 if it was made; 0 if there are accounts already or the list could not be read. */
+int purr_login_make_default_account(void);
 
 typedef enum {
     PURR_LOGIN_OK = 0,       /* signed in: purr_login_current() is the account */

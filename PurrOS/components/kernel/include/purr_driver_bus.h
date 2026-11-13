@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define PURR_DRIVER_BUS_ABI_VERSION 8u
+#define PURR_DRIVER_BUS_ABI_VERSION 9u
 /* The oldest bus table layout this kernel still serves. The table only ever grows at the end (see Drivers/SPEC.md section 4.1), so a driver
  * built against any version from this one up to the current works unchanged: the driver's version is independent of the OS's. Raise this
  * only if a slot is ever moved, which the append-only rule forbids. */
@@ -119,6 +119,11 @@ typedef struct {
      * (host 0). `max_transfer` is the longest single spi_transfer() the driver will make, in bytes. 0 on success or when this driver's earlier call
      * already started the same host with the same pins; < 0 otherwise. After it, spi_add_device(host, ...) adds the chip to that bus. */
     int (*spi_open_bus)(int host, int sclk, int mosi, int miso, size_t max_transfer);
+
+    /* ABI 9: asks whether the I2C device behind `handle` answers its address, with no data and, above all, no error in the log. A module that may or may not be
+     * plugged in (the gamepad) looks for itself with this instead of writing to an address that may be empty: every failed write is an ERROR line from the I2C
+     * driver. 0 if it answered, < 0 if not (or on a bad handle). */
+    int (*i2c_probe)(uint32_t handle, int timeout_ms);
 } purr_driver_bus_table_t;
 
 /* core -> module direction (Modules/SPEC.md section 6, scoped to drivers): called once per

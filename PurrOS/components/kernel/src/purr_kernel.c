@@ -210,6 +210,10 @@ static uint32_t store_handle(void *h)
     return (uint32_t)(++s_bus_handle_count);
 }
 
+/* What i2c_probe() needs to ask the bus about a device: the bus it is on and its address, by handle. */
+static i2c_master_bus_handle_t s_i2c_bus_of[MAX_BUS_HANDLES];
+static uint16_t s_i2c_addr_of[MAX_BUS_HANDLES];
+
 static void *handle_at(uint32_t h)
 {
     return (h >= 1 && h <= (uint32_t)s_bus_handle_count) ? s_bus_handles[h - 1] : NULL;
@@ -275,7 +279,20 @@ static uint32_t bus_i2c_add_device(int port, int sda_pin, int scl_pin, uint16_t 
     if (i2c_master_bus_add_device(bus_h, &dc, &dev) != ESP_OK) {
         return 0;
     }
-    return store_handle(dev);
+    uint32_t h = store_handle(dev);
+    if (h >= 1 && h <= MAX_BUS_HANDLES) {
+        s_i2c_bus_of[h - 1] = bus_h;
+        s_i2c_addr_of[h - 1] = addr;
+    }
+    return h;
+}
+
+static int bus_i2c_probe(uint32_t handle, int timeout_ms)
+{
+    if (handle < 1 || handle > MAX_BUS_HANDLES || s_i2c_bus_of[handle - 1] == NULL) {
+        return -1;
+    }
+    return i2c_master_probe(s_i2c_bus_of[handle - 1], s_i2c_addr_of[handle - 1], timeout_ms) == ESP_OK ? 0 : -1;    /* the IDF's probe does not log a missing device */
 }
 
 /* The I2C driver's interrupt reads and writes the caller's buffer directly. A buffer in PSRAM (a big allocation, or a task
@@ -373,6 +390,7 @@ static void bus_i2c_remove_device(uint32_t handle)
     i2c_master_bus_rm_device(dev);
     if (handle >= 1 && handle <= (uint32_t)s_bus_handle_count) {
         s_bus_handles[handle - 1] = NULL;
+        s_i2c_bus_of[handle - 1] = NULL;
     }
 }
 
@@ -557,6 +575,7 @@ static const purr_driver_bus_table_t s_bus_table = {
     .i2c_read = bus_i2c_read,
     .i2c_write_read = bus_i2c_write_read,
     .i2c_remove_device = bus_i2c_remove_device,
+    .i2c_probe = bus_i2c_probe,
     .gpio_set_output = bus_gpio_set_output,
     .gpio_set_input_pullup = bus_gpio_set_input_pullup,
     .gpio_get = bus_gpio_get,

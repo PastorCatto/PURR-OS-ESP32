@@ -161,6 +161,7 @@ class Bus:
     def spi_lock(self): self.lock_depth += 1; self.lock_max = max(self.lock_max, self.lock_depth)
     def spi_unlock(self): self.lock_depth -= 1
     def spi_open_bus(self, host, sclk, mosi, miso, max_transfer): self.log.append(("spi_open_bus", host, sclk, mosi, miso, max_transfer)); return 0
+    def i2c_probe(self, handle, timeout_ms): self.log.append(("i2c_probe", handle)); return 0
     def dma_alloc(self, n):
         buf = C.create_string_buffer(n)
         self.dma.append(buf)
@@ -213,6 +214,7 @@ class Bus:
             ("spi_lock", T(None), b.spi_lock),
             ("spi_unlock", T(None), b.spi_unlock),
             ("spi_open_bus", T(C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, C.c_size_t), b.spi_open_bus),
+            ("i2c_probe", T(C.c_int, c_u32, C.c_int), b.i2c_probe),
         ]
         fields = [("abi_version", c_u32)] + [(n, t) for n, t, _ in funcs]
 
@@ -220,7 +222,7 @@ class Bus:
             _fields_ = fields
 
         tab = Table()
-        tab.abi_version = 8
+        tab.abi_version = 9
         keep = []
         for n, t, f in funcs:
             cb = t(f)

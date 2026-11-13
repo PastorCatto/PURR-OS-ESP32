@@ -38,7 +38,8 @@
 #define BTN_FUNC   8
 
 #define SCAN_US        8000      /* at most one scan this often, however often read() is called */
-#define ATTACH_US      500000    /* how often an absent module is looked for */
+#define ATTACH_US      500000    /* how soon an absent module is looked for again, the first time: it doubles after each miss ... */
+#define ATTACH_MAX_US  8000000   /* ... up to this, so a board with no module costs a probe every eight seconds, not every half second */
 #define REPEAT_FIRST_US 400000
 #define REPEAT_NEXT_US  120000
 #define I2C_MS         20
@@ -49,6 +50,7 @@ static const purr_driver_bus_table_t *s_bus;
 static uint32_t s_h;
 static int s_present;
 static uint64_t s_next_attach_us;
+static uint32_t s_attach_gap_us = ATTACH_US;
 static uint64_t s_last_scan_us;
 static uint16_t s_down;          /* bit n: button n is down, from the last scan */
 static uint64_t s_repeat_at_us;
@@ -104,10 +106,14 @@ static int leds_write(void)
     return wr(MCP_OLATB, b);
 }
 
-/* Sets the expander up as the firmware does and says whether it answered. */
+/* Sets the expander up as the firmware does and says whether it answered. The first thing is a probe of the address (bus ABI 9): it makes no noise when nothing
+ * is there, where a failed write is an ERROR line from the I2C driver every time. */
 static int attach(void)
 {
-    if (wr(MCP_IODIRA, 0x00) != 0) {                      /* the first write is the probe: a missing module NACKs */
+    if (s_bus->i2c_probe != NULL && s_bus->i2c_probe(s_h, I2C_MS) != 0) {
+        return -1;
+    }
+    if (wr(MCP_IODIRA, 0x00) != 0) {                      /* a module that answers its address but not a write is no use either */
         return -1;
     }
     uint8_t pu[3] = {MCP_GPPUA, 0x00, (uint8_t)(COL_MASK | FUNC_BIT)};
@@ -162,10 +168,12 @@ static int service(void)
         if (now < s_next_attach_us) {
             return 0;
         }
-        s_next_attach_us = now + ATTACH_US;
         if (attach() != 0) {
+            s_next_attach_us = now + s_attach_gap_us;
+            s_attach_gap_us = s_attach_gap_us * 2 > ATTACH_MAX_US ? ATTACH_MAX_US : s_attach_gap_us * 2;
             return 0;
         }
+        s_attach_gap_us = ATTACH_US;
         s_present = 1;
         s_last_scan_us = 0;
     }
@@ -265,8 +273,9 @@ static int pad_probe(const purr_device_t *dev, const purr_board_t *board, void *
         return -1;
     }
     s_h = h;
-    s_present = 0;                /* looked for on the first read, and again every half second while it is absent */
+    s_present = 0;                /* looked for on the first read, and again (after 0.5 s, then 1, 2, 4, up to 8 s) while it is absent */
     s_next_attach_us = 0;
+    s_attach_gap_us = ATTACH_US;
     s_down = 0;
     s_led = 0;
     s_led_override = 0;

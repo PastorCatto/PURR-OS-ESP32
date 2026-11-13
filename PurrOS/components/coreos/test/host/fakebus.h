@@ -108,6 +108,14 @@ static int fb_i2c_write_read(uint32_t h, const uint8_t *tx, size_t tn, uint8_t *
     return fb_i2c_hook ? fb_i2c_hook(tx, tn, rx, rn) : 0;
 }
 static void fb_i2c_remove(uint32_t h) { (void)h; fb_i2c_removed++; }
+static int fb_i2c_probes;
+static int fb_i2c_probe(uint32_t h, int ms)
+{
+    (void)h;
+    (void)ms;
+    fb_i2c_probes++;
+    return fb_i2c_hook ? fb_i2c_hook(NULL, 0, NULL, 0) : 0;      /* an empty transaction: the chip acknowledges its address, or does not */
+}
 
 /* ---- clock and GPIO */
 static uint64_t fb_now;
@@ -177,6 +185,7 @@ static purr_driver_bus_table_t fb_table(void)
     t.i2c_read = fb_i2c_read;
     t.i2c_write_read = fb_i2c_write_read;
     t.i2c_remove_device = fb_i2c_remove;
+    t.i2c_probe = fb_i2c_probe;
     t.spi_add_device = fb_spi_add;
     t.spi_transfer = fb_spi_transfer;
     t.spi_open_bus = fb_spi_open_bus;

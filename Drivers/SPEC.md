@@ -155,6 +155,11 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
   module registered later finds it like any board device.
 - **The first driver of the class** is `Modules/drivers/w5500_module.c` (a W5500 in MACRAW mode, same register sequence as ESP-IDF's driver). Host test: `test_drv_eth.c`, which plays the chip.
 
+### 4.7 Bus ABI 9, a quiet probe, and the GAMEPAD class (2026-11-12)
+- **`i2c_probe(handle, timeout_ms)`** (appended; `PURR_DRIVER_BUS_ABI_VERSION` is 9, `_MIN` stays 4). Asks whether the I2C device behind a handle answers its address, with no data and no error in the log (the IDF's `i2c_master_probe`). A driver for a module that may be unplugged looks for it with this: a failed write is an ERROR line every time.
+- **Class `GAMEPAD` (8)**, `purr_gamepad_ops_t`: `buttons(h)` (a bit for each of the nine buttons, `PURR_PAD_*`), `present(h)`, `set_leds(h, mask)` (a negative mask hands the lights back to the driver). It is for a shell that needs more than the keys the driver sends through `read()`: FUNC held, FUNC plus a face button, and the lights as hints.
+- **The reference driver** is `Modules/drivers/gamepad_mcp23017_module.c` (the Playtime board's MCP23017 module): the "keyboard" device, arrow keys, Enter, Esc, Menu, Home. An absent module is probed after 0.5 s, then 1, 2, 4 and up to 8 s. Host test: `test_drv_gamepad.c`, which plays the chip and its diode matrix.
+
 ## 6a. Reference drivers by class (2026-10-28)
 | Driver | Class | Bus | Notes |
 |---|---|---|---|

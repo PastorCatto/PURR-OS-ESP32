@@ -340,6 +340,11 @@ void app_main(void)
         int own_signin = 1;                   /* the recovery app has no sign-in: erasing asks an administrator for their password */
 #else
         int own_signin = purr_ui_mode_get() == PURR_UI_MODE_W10M && purr_login_has_accounts();
+        /* A board with no keyboard chip (Playtime: its input is a gamepad) cannot type a first account's name into the text setup below, which would wait for ever, and
+         * the graphical shell would never start. It gets the default administrator instead, as an unattended install does, and then the shell's own sign-in. */
+        if (!own_signin && !auto_in && !purr_login_has_accounts() && purr_board()->keyboard.addr == 0 && purr_login_make_default_account()) {
+            own_signin = purr_ui_mode_get() == PURR_UI_MODE_W10M && purr_login_has_accounts();
+        }
 #endif
         if (!own_signin && !auto_in) {
             rs_end();                           /* a text login needs the console */

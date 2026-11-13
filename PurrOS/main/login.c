@@ -180,7 +180,8 @@ static void count_home(void *ctx, const char *name, int is_dir, uint32_t size)
     }
 }
 
-static void unattended_first_account(void)
+/* Makes the default administrator and marks it (DEFAULT_ACCOUNT_FILE). Nobody is signed in by this. */
+static void make_default_account(void)
 {
     int homes = 0;
     purr_fs_list(purr_login_fs(), "/home", count_home, &homes);
@@ -191,7 +192,22 @@ static void unattended_first_account(void)
     purr_login_persist();
     purr_fs_mkdir(purr_login_fs(), "/etc");
     purr_fs_write(purr_login_fs(), DEFAULT_ACCOUNT_FILE, DEFAULT_ACCOUNT_NAME "\n", sizeof(DEFAULT_ACCOUNT_NAME));
+}
 
+/* For a board that cannot type a name (its only input is a gamepad): the text first-time setup would wait for ever, so the default administrator is made, as for an
+ * unattended install, and the sign-in screen says what it is. Only on a device with no accounts and a readable account list. 1 if it made it. */
+int purr_login_make_default_account(void)
+{
+    if (purr_login_has_accounts() || s_store_unreadable) {
+        return 0;
+    }
+    make_default_account();
+    return 1;
+}
+
+static void unattended_first_account(void)
+{
+    make_default_account();
     purr_user_t *u = purr_user_list_find(&s_users, DEFAULT_ACCOUNT_NAME);
     s_current = *u;
 
