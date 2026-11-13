@@ -129,7 +129,7 @@ static int poll_key(void)
 /* One tick later (past the scan interval, which is longer while nothing is down), then read. */
 static int tick_key(void)
 {
-    fb_now += s_down != 0 ? 10000 : SCAN_IDLE_US + 1000;
+    fb_now += s_down != 0 ? SCAN_US + 1000 : SCAN_IDLE_US + 1000;
     int k = poll_key();
     if (s_settling) {                                            /* a change is believed on the second scan: it comes a moment later */
         fb_now += SCAN_US + 1000;

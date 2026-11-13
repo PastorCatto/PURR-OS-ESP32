@@ -37,13 +37,14 @@
 #define N_BUTTONS  9             /* 0..3 UP DOWN LEFT RIGHT, 4..7 A B X Y, 8 FUNC */
 #define BTN_FUNC   8
 
-#define SCAN_US        8000      /* at most one scan this often while a button is down, however often read() is called */
+#define SCAN_US        12000     /* at most one scan this often while a button is down, however often read() is called */
 #define SCAN_IDLE_US   24000     /* and this often while none is: one bus read per look, 40 a second, not hundreds (an emulated I2C controller crashed the guest under load) */
 #define ATTACH_US      500000    /* how soon an absent module is looked for again, the first time: it doubles after each miss ... */
 #define ATTACH_MAX_US  8000000   /* ... up to this, so a board with no module costs a probe every eight seconds, not every half second */
 #define REPEAT_FIRST_US 400000
 #define REPEAT_NEXT_US  120000
-#define I2C_MS         60        /* a real transfer takes a millisecond; the rest is for an emulator on a busy computer, where a timeout leaves a late interrupt behind */
+#define I2C_MS         250       /* a real transfer takes a millisecond; the rest is for an emulator on a busy computer, where a timeout leaves a late interrupt behind */
+#define PROBE_MS       30        /* an absent module answers with a NACK at once; the probe only needs to wait out a stuck bus */
 
 static const uint8_t s_key[N_BUTTONS] = {17, 18, 20, 19, '\n', 27, 1, 2, '\t'};
 
@@ -103,17 +104,15 @@ static int leds_write(void)
         }
     }
     uint8_t b = (s_led & 1u) ? 0x00 : LED_UP_BIT;
-    if (wr(MCP_OLATA, (uint8_t)~a) != 0) {
-        return -1;
-    }
-    return wr(MCP_OLATB, b);
+    uint8_t both[3] = {MCP_OLATA, (uint8_t)~a, b};              /* OLATA and OLATB are neighbours: one transfer sets every light (the rows stay low in OLATB) */
+    return s_bus->i2c_write(s_h, both, sizeof(both), I2C_MS);
 }
 
 /* Sets the expander up as the firmware does and says whether it answered. The first thing is a probe of the address (bus ABI 9): it makes no noise when nothing
  * is there, where a failed write is an ERROR line from the I2C driver every time. */
 static int attach(void)
 {
-    if (s_bus->i2c_probe != NULL && s_bus->i2c_probe(s_h, I2C_MS) != 0) {
+    if (s_bus->i2c_probe != NULL && s_bus->i2c_probe(s_h, PROBE_MS) != 0) {
         return -1;
     }
     if (wr(MCP_IODIRA, 0x00) != 0) {                      /* a module that answers its address but not a write is no use either */
