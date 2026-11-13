@@ -104,6 +104,17 @@ int purr_catrt_ui_is_open(void)
     return 0;
 }
 
+/* The window in front (the sheet of the open app), for a shell that moves a highlight over its controls; NULL when none is open. */
+lv_obj_t *purr_catrt_ui_front(void)
+{
+    for (int i = 0; i < PURR_RT_MAX_APPS; i++) {
+        if (s_win[i].used && s_win[i].open) {
+            return s_win[i].sheet;
+        }
+    }
+    return NULL;
+}
+
 int purr_catrt_ui_back(void)
 {
     for (int i = 0; i < PURR_RT_MAX_APPS; i++) {

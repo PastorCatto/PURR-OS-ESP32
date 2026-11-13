@@ -36,6 +36,7 @@ static const purr_accent_t s_accents[] = {
 #define ACCENT_AMBER 13                                 /* index in s_accents; the Froyo orange highlight is closest to it */
 static int s_android = 1;                               /* the skin: the built-in shell is the Android style one; purr_shell_select() changes it when a loaded shell says otherwise */
 #define SKIN_ANDROID (s_android)
+static int s_type;                                      /* the Type look (the Playtime shell): paper, ink and the accent, square, outlined. A look over the W10M roles, not a third skin: every layout test in the shared screens keeps seeing W10M */
 
 static int s_accent = ACCENT_AMBER;                     /* Amber in the Android skin, which is the default; Cobalt unless the flavor says otherwise in the Windows skin (purr_theme_set_skin) */
 static int s_dark = 1;
@@ -46,22 +47,40 @@ static void (*s_on_change)(void);
 /* ---------------------------------------------------------------- colours */
 
 static lv_color_t c_accent(void) { return lv_color_hex(s_accents[s_accent].color); }
-static lv_color_t c_sheet(void)   { return lv_color_hex(SKIN_ANDROID ? (s_dark ? 0x000000 : 0xFFFFFF) : (s_dark ? 0x1A1A1A : 0xF2F2F2)); }
-static lv_color_t c_surface(void) { return lv_color_hex(SKIN_ANDROID ? (s_dark ? 0x1E1E1E : 0xE6E6E6) : (s_dark ? 0x2B2B2B : 0xDDDDDD)); }
-static lv_color_t c_hi(void)      { return lv_color_hex(SKIN_ANDROID ? (s_dark ? 0x3A3A3A : 0xBDBDBD) : (s_dark ? 0x404040 : 0xC4C4C4)); }
-static lv_color_t c_text(void)    { return lv_color_hex(s_dark ? 0xFFFFFF : 0x000000); }
-static lv_color_t c_dim(void)     { return lv_color_hex(SKIN_ANDROID ? (s_dark ? 0xAAAAAA : 0x555555) : (s_dark ? 0xB0B0B0 : 0x606060)); }
-static lv_color_t c_row_pr(void)  { return lv_color_hex(s_dark ? 0x333333 : 0xD0D0D0); }
+static lv_color_t c_sheet(void)   { if (s_type) return lv_color_hex(s_dark ? 0x14120F : 0xF4F1EA); return lv_color_hex(SKIN_ANDROID ? (s_dark ? 0x000000 : 0xFFFFFF) : (s_dark ? 0x1A1A1A : 0xF2F2F2)); }
+static lv_color_t c_surface(void) { if (s_type) return lv_color_hex(s_dark ? 0x26231E : 0xE7E2D5); return lv_color_hex(SKIN_ANDROID ? (s_dark ? 0x1E1E1E : 0xE6E6E6) : (s_dark ? 0x2B2B2B : 0xDDDDDD)); }
+static lv_color_t c_hi(void)      { if (s_type) return lv_color_hex(s_dark ? 0x3F3B33 : 0xCFC9BA); return lv_color_hex(SKIN_ANDROID ? (s_dark ? 0x3A3A3A : 0xBDBDBD) : (s_dark ? 0x404040 : 0xC4C4C4)); }
+static lv_color_t c_text(void)    { if (s_type) return lv_color_hex(s_dark ? 0xF4F1EA : 0x14120F); return lv_color_hex(s_dark ? 0xFFFFFF : 0x000000); }
+static lv_color_t c_dim(void)     { if (s_type) return lv_color_hex(s_dark ? 0xB5B0A3 : 0x6B675C); return lv_color_hex(SKIN_ANDROID ? (s_dark ? 0xAAAAAA : 0x555555) : (s_dark ? 0xB0B0B0 : 0x606060)); }
+static lv_color_t c_row_pr(void)  { if (s_type) return lv_color_hex(s_accents[s_accent].color); return lv_color_hex(s_dark ? 0x333333 : 0xD0D0D0); }
 
-/* Black or white, whichever reads on the accent (Lime and Yellow are light). */
+/* Black or white, whichever reads on the accent (Lime and Yellow are light). In the Type look: ink or paper, the one with the higher contrast ratio (the same rule as
+ * the shell's tp_on_accent(), which sdk/tests/test_type_shell.py checks for every colour in the picker). */
+static float lum2(uint32_t c)
+{
+    float r = ((c >> 16) & 0xFF) / 255.0f, g = ((c >> 8) & 0xFF) / 255.0f, b = (c & 0xFF) / 255.0f;
+    return 0.2126f * r * r + 0.7152f * g * g + 0.0722f * b * b;
+}
+
+static float contrast2(float x, float y)
+{
+    return x > y ? (x + 0.05f) / (y + 0.05f) : (y + 0.05f) / (x + 0.05f);
+}
+
 static lv_color_t c_on_accent(void)
 {
+    if (s_type) {
+        float a = lum2(s_accents[s_accent].color);
+        return contrast2(a, lum2(0x14120F)) >= contrast2(a, lum2(0xF4F1EA)) ? lv_color_hex(0x14120F) : lv_color_hex(0xF4F1EA);
+    }
     uint32_t c = s_accents[s_accent].color;
     uint32_t lum = (299 * ((c >> 16) & 0xFF) + 587 * ((c >> 8) & 0xFF) + 114 * (c & 0xFF)) / 1000;
     return lum > 150 ? lv_color_black() : lv_color_white();
 }
 
 lv_color_t purr_theme_accent_color(void) { return c_accent(); }
+/* Text that warns: amber on a dark sheet, a darker amber on paper (the Type look), where 0xFFB900 would not read. */
+lv_color_t purr_theme_warn_color(void) { return lv_color_hex(s_type && !s_dark ? 0x9A5B00 : 0xFFB900); }
 lv_color_t purr_theme_text_color(void) { return c_text(); }
 lv_color_t purr_theme_dim_color(void) { return c_dim(); }
 lv_color_t purr_theme_surface_color(void) { return c_surface(); }
@@ -321,12 +340,57 @@ static void fill_styles_android(void)
     lv_style_set_border_color(&s_ta_focus, acc);
 }
 
+/* The Type look: the flat, square W10M roles in paper, ink and the accent (the colour functions above), with the outlines the Type shell draws everywhere: an ink
+ * border on every control, the accent when pressed, an ink title bar with an accent rule. The highlight a d-pad moves is the shell's own ring (purr_tp_nav.c), so
+ * no widget needs a focus style here. */
+static void fill_styles_type(void)
+{
+    fill_styles_w10m();
+    lv_color_t ink = lv_color_hex(s_dark ? 0xF4F1EA : 0x14120F);
+    lv_color_t acc = c_accent();
+
+    lv_style_set_bg_color(&s_st[PURR_TH_STRIP], lv_color_hex(0x14120F));
+
+    lv_style_set_bg_color(&s_st[PURR_TH_TITLE_BAR], lv_color_hex(0x14120F));
+    lv_style_set_bg_opa(&s_st[PURR_TH_TITLE_BAR], LV_OPA_COVER);
+    lv_style_set_border_side(&s_st[PURR_TH_TITLE_BAR], LV_BORDER_SIDE_BOTTOM);
+    lv_style_set_border_width(&s_st[PURR_TH_TITLE_BAR], 2);
+    lv_style_set_border_color(&s_st[PURR_TH_TITLE_BAR], acc);
+
+    lv_style_set_border_side(&s_st[PURR_TH_SURFACE], LV_BORDER_SIDE_FULL);
+    lv_style_set_border_width(&s_st[PURR_TH_SURFACE], 1);
+    lv_style_set_border_color(&s_st[PURR_TH_SURFACE], ink);
+
+    lv_style_set_border_width(&s_btn, 2);
+    lv_style_set_border_color(&s_btn, lv_color_hex(0x14120F));
+
+    lv_style_set_border_width(&s_sw, 2);
+    lv_style_set_border_color(&s_sw, ink);
+    lv_style_set_border_width(&s_sl_knob, 2);
+    lv_style_set_border_color(&s_sl_knob, ink);
+
+    lv_style_set_border_color(&s_dd, ink);
+    lv_style_set_border_color(&s_dd_list, ink);
+    lv_style_set_border_color(&s_ta, ink);
+    lv_style_set_bg_color(&s_ta, s_dark ? c_surface() : lv_color_hex(0xFBF9F4));
+}
+
 static void fill_styles(void)
 {
     if (SKIN_ANDROID) {
         fill_styles_android();
+    } else if (s_type) {
+        fill_styles_type();
     } else {
         fill_styles_w10m();
+    }
+}
+
+void purr_theme_set_type_look(int on)
+{
+    s_type = on != 0;
+    if (s_type) {
+        s_dark = 0;                                     /* paper by default; a saved choice (load_file in purr_theme_init) overrides it */
     }
 }
 
@@ -341,6 +405,10 @@ void purr_theme_set_skin(purr_skin_t skin)
 void purr_theme_title_bar(lv_obj_t *head, lv_obj_t *arrow, lv_obj_t *title)
 {
     purr_theme_apply(head, PURR_TH_TITLE_BAR);
+    if (s_type) {
+        lv_obj_set_style_text_color(title, lv_color_hex(0xF4F1EA), 0);      /* the bar is ink in both bases */
+        lv_obj_set_style_text_color(arrow, lv_color_hex(0xF4F1EA), 0);
+    }
     if (SKIN_ANDROID) {
         lv_obj_add_flag(arrow, LV_OBJ_FLAG_HIDDEN);     /* Back is a key; tapping the bar still goes back */
         lv_obj_align(title, LV_ALIGN_LEFT_MID, 8, 0);
@@ -348,7 +416,7 @@ void purr_theme_title_bar(lv_obj_t *head, lv_obj_t *arrow, lv_obj_t *title)
     }
 }
 
-lv_color_t purr_theme_button_text_color(void) { return SKIN_ANDROID ? lv_color_black() : lv_color_white(); }
+lv_color_t purr_theme_button_text_color(void) { return SKIN_ANDROID ? lv_color_black() : (s_type ? c_on_accent() : lv_color_white()); }
 
 void purr_theme_apply(lv_obj_t *obj, purr_th_style_t which)
 {
@@ -366,7 +434,9 @@ void purr_theme_apply(lv_obj_t *obj, purr_th_style_t which)
             purr_theme_apply(obj, PURR_TH_ROW_PRESSED);     /* the pressed fill and the divider */
         } else {
             purr_theme_apply(obj, PURR_TH_SURFACE);
-            purr_theme_apply(obj, PURR_TH_ACCENT_BORDER);
+            if (!s_type) {                                  /* the Type look outlines the row instead of an edge in the accent */
+                purr_theme_apply(obj, PURR_TH_ACCENT_BORDER);
+            }
             purr_theme_apply(obj, PURR_TH_ROW_PRESSED);
         }
         return;

@@ -34,6 +34,11 @@ static void y_cb(void *obj, int32_t v)
     lv_obj_set_y((lv_obj_t *)obj, v);
 }
 
+lv_obj_t *w10m_tasks_root(void)
+{
+    return w10m_tasks_is_open() ? s_view : NULL;
+}
+
 int w10m_tasks_is_open(void)
 {
     return s_view != NULL && !lv_obj_has_flag(s_view, LV_OBJ_FLAG_HIDDEN);

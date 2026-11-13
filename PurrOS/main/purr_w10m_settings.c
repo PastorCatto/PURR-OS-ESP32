@@ -184,7 +184,7 @@ static void say(const char *text, int good)
         return;
     }
     lv_label_set_text(s_status, text);
-    lv_obj_set_style_text_color(s_status, good ? purr_theme_accent_color() : lv_color_hex(0xFFB900), 0);
+    lv_obj_set_style_text_color(s_status, good ? purr_theme_accent_color() : purr_theme_warn_color(), 0);
     lv_obj_t *b = w10m_last_button();           /* an error sits right under the button that failed */
     if (!good && b != NULL && lv_obj_get_parent(b) != NULL && lv_obj_is_valid(s_status)) {
         lv_obj_t *par = lv_obj_get_parent(b);
@@ -902,7 +902,7 @@ static void theme_section(void)
     cm_dim(s_body, line);
     if (purr_ui_assets_theme_failed()[0]) {
         snprintf(line, sizeof(line), "The theme %s could not be loaded, so the shell's own pictures are used.", purr_ui_assets_theme_failed());
-        lv_obj_set_style_text_color(cm_dim(s_body, line), lv_color_hex(0xFFB900), 0);
+        lv_obj_set_style_text_color(cm_dim(s_body, line), purr_theme_warn_color(), 0);
     }
     s_theme_ids[0][0] = '\0';
     cm_row(s_body, chosen[0] ? "None" : "None (chosen)", "The shell's own pictures", 1, theme_pick_cb, (void *)s_theme_ids[0]);
@@ -1794,7 +1794,7 @@ static void page_developer(void)
                    "Turning developer mode off turns this off too.");
     s_sec_warn = cm_dim(s_body, "WARNING: an unsigned app runs with the same access as the system, and an unsigned driver is "
                                 "code inside the kernel. Only install ones you built or trust.");
-    lv_obj_set_style_text_color(s_sec_warn, lv_color_hex(0xFFB900), 0);
+    lv_obj_set_style_text_color(s_sec_warn, purr_theme_warn_color(), 0);
     lv_obj_add_flag(s_sec_warn, LV_OBJ_FLAG_HIDDEN);
     if (!acting_admin()) {
         cm_dim(s_body, "Only an administrator can change developer options.");
@@ -1987,7 +1987,7 @@ static void page_about(void)
             cm_space(s_body, 4);
             cm_title(s_body, "Your data was reset");
             lv_obj_t *l = cm_text(s_body, why);
-            lv_obj_set_style_text_color(l, lv_color_hex(0xFFB900), 0);
+            lv_obj_set_style_text_color(l, purr_theme_warn_color(), 0);
             lv_obj_t *gb = cm_button(s_body, "Got it", about_reset_dismiss_cb, NULL);
             lv_obj_set_width(gb, LV_PCT(100));
         }
@@ -2011,12 +2011,12 @@ static void page_about(void)
         }
         lv_obj_t *l = cm_text(s_body, buf);
         if (who.revoked || !who.known) {
-            lv_obj_set_style_text_color(l, lv_color_hex(0xFFB900), 0);
+            lv_obj_set_style_text_color(l, purr_theme_warn_color(), 0);
         }
     } else {
         lv_obj_t *l = cm_text(s_body, st.have_handoff ? "System: NOT verified (the signature did not check out)"
                                                       : "System: NOT verified (no boot record: not started by the PURR bootloader)");
-        lv_obj_set_style_text_color(l, lv_color_hex(0xFFB900), 0);
+        lv_obj_set_style_text_color(l, purr_theme_warn_color(), 0);
     }
     snprintf(buf, sizeof(buf), "Boot policy: %s", !st.have_handoff ? "unknown"
              : st.mode_at_boot == PURR_SECURE_ENFORCE ? "enforce (unsigned images are refused)" : "warn (unsigned images boot with a warning)");
@@ -2218,6 +2218,7 @@ void w10m_settings_open(void)
 }
 
 int w10m_settings_is_open(void) { return s_open; }
+lv_obj_t *w10m_settings_root(void) { return s_open ? s_set : NULL; }
 
 void w10m_settings_back(void)
 {

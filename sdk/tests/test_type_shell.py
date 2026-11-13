@@ -74,6 +74,69 @@ class SharedScreens(unittest.TestCase):
         self.assertRegex(text[i:i + 400], r"#if !CONFIG_PURR_SHELL_TYPE\s+s_search = cm_input\(s_body, \"Find a setting\", 0\);")      # still there for every other build
 
 
+class TheTheme(unittest.TestCase):
+    """The user's rule (2026-11-12): the theme handles the user interface directly; a layout change is made in the theme and not in an app. So the d-pad and the look
+    of every sheet come from the shell and the theme, and the shared screens only learned to name their roots and to ask for a warning colour."""
+
+    def test_the_d_pad_reaches_every_sheet_through_the_shell(self):
+        hook = read("PurrOS", "main", "purr_tp.c")
+        i = hook.index("static int key_hook(uint32_t key)")
+        body = hook[i:i + 2400]
+        self.assertRegex(body, r"if \(tp_sheet_open\(\)\) \{\s*if \(tp_nav_key\(key\)\)")      # before the shell's own Back and Home handling
+        self.assertRegex(hook, r"void tp_go_home\(void\)\s*\{[^}]*\}\s*tp_nav_reset\(\);")           # the keyboard and the highlight do not outlive the sheet
+        self.assertIn("tp_nav_init();", hook)
+        self.assertIn("tp_nav_layout();", hook)
+
+    def test_every_sheet_names_its_root(self):
+        priv = read("PurrOS", "main", "purr_w10m_priv.h")
+        nav = read("PurrOS", "main", "purr_tp_nav.c")
+        for fn, src in (("w10m_settings_root", "purr_w10m_settings.c"), ("w10m_devportal_root", "purr_w10m_devportal.c"), ("w10m_tasks_root", "purr_w10m_tasks.c")):
+            self.assertIn("lv_obj_t *%s(void);" % fn, priv)
+            self.assertRegex(read("PurrOS", "main", src), r"lv_obj_t \*%s\(void\)" % fn)
+            self.assertIn(fn + "()", nav)
+        self.assertIn("purr_catrt_ui_front()", nav)
+        self.assertIn("lv_obj_t *purr_catrt_ui_front(void);", read("PurrOS", "main", "purr_catrt_ui.h"))
+
+    def test_an_activation_is_what_a_finger_does(self):
+        """A switch flips on the release and a button hears the click; both must be sent, in that order, and a handler that deletes the control stops the rest."""
+        nav = read("PurrOS", "main", "purr_tp_nav.c")
+        i = nav.index("static int activate(void)")
+        body = nav[i:i + 1800]
+        order = [body.index(c) for c in ("LV_EVENT_PRESSED", "LV_EVENT_RELEASED", "LV_EVENT_CLICKED")]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(body.count("!= LV_RESULT_OK"), 2)
+
+    def test_the_type_look_is_switched_on_by_the_shell_only(self):
+        theme = read("PurrOS", "main", "purr_w10m_theme.c")
+        self.assertIn("void purr_theme_set_type_look(int on)", theme)
+        self.assertIn("void purr_theme_set_type_look(int on);", read("PurrOS", "main", "purr_w10m_theme.h"))
+        users = [n for n in os.listdir(MAIN) if n.endswith(".c") and "purr_theme_set_type_look(" in read("PurrOS", "main", n) and n != "purr_w10m_theme.c"]
+        self.assertEqual(users, ["purr_tp.c"])
+        tp = read("PurrOS", "main", "purr_tp.c")
+        self.assertLess(tp.index("purr_theme_set_skin(PURR_SKIN_W10M);"), tp.index("purr_theme_set_type_look(1);"))
+        self.assertLess(tp.index("purr_theme_set_type_look(1);"), tp.index("purr_theme_init();"))
+        # a look and not a skin: the layout tests in the shared screens (purr_theme_skin() == PURR_SKIN_ANDROID) still see W10M
+        self.assertNotIn("PURR_SKIN_TYPE", theme)
+
+    def test_the_theme_and_the_shell_agree_on_what_reads_on_the_accent(self):
+        theme = read("PurrOS", "main", "purr_w10m_theme.c")
+        shell = read("PurrOS", "main", "purr_tp.c")
+        for text in (theme, shell):
+            self.assertIn("0.2126f", text)
+            self.assertIn("0.7152f", text)
+            self.assertIn("0.0722f", text)
+            self.assertIn("0.05f", text)
+        self.assertIn("0x14120F", theme)
+        self.assertIn("0xF4F1EA", theme)
+        self.assertEqual(re.search(r"#define TP_INK\s+(0x\w+)", read("PurrOS", "main", "purr_tp_priv.h")).group(1).upper(), "0X14120F")
+
+    def test_warnings_use_the_theme_colour(self):
+        """Amber on paper does not read; the screens ask the theme."""
+        for n in ("purr_w10m_settings.c", "purr_w10m_devportal.c"):
+            self.assertNotIn("0xFFB900", read("PurrOS", "main", n), n)
+        self.assertIn("0xFFB900", read("PurrOS", "main", "purr_w10m_theme.c"))      # the dark sheets keep their amber
+
+
 class Build(unittest.TestCase):
     def test_the_option_the_overlay_and_the_sources(self):
         kconfig = read("PurrOS", "main", "Kconfig.projbuild")

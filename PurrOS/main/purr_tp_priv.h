@@ -10,6 +10,7 @@
  *   purr_tp_kbd.c    the focus manager, the key grid (keyboard and PIN pad), small drawing helpers
  *   purr_tp_home.c   the app list, the home screen and its shortcut tiles, the app list screen, the quick menu
  *   purr_tp_lock.c   the lock screen, the PIN, the sign-in
+ *   purr_tp_nav.c    the d-pad for the sheets in front: a highlight over any control, the on-screen keyboard
  *   purr_tp_slot.c   the entry points the shell dispatcher (purr_shell.c) calls for the built-in shell
  *
  * UI service task only, unless a function says otherwise.
@@ -83,6 +84,14 @@ void tp_grid_cycle(tp_grid_t *g);           /* abc, ABC, symbols, abc */
 void tp_grid_show(tp_grid_t *g, int on);    /* shows or hides all its keys (hidden keys are not focusable) */
 void tp_grid_add_focus(tp_grid_t *g);       /* puts its keys into the focus manager */
 lv_obj_t *tp_grid_first(tp_grid_t *g);      /* a good key to start on */
+
+/* ---- purr_tp_nav.c: the d-pad for the sheets in front (Settings, the portal, the task manager, app windows): a ring over the highlighted control, arrows, Enter,
+ * an on-screen keyboard for text boxes. The layout and the input are the shell's; the sheets and the apps do not know. */
+void tp_nav_init(void);
+int tp_nav_key(uint32_t key);               /* a key while a sheet is in front: 1 if used (0 for Back, Home, Menu and anything else) */
+void tp_nav_reset(void);                    /* forget the highlight, close the keyboard (the sheet changed) */
+void tp_nav_layout(void);                   /* the screen rotated */
+int tp_nav_osk_up(void);
 
 /* ---- purr_tp_home.c */
 void tp_home_build(lv_obj_t *screen);

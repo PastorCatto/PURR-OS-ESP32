@@ -26,7 +26,7 @@ if(CONFIG_PURR_BOARD_COLOR_LCD)
         # module built by `purrstrap shells build` from its own source and installed under /ui/shells/ (plan7.md); it is not part of the kernel.
         if(CONFIG_PURR_SHELL_TYPE)
             # The Type shell (plan7.md "The Type shell"): the same entry points, its own files. The Android shell's files are left out of this image, not changed.
-            list(APPEND main_srcs "purr_tp.c" "purr_tp_home.c" "purr_tp_lock.c" "purr_tp_kbd.c" "purr_tp_slot.c")
+            list(APPEND main_srcs "purr_tp.c" "purr_tp_home.c" "purr_tp_lock.c" "purr_tp_kbd.c" "purr_tp_nav.c" "purr_tp_slot.c")
         else()
             list(APPEND main_srcs "purr_android.c" "purr_android_home.c" "purr_android_shade.c" "purr_android_lock.c")
         endif()

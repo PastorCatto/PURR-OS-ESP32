@@ -142,7 +142,7 @@ static void say(const char *t, int good)
         return;
     }
     lv_label_set_text(s_status, t);
-    lv_obj_set_style_text_color(s_status, good ? purr_theme_accent_color() : lv_color_hex(0xFFB900), 0);
+    lv_obj_set_style_text_color(s_status, good ? purr_theme_accent_color() : purr_theme_warn_color(), 0);
 }
 
 static void make_status(void)
@@ -733,6 +733,7 @@ void w10m_devportal_open(void)
 }
 
 int w10m_devportal_is_open(void) { return s_open; }
+lv_obj_t *w10m_devportal_root(void) { return s_open ? s_sheet : NULL; }
 
 void w10m_devportal_back(void)
 {

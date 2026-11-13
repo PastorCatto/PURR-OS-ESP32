@@ -458,6 +458,7 @@ void tp_go_home(void)
     if (tp_modal_up() || !s_signed_in || w10m_perm_is_open()) {
         return;
     }
+    tp_nav_reset();
     w10m_tasks_close();
     for (int i = 0; i < 4 && w10m_settings_is_open(); i++) {
         w10m_settings_back();                           /* up a page at a time, the last one closes it */
@@ -528,6 +529,9 @@ static int key_hook(uint32_t key)
         return 1;
     }
     if (tp_sheet_open()) {
+        if (tp_nav_key(key)) {                          /* the sheet's controls: arrows, Enter, the keyboard for a text box */
+            return 1;
+        }
         if (key == LV_KEY_ESC) {
             tp_back();
             return 1;
@@ -591,6 +595,7 @@ static void relayout(void)
     purr_catrt_ui_layout();
     tp_lock_layout();
     tp_signin_layout();
+    tp_nav_layout();
 }
 
 void w10m_apply_orientation(int degrees)
@@ -735,6 +740,7 @@ static void *build_cb(void *arg)
 {
     (void)arg;
     purr_theme_set_skin(PURR_SKIN_W10M);                /* the shared screens (Settings, windows) in the flat, square look that sits next to this one */
+    purr_theme_set_type_look(1);                        /* ... in paper, ink and the accent: Settings, the portal, the task manager and every app window take their look from here */
     for (int i = 0; i < purr_theme_accent_count(); i++) {
         if (strcmp(purr_theme_accent_at(i)->name, "Orange") == 0) {
             purr_theme_set_accent(i);                   /* this shell's own default; a saved choice (purr_theme_init) overrides it */
@@ -761,6 +767,7 @@ static void *build_cb(void *arg)
     build_strip();
     tp_lock_build();                                    /* above the strip: the lock screen and the sign-in cover the whole screen */
     tp_signin_build();
+    tp_nav_init();
     purr_theme_on_change(theme_changed);
     if (purr_login_autologin_used()) {
         char msg[80];

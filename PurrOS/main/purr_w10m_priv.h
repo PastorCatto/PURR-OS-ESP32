@@ -61,12 +61,14 @@ void w10m_devportal_build(void);
 void w10m_devportal_layout(void);
 void w10m_devportal_open(void);
 int w10m_devportal_is_open(void);
+lv_obj_t *w10m_devportal_root(void);
 void w10m_devportal_back(void);                     /* up one page, or closes it (the Back key) */
 
 /* The task manager (purr_w10m_tasks.c): a list of every running app with its memory and an End button, opened from the control center's Tasks tile. UI task only. */
 void w10m_tasks_open(void);                         /* a second call goes back */
 void w10m_tasks_close(void);
 int w10m_tasks_is_open(void);
+lv_obj_t *w10m_tasks_root(void);
 /* The lock screen or the sign-in screen is up: nothing behind it may be opened. */
 int w10m_is_locked(void);
 
@@ -75,6 +77,7 @@ void w10m_settings_build(void);
 void w10m_settings_layout(void);
 void w10m_settings_open(void);
 int w10m_settings_is_open(void);
+lv_obj_t *w10m_settings_root(void);
 void w10m_settings_back(void);                      /* up one page, or closes it from the first page (the Back key) */
 
 #endif /* PURR_W10M_PRIV_H */
