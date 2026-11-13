@@ -5,4 +5,4 @@ standard library to look at things (inspect, verify, serve, edit configs); makin
 signing need the `cryptography` package, which the kit bundles.
 """
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
