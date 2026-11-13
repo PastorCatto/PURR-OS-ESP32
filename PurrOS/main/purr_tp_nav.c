@@ -143,7 +143,7 @@ static int listed(const lv_obj_t *o)
     return 0;
 }
 
-/* Where to start: the first control under the title bar (so Enter does not close the sheet by accident), else the first. */
+/* Where to start: the first control under the title bar (so Enter does not close the sheet by accident); with none there, nothing: a window that is still being built has only its bar. */
 static lv_obj_t *first_control(lv_obj_t *root)
 {
     lv_area_t r, a;
@@ -161,7 +161,7 @@ static lv_obj_t *first_control(lv_obj_t *root)
             bx = a.x1;
         }
     }
-    return best != NULL ? best : (s_nc > 0 ? s_c[0] : NULL);
+    return best;                                        /* nothing under the bar yet (a page still being built): no highlight, not the bar itself */
 }
 
 static void set_cur(lv_obj_t *o)

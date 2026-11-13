@@ -167,6 +167,17 @@ class TheTheme(unittest.TestCase):
         self.assertIn("COL_MASK   0x3Cu", read("Modules", "drivers", "gamepad_mcp23017_module.c"))
         self.assertIn("FUNC_BIT   0x40u", read("Modules", "drivers", "gamepad_mcp23017_module.c"))
 
+    def test_the_first_highlight_is_never_the_title_bar(self):
+        """An app window shows its bar before its page is built, and A on the bar goes Back: the Store closed itself on the first A (seen in the emulator)."""
+        nav = read("PurrOS", "main", "purr_tp_nav.c")
+        i = nav.index("static lv_obj_t *first_control(lv_obj_t *root)")
+        body = nav[i:nav.index("static void set_cur", i)]
+        self.assertIn("controls_top(&r)", body)
+        self.assertRegex(body, r"return best;\s*/\*")                      # no fallback to the first control, which may be the bar
+        self.assertNotIn("s_c[0]", body)
+        top = nav[nav.index("static int controls_top"):nav.index("static int controls_top") + 500]
+        self.assertIn("TP_STRIP_H + head_h()", top)                           # a window's bar sits under the status strip, inside a sheet that starts above it
+
     def test_every_declared_font_exists_and_carries_its_licence(self):
         header = read("PurrOS", "main", "purr_tp_fonts.h")
         declared = re.findall(r"extern const lv_font_t (tp_font_\w+);", header)
