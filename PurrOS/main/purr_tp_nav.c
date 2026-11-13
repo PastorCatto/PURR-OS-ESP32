@@ -176,7 +176,7 @@ static void ring_update(lv_obj_t *root)
     if (s_ring == NULL) {
         ring_make();
     }
-    if (root == NULL || s_cur == NULL || s_osk != NULL) {
+    if (root == NULL || s_cur == NULL || s_osk != NULL || w10m_perm_is_open()) {      /* a permission question is above everything, the ring included */
         ring_hide();
         return;
     }
@@ -534,6 +534,10 @@ static void tick(lv_timer_t *t)
 {
     (void)t;
     lv_obj_t *root = front_root();
+    if (w10m_perm_is_open()) {                  /* the question is answered first; the highlight stays where it was */
+        ring_hide();
+        return;
+    }
     if (root == NULL || !tp_signed_in() || tp_modal_up()) {
         if (s_osk != NULL) {
             osk_close();
