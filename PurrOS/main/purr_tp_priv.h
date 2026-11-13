@@ -92,6 +92,9 @@ int tp_nav_key(uint32_t key);               /* a key while a sheet is in front: 
 void tp_nav_reset(void);                    /* forget the highlight, close the keyboard (the sheet changed) */
 void tp_nav_layout(void);                   /* the screen rotated */
 int tp_nav_osk_up(void);
+void tp_nav_set_root(lv_obj_t *(*fn)(void), int head_h);   /* a screen that is not a shell sheet: its root, and the height of its title bar (0 for none) */
+void tp_nav_set_back(int (*fn)(void));      /* what B does there: 1 if it went back */
+int purr_dpad_key(uint32_t key);            /* the key hook for a gamepad board with no shell: see purr_lvgl_init() */
 
 /* ---- purr_tp_home.c */
 void tp_home_build(lv_obj_t *screen);

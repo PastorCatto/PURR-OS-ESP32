@@ -20,6 +20,31 @@ static lv_obj_t *s_f[FOCUS_MAX];
 static int s_nf;
 static lv_obj_t *s_cur;
 
+/* ---------------------------------------------------------------- the accent, and what reads on it */
+
+lv_color_t tp_ink(void) { return lv_color_hex(TP_INK); }
+lv_color_t tp_paper(void) { return lv_color_hex(TP_PAPER); }
+lv_color_t tp_accent(void) { return purr_theme_accent_color(); }
+
+/* Whichever of ink and paper reads better on the accent: the one with the higher contrast ratio, with the luminance taken as a gamma-2 approximation of the
+ * sRGB curve. Every colour in the picker ends up with text above 3:1 (sdk/tests/test_type_shell.py checks all of them). */
+static float lum2(lv_color_t c)
+{
+    float r = c.red / 255.0f, g = c.green / 255.0f, b = c.blue / 255.0f;
+    return 0.2126f * r * r + 0.7152f * g * g + 0.0722f * b * b;
+}
+
+static float contrast(float x, float y)
+{
+    return x > y ? (x + 0.05f) / (y + 0.05f) : (y + 0.05f) / (x + 0.05f);
+}
+
+lv_color_t tp_on_accent(void)
+{
+    float a = lum2(tp_accent());
+    return contrast(a, lum2(tp_ink())) >= contrast(a, lum2(tp_paper())) ? tp_ink() : tp_paper();
+}
+
 /* ---------------------------------------------------------------- the focus manager */
 
 void tp_focus_clear(void)

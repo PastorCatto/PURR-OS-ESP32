@@ -120,7 +120,7 @@ class TheTheme(unittest.TestCase):
 
     def test_the_theme_and_the_shell_agree_on_what_reads_on_the_accent(self):
         theme = read("PurrOS", "main", "purr_w10m_theme.c")
-        shell = read("PurrOS", "main", "purr_tp.c")
+        shell = read("PurrOS", "main", "purr_tp_kbd.c")                # tp_on_accent() lives with the key grid and the focus manager, which the shell-less images use too
         for text in (theme, shell):
             self.assertIn("0.2126f", text)
             self.assertIn("0.7152f", text)
@@ -143,7 +143,29 @@ class TheTheme(unittest.TestCase):
         theme = read("PurrOS", "main", "purr_w10m_theme.c")
         self.assertRegex(theme, r"void purr_theme_row_divider\(lv_obj_t \*obj\)\s*\{\s*if \(s_type\)")   # no effect in any other look
         nav = read("PurrOS", "main", "purr_tp_nav.c")
-        self.assertGreater(int(re.search(r"#define HEAD_H\s+(\d+)", nav).group(1)), int(re.search(r"#define HEAD_H (\d+)", settings).group(1)))   # the first control is the one under the title bar
+        self.assertEqual(int(re.search(r"#define HEAD_H\s+(\d+)", nav).group(1)), int(re.search(r"#define HEAD_H (\d+)", settings).group(1)))   # a control whose centre is in the title bar is skipped, so the first row (centre 23 px under it) is the start
+
+    def test_the_images_without_a_shell_have_the_d_pad_too(self):
+        """The owner could not enable developer mode on Playtime: KittenOS's recovery app, the internet loader, the setup wizard and the boot menu had no way to take
+        a gamepad. A default key hook (purr_dpad_key) is installed by purr_lvgl_init() on that board, the recovery app names its root and its Back, and the boot
+        package reads the gamepad module over its bit-banged bus."""
+        lvgl = read("PurrOS", "main", "purr_lvgl.c")
+        self.assertRegex(lvgl, r"#if CONFIG_PURR_BOARD_PLAYTIME[^#]*purr_lvgl_set_key_hook\(purr_dpad_key\);")
+        rec = read("PurrOS", "main", "recovery_app.c")
+        for needle in ("tp_nav_set_root(recovery_root, 0);", "tp_nav_set_back(recovery_back);", "tp_nav_init();"):
+            self.assertIn(needle, rec)
+        shim = read("PurrOS", "main", "purr_tp_shim.c")
+        for fn in ("tp_signed_in", "tp_modal_up", "tp_pad_hint", "w10m_perm_is_open", "w10m_settings_root", "w10m_devportal_root", "w10m_tasks_root", "purr_catrt_ui_front"):
+            self.assertRegex(shim, r"__attribute__\(\(weak\)\)[^\n]*\b%s\(" % fn, fn)      # weak: a shell's own definition wins
+        hw = read("bootpkg", "src", "pkg_hw.c")
+        self.assertIn("#ifdef BOARD_GAMEPAD_ADDR", hw)
+        self.assertIn("BOARD_GAMEPAD_ADDR", read("bootpkg", "boards", "playtime.h"))
+        self.assertNotIn("BOARD_GAMEPAD_ADDR", read("bootpkg", "boards", "tdeck_plus.h"))      # the T-Deck's keyboard path is untouched
+        # the scan is the driver's: rows GPB0-1, columns GPB2-5, FUNC GPB6 (mask 0x7C pulled up), the lights left off
+        self.assertIn("PAD_COLS   0x3C", hw)
+        self.assertIn("PAD_FUNC   0x40", hw)
+        self.assertIn("COL_MASK   0x3Cu", read("Modules", "drivers", "gamepad_mcp23017_module.c"))
+        self.assertIn("FUNC_BIT   0x40u", read("Modules", "drivers", "gamepad_mcp23017_module.c"))
 
     def test_warnings_use_the_theme_colour(self):
         """Amber on paper does not read; the screens ask the theme."""
@@ -162,8 +184,9 @@ class Build(unittest.TestCase):
         self.assertIn("if(CONFIG_PURR_SHELL_TYPE)", cmake)
         names, _code = tp_sources()
         listed = re.search(r"if\(CONFIG_PURR_SHELL_TYPE\)(.*?)else\(\)", cmake, re.S).group(1)
+        common = re.search(r"if\(CONFIG_PURR_SHELL_TYPE OR CONFIG_PURR_BOARD_PLAYTIME\)(.*?)endif\(\)", cmake, re.S).group(1)      # the d-pad files: the Type shell and every Playtime image
         for n in names:
-            self.assertIn('"%s"' % n, listed, "%s is not in the Type shell's source list" % n)
+            self.assertTrue('"%s"' % n in listed or '"%s"' % n in common, "%s is not in any source list" % n)
         for n in re.findall(r'"(purr_tp\w*\.c)"', listed):
             self.assertTrue(os.path.isfile(os.path.join(MAIN, n)), n)
         elsewhere = cmake.replace(listed, "")

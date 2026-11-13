@@ -74,9 +74,17 @@ static lv_obj_t *button(const char *text, int choice, lv_obj_t **label_out)
     lv_obj_set_style_text_font(l, android ? &lv_font_montserrat_12 : &lv_font_montserrat_14, 0);
     lv_obj_center(l);
     lv_obj_add_event_cb(b, answered, LV_EVENT_CLICKED, (void *)(intptr_t)choice);
-    lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUSED);      /* the d-pad's highlight */
-    lv_obj_set_style_outline_color(b, lv_color_white(), LV_STATE_FOCUSED);
-    lv_obj_set_style_outline_pad(b, 1, LV_STATE_FOCUSED);
+    if (purr_theme_type_look()) {                       /* the d-pad's highlight in the Type look: the button inverts to ink on paper (the buttons are all the accent) */
+        lv_obj_set_style_bg_color(b, lv_color_hex(0x14120F), LV_STATE_FOCUSED);
+        lv_obj_set_style_text_color(b, lv_color_hex(0xF4F1EA), LV_STATE_FOCUSED);
+        lv_obj_set_style_outline_width(b, 3, LV_STATE_FOCUSED);
+        lv_obj_set_style_outline_color(b, purr_theme_accent_color(), LV_STATE_FOCUSED);
+        lv_obj_set_style_outline_pad(b, 0, LV_STATE_FOCUSED);
+    } else {
+        lv_obj_set_style_outline_width(b, 2, LV_STATE_FOCUSED);      /* the d-pad's highlight */
+        lv_obj_set_style_outline_color(b, lv_color_white(), LV_STATE_FOCUSED);
+        lv_obj_set_style_outline_pad(b, 1, LV_STATE_FOCUSED);
+    }
     if (s_nbtn < 3) {
         s_btns[s_nbtn++] = b;
     }

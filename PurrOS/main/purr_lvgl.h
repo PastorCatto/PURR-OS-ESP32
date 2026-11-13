@@ -62,6 +62,9 @@ int purr_lvgl_set_rotation(int degrees);
 struct _lv_indev_t;
 struct _lv_indev_t *purr_lvgl_keypad(void);
 
+/* The default key hook of a board with a gamepad (purr_tp_nav.c): set by purr_lvgl_init() on Playtime; a shell replaces it with its own. */
+int purr_dpad_key(uint32_t key);
+
 /* Called by the UI task before each LVGL pass: checks that the pointer and keypad devices still hold their own read callbacks and, if one was overwritten
  * (a bug seen only in the emulator so far, plan7.md), logs what it found, repairs it and counts it. Returns how many times that has happened. */
 int purr_lvgl_guard(void);

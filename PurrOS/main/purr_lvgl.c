@@ -1,5 +1,7 @@
 #include "purr_lvgl.h"
 
+#include "sdkconfig.h"
+
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -381,6 +383,12 @@ esp_err_t purr_lvgl_init(void)
     ESP_LOGI(TAG, "up: %ux%u, %u byte draw buffer (PSRAM), LVGL %d.%d.%d",
              (unsigned)info.width, (unsigned)info.height, (unsigned)bytes, LVGL_VERSION_MAJOR,
              LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
+
+#if CONFIG_PURR_BOARD_PLAYTIME
+    /* A gamepad and no touch screen: until a shell puts its own hook in (the Type shell does), the d-pad moves a highlight over whatever is on the screen
+     * (purr_tp_nav.c). It is what makes KittenOS's recovery app, the internet loader and the setup wizard usable on this board. */
+    purr_lvgl_set_key_hook(purr_dpad_key);
+#endif
 
     /* The service task is what actually drives LVGL from here on (purr_ui_service.h's own
      * comment on why) -- started here, not left for the caller to remember, so the two can

@@ -19,11 +19,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_log.h"
+
 #include "purr_catrt_ui.h"
 #include "purr_lvgl.h"
 
+static const char *TAG = "dpad";
+
 #define NAV_MAX     96
-#define HEAD_H      32                          /* the top of a sheet is its title bar (30 px in the shared sheets): the highlight starts under it */
+#define HEAD_H      30                          /* the top of a sheet is its title bar (30 px in the shared sheets): the highlight starts under it */
 #define RING_PAD    2
 
 static lv_obj_t *s_c[NAV_MAX];                  /* the controls of the sheet in front, in tree order */
@@ -40,8 +44,31 @@ static tp_grid_t *s_osk_grid;
 
 /* ---------------------------------------------------------------- finding the controls */
 
+static lv_obj_t *(*s_root_fn)(void);            /* a screen that is not a shell sheet (the recovery app, the setup wizard) names its own root */
+static int s_root_head;
+static int (*s_back_fn)(void);
+
+void tp_nav_set_root(lv_obj_t *(*fn)(void), int head_h)
+{
+    s_root_fn = fn;
+    s_root_head = head_h;
+}
+
+void tp_nav_set_back(int (*fn)(void))
+{
+    s_back_fn = fn;
+}
+
+static int head_h(void)
+{
+    return s_root_fn != NULL ? s_root_head : HEAD_H;
+}
+
 static lv_obj_t *front_root(void)
 {
+    if (s_root_fn != NULL) {
+        return s_root_fn();
+    }
     lv_obj_t *r = w10m_tasks_root();
     if (r == NULL) {
         r = purr_catrt_ui_front();
@@ -114,7 +141,7 @@ static lv_obj_t *first_control(lv_obj_t *root)
     int by = 0, bx = 0;
     for (int i = 0; i < s_nc; i++) {
         lv_obj_get_coords(s_c[i], &a);
-        if (a.y1 < r.y1 + HEAD_H) {
+        if ((a.y1 + a.y2) / 2 < r.y1 + head_h()) {          /* inside the title bar */
             continue;
         }
         if (best == NULL || a.y1 < by || (a.y1 == by && a.x1 < bx)) {
@@ -183,7 +210,7 @@ static void ring_update(lv_obj_t *root)
     lv_area_t a, r;
     lv_obj_get_coords(s_cur, &a);
     lv_obj_get_coords(root, &r);
-    if (a.y2 < r.y1 + HEAD_H / 2 || a.y1 > r.y2 || a.x2 < r.x1 || a.x1 > r.x2) {       /* scrolled out of the sheet: no ring */
+    if (a.y2 < r.y1 + head_h() / 2 || a.y1 > r.y2 || a.x2 < r.x1 || a.x1 > r.x2) {       /* scrolled out of the sheet: no ring */
         ring_hide();
         return;
     }
@@ -334,8 +361,10 @@ static int activate(void)
 {
     lv_obj_t *o = s_cur;
     if (o == NULL) {
+        ESP_LOGI(TAG, "A with nothing highlighted");
         return 0;
     }
+    ESP_LOGI(TAG, "A on %p", (void *)o);
     if (lv_obj_has_class(o, &lv_textarea_class)) {
         osk_open(o);
         return 1;
@@ -556,6 +585,18 @@ static void tick(lv_timer_t *t)
     }
     validate(root);
     ring_update(root);
+    static lv_obj_t *last_root, *last_cur;
+    static int last_nc = -1;
+    if (root != last_root || s_cur != last_cur || s_nc != last_nc) {           /* only a change is logged */
+        lv_area_t a = {0};
+        if (s_cur != NULL) {
+            lv_obj_get_coords(s_cur, &a);
+        }
+        ESP_LOGI(TAG, "sheet %p: %d control(s), on %p (%d,%d %dx%d)", (void *)root, s_nc, (void *)s_cur, (int)a.x1, (int)a.y1, (int)(a.x2 - a.x1 + 1), (int)(a.y2 - a.y1 + 1));
+        last_root = root;
+        last_cur = s_cur;
+        last_nc = s_nc;
+    }
 }
 
 void tp_nav_reset(void)
@@ -573,6 +614,26 @@ void tp_nav_layout(void)
 int tp_nav_osk_up(void)
 {
     return s_osk != NULL;
+}
+
+static lv_obj_t *screen_root(void)
+{
+    return lv_screen_active();
+}
+
+/* The hook for a board with a gamepad and no shell above it (the recovery app, the setup wizard, the internet loader): every control on the screen, arrows and A as
+ * in the sheets, B for the screen's own Back if it has one. A shell that starts later puts its own hook in its place. UI task. */
+int purr_dpad_key(uint32_t key)
+{
+    tp_nav_init();
+    if (s_root_fn == NULL) {
+        s_root_fn = screen_root;
+        s_root_head = 0;
+    }
+    if (key == LV_KEY_ESC && s_osk == NULL) {
+        return s_back_fn != NULL ? s_back_fn() : 0;
+    }
+    return tp_nav_key(key);
 }
 
 void tp_nav_init(void)

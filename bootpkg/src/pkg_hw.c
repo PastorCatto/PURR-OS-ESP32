@@ -244,6 +244,101 @@ static uint8_t i2c_read_nack(void)
     return b;
 }
 
+#ifdef BOARD_GAMEPAD_ADDR
+/* The gamepad module (an MCP23017, Modules/drivers/gamepad_mcp23017_module.c has the full story): the same scan, one byte at a time on the bit-banged bus. The
+ * keys are the ones the menu already knows from the T-Deck keyboard: w and s move, d (or Enter) starts, a space is the menu key. */
+#define MCP_IODIRA 0x00
+#define MCP_IODIRB 0x01
+#define MCP_GPPUB  0x0D
+#define MCP_GPIOB  0x13
+#define MCP_OLATA  0x14
+#define MCP_OLATB  0x15
+#define PAD_COLS   0x3C                     /* GPB2..GPB5 */
+#define PAD_FUNC   0x40                     /* GPB6 */
+#define PAD_LED_UP 0x80                     /* GPB7, active low: left off */
+
+static int mcp_wr(uint8_t reg, uint8_t v)
+{
+    i2c_start();
+    int ok = i2c_write((uint8_t)(BOARD_GAMEPAD_ADDR << 1)) && i2c_write(reg) && i2c_write(v);
+    i2c_stop();
+    return ok;
+}
+
+static int mcp_rd(uint8_t reg, uint8_t *v)
+{
+    i2c_start();
+    int ok = i2c_write((uint8_t)(BOARD_GAMEPAD_ADDR << 1)) && i2c_write(reg);
+    if (ok) {
+        i2c_start();                        /* a repeated start */
+        ok = i2c_write((uint8_t)((BOARD_GAMEPAD_ADDR << 1) | 1));
+        if (ok) {
+            *v = i2c_read_nack();
+        }
+    }
+    i2c_stop();
+    return ok;
+}
+
+/* The nine buttons as a mask (bit 0..3 UP DOWN LEFT RIGHT, 4..7 A B X Y, 8 FUNC), or -1 when the module does not answer. */
+static int pad_scan(void)
+{
+    int mask = 0;
+    for (int r = 0; r < 2; r++) {
+        uint8_t v;
+        if (!mcp_wr(MCP_IODIRB, (uint8_t)~((1u << r) | PAD_LED_UP)) || !mcp_rd(MCP_GPIOB, &v)) {
+            return -1;
+        }
+        for (int c = 0; c < 4; c++) {
+            if (!(v & (1u << (2 + c)))) {
+                mask |= 1 << (r * 4 + c);
+            }
+        }
+        if (r == 0 && !(v & PAD_FUNC)) {
+            mask |= 1 << 8;
+        }
+    }
+    return mask;
+}
+
+static int pad_init(void)
+{
+    return mcp_wr(MCP_IODIRA, 0x00) && mcp_wr(MCP_OLATA, 0xFF) &&              /* the lights off */
+           mcp_wr(MCP_GPPUB, PAD_COLS | PAD_FUNC) && mcp_wr(MCP_OLATB, PAD_LED_UP) &&
+           mcp_wr(MCP_IODIRB, (uint8_t)~(0x03 | PAD_LED_UP));
+}
+
+char hw_key(void)
+{
+    static int ready, prev, held;
+    if (!ready) {
+        if (!pad_init()) {
+            s_kbd_ok = 0;
+            return 0;
+        }
+        ready = 1;
+    }
+    int m = pad_scan();
+    if (m < 0) {
+        ready = 0;
+        prev = 0;
+        s_kbd_ok = 0;
+        return 0;
+    }
+    s_kbd_ok = 1;
+    int fresh = m & ~prev;
+    prev = m;
+    if (m & (1 << 8)) {                     /* FUNC held: the menu key (the splash asks for it, the menu ignores it) */
+        return ' ';
+    }
+    held = (m & 0x03) ? held + 1 : 0;       /* up or down held: it repeats, after eight polls and then every third */
+    int rep = held == 8 || (held > 8 && (held - 8) % 3 == 0);
+    if ((fresh | (rep ? m : 0)) & 0x01) return 'w';
+    if ((fresh | (rep ? m : 0)) & 0x02) return 's';
+    if (fresh & ((1 << 3) | (1 << 4))) return 'd';   /* right, or A */
+    return 0;
+}
+#else
 char hw_key(void)
 {
     i2c_start();
@@ -257,6 +352,7 @@ char hw_key(void)
     i2c_stop();
     return (char)c;
 }
+#endif /* BOARD_GAMEPAD_ADDR */
 
 /* ------------------------------------------------------------ init */
 

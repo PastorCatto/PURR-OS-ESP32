@@ -6,7 +6,7 @@
 
 #define BOARD_NAME        "playtime"
 #define BOARD_CODENAME    "Playtime"
-#define BOARD_HAS_KEYBOARD 1      /* the menu code is the keyboard one; the gamepad is not read here yet, so the boot package never waits for a key */
+#define BOARD_HAS_KEYBOARD 1      /* the menu code is the keyboard one; its keys come from the gamepad here (BOARD_GAMEPAD_ADDR): FUNC held at power-up asks for the menu, up and down choose, A or right starts */
 
 #define PIN_MOSI          11
 #define PIN_SCLK          10
@@ -21,6 +21,7 @@
 
 #define PIN_KBD_SDA       17
 #define PIN_KBD_SCL       18
-#define KBD_ADDR          0x55    /* nothing answers here on Playtime: the T-Deck keyboard probe finds no key, so the boot goes straight on */
+#define KBD_ADDR          0x55    /* nothing answers here on Playtime; the keys come from the gamepad module instead: */
+#define BOARD_GAMEPAD_ADDR 0x20   /* MCP23017 on the same two lines: a 2x4 matrix on GPB (rows GPB0-1, columns GPB2-5) and FUNC on GPB6; src/pkg_hw.c, Modules/drivers/gamepad_mcp23017_module.c */
 
 #endif

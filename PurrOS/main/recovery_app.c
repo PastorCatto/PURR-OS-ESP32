@@ -58,6 +58,9 @@ static int s_pending;                      /* a job was started and its result n
 static screen_t s_after;                   /* where the administrator check leads once it passes */
 static int s_weaken_ok;                    /* the 'I understand' switch on the keep-my-data warning */
 static int s_erase;                        /* what the working screen is doing: 1 erase + reinstall, 0 reinstall */
+#if CONFIG_PURR_BOARD_PLAYTIME
+static screen_t s_screen = SC_HOME;        /* which screen is up: B goes back to the first one */
+#endif
 
 static void show(screen_t sc);
 
@@ -447,6 +450,9 @@ static void working(void)
 
 static void show(screen_t sc)
 {
+#if CONFIG_PURR_BOARD_PLAYTIME
+    s_screen = sc;
+#endif
     s_status = s_stage = s_bar = NULL;
     strip_set(0);
     lv_obj_clean(s_body);
@@ -464,6 +470,22 @@ static void show(screen_t sc)
     case SC_WEAKEN_KEEP: weaken_keep(); break;
     }
 }
+
+#if CONFIG_PURR_BOARD_PLAYTIME
+#include "purr_tp_priv.h"
+
+static lv_obj_t *recovery_root(void) { return s_sheet; }
+
+/* B: back to the first screen from any other (never while a job runs: the working screen has no way out). */
+static int recovery_back(void)
+{
+    if (s_pending || s_screen == SC_HOME || s_screen == SC_WORKING) {
+        return 0;
+    }
+    show(SC_HOME);
+    return 1;
+}
+#endif
 
 static void tick_cb(lv_timer_t *t)
 {
@@ -553,6 +575,11 @@ static void *build_cb(void *arg)
     lv_obj_set_scroll_dir(s_body, LV_DIR_VER);
     s_timer = lv_timer_create(tick_cb, 100, NULL);
     show(SC_HOME);
+#if CONFIG_PURR_BOARD_PLAYTIME
+    tp_nav_set_root(recovery_root, 0);                         /* the d-pad: every control on this sheet; B is the way back to the first screen */
+    tp_nav_set_back(recovery_back);
+    tp_nav_init();
+#endif
     return NULL;
 }
 

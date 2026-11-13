@@ -14,6 +14,9 @@
 #include "oobe_job.h"
 #include "purr_lvgl.h"
 #include "purr_ui_service.h"
+#if CONFIG_PURR_BOARD_PLAYTIME
+#include "purr_tp_priv.h"
+#endif
 #include "purr_w10m_theme.h"
 
 static const char *TAG = "oobe";
@@ -30,6 +33,9 @@ static void *build_cb(void *arg)
     start_t *s = arg;
     purr_theme_init();                              /* the same theme as the shell and Settings */
     purr_oobe_start(s->part, s->ops, s->start_page);
+#if CONFIG_PURR_BOARD_PLAYTIME
+    tp_nav_init();                                  /* the d-pad: purr_lvgl_init() installed the key hook; this starts the highlight */
+#endif
     return NULL;
 }
 
