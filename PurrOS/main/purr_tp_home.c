@@ -71,8 +71,8 @@ static void load_apps(void)
     }
     for (int i = 0; i < reg.count && s_napps < MAX_APPS; i++) {
         const purr_app_entry_t *a = &reg.apps[i];
-        if (!a->chip_ok || !(a->verified || purr_security_unsigned_apps_allowed()) || strcmp(a->name, "Settings") == 0) {
-            continue;
+        if (!a->chip_ok || !(a->verified || purr_security_unsigned_apps_allowed()) || strcmp(a->name, "Settings") == 0 || strcmp(a->name, "storesvc") == 0) {
+            continue;                                   /* storesvc is the Store's background companion, not something to open */
         }
         d = &s_apps[s_napps++];
         memset(d, 0, sizeof(*d));
@@ -302,6 +302,11 @@ static void list_open(const char *title, const lrow_t *rows, int n, void (*pick)
         lv_obj_set_size(b, LV_PCT(100), 34);
         lv_obj_set_style_border_side(b, LV_BORDER_SIDE_BOTTOM, 0);
         lv_obj_set_style_pad_hor(b, 10, 0);
+        static const lv_state_t chosen[2] = {LV_STATE_FOCUSED, LV_STATE_PRESSED};     /* the iPod's way: the chosen row is an ink bar with paper text, not the accent */
+        for (int k = 0; k < 2; k++) {
+            lv_obj_set_style_bg_color(b, tp_ink(), chosen[k]);
+            lv_obj_set_style_text_color(b, tp_paper(), chosen[k]);
+        }
         int ix = 0;
         if (s_ls.rows[i].icon[0] != '\0') {                /* the app's icon from the pack, at 20 pixels */
             char nb[40];
@@ -318,7 +323,9 @@ static void list_open(const char *title, const lrow_t *rows, int n, void (*pick)
         }
         lv_obj_t *l = tp_label(b, s_ls.rows[i].label, &lv_font_montserrat_20, NULL);
         lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
-        lv_obj_set_width(l, LV_PCT(70) - ix);
+        int row_w = w10m_disp_w() - ((with_clock && w10m_disp_w() > 260) ? 110 : 0);
+        int lab_w = row_w - 20 - ix - (s_ls.rows[i].sub[0] != '\0' ? 76 : 28);        /* the row, less its padding, the icon, and the chevron (and the small text) */
+        lv_obj_set_width(l, lab_w < 40 ? 40 : lab_w);                               /* exact pixels: a percentage minus pixels is not a width */
         lv_obj_align(l, LV_ALIGN_LEFT_MID, ix, 0);
         lv_obj_t *c = tp_label(b, LV_SYMBOL_RIGHT, &lv_font_montserrat_12, NULL);
         lv_obj_align(c, LV_ALIGN_RIGHT_MID, 0, 0);
@@ -412,7 +419,7 @@ static void tile_face(int idx, tile_face_t *f)
     } else if (strcmp(id, "music") == 0) {
         snprintf(f->name, sizeof(f->name), "MUSIC");
         snprintf(f->big, sizeof(f->big), LV_SYMBOL_PLAY);
-        snprintf(f->sub, sizeof(f->sub), find_app("Music") >= 0 ? "OPEN" : "NOT INSTALLED");
+        snprintf(f->sub, sizeof(f->sub), find_app("Music") >= 0 ? "OPEN" : "NO APP");
     } else if (strcmp(id, "none") == 0) {
         snprintf(f->name, sizeof(f->name), "EMPTY");
         snprintf(f->big, sizeof(f->big), "+");
@@ -480,7 +487,7 @@ static void home_fill(void)
         lv_obj_set_style_border_width(t, 1, 0);
         s_tile[i] = t;
         lv_obj_t *n = tp_label(t, f.name, &lv_font_montserrat_12, NULL);
-        lv_obj_set_style_text_letter_space(n, 1, 0);
+        lv_label_set_long_mode(n, LV_LABEL_LONG_CLIP);
         lv_obj_align(n, LV_ALIGN_TOP_LEFT, 4, 3);
         lv_obj_t *k = lv_obj_create(t);                 /* the button that opens it with FUNC held */
         lv_obj_remove_style_all(k);
@@ -488,14 +495,14 @@ static void home_fill(void)
         lv_obj_set_size(k, 14, 14);
         lv_obj_set_style_bg_color(k, tp_ink(), 0);
         lv_obj_set_style_bg_opa(k, LV_OPA_COVER, 0);
-        lv_obj_align(k, LV_ALIGN_TOP_RIGHT, -3, 3);
+        lv_obj_align(k, LV_ALIGN_BOTTOM_RIGHT, -3, -3);            /* bottom right: the name has the top row to itself */
         lv_obj_t *kl = tp_label(k, k_tile_key[i], &lv_font_montserrat_12, NULL);
         lv_obj_set_style_text_color(kl, tp_paper(), 0);
         lv_obj_center(kl);
         lv_obj_t *b = tp_label(t, f.big, &lv_font_montserrat_28, NULL);
         lv_obj_align(b, LV_ALIGN_LEFT_MID, 4, 2);
         lv_obj_t *s = tp_label(t, f.sub, &lv_font_montserrat_12, NULL);
-        lv_obj_set_style_text_letter_space(s, 1, 0);
+        lv_label_set_long_mode(s, LV_LABEL_LONG_CLIP);
         lv_obj_align(s, LV_ALIGN_BOTTOM_LEFT, 4, -3);
         lv_obj_add_event_cb(t, tile_clicked, LV_EVENT_CLICKED, (void *)(intptr_t)i);
     }
@@ -539,7 +546,7 @@ void tp_home_layout(void)
     int w = w10m_disp_w(), h = w10m_disp_h() - TP_STRIP_H;
     lv_obj_set_pos(s_home, 0, TP_STRIP_H);
     lv_obj_set_size(s_home, w, h);
-    int m = 8;
+    int m = 6;
     int line = lv_font_get_line_height(&lv_font_montserrat_40);
     int cy = 0, ch = line * 440 / 256;                  /* the big clock: the font at 1.7 times */
     lv_obj_set_pos(s_clock_big, m, cy);
@@ -549,7 +556,7 @@ void tp_home_layout(void)
     int ny = ty - 26;
     lv_obj_set_pos(s_notice, m, ny);
     lv_obj_set_size(s_notice, w - 2 * m, 22);
-    int gap = 5, total = w - 2 * m - 3 * gap;
+    int gap = 4, total = w - 2 * m - 3 * gap;
     int unit = total * 10 / 45;                          /* the first tile is one and a half units */
     int first = total - 3 * unit;
     int x = m;
@@ -919,7 +926,7 @@ void tp_home_build(lv_obj_t *screen)
     lv_obj_align(s_notice_cnt, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_add_event_cb(s_notice, notice_clicked, LV_EVENT_CLICKED, NULL);
 
-    s_hint = tp_label(s_home, LV_SYMBOL_LEFT " " LV_SYMBOL_RIGHT " CHOOSE    A OPEN    X MENU    FUNC+ABXY SHORTCUT", &lv_font_montserrat_12, NULL);
+    s_hint = tp_label(s_home, "A OPEN     X MENU     FUNC+ABXY SHORTCUT", &lv_font_montserrat_12, NULL);
     lv_obj_set_style_text_color(s_hint, tp_ink(), 0);
     lv_obj_set_style_text_opa(s_hint, LV_OPA_70, 0);
 
