@@ -36,10 +36,18 @@ typedef struct {
     uint8_t read_buf[PURR_FS_CACHE];
     uint8_t prog_buf[PURR_FS_CACHE];
     uint8_t look_buf[64];                  /* 512 blocks per pass: the root file system is about 2,800 blocks since flash map v2 */
-    uint8_t file_buf[PURR_FS_CACHE];      /* one file open at a time */
+    uint8_t file_buf[PURR_FS_CACHE];      /* one file open at a time: every operation holds the lock below for its whole open, read or write and close */
+    void (*lock)(void *ctx);              /* the owner's lock, taken around every operation (see purr_fs_set_lock); NULL: none (the host tests) */
+    void (*unlock)(void *ctx);
+    void *lock_ctx;
     int mounted;
     int poisoned;                         /* a read failed for good: the next operation remounts first (see purr_fs.c, bd_read); 2 = unmounted, mount pending */
 } purr_fs_t;
+
+/* Every operation below is serialised with the lock given here: LittleFS is not thread-safe, and the one file buffer and the one cache are shared, so two tasks
+ * inside it at once (an app saving its data while another installs, a scan on the UI task) corrupt each other. The lock must be RECURSIVE: a read callback may call
+ * back into the filesystem on the same task. Set it once, before the first mount; it survives purr_fs_mount/purr_fs_format. NULL locks: no locking. */
+void purr_fs_set_lock(purr_fs_t *fs, void (*lock)(void *ctx), void (*unlock)(void *ctx), void *ctx);
 
 /* Mount an existing filesystem. Fails on a blank or damaged device: it never formats. */
 int purr_fs_mount(purr_fs_t *fs, const purr_bd_t *bd);

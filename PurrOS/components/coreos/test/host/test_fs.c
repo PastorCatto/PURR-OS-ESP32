@@ -433,6 +433,101 @@ static void test_effective_owner_root_itself(void)
     CHECK_EQ(o.mode, PURR_FS_MODE_OREAD);
 }
 
+/* ---------------------------------------------------------------- the lock */
+
+/* LittleFS shares one file buffer and one cache, and the root filesystem is used by several tasks at once: every operation has to run inside the owner's
+ * recursive lock, balanced, even when a read callback calls back into the filesystem. */
+static int s_lock_depth, s_lock_max, s_lock_takes;
+
+static void lk_take(void *ctx)
+{
+    (void)ctx;
+    s_lock_depth++;
+    s_lock_takes++;
+    if (s_lock_depth > s_lock_max) {
+        s_lock_max = s_lock_depth;
+    }
+}
+
+static void lk_give(void *ctx)
+{
+    (void)ctx;
+    s_lock_depth--;
+}
+
+static int s_inside_ok;
+static int reenter_cb(void *ctx, const void *data, uint32_t len)
+{
+    (void)ctx; (void)data; (void)len;
+    s_inside_ok = s_lock_depth >= 1;                 /* the callback runs under the lock */
+    int is_dir;
+    uint32_t size;
+    return purr_fs_stat(&fs, "/a.txt", &is_dir, &size) == 0 ? 0 : -1;       /* and may call back in: the lock is recursive */
+}
+
+static void inside_check(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)ctx; (void)name; (void)is_dir; (void)size;
+    CHECK(s_lock_depth >= 1);
+}
+
+static void test_lock_is_taken_and_balanced(void)
+{
+    blank();
+    memset(&fs, 0, sizeof(fs));
+    s_lock_depth = s_lock_max = s_lock_takes = 0;
+    purr_fs_set_lock(&fs, lk_take, lk_give, NULL);
+    purr_bd_t b = bd();
+    CHECK_EQ(purr_fs_format(&fs, &b), 0);
+    CHECK_EQ(s_lock_depth, 0);                       /* mount and format take it and give it back */
+    purr_bd_t b2 = bd();
+    purr_fs_unmount(&fs);
+    CHECK_EQ(purr_fs_mount(&fs, &b2), 0);            /* the lock survives a mount (it is set before the first one) */
+    CHECK(s_lock_takes > 0);
+
+    int takes = s_lock_takes;
+    CHECK_EQ(purr_fs_write(&fs, "/a.txt", "hello", 5), 0);
+    CHECK(s_lock_takes > takes);
+    CHECK_EQ(s_lock_depth, 0);
+
+    takes = s_lock_takes;
+    CHECK_EQ(purr_fs_mkdir(&fs, "/d"), 0);
+    CHECK_EQ(purr_fs_append(&fs, "/a.txt", "!", 1), 0);
+    CHECK_EQ(purr_fs_rename(&fs, "/a.txt", "/b.txt"), 0);
+    int is_dir = 0;
+    uint32_t size = 0;
+    CHECK_EQ(purr_fs_stat(&fs, "/b.txt", &is_dir, &size), 0);
+    CHECK_EQ(size, 6u);
+    purr_fs_owner_t o = {1, 3};
+    CHECK_EQ(purr_fs_set_owner(&fs, "/b.txt", &o), 0);
+    CHECK_EQ(purr_fs_get_owner(&fs, "/b.txt", &o), 0);
+    CHECK(s_lock_takes >= takes + 6);                /* each of those took it */
+    CHECK_EQ(s_lock_depth, 0);
+
+    CHECK_EQ(purr_fs_write(&fs, "/a.txt", "x", 1), 0);          /* the callback below stats it */
+    s_lock_max = 0;
+    s_inside_ok = 0;
+    CHECK_EQ(purr_fs_read(&fs, "/b.txt", reenter_cb, NULL), 0);
+    CHECK(s_inside_ok);
+    CHECK(s_lock_max >= 2);                          /* the callback's own call nested inside the read's hold */
+    CHECK_EQ(s_lock_depth, 0);
+
+    uint8_t buf[16];
+    uint32_t n = 0;
+    CHECK_EQ(purr_fs_slurp(&fs, "/b.txt", buf, sizeof(buf), &n), 0);
+    CHECK_EQ(purr_fs_slurp(&fs, "/missing", buf, sizeof(buf), &n), 1);
+    CHECK_EQ(purr_fs_write_kept(&fs, "/b.txt", "kept", 4), 0);
+    CHECK_EQ(s_lock_depth, 0);                       /* an error return gives it back too */
+    CHECK(purr_fs_read(&fs, "/nope", reenter_cb, NULL) < 0);
+    CHECK_EQ(s_lock_depth, 0);
+    purr_fs_list(&fs, "/", inside_check, NULL);
+    CHECK_EQ(s_lock_depth, 0);
+    CHECK_EQ(purr_fs_remove(&fs, "/d"), 0);
+    purr_fs_unmount(&fs);
+    CHECK_EQ(s_lock_depth, 0);
+    purr_fs_set_lock(&fs, NULL, NULL, NULL);
+}
+
 int main(void)
 {
     test_mount_and_format();
@@ -447,5 +542,6 @@ int main(void)
     test_owner_survives_unmount();
     test_effective_owner_walks_up();
     test_effective_owner_root_itself();
+    test_lock_is_taken_and_balanced();
     TK_DONE("test_fs");
 }

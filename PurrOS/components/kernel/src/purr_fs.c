@@ -41,13 +41,47 @@ static int bd_sync(const struct lfs_config *c)
     return (fs->bd.sync == NULL || fs->bd.sync(fs->bd.ctx) == 0) ? LFS_ERR_OK : LFS_ERR_IO;
 }
 
+/* The lock, held for the rest of the function that declares it (a cleanup, so every return path lets go). */
+typedef struct {
+    purr_fs_t *fs;
+} fs_guard_t;
+
+static fs_guard_t guard_take(purr_fs_t *fs)
+{
+    if (fs->lock != NULL) {
+        fs->lock(fs->lock_ctx);
+    }
+    return (fs_guard_t){fs};
+}
+
+static void guard_release(fs_guard_t *g)
+{
+    if (g->fs->unlock != NULL) {
+        g->fs->unlock(g->fs->lock_ctx);
+    }
+}
+
+#define FS_GUARD(fs) fs_guard_t guard_ __attribute__((cleanup(guard_release))) = guard_take(fs)
+
+void purr_fs_set_lock(purr_fs_t *fs, void (*lock)(void *ctx), void (*unlock)(void *ctx), void *ctx)
+{
+    fs->lock = lock;
+    fs->unlock = unlock;
+    fs->lock_ctx = ctx;
+}
+
 static int setup(purr_fs_t *fs, const purr_bd_t *bd)
 {
     if (bd == NULL || bd->read == NULL || bd->prog == NULL || bd->erase == NULL ||
         bd->block_size < PURR_FS_CACHE || bd->block_size % PURR_FS_CACHE != 0 || bd->block_count < 2) {
         return LFS_ERR_INVAL;
     }
+    void (*lock)(void *) = fs->lock, (*unlock)(void *) = fs->unlock;       /* set before the first mount: they outlive it */
+    void *lock_ctx = fs->lock_ctx;
     memset(fs, 0, sizeof(*fs));
+    fs->lock = lock;
+    fs->unlock = unlock;
+    fs->lock_ctx = lock_ctx;
     fs->bd = *bd;
     fs->cfg = (struct lfs_config){
         .context = fs,
@@ -71,6 +105,7 @@ static int setup(purr_fs_t *fs, const purr_bd_t *bd)
 
 int purr_fs_mount(purr_fs_t *fs, const purr_bd_t *bd)
 {
+    FS_GUARD(fs);
     int e = setup(fs, bd);
     if (e < 0) {
         return e;
@@ -82,6 +117,7 @@ int purr_fs_mount(purr_fs_t *fs, const purr_bd_t *bd)
 
 int purr_fs_format(purr_fs_t *fs, const purr_bd_t *bd)
 {
+    FS_GUARD(fs);
     int e = setup(fs, bd);
     if (e < 0) {
         return e;
@@ -97,6 +133,7 @@ int purr_fs_format(purr_fs_t *fs, const purr_bd_t *bd)
 
 void purr_fs_unmount(purr_fs_t *fs)
 {
+    FS_GUARD(fs);
     if (fs->mounted) {
         if (fs->poisoned != 2) {                  /* 2: already unmounted, waiting for a mount that did not work yet */
             lfs_unmount(&fs->lfs);
@@ -130,7 +167,7 @@ static int fs_ready(purr_fs_t *fs)
     return 0;
 }
 
-#define NEED_MOUNT(fs) do { int rdy_ = fs_ready(fs); if (rdy_ != 0) return rdy_; } while (0)
+#define NEED_MOUNT(fs) FS_GUARD(fs); do { int rdy_ = fs_ready(fs); if (rdy_ != 0) return rdy_; } while (0)
 
 /* ---------------------------------------------------------------- operations */
 
@@ -428,6 +465,7 @@ int purr_fs_slurp(purr_fs_t *fs, const char *path, void *buf, uint32_t cap, uint
 
 int purr_fs_write_kept(purr_fs_t *fs, const char *path, const void *data, uint32_t len)
 {
+    FS_GUARD(fs);                                       /* the keep-and-replace is one step to everyone else */
     char bak[96];
     int is_dir = 0;
     uint32_t size = 0;
