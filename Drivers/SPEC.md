@@ -99,6 +99,24 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
 - **Two I2C buses at most:** the kernel's bus lookup is by pin pair, so a driver for a discovered device gets its own controller (port 1) and
   can never be handed the keyboard's bus by mistake.
 
+### 4a. The driver partition (flash map v3, 2026-11-19)
+
+Nothing but the W5500 is compiled into the kernel any more (it stays because a virtual device's flag selects it, `purr_vm_info()`, and a VM has no other way to the network). The drivers
+a board cannot start without (its display, keyboard, touch panel, battery gauge, the Playtime gamepad) are signed driver modules like any other, in a small raw partition of their own,
+**`drivers`**, so the kernel is not rebuilt to add or replace one.
+
+- **Where:** the last 0x14000 bytes of the 16 MB flash (0xFEC000), `data` subtype 0x42. `root` keeps its start (0x5C1000) and loses the same 0x14000 bytes of its tail (0xA3F000 to 0xA2B000).
+  A layout change: a device needs a full flash, not an update, to get it. The 8 MB board (waveshare154) has no LCD and no drivers to carry, and keeps its table.
+- **Format** (`PurrOS/components/coreos/include/purr_drvpart.h`, `src/purr_drvpart.c`, `purrstrap/scripts/drvpart.py`; the C and Python sides share a golden slot in their tests): ten slots
+  of 8 KB, one driver each. Slot n starts at n * 8192 with a 64-byte header (`PDRV`, version 1, flags, the length of the .cat, the crc32 of the .cat, the file name the driver is planted
+  under, 0xFF), then the .cat exactly as it ships, then 0xFF. A blank header is an empty slot; one that does not hold together is damaged and skipped.
+- **Who writes it:** the image maker (`purrstrap drvpart pack`, then placed by the SDK's image maker at the partition's offset), and an update that replaces a driver (one slot, 8 KB).
+  The signature is checked when the driver is loaded, as for every module: the partition's crc only says the bytes are the ones that were written.
+- **Who reads it:** the kernel at boot (it plants each slot under its file name in /boot/drivers when the file is missing or different, the same planting as before, so quarantine, deferral and
+  the driver index work as they did), and the loader and KittenOS, which have no file system and load straight from the slots. Everything that is not essential still arrives as a file in
+  /boot/drivers (the Store, the dev server, a download).
+- **Which drivers:** the board's file says (`drivers = [...]` in sdk/boards/<board>.toml); the kernel no longer decides by the board's name.
+
 ## 5. Testing
 
 - Pack checks: a wrong signature, a driver file whose hash does not match, a swapped driver, and a missing
