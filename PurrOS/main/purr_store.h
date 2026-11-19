@@ -19,6 +19,8 @@ void purr_catrt_store_init(void);
 int purr_store_vouches(const char *path, const uint8_t *data, size_t len);
 
 /* Marks the entries of a scan of /home/<user>/apps that a trusted repository vouches for as verified, so they show and run like any app. */
+/* 1 once, after a scan that could not tell whether an installed app is vouched for (a failed allocation or read, not a "no"): the shell should scan again in a few seconds. */
+int purr_store_vouch_retry_pending(void);
 void purr_store_mark_vouched(purr_app_registry_t *reg, const char *apps_root);
 
 /* The shell command: store [repos | add <url> | confirm | refresh [id] | list | install <name> <repo-id> | remove <name> <repo-id> | check | bootstrap]. */

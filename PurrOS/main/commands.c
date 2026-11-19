@@ -20,6 +20,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
@@ -312,12 +313,32 @@ void purr_fs_permissions_migrate(void)
     purr_fs_list(&s_fs, "/home", migrate_home_entry, NULL);
 }
 
+/* LittleFS is not thread-safe and the wrapper shares one file buffer, and the root filesystem is used by the UI task, app tasks (their data), install jobs, the
+ * launcher and login at once (audit 2026-11-19, plan7.md). One recursive lock around every operation: recursive because a read callback may call back in. */
+static SemaphoreHandle_t s_fs_mutex;
+
+static void fs_lock_take(void *ctx)
+{
+    xSemaphoreTakeRecursive((SemaphoreHandle_t)ctx, portMAX_DELAY);
+}
+
+static void fs_lock_give(void *ctx)
+{
+    xSemaphoreGiveRecursive((SemaphoreHandle_t)ctx);
+}
+
 void purr_fs_setup(purr_cli_t *cli)
 {
     purr_bd_t bd;
     if (purr_fs_flash_bd("root", &bd) != 0) {
         purr_cli_puts(cli, "root: no such partition\n");
         return;
+    }
+    if (s_fs_mutex == NULL) {
+        s_fs_mutex = xSemaphoreCreateRecursiveMutex();
+    }
+    if (s_fs_mutex != NULL) {
+        purr_fs_set_lock(&s_fs, fs_lock_take, fs_lock_give, s_fs_mutex);
     }
     int e = purr_fs_mount(&s_fs, &bd);
 #if CONFIG_PURR_PROFILE_RECOVERY
@@ -399,6 +420,58 @@ static uint8_t *app_scratch(void)
         }
     }
     return s_app_scratch;
+}
+
+/* A scan reads every installed package into a buffer to verify it; an install reads or downloads the new package into another. They used to be the same buffer, so a
+ * scan on the UI task (the home screen reloads on every app change) trampled a package another task was installing (audit 2026-11-19). Now a scan has its own
+ * buffer and lock, and installs are one at a time under theirs; a scan never waits for a download. */
+static uint8_t *s_scan_scratch;
+static SemaphoreHandle_t s_scan_lock, s_install_lock;
+
+static uint8_t *scan_scratch(void)
+{
+    if (s_scan_scratch == NULL) {
+        s_scan_scratch = heap_caps_malloc(APP_SCRATCH_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (s_scan_scratch == NULL) {
+            s_scan_scratch = malloc(APP_SCRATCH_CAP);
+        }
+    }
+    return s_scan_scratch;
+}
+
+static void apps_locks_init(void)
+{
+    static portMUX_TYPE once = portMUX_INITIALIZER_UNLOCKED;
+    portENTER_CRITICAL(&once);
+    if (s_scan_lock == NULL) {
+        s_scan_lock = xSemaphoreCreateRecursiveMutex();
+    }
+    if (s_install_lock == NULL) {
+        s_install_lock = xSemaphoreCreateRecursiveMutex();
+    }
+    portEXIT_CRITICAL(&once);
+}
+
+static void scratch_unlock(SemaphoreHandle_t *m)
+{
+    if (*m != NULL) {
+        xSemaphoreGiveRecursive(*m);
+    }
+}
+
+/* Held to the end of the function that declares it, whichever way it returns. */
+#define SCRATCH_GUARD(lockvar) apps_locks_init(); SemaphoreHandle_t guard_##lockvar __attribute__((cleanup(scratch_unlock))) = (xSemaphoreTakeRecursive(lockvar, portMAX_DELAY), lockvar)
+
+/* purr_appmgr_scan with the scan buffer, serialised. An empty registry if there is no memory for it (no app is shown rather than a wrong one). */
+static void apps_scan(const char *root, const purr_appmgr_env_t *env, purr_app_registry_t *reg)
+{
+    SCRATCH_GUARD(s_scan_lock);
+    uint8_t *buf = scan_scratch();
+    if (buf == NULL) {
+        memset(reg, 0, sizeof(*reg));
+        return;
+    }
+    purr_appmgr_scan(&s_appmgr_fs, root, env, buf, APP_SCRATCH_CAP, reg);
 }
 
 /* "/home/<name>/apps", built fresh each time from whoever is logged in right now -- never
@@ -493,7 +566,7 @@ static int kernel_table_app_info(purr_cli_t *cli, const char *name)
     purr_cfg_t cfg;
     purr_appmgr_env_t env = apps_env(&cfg);
     purr_app_registry_t reg;
-    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, &reg);
+    apps_scan(root, &env, &reg);
     const purr_app_entry_t *e = purr_appmgr_find(&reg, name);
     if (e == NULL) {
         purr_cli_printf(cli, "appinfo: no such app '%s'\n", name);
@@ -535,6 +608,7 @@ static int kernel_table_app_install(purr_cli_t *cli, const char *file_or_url)
     user_apps_root(root, sizeof(root), purr_login_current()->name);
     ensure_user_home(purr_login_current()->name); /* in case this user was created after boot */
 
+    SCRATCH_GUARD(s_install_lock);                  /* one install at a time: this buffer is the package being installed */
     uint8_t *scratch = app_scratch();
     if (scratch == NULL) {
         purr_cli_puts(cli, "appinstall: out of memory\n");
@@ -549,7 +623,7 @@ static int kernel_table_app_install(purr_cli_t *cli, const char *file_or_url)
         cfg.secure_mode = PURR_SECURE_OFF;          /* the app manager's accept-unsigned rule */
     }
     purr_app_registry_t reg;
-    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);
+    apps_scan(root, &env, &reg);
 
     /* Now read the package to install into the same buffer, either from a URL (there is
      * no other way onto the device yet, with no MTP transport built) or from root. */
@@ -609,6 +683,7 @@ int purr_apps_install(const char *file_or_url, char *msg, size_t cap)
     char root[64];
     user_apps_root(root, sizeof(root), purr_login_current()->name);
     ensure_user_home(purr_login_current()->name);
+    SCRATCH_GUARD(s_install_lock);                  /* one install at a time: this buffer is the package being installed */
     uint8_t *scratch = app_scratch();
     if (scratch == NULL) {
         snprintf(msg, cap, "out of memory");
@@ -620,7 +695,7 @@ int purr_apps_install(const char *file_or_url, char *msg, size_t cap)
     if (purr_security_unsigned_apps_allowed()) {
         cfg.secure_mode = PURR_SECURE_OFF;          /* developer mode, unsigned apps switched on */
     }
-    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);
+    apps_scan(root, &env, &reg);
     uint32_t len = 0;
     if (is_url(file_or_url)) {
         size_t got = 0;
@@ -676,7 +751,7 @@ void purr_devapps_scan(purr_app_registry_t *out_reg)
     user_devapps_root(root, sizeof(root), purr_login_current()->name);
     purr_cfg_t cfg;
     purr_appmgr_env_t env = apps_env(&cfg);
-    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, out_reg);
+    apps_scan(root, &env, out_reg);
 }
 
 int purr_devapps_remove(const char *name)
@@ -696,6 +771,7 @@ int purr_devapps_install_url(const char *url, const purr_repo_app_t *app, char *
         snprintf(msg, cap, "developer mode is not active this boot");
         return -1;
     }
+    SCRATCH_GUARD(s_install_lock);                  /* one install at a time: this buffer is the package being installed */
     uint8_t *scratch = app_scratch();
     if (scratch == NULL) {
         snprintf(msg, cap, "out of memory");
@@ -707,7 +783,7 @@ int purr_devapps_install_url(const char *url, const purr_repo_app_t *app, char *
     static purr_app_registry_t reg;                 /* ~1.6 KB: not for a small task stack */
     purr_cfg_t cfg;
     purr_appmgr_env_t env = apps_env(&cfg);
-    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);   /* before the download reuses the buffer */
+    apps_scan(root, &env, &reg);   /* before the download reuses the buffer */
     if (purr_security_unsigned_apps_allowed()) {
         cfg.secure_mode = PURR_SECURE_OFF;          /* the app manager's accept-unsigned rule */
     }
@@ -748,6 +824,7 @@ int purr_apps_install_vouched(const uint8_t *data, size_t len, const char *name,
     user_apps_root(root, sizeof(root), purr_login_current()->name);
     ensure_user_home(purr_login_current()->name);
     purr_fs_mkdir(&s_fs, root);
+    SCRATCH_GUARD(s_install_lock);                  /* one install at a time: this buffer is the package being installed */
     uint8_t *scratch = app_scratch();
     if (scratch == NULL) {
         snprintf(msg, cap, "out of memory");
@@ -756,7 +833,7 @@ int purr_apps_install_vouched(const uint8_t *data, size_t len, const char *name,
     static purr_app_registry_t reg;
     purr_cfg_t cfg;
     purr_appmgr_env_t env = apps_env(&cfg);
-    purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch, APP_SCRATCH_CAP, &reg);    /* before the package is copied over the buffer */
+    apps_scan(root, &env, &reg);    /* before the package is copied over the buffer */
     cfg.secure_mode = PURR_SECURE_OFF;               /* the repository's signed index stands for the package; the receipt is what the loader checks */
     if (len > APP_SCRATCH_CAP) {
         snprintf(msg, cap, "the package is too big");
@@ -803,7 +880,7 @@ static int kernel_table_app_format(purr_cli_t *cli)
     purr_cfg_t cfg;
     purr_appmgr_env_t env = apps_env(&cfg);
     purr_app_registry_t reg;
-    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, &reg);
+    apps_scan(root, &env, &reg);
     int removed = 0;
     for (int i = 0; i < reg.count; i++) {
         if (purr_appmgr_remove(&s_appmgr_fs, root, reg.apps[i].name) == 0) {
@@ -5341,7 +5418,7 @@ static void core_table_apps_scan(purr_app_registry_t *out_reg)
     user_apps_root(root, sizeof(root), purr_login_current()->name);
     purr_cfg_t cfg;
     purr_appmgr_env_t env = apps_env(&cfg);
-    purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch(), APP_SCRATCH_CAP, out_reg);
+    apps_scan(root, &env, out_reg);
     STORE_MARK_VOUCHED(out_reg, root);               /* what a trusted repository vouches for shows and runs like any app */
 }
 

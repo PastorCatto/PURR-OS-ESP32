@@ -35,6 +35,7 @@
 #include "purr_catrt.h"
 #include "purr_lvgl.h"
 #include "purr_settings.h"
+#include "purr_store.h"
 #include "purr_ui_service.h"
 
 static const char *TAG = "type-home";
@@ -58,6 +59,18 @@ typedef struct {
 static app_t s_apps[MAX_APPS];
 static int s_napps;
 
+void tp_home_reload(void);
+
+/* An installed app the scan could not vouch for this time (a failed allocation or read, which is not a "no") is hidden from the lists, and must not stay hidden until
+ * the next restart: look again in a few seconds, a handful of times (audit 2026-11-19). */
+static int s_vouch_tries;
+
+static void vouch_retry_cb(lv_timer_t *t)
+{
+    lv_timer_delete(t);
+    tp_home_reload();
+}
+
 static void load_apps(void)
 {
     static purr_app_registry_t reg;                     /* ~1.6 KB: not for the UI task's stack */
@@ -70,6 +83,14 @@ static void load_apps(void)
     memset(&reg, 0, sizeof(reg));
     if (purr_login_current()->name[0] != '\0') {
         purr_apps_scan_current_user(&reg);
+    }
+    if (purr_store_vouch_retry_pending()) {
+        if (s_vouch_tries++ < 6) {
+            lv_timer_t *rt = lv_timer_create(vouch_retry_cb, 3000, NULL);
+            lv_timer_set_repeat_count(rt, 1);
+        }
+    } else {
+        s_vouch_tries = 0;
     }
     for (int i = 0; i < reg.count && s_napps < MAX_APPS; i++) {
         const purr_app_entry_t *a = &reg.apps[i];

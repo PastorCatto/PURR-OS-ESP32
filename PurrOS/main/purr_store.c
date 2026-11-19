@@ -1410,7 +1410,9 @@ static int parse_receipt(const char *folder, char repo[20], char idx8[IDX8 + 1],
     return repo[0] && idx8[0] && purr_repo_hex_to_sha256(shahex, sha) == 0 ? 0 : -1;
 }
 
-/* Does the saved, signed index a receipt points at list this app with this hash? */
+/* Does the saved, signed index a receipt points at list this app with this hash? 1 yes, 0 no for good (the repository is not trusted, the index does not list
+ * it), -1 could not tell this time (no memory, a file did not read): the caller must not remember that as a "no" (audit 2026-11-19: a "no" kept for the whole
+ * boot after one failed allocation hid an installed app from the lists until the next restart, its data still there). */
 static int receipt_vouches(const char *name, const char *repo, const char *idx8, const uint8_t sha[32])
 {
     repos_load();
@@ -1423,17 +1425,18 @@ static int receipt_vouches(const char *name, const char *repo, const char *idx8,
     uint32_t n = 0, sn = 0;
     uint8_t *ibuf = big_alloc(PURR_REPO_MAX_INDEX + 8);
     purr_repo_index_t *idx = big_alloc(sizeof(*idx));
-    int ok = 0;
+    int ok = -1;                                        /* unless it is known either way below */
     if (ibuf != NULL && idx != NULL) {
         snprintf(path, sizeof(path), STORE_DIR "/%s/idx-%s.json", repo, idx8);
         if (read_file(path, ibuf, PURR_REPO_MAX_INDEX + 8, &n) >= 0) {
             snprintf(path, sizeof(path), STORE_DIR "/%s/idx-%s.json.sig", repo, idx8);
             purr_repo_kind_t kind = PURR_REPO_STORE;
             char err[40];
-            if (read_file(path, sigtxt, sizeof(sigtxt), &sn) >= 0 && purr_repo_sig_decode((const char *)sigtxt, sn, sig) == 0 &&
-                purr_repo_check_signed(&purr_crypto_mbedtls, e->pub, ibuf, n, sig) == 0 &&
-                purr_repo_index_parse((const char *)ibuf, n, idx, &kind, err, sizeof(err)) == 0) {
-                ok = purr_repo_vouches(idx, name, sha);
+            if (read_file(path, sigtxt, sizeof(sigtxt), &sn) >= 0) {
+                ok = purr_repo_sig_decode((const char *)sigtxt, sn, sig) == 0 &&
+                     purr_repo_check_signed(&purr_crypto_mbedtls, e->pub, ibuf, n, sig) == 0 &&
+                     purr_repo_index_parse((const char *)ibuf, n, idx, &kind, err, sizeof(err)) == 0 &&
+                     purr_repo_vouches(idx, name, sha);
             }
         }
     }
@@ -1472,7 +1475,16 @@ int purr_store_vouches(const char *path, const uint8_t *data, size_t len)
         }
         return 0;
     }
-    return receipt_vouches(name, repo, idx8, sha);
+    return receipt_vouches(name, repo, idx8, sha) == 1;
+}
+
+static int s_vouch_retry;
+
+int purr_store_vouch_retry_pending(void)
+{
+    int r = s_vouch_retry;
+    s_vouch_retry = 0;
+    return r;
 }
 
 void purr_store_mark_vouched(purr_app_registry_t *reg, const char *apps_root)
@@ -1497,7 +1509,7 @@ void purr_store_mark_vouched(purr_app_registry_t *reg, const char *apps_root)
         int ok = -1;
         for (int k = 0; k < ncache; k++) {
             if (strcmp(cache[k].name, a->name) == 0 && memcmp(cache[k].sha, sha, 8) == 0) {
-                ok = cache[k].ok;
+                ok = cache[k].ok;                           /* only a "yes" is kept (below) */
             }
         }
         if (ok < 0) {
@@ -1511,10 +1523,13 @@ void purr_store_mark_vouched(purr_app_registry_t *reg, const char *apps_root)
             } else {
                 ok = receipt_vouches(a->name, repo, idx8, sha);
             }
-            if (ncache < 8) {
+            if (ok < 0) {
+                s_vouch_retry = 1;                          /* could not tell: not remembered, and the shell is asked to look again soon */
+                ok = 0;
+            } else if (ok == 1 && ncache < 8) {
                 snprintf(cache[ncache].name, sizeof(cache[ncache].name), "%s", a->name);
                 memcpy(cache[ncache].sha, sha, 8);
-                cache[ncache].ok = (uint8_t)ok;
+                cache[ncache].ok = 1;
                 ncache++;
             }
         }
