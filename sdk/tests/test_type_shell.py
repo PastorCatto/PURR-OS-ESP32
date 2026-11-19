@@ -203,6 +203,63 @@ class TheTheme(unittest.TestCase):
         self.assertIn("0xFFB900", read("PurrOS", "main", "purr_w10m_theme.c"))      # the dark sheets keep their amber
 
 
+class Audit(unittest.TestCase):
+    """The code audit of 2026-11-19 (plan7.md): each finding that was fixed keeps a test that says what must stay true."""
+
+    def test_the_root_filesystem_is_locked_around_every_operation(self):
+        fs = read("PurrOS", "components", "kernel", "src", "purr_fs.c")
+        self.assertIn("void purr_fs_set_lock(", fs)
+        self.assertIn("#define NEED_MOUNT(fs) FS_GUARD(fs);", fs)                       # every operation that needs the filesystem holds the lock
+        self.assertIn("FS_GUARD(fs);", fs[fs.index("int purr_fs_write_kept"):])          # and the keep-and-replace is one step
+        cmd = read("PurrOS", "main", "commands.c")
+        i = cmd.index("void purr_fs_setup(purr_cli_t *cli)")
+        self.assertLess(cmd.index("purr_fs_set_lock(&s_fs", i), cmd.index("purr_fs_mount(&s_fs, &bd)", i))        # set before the first mount
+        self.assertIn("xSemaphoreCreateRecursiveMutex", cmd[i - 900:i + 400])             # a callback may call back in
+
+    def test_scans_and_installs_do_not_share_a_buffer(self):
+        cmd = read("PurrOS", "main", "commands.c")
+        self.assertIn("static uint8_t *s_scan_scratch;", cmd)
+        self.assertNotIn("purr_appmgr_scan(&s_appmgr_fs, root, &env, app_scratch()", cmd)
+        self.assertNotIn("purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch", cmd)
+        self.assertEqual(cmd.count("SCRATCH_GUARD(s_install_lock);"), cmd.count("uint8_t *scratch = app_scratch();"))      # every install holds the install lock
+
+    def test_a_failed_vouch_check_is_not_remembered_as_no(self):
+        store = read("PurrOS", "main", "purr_store.c")
+        self.assertIn("int purr_store_vouch_retry_pending(void)", store)
+        i = store.index("void purr_store_mark_vouched")
+        body = store[i:]
+        self.assertIn("} else if (ok == 1 && ncache < 8) {", body)                        # only a "yes" is kept
+        self.assertIn("s_vouch_retry = 1;", body)
+        recv = store[store.index("static int receipt_vouches"):store.index("int purr_store_vouches")]
+        self.assertIn("int ok = -1;", recv)                                               # unknown unless it was read
+        self.assertIn("purr_store_vouch_retry_pending", read("PurrOS", "main", "purr_tp_home.c"))     # the shell looks again
+
+    def test_lvgl_does_not_freeze_the_device_on_a_failed_allocation(self):
+        defaults = read("PurrOS", "sdkconfig.defaults")
+        self.assertIn("# CONFIG_LV_USE_ASSERT_NULL is not set", defaults)
+        self.assertIn("# CONFIG_LV_USE_ASSERT_MALLOC is not set", defaults)
+
+    def test_a_keyboard_board_keeps_enter_and_tab(self):
+        nav = read("PurrOS", "main", "purr_tp_nav.c")
+        i = nav.index("static int activate(void)")
+        self.assertIn("if (!tp_nav_osk_wanted())", nav[i:i + 900])
+        shell = read("PurrOS", "main", "purr_tp.c")
+        self.assertIn("int tp_nav_osk_wanted(void)", shell)
+        self.assertIn("if (p == NULL && tp_sheet_open())", shell)
+        self.assertIn("tp_nav_osk_wanted", read("PurrOS", "main", "purr_tp_shim.c"))      # the weak answer: yes, for the images without a shell
+
+    def test_the_on_screen_keyboard_checks_its_text_box_before_every_use(self):
+        nav = read("PurrOS", "main", "purr_tp_nav.c")
+        self.assertIn("static int osk_target_alive(void)", nav)
+        self.assertEqual(nav.count("osk_target_alive()"), 2)                              # called from the key callback and from the key handler (the definition says (void))
+
+    def test_the_clock_fonts_can_draw_an_unset_clock(self):
+        for name in ("tp_font_clock_xl", "tp_font_clock_lock", "tp_font_clock_panel", "tp_font_date_big"):
+            text = read("PurrOS", "main", "tpfonts", name + ".c")
+            self.assertRegex(text, r"/\* U\+002D \*/")                                  # "-": "--:--" is what an unset clock says
+            self.assertRegex(text, r"/\* U\+0020 \*/")
+
+
 class Build(unittest.TestCase):
     def test_the_option_the_overlay_and_the_sources(self):
         kconfig = read("PurrOS", "main", "Kconfig.projbuild")

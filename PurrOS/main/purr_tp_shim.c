@@ -10,6 +10,7 @@
 #include "purr_catrt_ui.h"
 
 __attribute__((weak)) int tp_signed_in(void) { return 1; }
+__attribute__((weak)) int tp_nav_osk_wanted(void) { return 1; }
 __attribute__((weak)) int tp_modal_up(void) { return 0; }
 __attribute__((weak)) void tp_pad_hint(int mask) { (void)mask; }
 __attribute__((weak)) int w10m_perm_is_open(void) { return 0; }

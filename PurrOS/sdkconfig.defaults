@@ -53,3 +53,10 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 # of it fast RAM that apps need. Wi-Fi runs from flash instead, a little slower.
 # CONFIG_ESP_WIFI_IRAM_OPT is not set
 # CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
+
+# LVGL asserts: off. With no handler configured LVGL's default is `while(1);`, so the first failed allocation (internal RAM is the scarce resource: LVGL objects are
+# small, and anything under 4 KB is always allocated there) froze the UI task for good with nothing logged and the task watchdog only printing (audit 2026-11-19, plan7.md).
+# With the asserts off a failed allocation is a NULL that is used at once: a panic, a backtrace in the log and a restart, which is a crash that can be read and
+# recovered from instead of a device that has to be power-cycled.
+# CONFIG_LV_USE_ASSERT_NULL is not set
+# CONFIG_LV_USE_ASSERT_MALLOC is not set

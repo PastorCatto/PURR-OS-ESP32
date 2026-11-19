@@ -377,6 +377,9 @@ static int activate(void)
     }
     ESP_LOGI(TAG, "A on %p", (void *)o);
     if (lv_obj_has_class(o, &lv_textarea_class)) {
+        if (!tp_nav_osk_wanted()) {
+            return 0;                                   /* a board with its own keyboard: Enter is the box's, as it always was */
+        }
         osk_open(o);
         return 1;
     }
@@ -429,13 +432,27 @@ static void osk_close(void)
     tp_focus_clear();
 }
 
+/* The box the keyboard edits can be deleted by a page rebuild between two of the 80 ms looks (the timer closes the keyboard then): check before every use. */
+static int osk_target_alive(void)
+{
+    lv_obj_t *root = front_root();
+    if (s_osk_target == NULL || root == NULL) {
+        return 0;
+    }
+    collect(root);
+    return listed(s_osk_target);
+}
+
+static void osk_close(void);
+
 static void osk_cb(void *ud, tp_key_kind_t kind, char ch)
 {
     (void)ud;
-    lv_obj_t *ta = s_osk_target;
-    if (ta == NULL) {
+    if (!osk_target_alive()) {
+        osk_close();
         return;
     }
+    lv_obj_t *ta = s_osk_target;
     switch (kind) {
     case TP_KEY_CHAR:
         if (ch != '\0') {
@@ -518,6 +535,10 @@ static int osk_key(uint32_t key)
         return 1;
     }
     if (tp_focus_key(key)) {
+        return 1;
+    }
+    if (!osk_target_alive()) {
+        osk_close();
         return 1;
     }
     if (s_osk_target != NULL) {

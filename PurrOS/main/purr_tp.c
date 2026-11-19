@@ -122,6 +122,11 @@ int w10m_disp_h(void) { return disp_h(); }
 
 /* ---------------------------------------------------------------- the gamepad, if the board has one */
 
+int tp_nav_osk_wanted(void)
+{
+    return tp_pad() != NULL;                            /* no gamepad: a keyboard is there, and Enter on a text box is its own */
+}
+
 const purr_gamepad_ops_t *tp_pad(void)
 {
     void *h = NULL;
@@ -530,6 +535,9 @@ static int key_hook(uint32_t key)
         return 1;
     }
     if (key == LV_KEY_NEXT) {                           /* FUNC tapped: nothing on its own yet (play and pause, once a music app reports) */
+        if (p == NULL && tp_sheet_open()) {
+            return 0;                                   /* a keyboard board: Tab in a sheet moves between the fields, as it does everywhere else */
+        }
         return 1;
     }
     if (tp_sheet_open()) {
