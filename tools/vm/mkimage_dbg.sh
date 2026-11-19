@@ -74,9 +74,9 @@ PYEOF
 fi
 ps keys verify --key $SLOT_PUB --image $W/kernel.cat | tail -1 | cut -c1-90
 BOOTLOADER=${BOOTLOADER:-$ROOT/out/boot_tdeck_plus/bootloader/bootloader.bin}      # built from bootloader/, see README
-$PY - "$BASE" "$OUT" "$W" "$BOOTLOADER" "$SCENARIO" "$PT" <<'PYEOF'
+$PY - "$BASE" "$OUT" "$W" "$BOOTLOADER" "$SCENARIO" "$PT" "${DRIVERS_FROM:-}" <<'PYEOF'
 import os, struct, sys
-base, out, w, bl, scenario, pt = sys.argv[1:7]
+base, out, w, bl, scenario, pt, drivers = sys.argv[1:8]
 img = bytearray(open(base, "rb").read())
 newtab = open(pt, "rb").read()
 assert len(img) == 16 * 1024 * 1024, "%s is not a 16 MB image" % base
@@ -88,8 +88,8 @@ for i in range(0, len(newtab) - 31, 32):                  # the new table must b
         break
     _t, _s, o, z = struct.unpack_from("<BBII", newtab, i + 2)
     rows[newtab[i + 12:i + 28].split(b"\0")[0].decode()] = (o, z)
-if "ui_assets" in rows or rows.get("root") != (0x5C1000, 0xA3F000):
-    sys.exit("%s is not the flash map v2 table (root must be 0x5C1000 for 0xA3F000 bytes and there is no ui_assets)" % pt)
+if "ui_assets" in rows or rows.get("root") != (0x5C1000, 0xA2B000) or rows.get("drivers") != (0xFEC000, 0x14000):
+    sys.exit("%s is not the flash map v3 table (root 0x5C1000 for 0xA2B000 bytes, drivers 0xFEC000 for 0x14000, no ui_assets)" % pt)
 relayout = bytes(img[0xA000:0xB000]) != newtab                  # the base image has another (old) table: its root and picture data cannot be kept
 img[0xA000:0xB000] = newtab
 if relayout:
@@ -108,8 +108,12 @@ put(0x1E0000, w + "/kernel_slot.bin", 0x220000)
 if os.path.exists(w + "/loader_slot.bin"):
     put(0x400000, w + "/loader_slot.bin", 0x1C0000)
     put(0x20000, w + "/kittenos_slot.bin", 0x1C0000)
+if drivers and os.path.isfile(drivers):                              # flash map v3: the essential drivers are in their own partition (tools/release/make_drivers_partition.py)
+    put(0xFEC000, drivers, 0x14000)
+elif bytes(img[0xFEC000:0xFEC040]) == b"\xff" * 0x40:
+    print("WARNING: no DRIVERS_FROM and the base image has no drivers partition content: the device boots with no display, keyboard or touch driver")
 if scenario in ("first", "auto"):                                   # a blank device: nothing installed, and a blank root filesystem
-    img[0x5C1000:0x5C1000 + 0xA3F000] = b"\xff" * 0xA3F000           # root, from 0x5C1000 to the end of the flash
+    img[0x5C1000:0x5C1000 + 0xA2B000] = b"\xff" * 0xA2B000           # root, from 0x5C1000 to the drivers partition
     img[0x5C0000:0x5C0000 + 0x1000] = b"\xff" * 0x1000     # no remembered network either
     img[0x1E0000:0x1E0000 + 0x220000] = b"\xff" * 0x220000
     img[0x20000:0x20000 + 0x1C0000] = b"\xff" * 0x1C0000

@@ -590,7 +590,7 @@ class Baked(unittest.TestCase):
         self.go()
         b = {c[0][c[0].index("--name") + 1]: c[0][c[0].index("--kind") + 1] for c in self.calls if c[0][:2] == ["modules", "build"]}
         self.assertEqual(b["about"], "driver")
-        self.assertEqual(b["st7789"], "driver")
+        self.assertEqual(b["w5500"], "driver")
         self.assertEqual(b["store"], "app")
 
     def test_the_store_is_written_by_the_generator_from_the_compiled_apps(self):
@@ -608,18 +608,18 @@ class Baked(unittest.TestCase):
 
     def test_a_module_that_does_not_compile_stops_and_leaves_commands_c_alone(self):
         before = self.text()
-        self.fail = (["modules", "build"], "gt911")
+        self.fail = (["modules", "build"], "w5500")
         r, steps = self.go()
         self.assertFalse(r["ok"])
-        self.assertIn("gt911", r["problem"])
+        self.assertIn("w5500", r["problem"])
         self.assertIn(("baked", "fail"), steps)
         self.assertEqual(before, self.text())
 
     def test_a_missing_source_or_array_is_named(self):
-        os.remove(os.path.join(source.tree(self.ws), "Modules", "drivers", "st7789_module.c"))
+        os.remove(os.path.join(source.tree(self.ws), "Modules", "drivers", "w5500_module.c"))
         r, _ = self.go()
         self.assertFalse(r["ok"])
-        self.assertIn("s_st7789_driver_module", r["problem"])
+        self.assertIn("s_w5500_driver_module", r["problem"])
 
     def test_the_tarball_keeps_the_tools_release_folder_but_not_the_rest_of_tools(self):
         buf = io.BytesIO()
@@ -644,7 +644,10 @@ class TheRoadInSourceMode(test_system.Setup):
         self.assertEqual(system.load(self.ws, "road")["shell"], "android")
         built = os.path.join(self.tmp, "built")
 
-        def fake_compile(ws, board, shell, key, key_id, password, out, on_step, on_line, base):
+        dev = []
+
+        def fake_compile(ws, board, shell, key, key_id, password, out, on_step, on_line, base, dev_key=None, dev_key_id=None, dev_password=None):
+            dev.append((dev_key, dev_key_id, dev_password))
             test_system.make_parts(out, board)
             for i in ("compile-full", "package", "sign"):
                 on_step(i, "done", "")
@@ -677,6 +680,7 @@ class TheRoadInSourceMode(test_system.Setup):
         self.assertEqual([(o[1], o[2]) for o in own], [("boot", 7), ("developer", 6)])
         self.assertTrue(at.call_args[0][1])                                        # PURR's keys are kept by default
         self.assertEqual(rb.call_args[0][2:5], (os.path.join(self.ws.keys, "developer.key"), 6, "pw"))      # the baked-in binaries are signed with the developer key
+        self.assertEqual(dev, [(os.path.join(self.ws.keys, "developer.key"), 6, "pw")])                    # and so are the essential drivers of the drivers partition (the boot key may not sign a driver)
         rec = os.path.join(r["delivery"], "recovery")
         self.assertIn("component=bme280", open(os.path.join(rec, "drivers.manifest")).read())
         self.assertTrue(all(os.path.isfile(os.path.join(rec, "%s-tdeck_plus.cat" % m)) for m in system.MODULES))

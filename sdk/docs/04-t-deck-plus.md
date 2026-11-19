@@ -28,7 +28,8 @@ The goal for this board is **100 % supported**: every part has a driver you can 
 | `kernel` | 0x1E0000 | 2.125 MB | the full system |
 | `loader` | 0x400000 | 1.75 MB | the recovery loader |
 | `netrec` | 0x5C0000 | 4 KB | the saved network for recovery |
-| `root` | 0x5C1000 | 0xA3F000 (about 10.2 MiB) | the file system: apps, drivers, settings, picture packs, themes |
+| `root` | 0x5C1000 | 0xA2B000 (about 10.2 MiB) | the file system: apps, other drivers, settings, picture packs, themes |
+| `drivers` | 0xFEC000 | 0x14000 (80 KB, ten 8 KB slots) | the display, keyboard, touch and other drivers the board cannot start without: signed modules your developer key signs when the image is built (flash map v3: a device with an older table needs a full 16 MB flash) |
 
 Up to 1.0.28 there was also a 5 MB `ui_assets` partition and `root` was about 6 MB. A device with the old table must be flashed with a whole 16 MB image over USB (that rewrites `root`); an update over the air never changes the table.
 

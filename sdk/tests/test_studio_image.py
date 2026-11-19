@@ -17,7 +17,7 @@ class ImageRoutes(test_studio.Studio):
         st, body = self.call("GET", "/api/image/plan?board=tdeck_plus&folder=" + folder)
         self.assertEqual(st, 200)
         self.assertFalse(body["ok"])
-        self.assertEqual(len(body["parts"]), 5)
+        self.assertEqual(len(body["parts"]), 6)                                  # the five signed parts and the drivers partition image (a 16 MB board)
         self.assertTrue(all(not p["found"] for p in body["parts"]))
 
     def test_unknown_board_is_a_plain_error(self):

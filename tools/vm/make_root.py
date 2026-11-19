@@ -48,7 +48,7 @@ def main():
     ap.add_argument("--user", action="append", default=[], help="name:password:admin|standard")
     ap.add_argument("--file", action="append", default=[], help="/device/path=host/file")
     ap.add_argument("--into", help="a flash image to splice the root image into")
-    ap.add_argument("--blocks", type=int, help="block count (default: from the image's table, else flash map v2: 0xA3F000 / 4096)")
+    ap.add_argument("--blocks", type=int, help="block count (default: from the image's table, else flash map v3: 0xA2B000 / 4096)")
     a = ap.parse_args()
     tool = os.path.join(ROOT, "out", "lfs_image")
     os.makedirs(os.path.dirname(tool), exist_ok=True)
@@ -56,7 +56,7 @@ def main():
     offset = size = None
     if a.into:
         offset, size = root_of(a.into)
-    blocks = a.blocks or ((size // 4096) if size else 0xA3F000 // 4096)
+    blocks = a.blocks or ((size // 4096) if size else 0xA2B000 // 4096)
     cmd = [tool, "--blocks", str(blocks), "--out", a.out]
     for u in a.user:
         cmd += ["--user", u]

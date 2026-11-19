@@ -24,7 +24,7 @@ import tarfile
 import time
 import urllib.request
 
-from . import formats, runner
+from . import drivers, formats, minitoml, runner, workspace
 
 DEFAULT_URL = "https://github.com/PastorCatto/PURR-OS-ESP32"
 DEFAULT_REF = "main"
@@ -340,8 +340,18 @@ def build_dir(ws, board, profile, shell):
     return os.path.join(tree(ws), "PurrOS", "build", "%s-%s%s" % (board, profile, "" if shell == "w10m" else "-" + shell))
 
 
-def compile_and_package(ws, board, shell="android", key=None, key_id=4, password=None, out=None, on_step=None, on_line=print, run=None, clean=False, base=DEFAULT_VERSION):
+def _board_toml(board):
+    """The parsed sdk/boards/<board>.toml, or None."""
+    path = workspace.sdk_path("boards", board + ".toml")
+    return minitoml.load(path) if os.path.isfile(path) else None
+
+
+def compile_and_package(ws, board, shell="android", key=None, key_id=4, password=None, out=None, on_step=None, on_line=print, run=None, clean=False, base=DEFAULT_VERSION,
+                        dev_key=None, dev_key_id=None, dev_password=None):
     """Compile the firmware of `board` from the pulled source and put parts in `out`, signed with `key` (the boot key: it signs everything below the OS). Returns {"ok", "out", "version", "parts": [names], "problem"}.
+
+    With `dev_key` (the developer key: a driver is a module, and the boot key may not sign one) it also compiles, signs and packs the board's essential drivers into
+    drivers-<board>.bin, the image of the `drivers` partition. Without it that file is not made, and an image of a board that has the partition cannot be built.
 
     `run(args, extra_env=None, password=None)` runs purrstrap and returns {"rc", "output"}; it is a parameter so tests can stand in for the compiler."""
     st = state(ws)
@@ -424,6 +434,20 @@ def compile_and_package(ws, board, shell="android", key=None, key_id=4, password
         if r["rc"] != 0:
             return fail("sign", "Signing %s failed: %s" % (os.path.basename(p), (r["output"].strip().splitlines() or ["no reason given"])[-1]))
     step("sign", "done", "%d parts signed" % len(made))
+
+    # 4 the essential drivers, into the drivers partition's image
+    try:
+        wanted = drivers.board_files(board, _board_toml(board))
+    except drivers.DriverError as e:
+        return fail("drivers", str(e))
+    if wanted and dev_key:
+        dp = os.path.join(out, "drivers-%s.bin" % board)
+        r = drivers.build(board, t, dev_key, dev_key_id if dev_key_id is not None else 4, dev_password, dp, version, files=wanted, run=ps, on_line=on_line, on_step=on_step)
+        if not r["ok"]:
+            return {"ok": False, "problem": r["problem"], "out": out, "version": version}
+        made.append(dp)
+    elif wanted:
+        on_line("No developer key given: the drivers partition image (%s) is not made, and the image of this board cannot be built without it." % ", ".join(wanted))
     return {"ok": True, "out": out, "version": version, "parts": [os.path.basename(p) for p in made]}
 
 
@@ -674,19 +698,15 @@ def compile_modules(ws, board, key, key_id, password, drivers, apps, out, on_ste
 
 # ---------------------------------------------------------------------------------------------------------------- binaries baked into the kernel
 
-# PurrOS/main/commands.c holds signed binaries as byte arrays (signed by PURR's developer key): the loader's display, keyboard and touch drivers come from them, and the
-# kernel plants the system modules from them. A build that trusts nobody's binaries compiles each one again from source and writes its own signed copy into the array.
+# PurrOS/main/commands.c holds signed binaries as byte arrays (signed by PURR's developer key): the kernel plants the system modules from them, and the W5500 driver of a VM is one.
+# (The display, keyboard, touch and other essential drivers are not here any more: purrsdk/drivers.py builds them into the drivers partition.) A build that trusts nobody's binaries compiles each one again from source and writes its own signed copy into the array.
 # array in commands.c -> (source, entry symbol)
 BAKED = (("s_about_module", "Modules/test/about_module.c", "about_module_entry"), ("s_apps_module", "Modules/appmanager/apps_module.c", "apps_module_entry"),
          ("s_wifi_module", "Modules/network/wifi_module.c", "wifi_module_entry"), ("s_netinstall_module", "Modules/netinstall/netinstall_module.c", "netinstall_module_entry"),
          ("s_sysinfo_module", "Modules/coreos/sysinfo_module.c", "sysinfo_module_entry"), ("s_fs_module", "Modules/coreos/fs_module.c", "fs_module_entry"),
          ("s_login_module", "Modules/coreos/login_module.c", "login_module_entry"), ("s_appmgr_module", "Modules/coreos/appmgr_module.c", "appmgr_module_entry"),
          ("s_debug_module", "Modules/test/debug_module.c", "debug_module_entry"),
-         ("s_kbd_i2c_driver_module", "Modules/drivers/kbd_i2c_module.c", "kbd_i2c_entry"), ("s_gt911_driver_module", "Modules/drivers/gt911_module.c", "gt911_entry"),
-         ("s_st7789_driver_module", "Modules/drivers/st7789_module.c", "st7789_entry"), ("s_battery_driver_module", "Modules/drivers/battery_module.c", "battery_entry"),
-         ("s_kbd_backlight_driver_module", "Modules/drivers/kbd_backlight_module.c", "kbd_backlight_entry"),
-         ("s_w5500_driver_module", "Modules/drivers/w5500_module.c", "w5500_entry"),
-         ("s_gamepad_driver_module", "Modules/drivers/gamepad_mcp23017_module.c", "gamepad_mcp23017_entry"))
+         ("s_w5500_driver_module", "Modules/drivers/w5500_module.c", "w5500_entry"))        # the only driver still inside the kernel; the others are in the drivers partition (purrsdk/drivers.py)
 BUILTIN_APPS = ("store", "storesvc")                    # purr_builtin_apps.c: the Store and its companion (unsigned: the kernel's hash vouches for them)
 KIND_OF_FLAGS = {2: "coreos", 3: "appmanager", 4: "runtime", 5: "driver", 7: "devbundle"}
 COMMANDS_C = os.path.join("PurrOS", "main", "commands.c")

@@ -16,6 +16,7 @@ psram_mb = 8
 power_pin = -1                 # no switched peripheral rail
 power_settle_ms = 0
 idle_high_pins = []            # the display has a bus of its own: nothing else to hold deselected
+drivers = ["st7789.cat", "gamepad.cat"]            # the essential drivers the `drivers` partition carries (purrsdk/drivers.py builds them; at most ten)
 
 [spi]
 host = 2                       # SPI3_HOST: the display's bus. Write-only: the panel has no MISO line.

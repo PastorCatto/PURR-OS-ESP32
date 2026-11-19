@@ -32,6 +32,7 @@ HEADER = 173                                    # the signed container header (p
 
 # Which file name each part is looked for under, in a folder: the official release uses kernel_<board>.cat, a dev server or `purr release` kernel-<board>.cat.
 PARTS = (("bootloader", ".cat"), ("bootpkg", ".cat"), ("kittenos", ".kitt"), ("kernel", ".cat"), ("loader", ".cat"))
+DRIVERS_PART = "drivers"                        # flash map v3: a raw image of the essential drivers (purrsdk/drivers.py), not a signed container: drivers-<board>.bin
 SLOTS = ("kittenos", "kernel", "loader")        # these three become whole-partition images
 
 
@@ -124,6 +125,17 @@ def find_parts(folder, board):
     return found
 
 
+def find_drivers(folder, board):
+    """The drivers partition image in a folder (or its recovery/ or JumpingJaguar1/ subfolder): drivers-<board>.bin or drivers_<board>.bin; None when it is not there."""
+    roots = [folder] + [os.path.join(folder, s) for s in ("recovery", "JumpingJaguar1") if os.path.isdir(os.path.join(folder, s))]
+    for root in roots:
+        for sep in ("-", "_"):
+            p = os.path.join(root, "drivers%s%s.bin" % (sep, board))
+            if os.path.isfile(p):
+                return p
+    return None
+
+
 def _container(path):
     """(header fields, whole bytes) of a signed PURR container, or ImageError."""
     with open(path, "rb") as fh:
@@ -163,6 +175,16 @@ def plan(board, folder):
             problems.append("I cannot find the %s for %s in %s." % (part, board, folder or "(no folder)"))
         if row["size"] is not None and row["room"] is not None and row["size"] > row["room"]:
             problems.append("The %s is %d bytes and its slot holds %d: %d too many." % (part, row["size"], row["room"], row["size"] - row["room"]))
+        rows.append(row)
+    if DRIVERS_PART in by:                       # a board with the partition cannot start without what is in it
+        path = find_drivers(folder, board) if folder and os.path.isdir(folder) else None
+        row = {"part": DRIVERS_PART, "path": path, "found": bool(path), "offset": by[DRIVERS_PART]["offset"], "room": by[DRIVERS_PART]["size"], "size": None, "version": None, "key_id": None}
+        if path:
+            row["size"] = os.path.getsize(path)
+            if row["size"] > row["room"]:
+                problems.append("The drivers image is %d bytes and its partition holds %d: %d too many." % (row["size"], row["room"], row["size"] - row["room"]))
+        else:
+            problems.append("I cannot find the drivers image for %s (drivers-%s.bin) in %s: the display, keyboard and touch drivers are in it. The source build writes it when you give it a developer key." % (board, board, folder or "(no folder)"))
         rows.append(row)
     flash = max(p["offset"] + p["size"] for p in layout)
     return {"board": board, "layout": layout, "flash_bytes": flash, "parts": rows, "problems": problems, "ok": not problems}
@@ -206,6 +228,9 @@ def build(board, folder, out, trust_block=None, on_line=print, work=None):
         notes.append("No trust block: the device uses its defaults (it boots what is signed by a key it knows, and warns about the rest).")
     with open(parts["bootpkg"], "rb") as fh:
         put("bootpkg", layout["bootpkg"]["offset"], fh.read(), layout["bootpkg"]["size"])
+    if DRIVERS_PART in layout:
+        with open(parts[DRIVERS_PART], "rb") as fh:
+            put(DRIVERS_PART, layout[DRIVERS_PART]["offset"], fh.read(), layout[DRIVERS_PART]["size"])
     for slot in SLOTS:
         slot_file = os.path.join(work, slot + "_slot.bin")
         r = runner.purrstrap(["coreos", "slot-image", "--file", parts[slot], "--board", board, "--slot", slot, "--out", slot_file])

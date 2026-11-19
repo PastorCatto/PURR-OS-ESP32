@@ -15,6 +15,7 @@ psram_mb = 8
 power_pin = 10                 # switches the rail for the display, touch, keyboard, SD card and LoRa: high first, or none of them answer
 power_settle_ms = 50
 idle_high_pins = [9, 39]       # the other chip selects on the shared SPI bus (LoRa 9, SD 39), held high while the display is used
+drivers = ["st7789.cat", "gt911.cat", "kbd_i2c.cat", "battery.cat", "kbd-backlight.cat"]            # the essential drivers the `drivers` partition carries (purrsdk/drivers.py builds them; at most ten)
 
 [spi]
 host = 1                       # SPI2_HOST
@@ -236,7 +237,14 @@ name = "root"
 type = "data"
 subtype = "0x83"
 offset = 0x5C1000
-size = 0xA3F000
+size = 0xA2B000
+
+[[partition]]
+name = "drivers"
+type = "data"
+subtype = "0x42"
+offset = 0xFEC000
+size = 0x14000
 
 # How the game cores see this board (purrstrap games target): the one thing the rest of the file does not say is which hardware
 # input is which game button. Everything else (display, SD card, audio pins, battery, power pin) is read from the sections above.

@@ -5,6 +5,8 @@
 # runs from 0x5C1000 to the end of the 16 MB flash (0xA3F000 bytes, about 10.2 MiB). The 5 MB raw `ui_assets` partition is gone. The three slots each got 256 KB of
 # room to grow (owner, 2026-11-06): kittenos 1.75 MB, kernel 2.125 MB, loader 1.75 MB. Changing this table is not an OTA: it needs a cable flash and a full erase
 # of root (its start moved from 0xA01000), as every layout change has.
+# Flash map v3 (2026-11-19, Drivers/SPEC.md "The driver partition"): `drivers` is the last 0x14000 bytes of the flash, ten 8 KB slots of signed driver modules (the display, the
+# keyboard, the touch panel...), written when the image is made so the kernel does not carry them. `root` keeps its start and is 0x14000 bytes shorter.
 nvs,      data, nvs,     0xB000,  0x4000
 purrcfg,  data, 0x40,    0xF000,  0x2000
 phy_init, data, phy,     0x11000, 0x1000
@@ -13,4 +15,5 @@ kittenos, app,  factory, 0x20000, 0x1C0000
 kernel,   app,  ota_0,   0x1E0000, 0x220000
 loader,   app,  test,    0x400000, 0x1C0000
 netrec,    data, 0x41,    0x5C0000, 0x1000
-root,      data, 0x83,    0x5C1000, 0xA3F000
+root,      data, 0x83,    0x5C1000, 0xA2B000
+drivers,   data, 0x42,    0xFEC000, 0x14000

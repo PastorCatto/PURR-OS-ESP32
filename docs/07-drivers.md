@@ -102,7 +102,7 @@ The same container and loader also serve **command modules**: `about`, `apps`, `
 3. Publish to the driver list: `python3 tools/release/make_drivers_index.py --out <dir> --driver <file>:<compatible>:<buses>:<catcall>[:<abi_min>] ...`. **The script writes the manifest from only the `--driver` arguments, so list every driver each time.** A driver that calls `adc_read_mv` needs `abi_min` 5 or more; one that calls `uart_open` needs 6; one that calls `spi_lock` needs 7.
 4. Copy the files and `drivers.manifest` to the dev server's `recovery/` folder, or into a release.
 5. Test on a PC: run the real driver against a Python bus (`sdk/tests/test_drivers_host.py`) or against `fakebus.h` in the C host tests (`test_drv_gnss`). `test_driver` covers the registry.
-6. After any change to the bus table: raise the version, **rebuild, re-sign and re-embed the baked-in blobs** in `commands.c` (`s_kbd_i2c_driver_module`, `s_gt911_driver_module`, `s_st7789_driver_module`, `s_battery_driver_module`, `s_kbd_backlight_driver_module`).
+6. After any change to the bus table: raise the version, **rebuild and re-sign the essential drivers** and write the `drivers` partition again (`tools/release/make_drivers_partition.py`, or the SDK build, which does it with your developer key; see Drivers/SPEC.md "The driver partition"). Only the W5500 is still a blob in `commands.c` (`s_w5500_driver_module`): re-embed that one.
 
 ## What goes wrong and how to fix it
 

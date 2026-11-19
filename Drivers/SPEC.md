@@ -73,10 +73,9 @@ pointers the kernel hands to its entry function: `purr_driver_bus_table_t`
 - **Change the table by appending.** A new function goes at the END of the table, never in the
   middle, so an old module's slots keep their meaning. Bump `PURR_DRIVER_BUS_ABI_VERSION` on every
   layout change regardless.
-- **After a bump, every driver blob must be rebuilt, re-signed and re-embedded.** The firmware
-  carries baked-in copies in `commands.c` (`s_kbd_i2c_driver_module`, `s_gt911_driver_module`,
-  `s_st7789_driver_module`, `s_hello_driver_module`). Build with `purrstrap modules build --kind
-  driver`, sign with the developer key (key id 2), and replace the byte arrays.
+- **After a bump, every essential driver must be rebuilt and re-signed, and the `drivers` partition written again** (section 4a: no blob is compiled into the kernel any more except
+  the W5500's, `s_w5500_driver_module`, and a test blob, `s_hello_driver_module`). `tools/release/make_drivers_partition.py` or the SDK build does it: it builds with `purrstrap modules
+  build --kind driver`, signs with the developer key, and packs the slots.
 - **Planting replaces a differing file.** Driver files in `/boot/drivers` come only from the
   firmware, so on boot a file whose contents differ from the baked-in blob is replaced. (Files in
   `/system` and `/kernelmods` keep the older rule: planted only if missing.)

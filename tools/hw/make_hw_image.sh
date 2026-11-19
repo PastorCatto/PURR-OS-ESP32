@@ -48,10 +48,10 @@ tb=(--mode enforce --force-loader)
 [[ $FULL == 1 ]] && tb=(--mode enforce)                                                       # a full image boots the system, not the loader
 [[ ${DEV_RECOVERY-1} == 0 ]] || tb+=(--dev-recovery --dev-mode)      # the bootloader honours DEV_RECOVERY only while developer mode is on, and a blank device has no KittenOS to switch it on
 ps keys trust-block --key signing_keys/boot.key $tb --out $W/purrcfg.bin >/dev/null
-$PY - "$OUT" "$W" "$BL" "$PT" "$REL" "$MINIMAL" "$FULL" <<'PYEOF'
+$PY - "$OUT" "$W" "$BL" "$PT" "$REL" "$MINIMAL" "$FULL" "${DRIVERS_FROM:-}" <<'PYEOF'
 import struct, sys
-out, w, bl, pt, rel, minimal, full = sys.argv[1:8]
-# Flash map v2: the table must have no picture partition and `root` from 0x5C1000 to the end of the 16 MB flash. A table built before the change would put
+out, w, bl, pt, rel, minimal, full, drivers = sys.argv[1:9]
+# Flash map v3: the table must have no picture partition, `root` from 0x5C1000 and `drivers` in the last 0x14000 bytes of the 16 MB flash. A table built before the change would put
 # the old layout on the device (a root that starts at 0xA01000 and a 5 MB partition that nothing reads).
 tab = open(pt, "rb").read()
 rows = {}
@@ -60,8 +60,8 @@ for i in range(0, len(tab) - 31, 32):
         break
     _t, _s, o, z = struct.unpack_from("<BBII", tab, i + 2)
     rows[tab[i + 12:i + 28].split(b"\0")[0].decode()] = (o, z)
-if "ui_assets" in rows or rows.get("root") != (0x5C1000, 0xA3F000):
-    sys.exit("%s is not the flash map v2 table (root must be 0x5C1000 for 0xA3F000 bytes and there is no ui_assets): rebuild out/stdfull, or give PT_FROM" % pt)
+if "ui_assets" in rows or rows.get("root") != (0x5C1000, 0xA2B000) or rows.get("drivers") != (0xFEC000, 0x14000):
+    sys.exit("%s is not the flash map v3 table (root 0x5C1000 for 0xA2B000 bytes, drivers 0xFEC000 for 0x14000, no ui_assets): rebuild out/stdfull, or give PT_FROM" % pt)
 img = bytearray(b"\xff" * (16 * 1024 * 1024))
 def put(off, path, limit, skip=0):
     d = open(path, "rb").read()[skip:]
@@ -76,7 +76,13 @@ if minimal != "1":
     if full == "1":
         put(0x20000, w + "/kittenos_slot.bin", 0x1C0000)
         put(0x1E0000, w + "/kernel_slot.bin", 0x220000)
-# netrec (0x5C0000) and root (0x5C1000 to the end) stay 0xFF: a blank device
+# The drivers partition (flash map v3): the display, keyboard and touch drivers are no longer in the kernel. DRIVERS_FROM is the image tools/release/make_drivers_partition.py wrote.
+import os
+if drivers and os.path.isfile(drivers):
+    put(0xFEC000, drivers, 0x14000)
+else:
+    print("WARNING: no DRIVERS_FROM: the drivers partition stays blank, and the device boots with no display, keyboard or touch driver. Run tools/release/make_drivers_partition.py first.")
+# netrec (0x5C0000) and root (0x5C1000 up to the drivers partition) stay 0xFF: a blank device
 open(out, "wb").write(img)
 print("wrote", out, len(img), "bytes")
 PYEOF

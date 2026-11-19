@@ -186,8 +186,17 @@ def check_layout(board):
         names = [p.get("name") for p in parts]
         if "root" not in names:
             add("bad", "partition", "A board needs a `root` partition: the LittleFS file system.")
-        elif last["name"] != "root" or last["offset"] + last["size"] != end:
-            add("warn", "partition.root", "`root` is meant to be the last partition and to run to the end of the flash (flash map v2): everything that is not a slot is a file in it.")
+        else:
+            by = {q.get("name"): q for q in parts}
+            tail = by.get("drivers")                                     # flash map v3: the essential drivers' partition is the last 0x14000 bytes, and root runs up to it
+            root = by["root"]
+            if tail is not None:
+                if tail.get("offset", 0) + tail.get("size", 0) != end or last["name"] != "drivers":
+                    add("warn", "partition.drivers", "`drivers` is meant to be the last partition and to end at the end of the flash (flash map v3).")
+                if root.get("offset", 0) + root.get("size", 0) != tail.get("offset"):
+                    add("warn", "partition.root", "`root` is meant to run up to the `drivers` partition (flash map v3): everything that is not a slot is a file in it.")
+            elif last["name"] != "root" or last["offset"] + last["size"] != end:
+                add("warn", "partition.root", "`root` is meant to be the last partition and to run to the end of the flash (flash map v2): everything that is not a slot is a file in it.")
     if "ui_assets" in [p.get("name") for p in parts]:
         add("bad", "partition.ui_assets", "The raw picture partition is gone in flash map v2 (1.0.29): the picture packs are files in `root`.")
     return issues

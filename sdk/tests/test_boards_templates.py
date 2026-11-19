@@ -83,10 +83,16 @@ class PlaytimeBoard(unittest.TestCase):
         self.assertEqual(open(os.path.join(helpers.ROOT, "PurrOS", "partitions", "playtime.csv")).read(),
                          open(os.path.join(helpers.ROOT, "PurrOS", "partitions", "tdeck_plus.csv")).read())     # the same 16 MB layout
 
-    def test_the_gamepad_driver_is_re_signed_by_a_source_build(self):
-        from purrsdk import source
-        self.assertIn(("s_gamepad_driver_module", "Modules/drivers/gamepad_mcp23017_module.c", "gamepad_mcp23017_entry"), source.BAKED)
-        self.assertTrue(os.path.isfile(os.path.join(helpers.ROOT, "Modules", "drivers", "gamepad_mcp23017_module.c")))
+    def test_the_gamepad_driver_is_in_the_drivers_partition_not_the_kernel(self):
+        """Only the W5500 stays baked into the kernel (a virtual device's flag); the gamepad driver is built, signed and packed into the drivers partition."""
+        from purrsdk import drivers, minitoml, source
+        self.assertFalse([b for b in source.BAKED if "gamepad" in b[0]])
+        self.assertEqual([b[0] for b in source.BAKED if "driver" in b[0]], ["s_w5500_driver_module"])
+        name, rel, entry = drivers.ESSENTIAL["gamepad.cat"]
+        self.assertTrue(os.path.isfile(os.path.join(helpers.ROOT, *rel.split("/"))))
+        toml = minitoml.load(os.path.join(helpers.ROOT, "sdk", "boards", "playtime.toml"))
+        self.assertEqual(drivers.board_files("playtime", toml), ["st7789.cat", "gamepad.cat"])
+        self.assertNotIn("gamepad.cat", drivers.board_files("tdeck_plus"))                     # a T-Deck Plus has no Playtime code on it
 
 
 class Boards(unittest.TestCase):
@@ -139,16 +145,17 @@ class FlashLayout(unittest.TestCase):
 
     def test_board_profile_is_flash_map_v2(self):
         names = [p["name"] for p in self.layout()]
-        self.assertEqual(names, ["nvs", "purrcfg", "phy_init", "bootpkg", "kittenos", "kernel", "loader", "netrec", "root"])
+        self.assertEqual(names, ["nvs", "purrcfg", "phy_init", "bootpkg", "kittenos", "kernel", "loader", "netrec", "root", "drivers"])
         self.assertNotIn("ui_assets", names)
-        root = self.layout()[-1]
-        self.assertEqual((root["offset"], root["size"]), (0x5C1000, 0xA3F000))
         slots = {p["name"]: (p["offset"], p["size"]) for p in self.layout()}
+        self.assertEqual(slots["root"], (0x5C1000, 0xA2B000))                    # flash map v3: root keeps its start and gives its last 0x14000 bytes ...
+        self.assertEqual(slots["drivers"], (0xFEC000, 0x14000))                  # ... to the drivers partition at the end of the flash (ten 8 KB slots)
+        self.assertEqual(slots["root"][0] + slots["root"][1], slots["drivers"][0])
         self.assertEqual(slots["kittenos"], (0x20000, 0x1C0000))                 # 1.75 MB, each slot 256 KB larger than in 1.0.28
         self.assertEqual(slots["kernel"], (0x1E0000, 0x220000))                  # 2.125 MB
         self.assertEqual(slots["loader"], (0x400000, 0x1C0000))                  # 1.75 MB
         self.assertEqual(slots["netrec"], (0x5C0000, 0x1000))
-        self.assertEqual(root["offset"] + root["size"], 16 << 20)                # root runs to the end of the flash
+        self.assertEqual(slots["drivers"][0] + slots["drivers"][1], 16 << 20)    # the drivers partition runs to the end of the flash
         self.assertEqual([i for i in boards.check(boards.load(REF)) if i["where"].startswith("partition")], [])
 
     def test_board_profile_equals_the_build_tables(self):

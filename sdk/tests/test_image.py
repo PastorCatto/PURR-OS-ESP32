@@ -29,12 +29,20 @@ class Table(unittest.TestCase):
         with self.assertRaises(image.ImageError):
             image.layout_for("no-such-board")
 
-    def test_flash_map_v2_shapes(self):
-        for board, root_at, end in (("tdeck_plus", 0x5C1000, 0x1000000), ("tdeck", 0x5C1000, 0x1000000), ("waveshare154", 0x461000, 0x800000)):
+    def test_flash_map_shapes(self):
+        """The 16 MB boards are flash map v3 (root, then the drivers partition at the very end); the 8 MB board keeps map v2 (root to the end, no drivers)."""
+        for board, root_at, end, drv in (("tdeck_plus", 0x5C1000, 0x1000000, True), ("tdeck", 0x5C1000, 0x1000000, True), ("playtime", 0x5C1000, 0x1000000, True),
+                                         ("waveshare154", 0x461000, 0x800000, False)):
             lay = {p["name"]: p for p in image.layout_for(board)}
             self.assertNotIn("ui_assets", lay)
             self.assertEqual(lay["root"]["offset"], root_at, board)
-            self.assertEqual(lay["root"]["offset"] + lay["root"]["size"], end, board)
+            if drv:
+                self.assertEqual((lay["drivers"]["offset"], lay["drivers"]["size"]), (0xFEC000, 0x14000), board)
+                self.assertEqual(lay["root"]["offset"] + lay["root"]["size"], lay["drivers"]["offset"], board)
+                self.assertEqual(lay["drivers"]["offset"] + lay["drivers"]["size"], end, board)
+            else:
+                self.assertNotIn("drivers", lay)
+                self.assertEqual(lay["root"]["offset"] + lay["root"]["size"], end, board)
 
 
 @unittest.skipUnless(helpers.HAVE_CRYPTO, "needs the cryptography package")

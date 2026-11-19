@@ -321,7 +321,8 @@ def build(ws, name, password=None, on_step=None, on_line=print, boot_password=No
         rb = sourcemod.rebake(ws, s["board"], key, s["key_id"], password, on_step=step, on_line=on_line, base=s["version"])
         if not rb["ok"]:
             return {"ok": False, "steps": steps, "image": "", "delivery": ""}
-        res = sourcemod.compile_and_package(ws, s["board"], s["shell"], bkey, s["boot_key_id"], boot_password or password, out=os.path.join(out, "parts"), on_step=step, on_line=on_line, base=s["version"])
+        res = sourcemod.compile_and_package(ws, s["board"], s["shell"], bkey, s["boot_key_id"], boot_password or password, out=os.path.join(out, "parts"), on_step=step, on_line=on_line, base=s["version"],
+                                            dev_key=key, dev_key_id=s["key_id"], dev_password=password)      # the essential drivers are modules: your developer key signs them
         if not res["ok"]:
             return {"ok": False, "steps": steps, "image": "", "delivery": ""}
         built_parts = res["out"]
