@@ -1,0 +1,82 @@
+#include "purr_drvpart_plat.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_partition.h"
+
+#include "purr_drvpart.h"
+#include "purr_io.h"
+
+static const char *TAG = "drvpart";
+
+static const esp_partition_t *find(void)
+{
+    return esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "drivers");
+}
+
+static int dp_read(void *ctx, uint32_t off, void *buf, uint32_t len)
+{
+    return purr_io_partition_read((const esp_partition_t *)ctx, off, buf, len) == ESP_OK ? 0 : -1;
+}
+
+int purr_drvpart_each(purr_drvpart_each_fn fn, void *ctx)
+{
+    const esp_partition_t *p = find();
+    if (p == NULL || p->size < PURR_DRVPART_SIZE) {
+        return -1;
+    }
+    uint8_t *buf = heap_caps_malloc(PURR_DRVPART_MAX_CAT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        buf = malloc(PURR_DRVPART_MAX_CAT);
+    }
+    if (buf == NULL) {
+        return -1;
+    }
+    int rc = 0;
+    for (int i = 0; i < PURR_DRVPART_SLOTS && rc == 0; i++) {
+        purr_drvslot_info_t info;
+        uint32_t len = 0;
+        int e = purr_drvpart_slot_read(dp_read, (void *)p, i, buf, PURR_DRVPART_MAX_CAT, &len, &info);
+        if (e == PURR_DRVPART_EMPTY) {
+            continue;
+        }
+        if (e != 0) {
+            ESP_LOGW(TAG, "slot %d is damaged or unreadable (%d): skipped", i, e);
+            continue;
+        }
+        rc = fn(ctx, info.file, buf, len);
+    }
+    free(buf);
+    return rc;
+}
+
+static int count_cb(void *ctx, const char *file, const uint8_t *cat, uint32_t len)
+{
+    (void)file; (void)cat; (void)len;
+    (*(int *)ctx)++;
+    return 0;
+}
+
+int purr_drvpart_count(void)
+{
+    int n = 0;
+    return purr_drvpart_each(count_cb, &n) == 0 ? n : 0;
+}
+
+int purr_drvpart_has_file(const char *file)
+{
+    const esp_partition_t *p = find();
+    if (p == NULL || p->size < PURR_DRVPART_SIZE || file == NULL) {
+        return 0;
+    }
+    for (int i = 0; i < PURR_DRVPART_SLOTS; i++) {
+        purr_drvslot_info_t info;
+        if (purr_drvpart_slot_info(dp_read, (void *)p, i, &info) == 0 && strcmp(info.file, file) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
