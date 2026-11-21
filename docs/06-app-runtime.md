@@ -71,7 +71,7 @@ Each app task needs a stack. Since 1.0.22 (2026-11-05, [plan7.md](../plan7.md)) 
 
 ## The control surface
 
-`/etc/apps.conf` is planted with every line commented out. Keywords:
+`/etc/apps.conf` is planted with every line commented out. Keywords: A copy of the last config that loaded clean is kept as `/etc/apps.conf.bak`. A file that is there but does not read, or is not text, is never replaced by the default on the spot: it is read again, then the backup is put back, and with no good backup it is kept as `apps.conf.damaged` before the default is planted. Only a missing file (first start) is planted straight away.
 
 | Keyword | Meaning |
 |---|---|

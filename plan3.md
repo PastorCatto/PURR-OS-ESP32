@@ -384,3 +384,7 @@ The owner will have **four main system keys**: **boot** (OS images and the trust
 - **Not done:** a cable flash of these exact images on a real T-Deck or T-Deck Plus (the owner's test before upload); revoking keys 1 and 2 and bootloader 0.6.0 (phase 6); the hub repository's own copy of the drivers (still key 2); devices still on bootloader 0.4.0 stay in warn mode until flashed by cable.
 - **Lesson:** the 1.1 release script took `--bootloader` from a backup folder; a release must take the bootloader from the newest tested build, and a file the bootloader verifies may only move to a key that bootloader has (see `sdk/NOTES-compile-from-source.md`).
 
+
+
+## The `drivers` release component (2026-11-21)
+recovery.manifest can carry `component=drivers`, `type=drivers`: the raw image of the `drivers` partition, installed after the kernel (the loader's restore also before KittenOS), checked slot by slot before anything is erased, each driver signed by the developer key and checked when it loads. `abi_min` is the bus ABI it needs; a kernel serves every driver from ABI 4 up to its own, so a drivers image never has to wait for a newer kernel and an older one keeps working (the rule is pinned by a test). Withdrawal and key rotation (`resign_release.py` signs the drivers inside again) work on it like on any component. Spec: OTA/SPEC.md 5.1, Drivers/SPEC.md 4a; plan7.md has the work.

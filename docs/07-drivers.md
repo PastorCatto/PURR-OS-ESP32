@@ -125,3 +125,8 @@ The same container and loader also serve **command modules**: `about`, `apps`, `
 - **Open:** dependencies between drivers, two drivers matching one device, and rolling a bad driver back ([Drivers/SPEC.md](../Drivers/SPEC.md) section 6, [plan8.md](../plan8.md) "Driver foundation").
 
 Plan references: [plan2.md](../plan2.md) (display and driver bus), [plan8.md](../plan8.md) (driver index, Find hardware), [plan9.md](../plan9.md) (crashes and deferral).
+
+
+## The driver partition and updates (2026-11-21)
+
+The drivers a board cannot start without live in the raw `drivers` partition (flash map v3, ten 8 KB slots, [Drivers/SPEC.md](../Drivers/SPEC.md) section 4a). A release lists them as the `drivers` component, which is installed **after** the kernel: the kernel serves every driver built for a bus ABI from `PURR_DRIVER_BUS_ABI_MIN` (4) up to its own version, so drivers already on a device work with every later kernel, while a driver built for a newer table than the kernel running is skipped (with a line in the log) and the older ones still load. The floor is never raised; a test fails the build if it is. `netinstall drivers` installs the component by hand, and Settings > Updates names it when the partition differs from the release's.
