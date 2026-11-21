@@ -31,6 +31,12 @@ typedef struct {
 } purr_oobe_ap_t;
 
 typedef struct {
+    char name[32];
+    char version[12];
+    int selected;                       /* 1 when it will be installed (the wizard starts with all of them on) */
+} purr_oobe_app_t;
+
+typedef struct {
     char base[80];                      /* http://192.168.1.20:47801 */
     char name[32];
     char id[24];
@@ -73,6 +79,10 @@ typedef struct {
     /* The Installing page was reached: start the install now if it was held back (the Froyo first run installs after the connection test on the legal page). Returns 1 if an
      * install is running. NULL = it already started on its own. */
     int (*start_install)(void);
+    /* The ready-to-go image (plan1.md): apps that ship inside the image. NULL, or 0 apps, = the usual first run (a network install follows). With apps, the wizard has an Apps page
+     * (switches, all on to start with), no download happens, Wi-Fi can be skipped, and the chosen ones are installed in the background once the account exists. */
+    int (*apps_list)(purr_oobe_app_t *out, int max);
+    void (*apps_choose)(int index, int on);
 } purr_oobe_ops_t;
 
 #define PURR_OOBE_PART_LOADER 1

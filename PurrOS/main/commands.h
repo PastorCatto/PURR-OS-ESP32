@@ -95,6 +95,16 @@ int purr_stage2_pending(void);                      /* the same, without clearin
 int purr_stage2_take_pending(void);                 /* 1 if a recovery install is waiting to continue (clears the request) */
 int purr_stage2_step(purr_cli_t *cli, int step);    /* 0 = the kernel, 1 = the modules, 2 = the bootloader, 3 = the shell's picture pack; returns 0 when it installed (or had nothing to install) */
 
+/* ---- the ready-to-go image (plan1.md): apps and the legal text that ship in /boot/preload, planted at first start instead of downloaded. */
+#include "purr_preload.h"
+/* The apps in /boot/preload (the packages the image carries for this chip); 0 when there is none. */
+int purr_preload_apps(purr_preload_app_t *out, int max);
+/* Installs the named files (as listed, "notes.cat") for `user`, whose account exists. Returns how many are installed (an app already there at this version counts); `failed` gets the number
+ * that were refused, `why` the first reason in words. */
+int purr_preload_plant_files(const char *user, const char *const *files, int n, int *failed, char *why, size_t why_cap);
+/* /boot/preload/legal.txt, NUL-terminated into buf: its length, or -1 when the image has none. */
+int purr_preload_legal(char *buf, size_t cap);
+
 /* Resets purrcfg's boot_fail_count to 0 once a boot has reached a stable, working state (right
  * before the login loop starts) -- the bootloader's failure-count ladder
  * (bootloader/SPEC.md section 6) only climbs when this is never reached. Silent no-op if the

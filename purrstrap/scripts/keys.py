@@ -342,7 +342,7 @@ def inspect(ctx, path):
 
 
 # -- trust block -------------------------------------------------------
-def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys, out, installed=False, force_loader=False, dev_recovery=False, force_recovery=False, auto_reinstall=False):
+def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys, out, installed=False, force_loader=False, dev_recovery=False, force_recovery=False, auto_reinstall=False, first_run=False):
     """Build a purrcfg partition image carrying a SIGNED trust block (plan3.md): the secure mode,
     the development-mode lock, revocations and override keys, signed with a boot-role key. Flash
     it at the purrcfg partition (or hand it to the device's `trust apply`) to set the device's
@@ -393,7 +393,8 @@ def trust_block(ctx, key, mode, dev_locked, dev_mode, tighten, revoke, add_keys,
                                 (pcfg.CFGF_FORCE_LOADER if force_loader else 0) |
                                 (pcfg.CFGF_DEV_RECOVERY if dev_recovery else 0) |
                                 (pcfg.CFGF_FORCE_RECOVERY if force_recovery else 0) |
-                                (pcfg.CFGF_AUTO_REINSTALL if auto_reinstall else 0)),
+                                (pcfg.CFGF_AUTO_REINSTALL if auto_reinstall else 0) |
+                                (pcfg.CFGF_CONTINUE_INSTALL if first_run else 0)),
                          tighten=pcfg.SECURE[tighten], seq=1, trust_sig=der_sig_to_raw(der_sig))
     dest = out or "purrcfg.bin"
     os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
@@ -467,6 +468,8 @@ SCRIPT = Script(
                              help="let recovery pull from a local dev server (honoured only while development mode is on)"),
                        Param("auto_reinstall", "bool", default=False,
                              help="the recovery loader runs unattended and installs by itself (for a test device or the VM)"),
+                       Param("first_run", "bool", default=False,
+                             help="a ready-to-go image: KittenOS's first-run wizard runs once at the first start, and offers the apps the image carries (tools/vm/make_root.py --preload)"),
                        Param("force_recovery", "bool", default=False,
                              help="boot KittenOS once (a one-shot request, for a test device or the VM)"),
                        Param("force_loader", "bool", default=False,

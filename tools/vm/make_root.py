@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Builds a LittleFS root image on the host (tools/vm/lfs_image.c) and, optionally, splices it into a flash image at the `root` partition of flash map v2.
 
-    python3 tools/vm/make_root.py --out out/root.bin [--user dev:dev:admin] [--file /ui/w10m/pack.bin=out/ui/pack-w10m.bin] [--into out/vm-flash.bin]
+    python3 tools/vm/make_root.py --out out/root.bin [--user dev:dev:admin] [--file /ui/w10m/pack.bin=out/ui/pack-w10m.bin] [--preload DIR] [--into out/vm-flash.bin]
 
 The root partition is read from the flash image's own partition table when --into is given (the table must be flash map v2: `root` is the last partition);
 without --into the size is the one of PurrOS/partitions/tdeck_plus.csv. The accounts use a fixed salt: for test images only. Needs gcc.
@@ -47,6 +47,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--user", action="append", default=[], help="name:password:admin|standard")
     ap.add_argument("--file", action="append", default=[], help="/device/path=host/file")
+    ap.add_argument("--preload", help="a folder of signed app packages (*.cat) and, optionally, legal.txt: they go to /boot/preload, where the first-run wizard of a ready-to-go image offers them")
     ap.add_argument("--into", help="a flash image to splice the root image into")
     ap.add_argument("--blocks", type=int, help="block count (default: from the image's table, else flash map v3: 0xA2B000 / 4096)")
     a = ap.parse_args()
@@ -57,6 +58,12 @@ def main():
     if a.into:
         offset, size = root_of(a.into)
     blocks = a.blocks or ((size // 4096) if size else 0xA2B000 // 4096)
+    if a.preload:
+        names = sorted(f for f in os.listdir(a.preload) if f.endswith(".cat") or f == "legal.txt")
+        if not any(n.endswith(".cat") for n in names):
+            sys.exit("%s has no .cat app package" % a.preload)
+        for n in names:
+            a.file.append("/boot/preload/%s=%s" % (n, os.path.join(a.preload, n)))
     cmd = [tool, "--blocks", str(blocks), "--out", a.out]
     for u in a.user:
         cmd += ["--user", u]

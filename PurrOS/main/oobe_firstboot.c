@@ -21,6 +21,7 @@
 #include "purr_net.h"
 #include "purr_netrec.h"
 #include "purr_oobe.h"
+#include "purr_preload.h"
 #include "purr_recovery_src.h"
 #include "purr_w10m_theme.h"
 
@@ -50,6 +51,62 @@ static int job_account(oobe_job_t *job, void *arg)
         return 1;
     }
     return 0;
+}
+
+/* ---- the ready-to-go image: the apps it carries are planted instead of the system being downloaded */
+
+static purr_preload_app_t s_papps[PURR_PRELOAD_MAX];
+static uint8_t s_pchosen[PURR_PRELOAD_MAX];            /* 1 = install it; all on to start with */
+static int s_npapps;
+static int s_preloaded;                                 /* this image carries apps: no network install, the wizard has an Apps page */
+static char s_plant_user[40];
+
+static int job_plant(oobe_job_t *job, void *arg)
+{
+    (void)arg;
+    const char *files[PURR_PRELOAD_MAX];
+    int n = 0;
+    for (int i = 0; i < s_npapps; i++) {
+        if (s_pchosen[i]) {
+            files[n++] = s_papps[i].file;
+        }
+    }
+    if (n == 0) {
+        oobe_job_report(job, "No apps chosen", 1000);
+        return 0;
+    }
+    oobe_job_report(job, "Adding your apps...", 100);
+    int failed = 0;
+    char why[80];
+    int done = purr_preload_plant_files(s_plant_user, files, n, &failed, why, sizeof(why));
+    ESP_LOGI(TAG, "preloaded apps: %d installed, %d refused%s%s", done, failed, why[0] ? ": " : "", why);
+    if (failed > 0) {                                   /* the person is told, and the setup carries on: an app can be added later */
+        static char msg[120];
+        snprintf(msg, sizeof(msg), "%d of %d apps were added. %s", done, n, why);
+        oobe_job_report(job, msg, 1000);
+        return 0;
+    }
+    oobe_job_report(job, "Your apps are ready", 1000);
+    return 0;
+}
+
+static int op_apps_list(purr_oobe_app_t *out, int max)
+{
+    int n = s_npapps < max ? s_npapps : max;
+    for (int i = 0; i < n; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        snprintf(out[i].name, sizeof(out[i].name), "%s", s_papps[i].name);
+        snprintf(out[i].version, sizeof(out[i].version), "%s", s_papps[i].version);
+        out[i].selected = s_pchosen[i];
+    }
+    return n;
+}
+
+static void op_apps_choose(int index, int on)
+{
+    if (index >= 0 && index < s_npapps) {
+        s_pchosen[index] = on ? 1 : 0;
+    }
 }
 
 /* ---- stage 2: the rest of the system, in the background */
@@ -230,6 +287,19 @@ static int job_connect(oobe_job_t *job, void *arg)
 
 static int op_job_start(purr_oobe_job_t kind, const char *a, const char *b)
 {
+    if (kind == PURR_OOBE_JOB_LEGAL && s_preloaded) {   /* nothing is downloaded: the text the image carries, or a pointer to where it is */
+        if (s_legal_text == NULL) {
+            char *t = malloc(LEGAL_MAX);
+            int n = t != NULL ? purr_preload_legal(t, LEGAL_MAX) : -1;
+            if (n > 0) {
+                s_legal_text = t;
+            } else {
+                free(t);
+                s_legal_text = strdup("The legal notices and credits are in Settings, under About.");
+            }
+        }
+        return s_legal_text != NULL ? 0 : -1;
+    }
     if (kind == PURR_OOBE_JOB_LEGAL) {
         if (s_defer) {                                  /* the Froyo first run: a job of its own, the connection test */
             return oobe_job_start_stack(s_net_job, job_legal_test, NULL, OOBE_STACK_NET);
@@ -275,7 +345,15 @@ static int op_job_poll(purr_oobe_job_t kind, char *msg, size_t cap, int *per_mil
         }
         return r;
     }
-    return oobe_job_poll(s_acct_job, msg, cap, per_mille);
+    int ar = oobe_job_poll(s_acct_job, msg, cap, per_mille);
+    if (ar == 0 && s_preloaded && !s_stage2_started) {  /* the account exists: the apps it was given a choice of can be planted for it */
+        snprintf(s_plant_user, sizeof(s_plant_user), "%s", s_name);
+        if (oobe_job_start(s_stage2_job, job_plant, NULL) == 0) {
+            s_stage2_started = 1;
+        }
+        ESP_LOGI(TAG, "planting the chosen apps for %s: %s", s_plant_user, s_stage2_started ? "started" : "could not start");
+    }
+    return ar;
 }
 
 static int op_scan_results(purr_oobe_ap_t *out, int max)
@@ -352,6 +430,7 @@ static void op_finish(void)
 static const purr_oobe_ops_t k_ops = {
     .job_start = op_job_start, .job_poll = op_job_poll, .legal = op_legal, .background = op_background, .finish = op_finish,
     .scan_results = op_scan_results, .wired = op_wired, .remembered_ssid = op_remembered, .need_wifi = op_need_wifi, .retry = op_retry, .start_install = op_start_install,
+    .apps_list = op_apps_list, .apps_choose = op_apps_choose,
 };
 
 int oobe_firstboot_available(void)
@@ -372,7 +451,14 @@ void oobe_firstboot_run(void)
     s_net_job = oobe_job_new();
     purr_console_set_muted(1);                          /* the wizard draws the screen; the log stays in the serial log */
     s_defer = purr_theme_skin() == PURR_SKIN_ANDROID && !purr_login_has_accounts();
-    if (purr_stage2_take_pending()) {                   /* the loader restored us */
+    s_npapps = purr_login_has_accounts() ? 0 : purr_preload_apps(s_papps, PURR_PRELOAD_MAX);
+    s_preloaded = s_npapps > 0;
+    memset(s_pchosen, 1, sizeof(s_pchosen));
+    if (s_preloaded) {
+        s_defer = 0;                                    /* nothing to download, so nothing to hold back */
+        purr_stage2_take_pending();                     /* the request that brought us here is answered by the image itself */
+        ESP_LOGI(TAG, "a ready-to-go image: %d app(s) to choose from, no install from the network", s_npapps);
+    } else if (purr_stage2_take_pending()) {            /* the loader restored us */
         if (s_defer) {
             s_install_wanted = 1;                       /* the Froyo first run installs from its Installing page, after the legal page has tested the connection */
         } else {

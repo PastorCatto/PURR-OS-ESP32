@@ -126,6 +126,15 @@ class TrustBlockToolTests(unittest.TestCase):
         self.assertEqual(self.build(installed=True, dev_mode=True), 0)
         self.assertEqual(pcfg.parse_cfg(self.read())["flags"], pcfg.CFGF_DEV_MODE)
 
+    def test_a_ready_to_go_image_asks_for_the_first_run_wizard_once(self):
+        self.assertEqual(self.build(first_run=True), 0)
+        f = pcfg.parse_cfg(self.read())
+        self.assertEqual(f["flags"], pcfg.CFGF_FRESH | pcfg.CFGF_CONTINUE_INSTALL)
+        self.assertEqual(pcfg.CFGF_CONTINUE_INSTALL, 1 << 6)                     # purr_abi.h's PURR_CFGF_CONTINUE_INSTALL: the bootloader starts KittenOS for it
+        self.verify_signature(self.read())                                        # a trust-block signature covers the trust fields only, so the flag does not break it
+        self.assertEqual(self.build(), 0)
+        self.assertEqual(pcfg.parse_cfg(self.read())["flags"], pcfg.CFGF_FRESH)    # and it is off unless asked for
+
     def test_revocations_keys_and_tighten(self):
         self.assertEqual(self.build(mode="warn", tighten="enforce", revoke="3, 5",
                                     add_keys=f"9:developer:{self.other_pub}"), 0)

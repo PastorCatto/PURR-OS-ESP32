@@ -24,7 +24,7 @@ static int head_px(void) { return droid() ? DROID_HEAD_H : HEAD_H; }
 static int bar_px(void) { return droid() ? DROID_BAR_H : BAR_H; }
 static const lv_font_t *head_font(void) { return droid() ? &lv_font_montserrat_14 : &lv_font_montserrat_20; }
 
-typedef enum { PG_WRONG, PG_DEVSERVER, PG_LEGAL, PG_WIFI, PG_RESTORING, PG_COLOUR, PG_ACCOUNT, PG_TIME, PG_DONE, PG_FINISHING, PG_WELCOME, PG_INSTALL } page_t;
+typedef enum { PG_WRONG, PG_DEVSERVER, PG_LEGAL, PG_WIFI, PG_RESTORING, PG_COLOUR, PG_ACCOUNT, PG_TIME, PG_DONE, PG_FINISHING, PG_WELCOME, PG_INSTALL, PG_APPS } page_t;
 
 /* The last page is only reached from a failed restore ("Use a recovery computer"); the normal flow ends on the restore. */
 static const page_t k_loader[] = {PG_WRONG, PG_WIFI, PG_RESTORING, PG_DEVSERVER};
@@ -37,6 +37,11 @@ static const page_t k_first[] = {PG_COLOUR, PG_LEGAL, PG_ACCOUNT, PG_TIME, PG_DO
 /* The Froyo skin's first run follows the owner's draft (plan7.md), with the legal page back in (owner): seven pages, the legal page doubling as the connection test,
  * then the install on a page of its own with a checklist. The colour is the skin's. */
 static const page_t k_first_droid[] = {PG_WELCOME, PG_WIFI, PG_ACCOUNT, PG_TIME, PG_LEGAL, PG_INSTALL, PG_DONE};
+/* The ready-to-go image: everything is already on the device, so there is no install page and the network is optional. The apps come first (they are what is planted once the
+ * account exists), then the account, the network if wanted, the clock. */
+static const page_t k_first_preloaded[] = {PG_COLOUR, PG_APPS, PG_LEGAL, PG_ACCOUNT, PG_WIFI, PG_TIME, PG_DONE};
+static const page_t k_first_droid_preloaded[] = {PG_WELCOME, PG_APPS, PG_ACCOUNT, PG_WIFI, PG_TIME, PG_LEGAL, PG_DONE};
+static int s_preloaded;                                          /* the image carries apps: the lists above */
 
 static const purr_oobe_ops_t *s_ops;
 static const page_t *s_pages;
@@ -145,6 +150,7 @@ static const char *page_name(page_t p)
     case PG_TIME:      return "Date and time";
     case PG_DONE:      return "All set";
     case PG_FINISHING: return "Almost there";
+    case PG_APPS:      return "Apps";
     }
     return "";
 }
@@ -553,10 +559,11 @@ static void page_wifi(void)
         w10m_title(s_body, "Let's get you connected");
     }
     int offline = s_detour || (s_ops->need_wifi != NULL && s_ops->need_wifi());
-    w10m_dim(s_body, offline ? "The rest of the system couldn't be downloaded. Pick your network and it will carry on."
-                             : "Pick your network and " PURR_BRAND_PRODUCT " will be ready for you.");
+    w10m_dim(s_body, s_preloaded ? "Everything is already on this device, so you can skip this. Connect to get app updates and the time from the network."
+                                 : offline ? "The rest of the system couldn't be downloaded. Pick your network and it will carry on."
+                                           : "Pick your network and " PURR_BRAND_PRODUCT " will be ready for you.");
     s_connected = 0;
-    set_next("Next", 0);
+    set_next(s_preloaded ? "Skip" : "Next", s_preloaded);      /* a ready-to-go device works without a network: it can be left for later (Settings) */
     if (s_ops->wired != NULL && s_ops->wired()) {
         w10m_dim(s_body, "You're on a wired network. Waiting for an address...");
         make_status();
@@ -769,6 +776,42 @@ static void page_install(void)
 
 /* ---- part 2 */
 
+/* The apps the image carries: a switch each, all on. Nothing is installed here; the account does not exist yet. The choice is the ops' (apps_choose) and is acted on in the background once it does. */
+#define MAX_APPS_SHOWN 12
+static purr_oobe_app_t s_apps[MAX_APPS_SHOWN];
+static lv_obj_t *s_app_sw[MAX_APPS_SHOWN];
+static int s_napps;
+
+static void app_switch_cb(lv_event_t *e)
+{
+    lv_obj_t *t = lv_event_get_target_obj(e);
+    for (int i = 0; i < s_napps; i++) {
+        if (s_app_sw[i] == t) {
+            int on = lv_obj_has_state(t, LV_STATE_CHECKED) ? 1 : 0;
+            s_apps[i].selected = on;
+            if (s_ops->apps_choose != NULL) {
+                s_ops->apps_choose(i, on);
+            }
+        }
+    }
+}
+
+static void page_apps(void)
+{
+    w10m_title(s_body, "Pick your apps");
+    w10m_dim(s_body, "These are already on this device. Choose the ones you want; the others stay out of the way, and you can add them later from Settings.");
+    s_napps = s_ops->apps_list != NULL ? s_ops->apps_list(s_apps, MAX_APPS_SHOWN) : 0;
+    for (int i = 0; i < s_napps; i++) {
+        char t[64];
+        snprintf(t, sizeof(t), "%.31s  %.11s", s_apps[i].name, s_apps[i].version);
+        s_app_sw[i] = w10m_switch(s_body, t, s_apps[i].selected, app_switch_cb);
+    }
+    if (s_napps == 0) {
+        w10m_dim(s_body, "There are no apps to choose from.");
+    }
+    set_next("Next", 1);
+}
+
 static int name_ok(const char *n)
 {
     size_t len = strlen(n);
@@ -975,6 +1018,7 @@ static void show_page(int idx)
     case PG_FINISHING: page_finishing(); break;
     case PG_WELCOME:   page_welcome(); break;
     case PG_INSTALL:   page_install(); break;
+    case PG_APPS:      page_apps(); break;
     }
 }
 
@@ -1029,6 +1073,7 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
     s_ops = ops;
     s_part = part;
     s_detour = 0;
+    s_preloaded = 0;
     int dev = (part == PURR_OOBE_PART_LOADER || part == PURR_OOBE_PART_LOADER_SETUP) && ops->dev_recovery != NULL && ops->dev_recovery();
     if (part == PURR_OOBE_PART_FINISHING) {
         s_pages = k_finishing;
@@ -1036,6 +1081,10 @@ void purr_oobe_start(int part, const purr_oobe_ops_t *ops, int start_page)
     } else if (part == PURR_OOBE_PART_LOADER_SETUP) {
         s_pages = dev ? k_loader_setup_dev : k_loader_setup;
         s_npages = dev ? 3 : 2;
+    } else if (part == PURR_OOBE_PART_FIRSTBOOT && ops->apps_list != NULL && ops->apps_list(s_apps, MAX_APPS_SHOWN) > 0) {
+        s_preloaded = 1;                                        /* a ready-to-go image: its own page lists */
+        s_pages = droid() ? k_first_droid_preloaded : k_first_preloaded;
+        s_npages = droid() ? (int)(sizeof(k_first_droid_preloaded) / sizeof(k_first_droid_preloaded[0])) : (int)(sizeof(k_first_preloaded) / sizeof(k_first_preloaded[0]));
     } else {
     s_pages = part == PURR_OOBE_PART_LOADER ? (dev ? k_loader_dev : k_loader) : (droid() ? k_first_droid : k_first);
     s_npages = part == PURR_OOBE_PART_LOADER ? (dev ? (int)(sizeof(k_loader_dev) / sizeof(k_loader_dev[0]))

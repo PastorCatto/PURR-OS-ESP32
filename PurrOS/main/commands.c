@@ -860,6 +860,83 @@ int purr_apps_install_vouched(const uint8_t *data, size_t len, const char *name,
     return 0;
 }
 
+int purr_preload_apps(purr_preload_app_t *out, int max)
+{
+    if (!purr_fs_mounted(&s_fs)) {
+        return 0;
+    }
+    SCRATCH_GUARD(s_install_lock);                  /* the list reads each package into the install buffer */
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        return 0;
+    }
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    return purr_preload_list(&s_appmgr_fs, PURR_PRELOAD_DIR, env.chip_id, scratch, APP_SCRATCH_CAP, out, max);
+}
+
+int purr_preload_plant_files(const char *user, const char *const *files, int n, int *failed, char *why, size_t why_cap)
+{
+    int done = 0, bad = 0;
+    if (why != NULL && why_cap > 0) {
+        why[0] = '\0';
+    }
+    if (!purr_fs_mounted(&s_fs) || user == NULL || user[0] == '\0') {
+        if (failed != NULL) {
+            *failed = n;
+        }
+        return 0;
+    }
+    char root[64];
+    user_apps_root(root, sizeof(root), user);
+    ensure_user_home(user);
+    purr_fs_mkdir(&s_fs, root);
+    SCRATCH_GUARD(s_install_lock);
+    uint8_t *scratch = app_scratch();
+    if (scratch == NULL) {
+        if (failed != NULL) {
+            *failed = n;
+        }
+        if (why != NULL) {
+            snprintf(why, why_cap, "out of memory");
+        }
+        return 0;
+    }
+    purr_cfg_t cfg;
+    purr_appmgr_env_t env = apps_env(&cfg);
+    static purr_app_registry_t reg;
+    for (int i = 0; i < n; i++) {
+        apps_scan(root, &env, &reg);                /* as it is now: each install changes it */
+        purr_app_result_t r = purr_preload_plant(&s_appmgr_fs, PURR_PRELOAD_DIR, files[i], root, &env, &cfg, &reg, scratch, APP_SCRATCH_CAP);
+        if (r == PURR_APP_OK || r == PURR_APP_EXISTS_NEWER) {
+            done++;
+        } else {
+            bad++;
+            ESP_LOGW("preload", "%s: %s", files[i], purr_app_result_name(r));
+            if (why != NULL && why[0] == '\0') {
+                snprintf(why, why_cap, "%.30s: %s", files[i], purr_app_result_name(r));
+            }
+        }
+    }
+    if (failed != NULL) {
+        *failed = bad;
+    }
+    return done;
+}
+
+int purr_preload_legal(char *buf, size_t cap)
+{
+    if (!purr_fs_mounted(&s_fs) || cap < 2) {
+        return -1;
+    }
+    appinstall_read_ctx_t rc = {(uint8_t *)buf, (uint32_t)cap - 1, 0};
+    if (purr_fs_read(&s_fs, PURR_PRELOAD_DIR "/legal.txt", appinstall_accumulate, &rc) < 0) {
+        return -1;
+    }
+    buf[rc.len] = '\0';
+    return (int)rc.len;
+}
+
 int purr_apps_remove(const char *name)
 {
     if (!purr_fs_mounted(&s_fs) || name == NULL || name[0] == '\0' || strchr(name, '/') != NULL) {

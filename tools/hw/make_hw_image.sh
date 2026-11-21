@@ -47,6 +47,9 @@ fi
 tb=(--mode enforce --force-loader)
 [[ $FULL == 1 ]] && tb=(--mode enforce)                                                       # a full image boots the system, not the loader
 [[ ${DEV_RECOVERY-1} == 0 ]] || tb+=(--dev-recovery --dev-mode)      # the bootloader honours DEV_RECOVERY only while developer mode is on, and a blank device has no KittenOS to switch it on
+# PRELOAD_DIR=<folder of signed app packages, optionally legal.txt> makes a READY-TO-GO image (FULL=1): the first start runs KittenOS's wizard once (--first-run), which offers those apps,
+# creates the account and asks for Wi-Fi, with nothing downloaded; the packages go into /boot/preload of the root file system (tools/vm/make_root.py, needs gcc), spliced in at the end.
+[[ -z ${PRELOAD_DIR-} ]] || tb+=(--first-run)
 ps keys trust-block --key signing_keys/boot.key $tb --out $W/purrcfg.bin >/dev/null
 $PY - "$OUT" "$W" "$BL" "$PT" "$REL" "$MINIMAL" "$FULL" "${DRIVERS_FROM:-}" <<'PYEOF'
 import struct, sys
@@ -86,3 +89,7 @@ else:
 open(out, "wb").write(img)
 print("wrote", out, len(img), "bytes")
 PYEOF
+if [[ -n ${PRELOAD_DIR-} ]]; then
+  [[ $FULL == 1 ]] || { echo "PRELOAD_DIR needs FULL=1: a ready-to-go image carries the kernel and KittenOS"; exit 1; }
+  $PY tools/vm/make_root.py --out $W/root.bin --preload "$PRELOAD_DIR" --into "$OUT"
+fi

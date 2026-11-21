@@ -24,6 +24,7 @@ OFF_TRUST_SIG, OFF_CRC = 684, 748
 SECURE = {"off": 0, "warn": 1, "enforce": 2}
 CFGF_DEV_MODE = 1 << 8
 CFGF_FORCE_RECOVERY = 1 << 3   # one-shot: boot KittenOS once
+CFGF_CONTINUE_INSTALL = 1 << 6   # KittenOS runs its first-run wizard (once; it clears the flag). A ready-to-go image sets it: the wizard then offers the apps the image carries
 CFGF_AUTO_REINSTALL = 1 << 5  # the loader runs unattended (the failure ladder normally sets this)
 CFGF_FORCE_LOADER = 1 << 4   # one-shot: boot the recovery loader once (a test device or VM can start in recovery)
 CFGF_BAD_KERNEL = 1 << 11     # the kernel slot is marked bad: the bootloader will not launch it (a reset sets this)
