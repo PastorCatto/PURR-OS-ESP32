@@ -1,5 +1,6 @@
 #include "purr_drvpart_plat.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,6 +10,7 @@
 
 #include "purr_drvpart.h"
 #include "purr_io.h"
+#include "purr_util.h"
 
 static const char *TAG = "drvpart";
 
@@ -78,5 +80,81 @@ int purr_drvpart_has_file(const char *file)
             return 1;
         }
     }
+    return 0;
+}
+
+int purr_drvpart_present(void)
+{
+    const esp_partition_t *p = find();
+    return p != NULL && p->size >= PURR_DRVPART_SIZE;
+}
+
+int purr_drvpart_matches(uint32_t size, const uint8_t sha256[32])
+{
+    const esp_partition_t *p = find();
+    if (p == NULL || p->size < PURR_DRVPART_SIZE || size == 0 || size > PURR_DRVPART_SIZE) {
+        return 0;
+    }
+    uint8_t chunk[512];
+    purr_sha256_t sha;
+    uint8_t digest[32];
+    purr_sha256_init(&sha);
+    for (uint32_t off = 0; off < size; off += sizeof(chunk)) {
+        uint32_t n = size - off < sizeof(chunk) ? size - off : (uint32_t)sizeof(chunk);
+        if (purr_io_partition_read(p, off, chunk, n) != ESP_OK) {
+            return 0;
+        }
+        purr_sha256_update(&sha, chunk, n);
+    }
+    purr_sha256_final(&sha, digest);
+    if (memcmp(digest, sha256, sizeof(digest)) != 0) {
+        return 0;
+    }
+    for (uint32_t off = size; off < PURR_DRVPART_SIZE; off += sizeof(chunk)) {      /* a driver beyond the image is not "exactly this" */
+        uint32_t n = PURR_DRVPART_SIZE - off < sizeof(chunk) ? PURR_DRVPART_SIZE - off : (uint32_t)sizeof(chunk);
+        if (purr_io_partition_read(p, off, chunk, n) != ESP_OK) {
+            return 0;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            if (chunk[i] != 0xFF) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static void why_set(char *why, size_t cap, const char *text)
+{
+    if (why != NULL && cap > 0) {
+        snprintf(why, cap, "%s", text);
+    }
+}
+
+int purr_drvpart_install(const uint8_t *image, uint32_t len, char *why, size_t cap)
+{
+    const esp_partition_t *p = find();
+    if (p == NULL || p->size < PURR_DRVPART_SIZE) {
+        why_set(why, cap, "this board has no drivers partition");
+        return -1;
+    }
+    int n = purr_drvpart_check_image(image, len);
+    if (n < 0) {
+        why_set(why, cap, n == PURR_DRVIMG_BAD_SIZE ? "the drivers image has the wrong size" : n == PURR_DRVIMG_DUPLICATE ? "the drivers image lists a driver twice" : "a driver slot in the image is damaged");
+        return -1;
+    }
+    if (purr_io_partition_erase_range(p, 0, p->size) != ESP_OK || purr_io_partition_write(p, 0, image, len) != ESP_OK) {
+        why_set(why, cap, "writing the drivers partition failed");
+        return -1;
+    }
+    uint8_t chunk[512];
+    for (uint32_t off = 0; off < len; off += sizeof(chunk)) {
+        uint32_t m = len - off < sizeof(chunk) ? len - off : (uint32_t)sizeof(chunk);
+        if (purr_io_partition_read(p, off, chunk, m) != ESP_OK || memcmp(chunk, image + off, m) != 0) {
+            why_set(why, cap, "the drivers partition did not read back what was written");
+            return -1;
+        }
+    }
+    ESP_LOGI(TAG, "drivers partition written: %d driver(s)", n);
     return 0;
 }

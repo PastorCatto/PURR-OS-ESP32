@@ -6,6 +6,7 @@
 #ifndef PURR_DRVPART_PLAT_H
 #define PURR_DRVPART_PLAT_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -23,6 +24,18 @@ int purr_drvpart_has_file(const char *file);
 
 /* How many good slots there are (0 with no partition). */
 int purr_drvpart_count(void);
+
+/* 1 when the board has a `drivers` partition of the right size (flash map v3). */
+int purr_drvpart_present(void);
+
+/* 1 when the partition holds exactly this image: the first `size` bytes hash to `sha256` and everything after them is blank. For a restore that must not rewrite
+ * what is already right. 0 with no partition. */
+int purr_drvpart_matches(uint32_t size, const uint8_t sha256[32]);
+
+/* Writes a release's `drivers` image (purr_drvpart.h, purr_drvpart_check_image) into the partition: checked first, so a damaged image changes nothing; then the whole
+ * partition is erased, written and read back. 0, or -1 with a short reason in `why` (may be NULL). The signatures inside are not checked here: each driver's is checked
+ * when it is loaded, like every module, so a blob can cost a driver but never weaken the device. */
+int purr_drvpart_install(const uint8_t *image, uint32_t len, char *why, size_t cap);
 
 #ifdef __cplusplus
 }

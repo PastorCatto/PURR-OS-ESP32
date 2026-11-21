@@ -103,6 +103,9 @@ def main():
     ap.add_argument("--bootloader", help="the built second-stage bootloader (bootloader.bin) to publish as a signed 'bootloader' component, "
                     "which KittenOS installs with a backup (bootloader/SPEC.md 9.2)")
     ap.add_argument("--bootloader-version", help="its version, like 0.3.0 (it must match PURR_BOOTLOADER_VERSION in purr_handoff.h)")
+    ap.add_argument("--drivers", help="the drivers partition image of the board (tools/release/make_drivers_partition.py), published as the 'drivers' component: "
+                    "the display, keyboard and touch drivers, installed after the kernel (OTA/SPEC.md)")
+    ap.add_argument("--drivers-abi", type=int, default=0, help="the driver bus ABI those drivers need (default: this tree's PURR_DRIVER_BUS_ABI_VERSION)")
     ap.add_argument("--board", default="tdeck_plus")
     ap.add_argument("--out", required=True)
     ap.add_argument("--key", default=os.path.join(ROOT, "signing_keys", "boot.key"))
@@ -164,6 +167,25 @@ def main():
            component_entry(bootpkg, "bootpkg", b, os.path.basename(bootpkg), bp)]
     if bootldr:
         new.append(component_entry(bootldr, "bootloader", b, os.path.basename(bootldr), a.bootloader_version))
+    drv = None
+    if a.drivers:
+        from scripts import dev as pdev, drvpart
+        blob = open(a.drivers, "rb").read()
+        try:
+            dversion, dcount = pdev.drivers_image_facts(blob)
+        except drvpart.DrvpartError as e:
+            sys.exit("%s: %s" % (a.drivers, e))
+        dsha = hashlib.sha256(blob).hexdigest()
+        dname = "drivers_%s.bin" % b
+        with open(os.path.join(r1, dname), "wb") as fh:
+            fh.write(blob)
+        abi = a.drivers_abi or pdev._tree_bus_abi()
+        drv = {"component": "drivers", "type": "drivers", "version": dversion, "chip": "any", "board": b, "file": dname, "size": str(len(blob)),
+               "sha256": dsha, "key": "developer"}
+        if abi:
+            drv["abi_min"] = str(abi)
+        new.append(drv)
+        print("drivers %s: %d driver(s)" % (dversion, dcount))
     shutil.copyfile(a.legal, os.path.join(r1, "legal.txt"))
 
     # ---- carry over what is already published for the other boards and the modules, unchanged
@@ -172,7 +194,7 @@ def main():
         old_text = urllib.request.urlopen(RELEASE1 + "recovery.manifest", timeout=60).read().decode()
         _, old = parse_manifest(old_text)
         for s in old:
-            if s.get("board") == b and s.get("component") in ("kernel", "kittenos", "loader", "bootpkg", "bootloader"):
+            if s.get("board") == b and s.get("component") in {n["component"] for n in new}:
                 notes.append("replaced %s %s %s -> %s" % (s["board"], s["component"], s["version"],
                                                            next(n["version"] for n in new if n["component"] == s["component"])))
                 continue

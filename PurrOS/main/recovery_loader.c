@@ -24,6 +24,8 @@
 #include "purr_abi.h"
 #include "purr_cfgstore.h"
 #include "purr_cli.h"
+#include "purr_drvpart.h"
+#include "purr_drvpart_plat.h"
 #include "purr_console.h"
 #include "purr_crypto_mbedtls.h"
 #include "purr_fetch.h"
@@ -765,9 +767,53 @@ static void fetch_progress(size_t got, size_t total)
  * flow). Failures return -1 except the boot package, which never stops the restore. */
 static bool s_emergency_ok;                        /* nobody to ask (automatic recovery): the loader may pick a recovery computer by itself */
 
+/* The release's `drivers` component (OTA/SPEC.md): the display, keyboard and touch drivers a device cannot start without. They live in the raw `drivers` partition, which
+ * KittenOS and the kernel read; a blank device has to get them from the release before KittenOS can draw anything. A release that has none (an older one) or a board without
+ * the partition changes nothing here. Never fatal: the drivers already in the partition keep working (a newer kernel serves every older driver), so a failure here is a note.
+ * Returns 1 if it wrote something, 0 if not, -1 if it tried and failed. */
+static int restore_drivers(const purr_manifest_t *man)
+{
+    const purr_manifest_entry_t *e = purr_manifest_find(man, "drivers", CONFIG_IDF_TARGET, purr_board()->name);
+    if (e == NULL) {
+        return 0;
+    }
+    if (!purr_drvpart_present()) {
+        status("This board has no drivers partition; its drivers stay as they are");
+        return 0;
+    }
+    if (e->size == 0 || e->size > PURR_DRVPART_SIZE) {
+        status("The drivers in this release have a wrong size; the drivers stay as they are");
+        return -1;
+    }
+    if (purr_drvpart_matches(e->size, e->sha256)) {
+        status("The drivers are already good");
+        return 0;
+    }
+    char url[256];
+    uint8_t *image = NULL;
+    size_t len = 0;
+    resolve_url(purr_recovery_manifest_url(), e->file, url, sizeof(url));
+    status_step("Downloading the drivers");
+    esp_err_t fe = purr_fetch_alloc_checked(url, &image, &len, PURR_DRVPART_SIZE, e->size, e->sha256);
+    if (fe != ESP_OK) {
+        status(fe == ESP_ERR_INVALID_SIZE || fe == ESP_ERR_INVALID_CRC ? "The drivers download didn't match what the server promised; the drivers stay as they are"
+                                                                         : "The drivers download didn't finish; the drivers stay as they are");
+        return -1;
+    }
+    char why[64];
+    int r = purr_drvpart_install(image, (uint32_t)len, why, sizeof(why));
+    free(image);
+    if (r != 0) {
+        statusf("The drivers were not installed: %s", why);
+        return -1;
+    }
+    status("The drivers are installed");
+    return 1;
+}
+
 static int restore_components(int include_kernel)
 {
-    int steps = include_kernel ? 3 : 2, step = 0;
+    int steps = include_kernel ? 4 : 3, step = 0;
     s_steps = steps;
     s_step = 0;
     wiz_progress(0, steps, 0);
@@ -805,6 +851,13 @@ static int restore_components(int include_kernel)
         } else if (fetch_and_install_module("kernel", "kernel", PURR_MOD_KERNEL, &man) != 0) {
             failures++;
         }
+    }
+
+    /* The drivers: after the kernel when it is restored too (a kernel that failed leaves the drivers it can serve alone), and in any case before KittenOS, which needs the display. */
+    s_step = step;
+    wiz_progress(step++, steps, 0);
+    if (failures == 0) {
+        restore_drivers(&man);
     }
 
     s_step = step;

@@ -9,10 +9,10 @@ import shutil
 
 from . import formats, inspector, runner, workspace
 
-COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader")
+COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader", "drivers")
 NAMES = {"kernel": "kernel_{b}.cat", "kittenos": "kittenos_{b}.kitt", "loader": "loader_{b}.cat",
-         "bootpkg": "bootpkg_{b}.cat", "bootloader": "bootloader_{b}.cat"}
-FLAGS = {"kernel": "--kernel", "kittenos": "--kittenos", "loader": "--loader", "bootpkg": "--bootpkg", "bootloader": "--bootloader"}
+         "bootpkg": "bootpkg_{b}.cat", "bootloader": "bootloader_{b}.cat", "drivers": "drivers_{b}.bin"}
+FLAGS = {"kernel": "--kernel", "kittenos": "--kittenos", "loader": "--loader", "bootpkg": "--bootpkg", "bootloader": "--bootloader", "drivers": "--drivers"}
 
 
 def prebuilt(board="tdeck_plus"):
@@ -23,9 +23,10 @@ def prebuilt(board="tdeck_plus"):
         if not root or not os.path.isdir(root):
             continue
         for comp, pattern in NAMES.items():
-            p = os.path.join(root, pattern.format(b=board))
-            if comp not in found and os.path.isfile(p):
-                found[comp] = p
+            for pat in (pattern, "drivers-{b}.bin") if comp == "drivers" else (pattern,):      # the image maker's name and the release folder's
+                p = os.path.join(root, pat.format(b=board))
+                if comp not in found and os.path.isfile(p):
+                    found[comp] = p
     return found
 
 
@@ -33,6 +34,12 @@ def describe(parts):
     """[{component, path, name, version, signer}] using the inspector, for showing what a release would contain."""
     out = []
     for comp, path in parts.items():
+        if comp == "drivers":                              # a raw partition image: its drivers are signed one by one, not the image
+            from . import drivers as drv_mod
+            info = drv_mod.describe_image(path)
+            out.append({"component": comp, "path": path, "name": "drivers", "version": info["version"], "signature": "info",
+                        "signature_text": "%d driver(s): %s. Each is signed on its own and checked when it loads." % (len(info["files"]), ", ".join(info["files"]))})
+            continue
         rep = inspector.inspect_path(path)
         facts = dict(rep.get("facts", []))
         sig = next((c for c in rep["checks"] if c["name"] == "Signature"), {"status": "info", "text": ""})
@@ -65,7 +72,7 @@ def assemble(dest, parts, board="tdeck_plus", key=None, key_id=0, password=None,
     for comp, path in parts.items():
         target = os.path.join(work, os.path.basename(path))
         shutil.copyfile(path, target)
-        if key:
+        if key and comp != "drivers":                      # (the drivers inside were signed when they were built)
             r = runner.purrstrap(["keys", "sign", "--key", key, "--image", target, "--key-id", int(key_id)], password=password, on_line=say)
             if r["rc"] != 0:
                 return {"ok": False, "log": "\n".join(log), "folder": dest}

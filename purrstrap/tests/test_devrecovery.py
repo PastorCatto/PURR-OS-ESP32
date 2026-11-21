@@ -272,3 +272,59 @@ class Announcing(unittest.TestCase):
         addrs = dev._broadcast_addresses()
         self.assertEqual(addrs[0], "255.255.255.255")
         self.assertEqual(len(addrs), len(set(addrs)))
+
+
+class DriversComponent(RecoveryHosting):
+    """The `drivers` component: the raw drivers-partition image, listed in recovery.manifest as type=drivers, named by its hash, with the bus ABI it needs."""
+
+    def make_blob(self, versions=("1.0.0", "1.2.0"), names=("st7789.cat", "gt911.cat")):
+        from scripts import drvpart
+        items = [(n, img(n.split(".")[0], v, b"driver " + n.encode() * 5, flags=pimg.MOD_DRIVER)) for n, v in zip(names, versions)]
+        path = os.path.join(self.tmp, "drivers-tdeck_plus.bin")
+        with open(path, "wb") as fh:
+            fh.write(drvpart.pack(items))
+        return path
+
+    def manifest_stanza(self):
+        text = open(os.path.join(self.repo, "recovery", "recovery.manifest")).read()
+        return next(x for x in text.split("\n\n") if "component=drivers" in x)
+
+    def test_the_image_is_hosted_and_listed_with_its_abi(self):
+        blob = self.make_blob()
+        rc, out = self.run_recovery(drivers=blob, drivers_abi=9)
+        self.assertEqual(rc, 0, out)
+        data = open(blob, "rb").read()
+        sha = hashlib.sha256(data).hexdigest()
+        st = self.manifest_stanza()
+        for want in ("type=drivers", "version=1.2.0", "chip=any", "board=tdeck_plus", "file=drivers-tdeck_plus.%s.bin" % sha[:10], "size=%d" % len(data),
+                     "sha256=" + sha, "key=developer", "abi_min=9"):
+            self.assertIn(want, st)
+        self.assertNotIn("payload_size", st)                                           # no PURR header around a raw partition image
+        self.assertEqual(open(os.path.join(self.repo, "recovery", "drivers-tdeck_plus.%s.bin" % sha[:10]), "rb").read(), data)
+        self.assertNotIn("component=drivers", open(os.path.join(self.repo, "recovery", "modules.manifest")).read())
+
+    def test_a_damaged_or_wrong_sized_image_is_refused_and_nothing_is_published(self):
+        blob = self.make_blob()
+        raw = bytearray(open(blob, "rb").read())
+        raw[100] ^= 0xFF                                                               # a bad crc in slot 0
+        bad = os.path.join(self.tmp, "bad.bin")
+        open(bad, "wb").write(raw)
+        rc, out = self.run_recovery(drivers=bad)
+        self.assertEqual(rc, 1)
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "recovery", "drivers-tdeck_plus.bin")))
+        short = os.path.join(self.tmp, "short.bin")
+        open(short, "wb").write(open(blob, "rb").read()[:8192])
+        self.assertEqual(self.run_recovery(drivers=short)[0], 1)
+        empty = os.path.join(self.tmp, "empty.bin")
+        open(empty, "wb").write(b"\xff" * 0x14000)                                     # no driver at all is no component
+        self.assertEqual(self.run_recovery(drivers=empty)[0], 1)
+
+    def test_a_withdrawn_version_is_marked_and_a_republish_names_a_new_file(self):
+        self.run_recovery(drivers=self.make_blob(), drivers_abi=9)
+        ctx, _ = make_ctx(self.tmp)
+        self.assertEqual(dev.withdraw(ctx, self.repo, "1.2.0", "drivers", "a driver stopped a screen"), 0)
+        self.assertIn("withdrawn=yes", self.manifest_stanza())
+        old = re.search(r"file=(\S+)", self.manifest_stanza()).group(1)
+        self.run_recovery(drivers=self.make_blob(versions=("1.0.0", "1.3.0")), drivers_abi=9)
+        self.assertNotEqual(re.search(r"file=(\S+)", self.manifest_stanza()).group(1), old)
+        self.assertTrue(os.path.exists(os.path.join(self.repo, "recovery", old)))       # the older generation stays for a device that is mid-download

@@ -115,6 +115,17 @@ a board cannot start without (its display, keyboard, touch panel, battery gauge,
   the driver index work as they did), and the loader and KittenOS, which have no file system and load straight from the slots. Everything that is not essential still arrives as a file in
   /boot/drivers (the Store, the dev server, a download).
 - **Which drivers:** the board's file says (`drivers = [...]` in sdk/boards/<board>.toml); the kernel no longer decides by the board's name.
+- **Compatibility (the rule that makes updating it safe, 2026-11-21).** The bus table only grows at the end, and the kernel serves every driver built for an ABI from
+  `PURR_DRIVER_BUS_ABI_MIN` (4, never raised) up to its own version: a driver in the partition keeps working through every later kernel, and a driver in the field built for ABI 7 loads on
+  a kernel at ABI 12. The reverse does not hold, so the order is always the kernel first, then the drivers. A test (`sdk/tests/test_drivers_component.py`) fails the build if the floor rises
+  or the version falls. A driver built for a newer table than the kernel running is skipped with a line in the log, and the older ones still load.
+- **The `drivers` component of a release** (OTA/SPEC.md section 5): the whole partition image, published in recovery.manifest as `component=drivers`, `type=drivers`, `chip=any`, with its
+  `size` and `sha256` and `abi_min=<the bus ABI its drivers need>`. It has no PURR header around it (its drivers are signed one by one, `key=developer`). Installed by: the recovery loader's
+  restore (before KittenOS, which needs the display, and after the kernel when the kernel is restored too; a failed kernel leaves the partition alone), `netinstall drivers` and stage 2 of the
+  install (after the kernel), and Settings > Updates names it ("drivers 1.4.2") when the partition is not exactly the release's. An image is checked slot by slot before anything is erased
+  (`purr_drvpart_check_image`), so a damaged one changes nothing; `netinstall drivers` refuses one whose `abi_min` is above what the running kernel serves and says to update the kernel first.
+  A board whose flash map has no partition (flash map v2, an older device that took a newer kernel): `netinstall drivers` plants the files in /boot/drivers instead, and the loader leaves them as they are.
+  Key rotation: `tools/release/resign_release.py` signs each driver inside the image again with the new developer key and writes a new image with the same slots.
 
 ## 5. Testing
 

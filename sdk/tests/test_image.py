@@ -61,6 +61,7 @@ class Whole(unittest.TestCase):
         put("kittenos-tdeck_plus.kitt", img.IMG_RECOVERY, 0, 100000)
         put("kernel_tdeck_plus.cat", img.IMG_MODULE, img.MOD_KERNEL, 200000)          # the official release spells it with an underscore
         put("loader-tdeck_plus.cat", img.IMG_MODULE, img.MOD_LOADER, 100000)
+        helpers.write_drivers_image(self.folder, "tdeck_plus")                          # flash map v3: the drivers partition's image comes with the parts
 
     def test_finds_both_spellings(self):
         found = image.find_parts(self.folder, "tdeck_plus")

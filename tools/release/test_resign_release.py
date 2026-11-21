@@ -137,6 +137,37 @@ class Resign(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("does not match its line", r.stdout)
 
+    def test_a_drivers_image_has_each_driver_signed_again_and_stays_one_image(self):
+        from scripts import drvpart
+        p = self.pimg
+        items = []
+        for n in ("st7789", "gt911"):
+            tmp = os.path.join(self.src, ".d.cat")
+            open(tmp, "wb").write(p.make_image(n, "1.0.0", p.IMG_MODULE, p.MOD_DRIVER, b"\xe9" * 60, p.CHIP_ESP32S3))
+            ps(["keys", "sign", "--key", os.path.join(self.keys, "old-dev.key"), "--image", tmp, "--key-id", 2], pw="pw-old-dev")
+            items.append((n + ".cat", open(tmp, "rb").read()))
+            os.remove(tmp)
+        blob = drvpart.pack(items)
+        digest = hashlib.sha256(blob).hexdigest()
+        fn = "drivers-tdeck.%s.bin" % digest[:10]
+        open(os.path.join(self.src, fn), "wb").write(blob)
+        with open(os.path.join(self.src, "recovery.manifest"), "a") as fh:
+            fh.write("\ncomponent=drivers\ntype=drivers\nversion=1.0.0\nchip=any\nboard=tdeck\nfile=%s\nsize=%d\nsha256=%s\nkey=developer\nabi_min=9\n" % (fn, len(blob), digest))
+        r = self.run_tool()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        text = open(os.path.join(self.out, "recovery.manifest")).read()
+        st = next(x for x in text.split("\n\n") if "component=drivers" in x)
+        self.assertIn("type=drivers", st)
+        self.assertIn("abi_min=9", st)                                           # what the manifest says about the image is kept
+        name = next(l.split("=", 1)[1] for l in st.splitlines() if l.startswith("file="))
+        new = open(os.path.join(self.out, name), "rb").read()
+        self.assertEqual(hashlib.sha256(new).hexdigest(), next(l.split("=", 1)[1] for l in st.splitlines() if l.startswith("sha256=")))
+        self.assertNotEqual(name, fn)
+        got = [(d, c) for d, c in (drvpart.extract(new, r_["slot"]) for r_ in drvpart.read(new) if r_["state"] == "ok")]
+        self.assertEqual([d for d, _c in got], ["st7789.cat", "gt911.cat"])      # the same files in the same slots
+        for d, c in got:
+            self.assertEqual(p.header_fields(p.parse_header(c[:p.HEADER_SIZE]))["key_id"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

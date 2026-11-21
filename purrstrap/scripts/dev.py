@@ -37,6 +37,7 @@ import time
 
 from lib import image as pimg
 from lib.model import Action, Param, Script
+from scripts import drvpart
 
 FORMAT = 1
 DISCOVERY_PORT = 47800
@@ -47,8 +48,9 @@ CHIPS = {pimg.CHIP_ANY: "any", pimg.CHIP_ESP32: "esp32", pimg.CHIP_ESP32S3: "esp
 MAX_PACKAGE = 512 * 1024
 RECOVERY_DIR = "recovery"
 RECOVERY_VM_DIR = "recovery-vm"                  # the same files built for the emulator (the VM flavor's recovery URL points here)
-RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader", "uiassets", "ui_w10m", "ui_android")      # the files the loader and KittenOS fetch by name
+RECOVERY_COMPONENTS = ("kernel", "kittenos", "loader", "bootpkg", "bootloader", "drivers", "uiassets", "ui_w10m", "ui_android")      # the files the loader and KittenOS fetch by name
 SYSTEM_KEY_COMPONENTS = ("uiassets", "ui_w10m", "ui_android")      # signed by the release's system key, not the boot key
+DEVELOPER_KEY_COMPONENTS = ("drivers",)                              # a bundle of driver modules: each is signed by the developer key, and checked when it loads
 RECOVERY_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$")    # a plain file name: no slash, so no way out of the folder
 
 
@@ -213,7 +215,7 @@ def _prune_immutable(rdir, keep):
     """Removes immutable copies beyond the newest KEEP_GENERATIONS of each image; `keep` (names the current manifests use) are never removed."""
     groups = {}
     for fn in os.listdir(rdir):
-        m = re.match(r"^([A-Za-z0-9_]+-[A-Za-z0-9_]+)\.[0-9a-f]{10}\.(cat|kitt)$", fn)
+        m = re.match(r"^([A-Za-z0-9_]+-[A-Za-z0-9_]+)\.[0-9a-f]{10}\.(cat|kitt|bin)$", fn)
         if m:
             groups.setdefault(m.group(1), []).append(fn)
     for names in groups.values():
@@ -267,6 +269,44 @@ def _withdrawn_lines(rdir):
     return ["withdrawn_versions=%s" % ",".join(tokens), "withdrawn_reason=%s" % reason]
 
 
+DRIVERS_FILE_RE = re.compile(r"^drivers-([A-Za-z0-9_]+)\.bin$")     # the drivers component: the raw `drivers` partition image (drvpart.py), not a PURR image
+
+
+def _tree_bus_abi():
+    """The driver bus ABI of the source tree this tool sits in (PURR_DRIVER_BUS_ABI_VERSION): what a driver image built from it needs at most. 0 when there is no tree."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "PurrOS", "components", "kernel", "include", "purr_driver_bus.h")
+    try:
+        m = re.search(r"#define\s+PURR_DRIVER_BUS_ABI_VERSION\s+(\d+)", open(path, encoding="utf-8").read())
+    except OSError:
+        return 0
+    return int(m.group(1)) if m else 0
+
+
+def _version_tuple(v):
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except ValueError:
+        return (0,)
+
+
+def drivers_image_facts(data):
+    """(version, count) of a drivers partition image: the highest version among its drivers and how many there are. Raises drvpart.DrvpartError for an image that is
+    damaged, empty, or not the partition's size: such an image is never published."""
+    rows = drvpart.read(data)
+    if len(data) != drvpart.SIZE:
+        raise drvpart.DrvpartError("The drivers image is %d bytes; the partition is %d." % (len(data), drvpart.SIZE))
+    good = [r for r in rows if r["state"] == "ok"]
+    if any(r["state"] == "damaged" for r in rows) or not good:
+        raise drvpart.DrvpartError("The drivers image has a damaged slot or no driver.")
+    versions = []
+    for r in good:
+        _name, cat = drvpart.extract(data, r["slot"])
+        if not pimg.is_purr_image(cat) or len(cat) < pimg.HEADER_SIZE:
+            raise drvpart.DrvpartError("%s in the drivers image is not a PURR module." % r["file"])
+        versions.append(pimg.header_fields(pimg.parse_header(cat))["version"] or "0.0.0")
+    return max(versions, key=_version_tuple), len(good)
+
+
 def build_recovery_manifests(repo):
     """Writes recovery/recovery.manifest (the components) and recovery/modules.manifest (everything else that is a PURR image)
     from the images in the folder. Files are named <component>-<board>.<ext>; the format is purr_manifest.h's. Returns
@@ -294,13 +334,42 @@ def build_recovery_manifests(repo):
                  "chip": CHIPS.get(f["chip_id"], "any"), "payload_size": f["payload_size"],
                  "payload_sha256": f["payload_sha256"].hex()}
         (comps if entry["component"] in RECOVERY_COMPONENTS else mods).append(entry)
+    for fn in sorted(os.listdir(rdir)):
+        m = DRIVERS_FILE_RE.match(fn)
+        if not m or not _safe_recovery_name(fn):
+            continue
+        with open(os.path.join(rdir, fn), "rb") as fh:
+            data = fh.read()
+        try:
+            version, _count = drivers_image_facts(data)
+        except drvpart.DrvpartError:
+            continue                                                      # a bad image is left out of the manifest, not published
+        sha = hashlib.sha256(data).hexdigest()
+        immutable = _immutable_name("drivers", m.group(1), sha, "bin")
+        if not os.path.exists(os.path.join(rdir, immutable)):
+            _atomic_write(os.path.join(rdir, immutable), data)
+        abi = 0
+        try:
+            abi = int(open(os.path.join(rdir, "drivers-%s.abi" % m.group(1))).read().strip())
+        except (OSError, ValueError):
+            pass
+        comps.append({"component": "drivers", "board": m.group(1), "file": immutable, "size": len(data), "sha256": sha, "version": version, "chip": "any",
+                      "payload_size": 0, "payload_sha256": "", "type": "drivers", "abi_min": abi})
     stamp = time.strftime("%Y-%m-%d")
     _reason, tokens = read_withdrawn(rdir)
     lines = ["release=dev-%s" % time.strftime("%Y%m%d%H%M%S"), "released=%s" % stamp] + _withdrawn_lines(rdir) + [""]
     for e in comps:
+        key = "system" if e["component"] in SYSTEM_KEY_COMPONENTS else "developer" if e["component"] in DEVELOPER_KEY_COMPONENTS else "boot"
+        if e.get("type") == "drivers":              # a raw image of the drivers partition: no PURR header around it, so no payload fields; its drivers are signed one by one
+            lines += ["component=drivers", "type=drivers", "version=%s" % e["version"], "chip=any", "board=%s" % e["board"], "file=%s" % e["file"],
+                      "size=%d" % e["size"], "sha256=%s" % e["sha256"], "key=%s" % key] + (["abi_min=%d" % e["abi_min"]] if e["abi_min"] else [])
+            if _is_withdrawn(tokens, "drivers", e["version"]):
+                lines.append("withdrawn=yes")
+            lines.append("")
+            continue
         lines += ["component=%s" % e["component"], "version=%s" % e["version"], "chip=%s" % e["chip"],
                   "board=%s" % e["board"], "file=%s" % e["file"], "size=%d" % e["size"], "sha256=%s" % e["sha256"],
-                  "key=%s" % ("system" if e["component"] in SYSTEM_KEY_COMPONENTS else "boot"), "payload_size=%d" % e["payload_size"], "payload_sha256=%s" % e["payload_sha256"]]
+                  "key=%s" % key, "payload_size=%d" % e["payload_size"], "payload_sha256=%s" % e["payload_sha256"]]
         if _is_withdrawn(tokens, e["component"], e["version"]):
             lines.append("withdrawn=yes")                    # the entry itself says so too, for a reader that only looks at entries
         lines.append("")
@@ -328,9 +397,22 @@ SLOT_BYTES = {"kernel": 0x220000, "kittenos": 0x1C0000, "loader": 0x1C0000, "boo
 BOARD_SLOT_BYTES = {"waveshare154": {"kernel": 0x180000, "kittenos": 0x160000, "loader": 0x160000}}
 
 
-def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader="", uiassets="", ui_w10m="", ui_android=""):
+def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader="", uiassets="", ui_w10m="", ui_android="", drivers="", drivers_abi=0):
     rdir = _recovery_dir(dir)
     os.makedirs(rdir, exist_ok=True)
+    if drivers:
+        try:
+            with open(drivers, "rb") as fh:
+                blob = fh.read()
+            version, count = drivers_image_facts(blob)
+        except (OSError, drvpart.DrvpartError) as e:
+            ctx.error("%s: %s" % (drivers, getattr(e, "strerror", None) or e))
+            return 1
+        _atomic_write(os.path.join(rdir, "drivers-%s.bin" % board), blob)
+        abi = int(drivers_abi) or _tree_bus_abi()
+        with open(os.path.join(rdir, "drivers-%s.abi" % board), "w") as fh:
+            fh.write("%d\n" % abi)
+        ctx.ok("drivers -> recovery/drivers-%s.bin (%d driver(s), version %s%s)" % (board, count, version, ", needs driver bus ABI %d" % abi if abi else ""))
     given = {"kernel": (kernel, ".cat"), "kittenos": (kittenos, ".kitt"), "loader": (loader, ".cat"),
              "bootpkg": (bootpkg, ".cat"), "bootloader": (bootloader, ".cat"), "uiassets": (uiassets, ".cat"),
              "ui_w10m": (ui_w10m, ".cat"), "ui_android": (ui_android, ".cat")}
@@ -638,6 +720,8 @@ SCRIPT = Script(
                        Param("uiassets", "path", default="", help="the signed single UI icon pack (.cat from `uiassets package`), the old raw-partition layout; the device no longer uses it"),
                        Param("ui_w10m", "path", default="", help="the signed Windows 10 Mobile shell's pack (.cat from `uiassets package --name ui_w10m`), installed by stage 2 as /ui/w10m/pack.bin; at most 5 MB"),
                        Param("ui_android", "path", default="", help="the signed Android shell's pack (.cat from `uiassets package --name ui_android`), installed by stage 2 as /ui/android/pack.bin; at most 5 MB"),
+                       Param("drivers", "path", default="", help="the drivers partition image (drivers-<board>.bin from `drvpart pack` or the image maker): the drivers a board cannot start without, installed before KittenOS and after the kernel"),
+                       Param("drivers_abi", "int", default=0, help="the driver bus ABI those drivers need (default: the one of this source tree)"),
                        Param("legal", "path", default="", help="the legal and credits text file"),
                        Param("modules", "str", default="", help="module images to host, comma separated"))),
         Action("withdraw", "Withdraw a version", withdraw,

@@ -10,7 +10,7 @@ default for its id below, which is what the kernel used to plant.
 
 import os
 
-from . import runner
+from . import formats, runner
 
 # file the driver is planted under -> (the module's name, its source in the repository, its entry symbol)
 ESSENTIAL = {
@@ -90,3 +90,24 @@ def build(board, tree, key, key_id, password, out, version, files=None, run=None
     if on_step:
         on_step("drivers", "done", "%d driver(s) compiled, signed and packed" % len(cats))
     return {"ok": True, "out": out, "files": files, "problem": ""}
+
+
+def describe_image(path):
+    """{"files": [the file names], "version": the highest version among the drivers} of a drivers partition image; DriverError when it is not a good one."""
+    dp, pimg = formats.drvpart(), formats.image()
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+        rows = dp.read(data)
+    except (OSError, dp.DrvpartError) as e:
+        raise DriverError("%s is not a drivers image: %s" % (os.path.basename(path), e))
+    if any(r["state"] == "damaged" for r in rows):
+        raise DriverError("%s has a damaged slot." % os.path.basename(path))
+    files, versions = [], []
+    for r in rows:
+        if r["state"] != "ok":
+            continue
+        name, cat = dp.extract(data, r["slot"])
+        files.append(name)
+        versions.append(tuple(int(x) for x in (pimg.header_fields(pimg.parse_header(cat[:pimg.HEADER_SIZE]))["version"] or "0").split(".") if x.isdigit()))
+    return {"files": files, "version": ".".join(str(x) for x in max(versions)) if versions else ""}

@@ -418,6 +418,9 @@ def build(ws, name, password=None, on_step=None, on_line=print, boot_password=No
     parts = image.find_parts(folder, s["board"])
     args = ["dev", "recovery", "--dir", out, "--board", s["board"], "--kernel", parts["kernel"], "--kittenos", parts["kittenos"], "--loader", parts["loader"], "--bootpkg", parts["bootpkg"],
             "--bootloader", parts["bootloader"]]
+    drivers_bin = image.find_drivers(folder, s["board"])
+    if drivers_bin:                                                    # the essential drivers: installed after the kernel, so an update keeps the display working
+        args += ["--drivers", drivers_bin]
     mods = _find_modules(folder, s["board"])
     if compiled:
         mods = list(compiled["modules"])                               # compiled from the source and signed with your key

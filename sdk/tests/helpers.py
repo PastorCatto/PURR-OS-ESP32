@@ -83,3 +83,17 @@ def keybag_dir(role, key_id, key):
     with open(os.path.join(d, "%s_%d.pub.bin" % (role, key_id)), "wb") as fh:
         fh.write(key.pub)
     return d
+
+
+def write_drivers_image(folder, board="tdeck_plus", names=("st7789", "gt911")):
+    """The essential drivers' partition image of a board, as the image maker and the release want it: real (unsigned) driver modules in the slots, so the image is a good one."""
+    import sys
+    sys.path.insert(0, os.path.join(ROOT, "purrstrap", "scripts"))
+    sys.path.insert(0, os.path.join(ROOT, "purrstrap"))
+    import drvpart
+    from lib import image as pimg
+    items = [(n + ".cat", pimg.make_image(n, "1.0.0", pimg.IMG_MODULE, pimg.MOD_DRIVER, b"\xe9" * 64, pimg.CHIP_ESP32S3)) for n in names]
+    path = os.path.join(folder, "drivers-%s.bin" % board)
+    with open(path, "wb") as fh:
+        fh.write(drvpart.pack(items))
+    return path

@@ -54,3 +54,18 @@ def uiassets():
     finally:
         if added:
             sys.path.remove(folder)
+
+
+def drvpart():
+    """purrstrap's driver partition packer (scripts/drvpart.py): the same slot format the kernel reads. Loaded like uiassets (it imports purrstrap's `lib`)."""
+    if "purrsdk_drvpart" in sys.modules:
+        return sys.modules["purrsdk_drvpart"]
+    folder = purrstrap_dir()
+    added = folder not in sys.path
+    if added:
+        sys.path.insert(0, folder)
+    try:
+        return _load("purrsdk_drvpart", os.path.join("scripts", "drvpart.py"))
+    finally:
+        if added:
+            sys.path.remove(folder)

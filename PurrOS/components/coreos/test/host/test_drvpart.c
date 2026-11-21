@@ -165,8 +165,54 @@ static void test_the_slot_bytes(void)
     printf("golden crc32 of 01 02 03 04: %08x\n", crc);
 }
 
+static void test_a_release_image_is_checked_before_it_is_written(void)
+{
+    static uint8_t img[PURR_DRVPART_SIZE];
+    uint8_t cat[500];
+    memset(cat, 0x5A, sizeof(cat));
+    memset(img, 0xFF, sizeof(img));
+    CHECK_EQ(purr_drvpart_check_image(img, sizeof(img)), 0);                      /* a blank image holds no driver, and is fine */
+    CHECK_EQ(purr_drvpart_build_slot(img + 0 * PURR_DRVPART_SLOT_SIZE, "st7789.cat", cat, sizeof(cat)), 0);
+    CHECK_EQ(purr_drvpart_build_slot(img + 3 * PURR_DRVPART_SLOT_SIZE, "gt911.cat", cat, sizeof(cat)), 0);
+    CHECK_EQ(purr_drvpart_check_image(img, sizeof(img)), 2);
+    CHECK_EQ(purr_drvpart_check_image(img, 4 * PURR_DRVPART_SLOT_SIZE), 2);       /* a shorter image is the slots it holds */
+    CHECK_EQ(purr_drvpart_check_image(img, 1 * PURR_DRVPART_SLOT_SIZE), 1);
+
+    CHECK_EQ(purr_drvpart_check_image(img, 0), PURR_DRVIMG_BAD_SIZE);             /* never a size that is not whole slots, nothing, or too much */
+    CHECK_EQ(purr_drvpart_check_image(img, 100), PURR_DRVIMG_BAD_SIZE);
+    CHECK_EQ(purr_drvpart_check_image(img, sizeof(img) + PURR_DRVPART_SLOT_SIZE), PURR_DRVIMG_BAD_SIZE);
+    CHECK_EQ(purr_drvpart_check_image(NULL, PURR_DRVPART_SLOT_SIZE), PURR_DRVIMG_BAD_SIZE);
+
+    img[5 * PURR_DRVPART_SLOT_SIZE + 70] ^= 0x01;                                 /* a slot with a header and a bad crc: refuse the whole image */
+    CHECK_EQ(purr_drvpart_check_image(img, sizeof(img)), 2);                      /* (slot 5 is blank: the flip made a header-less byte, nothing else) */
+    img[5 * PURR_DRVPART_SLOT_SIZE + 70] = 0xFF;
+    img[3 * PURR_DRVPART_SLOT_SIZE + 70] ^= 0x01;
+    CHECK_EQ(purr_drvpart_check_image(img, sizeof(img)), PURR_DRVIMG_BAD_SLOT);
+    img[3 * PURR_DRVPART_SLOT_SIZE + 70] ^= 0x01;
+    CHECK_EQ(purr_drvpart_check_image(img, sizeof(img)), 2);
+
+    img[7 * PURR_DRVPART_SLOT_SIZE + 0] = 'X';                                    /* a header that is not ours */
+    CHECK_EQ(purr_drvpart_check_image(img, sizeof(img)), PURR_DRVIMG_BAD_SLOT);
+    memset(img + 7 * PURR_DRVPART_SLOT_SIZE, 0xFF, 16);
+
+    CHECK_EQ(purr_drvpart_build_slot(img + 6 * PURR_DRVPART_SLOT_SIZE, "st7789.cat", cat, sizeof(cat)), 0);   /* two slots for one file */
+    CHECK_EQ(purr_drvpart_check_image(img, sizeof(img)), PURR_DRVIMG_DUPLICATE);
+    memset(img + 6 * PURR_DRVPART_SLOT_SIZE, 0xFF, PURR_DRVPART_SLOT_SIZE);
+
+    const char *file = NULL;
+    const uint8_t *c = NULL;
+    uint32_t n = 0;
+    CHECK_EQ(purr_drvpart_image_slot(img, sizeof(img), 3, &file, &c, &n), 0);
+    CHECK(strcmp(file, "gt911.cat") == 0);
+    CHECK_EQ(n, 500u);
+    CHECK_EQ(c[0], 0x5A);
+    CHECK_EQ(purr_drvpart_image_slot(img, sizeof(img), 4, &file, &c, &n), PURR_DRVPART_EMPTY);
+    CHECK_EQ(purr_drvpart_image_slot(img, 2 * PURR_DRVPART_SLOT_SIZE, 3, &file, &c, &n), PURR_DRVPART_EMPTY);     /* past the end of a short image */
+}
+
 int main(void)
 {
+    test_a_release_image_is_checked_before_it_is_written();
     test_sizes();
     test_blank_partition_is_empty();
     test_a_driver_round_trips();

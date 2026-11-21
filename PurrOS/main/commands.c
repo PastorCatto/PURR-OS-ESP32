@@ -27,6 +27,7 @@
 #include "login.h"
 #include "purr_app_abi.h"
 #include "purr_appmgr.h"
+#include "purr_drvpart.h"
 #include "purr_drvpart_plat.h"
 #include "purr_kernel_table.h"   /* the prototype kernel<->CoreOS boundary -- see s_kernel_table */
 #include "purr_module.h"
@@ -1051,6 +1052,7 @@ void purr_continue_install(purr_cli_t *cli)
     if (!purr_kernel_installed()) {
         purr_net_install_run(cli, "kernel");
     }
+    purr_net_install_run(cli, "drivers");              /* after the kernel: its bus ABI serves the release's drivers; a release without the component says so and goes on */
     purr_net_install_run(cli, "modules");
     purr_net_install_run(cli, "ui_w10m");              /* the picture packs of both shells, if the release carries them: the kernel's shell is not known here */
     purr_net_install_run(cli, "ui_android");
@@ -1090,7 +1092,14 @@ int purr_stage2_step(purr_cli_t *cli, int step)
         int b = purr_net_install_run(cli, "ui_android");
         return a != 0 ? a : b;
     }
-    return purr_net_install_run(cli, step == 0 ? "kernel" : "modules");
+    if (step == 0) {                                    /* the kernel, then the drivers the same release brings (never when the kernel failed) */
+        int k = purr_net_install_run(cli, "kernel");
+        if (k == 0) {
+            purr_net_install_run(cli, "drivers");
+        }
+        return k;
+    }
+    return purr_net_install_run(cli, "modules");
 }
 
 /* ---------------------------------------------------------------- net install */
@@ -1345,6 +1354,69 @@ static int install_ui_pack(purr_cli_t *cli, const char *component, const char *v
     return 0;
 }
 
+/* `netinstall drivers`: the release's driver image (OTA/SPEC.md, the `drivers` component) into the drivers partition, or, on a board whose flash map has none (flash map v2),
+ * each driver as a file in /boot/drivers. The kernel goes first (a release's drivers need its bus ABI; a newer kernel still serves every older driver, never the other way round),
+ * so a blob that asks for more than this kernel serves is refused with the order to follow. Nothing is erased before the image has been downloaded, hash-checked and checked slot by slot. */
+static int net_install_drivers(purr_cli_t *cli, const purr_manifest_entry_t *entry)
+{
+    if (entry->abi_min > PURR_DRIVER_BUS_ABI_VERSION) {
+        purr_cli_printf(cli, "these drivers need driver bus ABI %u and this kernel serves %u: update the kernel first, restart, then run: netinstall drivers\n",
+                        (unsigned)entry->abi_min, (unsigned)PURR_DRIVER_BUS_ABI_VERSION);
+        return 1;
+    }
+    if (purr_drvpart_present() && purr_drvpart_matches(entry->size, entry->sha256)) {
+        purr_cli_puts(cli, "the drivers are up to date\n");
+        return 0;
+    }
+    char url[256];
+    resolve_manifest_url(purr_recovery_manifest_url(), entry->file, url, sizeof(url));
+    purr_cli_printf(cli, "downloading %s...\n", entry->file);
+    purr_console_flush();
+    uint8_t *image = NULL;
+    size_t len = 0;
+    esp_err_t fe = purr_fetch_alloc_checked(url, &image, &len, PURR_DRVPART_SIZE, entry->size, entry->sha256);
+    if (fe != ESP_OK) {
+        purr_cli_puts(cli, fe == ESP_ERR_INVALID_SIZE || fe == ESP_ERR_INVALID_CRC ? "download does not match the manifest (size or hash)\n" : "download failed\n");
+        return 1;
+    }
+    int n = purr_drvpart_check_image(image, (uint32_t)len);
+    if (n <= 0) {
+        free(image);
+        purr_cli_puts(cli, n == 0 ? "the drivers image holds no driver; nothing is changed\n" : "the drivers image is damaged; nothing is changed\n");
+        return 1;
+    }
+    int rc = 0;
+    if (purr_drvpart_present()) {
+        char why[64];
+        if (purr_drvpart_install(image, (uint32_t)len, why, sizeof(why)) != 0) {
+            purr_cli_printf(cli, "%s\n", why);
+            rc = 1;
+        } else {
+            purr_cli_printf(cli, "%d driver(s) written to the drivers partition. They take effect at the next start.\n", n);
+        }
+    } else {                                                     /* an older flash map: the drivers are files, planted now */
+        for (int i = 0; i < PURR_DRVPART_SLOTS; i++) {
+            const char *file;
+            const uint8_t *cat;
+            uint32_t cat_len;
+            if (purr_drvpart_image_slot(image, (uint32_t)len, i, &file, &cat, &cat_len) != 0) {
+                continue;
+            }
+            char path[64];
+            snprintf(path, sizeof(path), "%s/%s", PURR_DRIVERS_DIR, file);
+            if (purr_fs_write(&s_fs, path, cat, cat_len) < 0) {
+                purr_cli_printf(cli, "could not write %s\n", path);
+                rc = 1;
+            }
+        }
+        if (rc == 0) {
+            purr_cli_printf(cli, "%d driver(s) written to %s (this board has no drivers partition). They take effect at the next start.\n", n, PURR_DRIVERS_DIR);
+        }
+    }
+    free(image);
+    return rc;
+}
+
 static int purr_net_install_run(purr_cli_t *cli, const char *component)
 {
     if (strcmp(component, "modules") == 0) {
@@ -1385,6 +1457,9 @@ static int purr_net_install_run(purr_cli_t *cli, const char *component)
         return 1;
     }
     purr_cli_printf(cli, "found %s %s (%u bytes)\n", component, entry->version, (unsigned)entry->size);
+    if (strcmp(component, "drivers") == 0) {
+        return net_install_drivers(cli, entry);
+    }
 
     if (strcmp(component, "bootloader") == 0 && !PURR_BOOTLOADER_OTA) {
         purr_cli_puts(cli, "bootloader updates over the air are turned off; the bootloader is left as it is\n");
@@ -6196,7 +6271,20 @@ static int builtin_driver_file(const char *file)
             return 1;
         }
     }
-    return purr_drvpart_has_file(file);                  /* and whatever the drivers partition carries under that name */
+    if (purr_drvpart_has_file(file)) {                   /* and whatever the drivers partition carries under that name */
+        return 1;
+    }
+    if (!purr_drvpart_present()) {
+        /* A board whose flash map has no drivers partition (flash map v2: a device that took a newer kernel by update) keeps the essential drivers as files in /boot/drivers, planted by
+         * the kernel it had before or by `netinstall drivers`. Those files are exempt by name, as the baked ones always were: setting the display driver aside as "unproven" is a black screen. */
+        static const char *const essential[] = {"st7789.cat", "gt911.cat", "kbd_i2c.cat", "battery.cat", "kbd-backlight.cat", "gamepad.cat"};
+        for (size_t i = 0; i < sizeof(essential) / sizeof(essential[0]); i++) {
+            if (strcmp(file, essential[i]) == 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 /* Drivers that stopped the device are listed in /boot/drivers.bad (one file name per line): the automatic put-back after sign-in (recover_drivers_task) never tries those

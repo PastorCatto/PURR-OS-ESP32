@@ -33,6 +33,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(ROOT, "purrstrap"))
 from lib import image as pimg  # noqa: E402
+from scripts import drvpart  # noqa: E402
 from make_official_from_dev import parse_manifest, write_manifest  # noqa: E402
 
 MANIFESTS = ("recovery.manifest", "modules.manifest", "drivers.manifest")
@@ -44,10 +45,43 @@ def sha256(path):
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def key_id_of(path):
+def is_drivers_blob(s):
+    """The `drivers` component is a raw partition image (drvpart.py), not a PURR image: each driver inside is a signed module of its own."""
+    return s.get("type") == "drivers"
+
+
+def drivers_cats(path):
+    with open(path, "rb") as fh:
+        data = fh.read()
+    return [drvpart.extract(data, r["slot"]) for r in drvpart.read(data) if r["state"] == "ok"]
+
+
+def key_id_of(path, blob=False):
+    """The key id that signed a file; for a drivers blob the id its drivers carry (-1 when they are signed by more than one key, so it is signed again as a whole)."""
+    if blob:
+        ids = {pimg.header_fields(pimg.parse_header(cat[:pimg.HEADER_SIZE]))["key_id"] for _n, cat in drivers_cats(path)}
+        return ids.pop() if len(ids) == 1 else -1
     with open(path, "rb") as fh:
         head = fh.read(pimg.HEADER_SIZE)
     return pimg.header_fields(pimg.parse_header(head))["key_id"]
+
+
+def sign_drivers_blob(src_path, dst_path, key, key_id, password, workdir):
+    """Signs every driver of a drivers image again, and writes the image of the same slots (same file names, same order) to dst_path."""
+    items = []
+    for i, (name, cat) in enumerate(drivers_cats(src_path)):
+        tmp = os.path.join(workdir, ".drv-%d.cat" % i)
+        with open(tmp, "wb") as fh:
+            fh.write(cat)
+        rc, text = purrstrap(["keys", "sign", "--key", key, "--image", tmp, "--key-id", key_id], password=password)
+        if rc != 0:
+            os.remove(tmp)
+            sys.exit("Signing %s failed: %s" % (name, (text.strip().splitlines() or ["no reason given"])[-1]))
+        with open(tmp, "rb") as fh:
+            items.append((name, fh.read()))
+        os.remove(tmp)
+    with open(dst_path, "wb") as fh:
+        fh.write(drvpart.pack(items))
 
 
 def is_picture_pack(path):
@@ -121,7 +155,7 @@ def main(argv=None):
                 sys.exit("%s names %s, which is not in %s." % (m, s["file"], src))
             if os.path.getsize(f) != int(s["size"]) or sha256(f) != s["sha256"]:
                 sys.exit("%s does not match its line in %s (size or sha256): fix the source first." % (s["file"], m))
-            kid = key_id_of(f)
+            kid = key_id_of(f, is_drivers_blob(s))
             role = s.get("key", "")
             if kid in new_ids:
                 continue
@@ -148,7 +182,7 @@ def main(argv=None):
                 s["file"], s["sha256"], s["size"] = renamed[old]
                 continue
             srcf = os.path.join(src, old)
-            kid = key_id_of(srcf)
+            kid = key_id_of(srcf, is_drivers_blob(s))
             if kid in new_ids:
                 shutil.copyfile(srcf, os.path.join(out, old))
                 continue
@@ -156,12 +190,15 @@ def main(argv=None):
             if role == "system" and is_picture_pack(srcf):
                 role = s["key"] = "boot"                      # signed with the boot key, so the line says so
             tmp = os.path.join(out, ".signing-" + old)
-            shutil.copyfile(srcf, tmp)
             key, kid_new, pw = (a.boot_key, a.boot_id, boot_pw) if role == "boot" else (a.dev_key, a.dev_id, dev_pw)
-            rc, text = purrstrap(["keys", "sign", "--key", key, "--image", tmp, "--key-id", kid_new], password=pw)
-            if rc != 0:
-                os.remove(tmp)
-                sys.exit("Signing %s failed: %s" % (old, (text.strip().splitlines() or ["no reason given"])[-1]))
+            if is_drivers_blob(s):
+                sign_drivers_blob(srcf, tmp, key, kid_new, pw, out)
+            else:
+                shutil.copyfile(srcf, tmp)
+                rc, text = purrstrap(["keys", "sign", "--key", key, "--image", tmp, "--key-id", kid_new], password=pw)
+                if rc != 0:
+                    os.remove(tmp)
+                    sys.exit("Signing %s failed: %s" % (old, (text.strip().splitlines() or ["no reason given"])[-1]))
             digest = sha256(tmp)
             name = new_name(old, digest)
             os.replace(tmp, os.path.join(out, name))
@@ -181,10 +218,20 @@ def main(argv=None):
             if sha256(f) != s["sha256"] or os.path.getsize(f) != int(s["size"]):
                 problems.append("%s does not match its line in %s" % (s["file"], m))
                 continue
-            kid = key_id_of(f)
+            kid = key_id_of(f, is_drivers_blob(s))
             key = a.boot_key if kid == a.boot_id else a.dev_key if kid == a.dev_id else None
             if key is None:
                 problems.append("%s carries key id %d, which is neither new key" % (s["file"], kid))
+                continue
+            if is_drivers_blob(s):                              # every driver inside is checked on its own, like the device does when it loads it
+                for dname, cat in drivers_cats(f):
+                    tmpv = os.path.join(out, ".verify.cat")
+                    with open(tmpv, "wb") as fh:
+                        fh.write(cat)
+                    rc, text = purrstrap(["keys", "verify", "--key", pub_of(key), "--image", tmpv])
+                    os.remove(tmpv)
+                    if rc != 0:
+                        problems.append("%s (%s): %s" % (s["file"], dname, (text.strip().splitlines() or ["does not verify"])[-1]))
                 continue
             rc, text = purrstrap(["keys", "verify", "--key", pub_of(key), "--image", f])
             if rc != 0:

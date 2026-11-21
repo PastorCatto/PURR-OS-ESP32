@@ -823,7 +823,7 @@ def main():
         os.makedirs(os.path.join(KIT, "images"), exist_ok=True)
         n = 0
         for f in sorted(os.listdir(images)):
-            if f.endswith((".cat", ".kitt", ".manifest")) or f == "legal.txt":
+            if f.endswith((".cat", ".kitt", ".manifest")) or f == "legal.txt" or (f.startswith("drivers") and f.endswith(".bin")):       # the drivers partition image too: the image maker needs it
                 shutil.copy2(os.path.join(images, f), os.path.join(KIT, "images", f))
                 n += 1
         say("  %d files from %s" % (n, images))

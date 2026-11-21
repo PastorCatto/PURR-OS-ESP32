@@ -24,12 +24,7 @@ def make_parts(folder, board="tdeck_plus"):
     put("loader-%s.cat" % board, img.IMG_MODULE, img.MOD_LOADER, 100000)
     from purrsdk import image as _image
     if "drivers" in [p["name"] for p in _image.layout_for(board)]:          # flash map v3: the essential drivers' partition image comes with the parts
-        import sys
-        sys.path.insert(0, os.path.join(helpers.ROOT, "purrstrap", "scripts"))
-        sys.path.insert(0, os.path.join(helpers.ROOT, "purrstrap"))
-        import drvpart
-        with open(os.path.join(folder, "drivers-%s.bin" % board), "wb") as fh:
-            fh.write(drvpart.pack([("st7789.cat", b"driver")]))
+        helpers.write_drivers_image(folder, board)
 
 
 def make_drivers(folder):

@@ -15,6 +15,7 @@
 #include "purr_cfgstore.h"
 #include "purr_fetch.h"
 #include "purr_kernel.h"
+#include "purr_drvpart_plat.h"
 #include "purr_manifest.h"
 #if CONFIG_PURR_BOARD_COLOR_LCD
 #include "purr_notify.h"
@@ -134,6 +135,14 @@ int purr_sysupdate_check(int use_dev, char *msg, size_t cap)
     int any = 0;
     newer(m, "kernel", kv, what, sizeof(what), &any);
     newer(m, "kittenos", ov, what, sizeof(what), &any);
+    {                                                    /* the drivers have no version a device could read back: they are "newer" when the partition is not exactly what the release carries */
+        const purr_manifest_entry_t *de = purr_manifest_find(m, "drivers", CONFIG_IDF_TARGET, purr_board()->name);
+        if (de != NULL && purr_drvpart_present() && !purr_drvpart_matches(de->size, de->sha256)) {
+            size_t n = strlen(what);
+            snprintf(what + n, sizeof(what) - n, "%sdrivers %s", n ? ", " : "", de->version);
+            any = 1;
+        }
+    }
     {
         const purr_manifest_entry_t *be = purr_manifest_find(m, "bootloader", CONFIG_IDF_TARGET, purr_board()->name);
         purr_handoff_t hh;

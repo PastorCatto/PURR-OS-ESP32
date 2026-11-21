@@ -64,6 +64,19 @@ int purr_drvpart_slot_read(purr_drvpart_read_fn rd, void *ctx, int slot, uint8_t
 /* Fills one 8 KB slot image (slot_out must hold PURR_DRVPART_SLOT_SIZE bytes) for a file name and its .cat: 0, or -1 if the name or the size does not fit. */
 int purr_drvpart_build_slot(uint8_t *slot_out, const char *file, const uint8_t *cat, uint32_t len);
 
+/* The `drivers` component of a release (OTA/SPEC.md): the whole partition image, PURR_DRVPART_SIZE bytes at most (a shorter one is the slots it holds, the rest is blank), checked before
+ * anything on the device is erased. Returns the number of drivers in it (0 for an image with no driver at all), or a negative error: PURR_DRVIMG_BAD_SIZE (empty, or longer than the
+ * partition, or not a whole number of slots), PURR_DRVIMG_BAD_SLOT (a slot that has a header but does not hold together: bad magic, length or crc), PURR_DRVIMG_DUPLICATE (two slots
+ * for one file name). An image that fails is never written: a damaged blob must not replace a working partition. */
+#define PURR_DRVIMG_BAD_SIZE   (-2)
+#define PURR_DRVIMG_BAD_SLOT   (-3)
+#define PURR_DRVIMG_DUPLICATE  (-4)
+int purr_drvpart_check_image(const uint8_t *image, uint32_t len);
+
+/* One slot of an image, for a device that has no `drivers` partition (flash map v2) and plants the files itself: the file name and the .cat inside slot n of a checked image,
+ * 0, or PURR_DRVPART_EMPTY / PURR_DRVPART_DAMAGED. `*cat` points into `image`. */
+int purr_drvpart_image_slot(const uint8_t *image, uint32_t len, int slot, const char **file, const uint8_t **cat, uint32_t *cat_len);
+
 #ifdef __cplusplus
 }
 #endif

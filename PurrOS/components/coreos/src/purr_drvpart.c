@@ -95,3 +95,79 @@ int purr_drvpart_build_slot(uint8_t *slot_out, const char *file, const uint8_t *
     memcpy(slot_out + PURR_DRVPART_HEADER, cat, len);
     return 0;
 }
+
+/* ---- a whole partition image in memory (the `drivers` component of a release) */
+
+typedef struct {
+    const uint8_t *image;
+    uint32_t len;
+} mem_t;
+
+static int mem_read(void *ctx, uint32_t off, void *buf, uint32_t len)
+{
+    const mem_t *m = ctx;
+    if (off > m->len || len > m->len - off) {
+        return -1;
+    }
+    memcpy(buf, m->image + off, len);
+    return 0;
+}
+
+int purr_drvpart_check_image(const uint8_t *image, uint32_t len)
+{
+    if (image == NULL || len == 0 || len > PURR_DRVPART_SIZE || len % PURR_DRVPART_SLOT_SIZE != 0) {
+        return PURR_DRVIMG_BAD_SIZE;
+    }
+    mem_t m = {image, len};
+    uint32_t slots = len / PURR_DRVPART_SLOT_SIZE;
+    char names[PURR_DRVPART_SLOTS][PURR_DRVPART_NAME_LEN];
+    int count = 0;
+    for (uint32_t i = 0; i < slots; i++) {
+        purr_drvslot_info_t info;
+        int e = purr_drvpart_slot_info(mem_read, &m, (int)i, &info);
+        if (e == PURR_DRVPART_EMPTY) {
+            continue;
+        }
+        if (e != 0) {
+            return PURR_DRVIMG_BAD_SLOT;
+        }
+        purr_drvslot_hdr_t h;
+        const uint8_t *cat = image + i * PURR_DRVPART_SLOT_SIZE + PURR_DRVPART_HEADER;
+        memcpy(&h, image + i * PURR_DRVPART_SLOT_SIZE, sizeof(h));
+        if (info.length > len - (i * PURR_DRVPART_SLOT_SIZE + PURR_DRVPART_HEADER) || purr_crc32(0, cat, info.length) != h.crc32) {
+            return PURR_DRVIMG_BAD_SLOT;
+        }
+        for (int k = 0; k < count; k++) {
+            if (strcmp(names[k], info.file) == 0) {
+                return PURR_DRVIMG_DUPLICATE;
+            }
+        }
+        memcpy(names[count++], info.file, PURR_DRVPART_NAME_LEN);
+    }
+    return count;
+}
+
+int purr_drvpart_image_slot(const uint8_t *image, uint32_t len, int slot, const char **file, const uint8_t **cat, uint32_t *cat_len)
+{
+    static char name[PURR_DRVPART_NAME_LEN];             /* one call at a time: the caller copies it before the next */
+    mem_t m = {image, len};
+    purr_drvslot_info_t info;
+    if (image == NULL || slot < 0 || (uint32_t)(slot + 1) * PURR_DRVPART_SLOT_SIZE > len) {
+        return PURR_DRVPART_EMPTY;
+    }
+    int e = purr_drvpart_slot_info(mem_read, &m, slot, &info);
+    if (e != 0) {
+        return e;
+    }
+    memcpy(name, info.file, sizeof(name));
+    if (file != NULL) {
+        *file = name;
+    }
+    if (cat != NULL) {
+        *cat = image + (uint32_t)slot * PURR_DRVPART_SLOT_SIZE + PURR_DRVPART_HEADER;
+    }
+    if (cat_len != NULL) {
+        *cat_len = info.length;
+    }
+    return 0;
+}
