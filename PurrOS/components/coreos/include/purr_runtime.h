@@ -262,6 +262,10 @@ int purr_rt_key(purr_rt_t *rt, unsigned mods, const char *key);
  * lines, so 0 means the file was clean. Emits `config>>reloaded`. An option the file does not set
  * goes back to its default, so removing a line and reloading undoes it. */
 int purr_rt_config_load(purr_rt_t *rt, const char *text, char *err, size_t errcap);
+/* Whether text read from /etc/apps.conf can be a config at all: 1 if it is (an empty file is: nothing listed), 0 if it is not text: a NUL or another control character other than
+ * newline, carriage return and tab, which a cut write, a bad flash block or another file's bytes in its place would leave. A config that fails this is never used and never
+ * replaced by the default without a copy being kept (purr_catrt.c: the backup, then the damaged copy). */
+int purr_rt_conf_is_text(const char *text, size_t len);
 /* Opens the exec-boot apps in order: the ones the system needs with nobody logged in (a
  * shell, a daemon every user relies on). Returns how many opened. Call at boot. */
 int purr_rt_exec_boot(purr_rt_t *rt);

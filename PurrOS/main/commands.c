@@ -474,6 +474,11 @@ static void apps_scan(const char *root, const purr_appmgr_env_t *env, purr_app_r
         return;
     }
     purr_appmgr_scan(&s_appmgr_fs, root, env, buf, APP_SCRATCH_CAP, reg);
+    static int s_said_dropped;
+    if (reg->dropped > 0 && reg->dropped != s_said_dropped) {      /* said once per change, so a log is not filled by every list refresh */
+        ESP_LOGW("apps", "%s: %d folder(s) were not listed (no readable package, a bad image, or more entries than the listing holds)", root, reg->dropped);
+    }
+    s_said_dropped = reg->dropped;
 }
 
 /* "/home/<name>/apps", built fresh each time from whoever is logged in right now -- never
@@ -842,17 +847,13 @@ int purr_apps_install_vouched(const uint8_t *data, size_t len, const char *name,
         return -1;
     }
     memcpy(scratch, data, len);
-    purr_app_result_t r = purr_appmgr_add(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, (uint32_t)len);
+    /* The receipt goes into the staging folder with the package, so one rename makes both appear. It used to be written after the app was in place: a reset between the two
+     * left an installed app with no receipt, which the loader does not trust and every list hides, its data still there (audit 2026-11-21). */
+    char rc[160];
+    int n = snprintf(rc, sizeof(rc), "repo=%s\nidx=%s\nsha=%s\n", repo_id, idx8, sha_hex);
+    purr_app_result_t r = purr_appmgr_add_ex(&s_appmgr_fs, root, &env, &cfg, &reg, scratch, (uint32_t)len, "receipt", (const uint8_t *)rc, (uint32_t)n);
     if (r != PURR_APP_OK) {
         snprintf(msg, cap, "%s", purr_app_result_name(r));
-        return -1;
-    }
-    char path[120], rc[160];
-    snprintf(path, sizeof(path), "%s/%s/receipt", root, name);
-    int n = snprintf(rc, sizeof(rc), "repo=%s\nidx=%s\nsha=%s\n", repo_id, idx8, sha_hex);
-    if (purr_fs_write(&s_fs, path, rc, (uint32_t)n) < 0) {
-        purr_appmgr_remove(&s_appmgr_fs, root, name);
-        snprintf(msg, cap, "could not save the receipt");
         return -1;
     }
     snprintf(msg, cap, "installed");
@@ -5879,6 +5880,13 @@ static int catrt_write_file(const char *path, const void *buf, size_t len)
     return purr_fs_write(&s_fs, path, buf, (uint32_t)len);
 }
 
+static int catrt_file_exists(const char *path)
+{
+    int is_dir = 0;
+    uint32_t size = 0;
+    return purr_fs_stat(&s_fs, path, &is_dir, &size) == 0;
+}
+
 void purr_catrt_setup(purr_cli_t *cli)
 {
     if (!purr_fs_mounted(&s_fs)) {
@@ -5892,6 +5900,7 @@ void purr_catrt_setup(purr_cli_t *cli)
         .console_write = catrt_console_write,
         .read_file = catrt_read_file,
         .write_file = catrt_write_file,
+        .file_exists = catrt_file_exists,
     };
     purr_fs_mkdir(&s_fs, "/apps");
     purr_catrt_storage_init();

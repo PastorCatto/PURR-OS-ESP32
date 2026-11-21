@@ -39,6 +39,9 @@ typedef struct {
     int  (*read_file)(const char *path, char *buf, size_t cap);
     /* Whole-file write, creating parent directories; used to plant defaults and test apps. */
     int  (*write_file)(const char *path, const void *buf, size_t len);
+    /* 1 if the file is there (whether or not it reads), 0 if not. Lets the runtime tell "first boot, no config yet" from "the config is there and did not read": the second must
+     * never be answered by overwriting it with the default. NULL: the old behaviour (a failed read counts as missing). */
+    int  (*file_exists)(const char *path);
 } purr_catrt_platform_t;
 
 /* Starts the manager task and loads /etc/apps.conf (planting a default one the first time), then

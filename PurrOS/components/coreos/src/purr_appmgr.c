@@ -93,6 +93,11 @@ static void join(char *out, size_t outcap, const char *root, const char *suffix)
     }
 }
 
+/* Removes a folder together with the files in it. A folder holds the package and, for a Store install, its receipt: removing only the package left the receipt behind, the folder
+ * could not be removed, and every update or removal left a `<name>.old` or an empty-looking folder that nothing cleaned up and every scan counted as dropped. Files only (an app's
+ * folder has no subfolders); a subfolder, or a file that will not go, leaves the folder for the next boot, as before. Defined below the listing it uses. */
+static void remove_tree(const purr_appmgr_fs_t *fs, const char *dir);
+
 /* ---------------------------------------------------------------- scanning */
 
 typedef struct {
@@ -100,21 +105,57 @@ typedef struct {
     int is_dir;
 } listing_row_t;
 
+/* The folder's entries: the apps (at most PURR_APP_MAX), and next to them whatever a cut left (`<name>.tmp`, `<name>.old`) or a person dropped there. The listing used to hold only
+ * PURR_APP_MAX rows, so a folder with 30 apps and a few leftovers lost the last ones to the scan and to recover() without a word. `overflow` counts what did not fit. */
+#define LIST_MAX (PURR_APP_MAX + 16)
+
 typedef struct {
-    listing_row_t rows[PURR_APP_MAX];
+    listing_row_t rows[LIST_MAX];
     int count;
+    int overflow;
 } listing_t;
 
 static void collect_row(void *ctx, const char *name, int is_dir, uint32_t size)
 {
     (void)size;
     listing_t *l = ctx;
-    if (l->count < PURR_APP_MAX) {
+    if (l->count >= LIST_MAX) {
+        l->overflow++;
+        return;
+    }
+    {
         strncpy(l->rows[l->count].folder, name, sizeof(l->rows[l->count].folder) - 1);
         l->rows[l->count].folder[sizeof(l->rows[l->count].folder) - 1] = '\0';
         l->rows[l->count].is_dir = is_dir;
         l->count++;
     }
+}
+
+typedef struct {
+    char name[8][PURR_APP_NAME_LEN];
+    int n;
+} filelist_t;
+
+static void collect_file(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)size;
+    filelist_t *f = ctx;
+    if (!is_dir && f->n < 8) {
+        snprintf(f->name[f->n++], sizeof(f->name[0]), "%s", name);
+    }
+}
+
+static void remove_tree(const purr_appmgr_fs_t *fs, const char *dir)
+{
+    filelist_t f = {.n = 0};
+    if (fs->list(dir, collect_file, &f) == 0) {
+        for (int i = 0; i < f.n; i++) {
+            char path[PURR_APPMGR_ROOT_MAX + 2 * PURR_APP_NAME_LEN + 8];
+            snprintf(path, sizeof(path), "%s/%s", dir, f.name[i]);
+            fs->remove(path);
+        }
+    }
+    fs->remove(dir);
 }
 
 void purr_appmgr_recover(const purr_appmgr_fs_t *fs, const char *root)
@@ -128,11 +169,7 @@ void purr_appmgr_recover(const purr_appmgr_fs_t *fs, const char *root)
         if (l.rows[i].is_dir && n > 4 && strcmp(l.rows[i].folder + n - 4, TMP_SUFFIX) == 0) {
             char path[PURR_APPMGR_ROOT_MAX + PURR_APP_NAME_LEN + 2];
             join(path, sizeof(path), root, l.rows[i].folder);
-            /* Remove the package file first (fs->remove needs an empty directory). */
-            char inner[sizeof(path) + 16];
-            snprintf(inner, sizeof(inner), "%s/%s", path, PACKAGE_FILE);
-            fs->remove(inner);
-            fs->remove(path);
+            remove_tree(fs, path);                  /* the package, and the receipt a Store install stages beside it */
         }
         /* F-34: an update's parked old version (purr_appmgr_add(), above). If the real name
          * is missing, the cut happened before the new version's rename took -- the old one
@@ -153,10 +190,7 @@ void purr_appmgr_recover(const purr_appmgr_fs_t *fs, const char *root)
             if (fs->stat(real_path, &is_dir, &size) != 0) {
                 fs->rename(old_path, real_path);
             } else {
-                char old_file[sizeof(old_path) + 16];
-                snprintf(old_file, sizeof(old_file), "%s/%s", old_path, PACKAGE_FILE);
-                fs->remove(old_file);
-                fs->remove(old_path);
+                remove_tree(fs, old_path);
             }
         }
     }
@@ -170,6 +204,7 @@ void purr_appmgr_scan(const purr_appmgr_fs_t *fs, const char *root, const purr_a
     if (fs->list(root, collect_row, &l) != 0) {
         return;
     }
+    reg->dropped += l.overflow;                /* entries the listing had no room for: said, not lost without a word */
     for (int i = 0; i < l.count && reg->count < PURR_APP_MAX; i++) {
         if (!l.rows[i].is_dir) {
             continue;                          /* a stray file at the root: not an app folder */
@@ -235,6 +270,17 @@ purr_app_result_t purr_appmgr_add(const purr_appmgr_fs_t *fs, const char *root, 
                                   const purr_cfg_t *cfg, const purr_app_registry_t *reg,
                                   const uint8_t *data, uint32_t len)
 {
+    return purr_appmgr_add_ex(fs, root, env, cfg, reg, data, len, NULL, NULL, 0);
+}
+
+purr_app_result_t purr_appmgr_add_ex(const purr_appmgr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
+                                     const purr_cfg_t *cfg, const purr_app_registry_t *reg,
+                                     const uint8_t *data, uint32_t len,
+                                     const char *extra_name, const uint8_t *extra, uint32_t extra_len)
+{
+    if (extra_name != NULL && (extra == NULL || extra_len == 0 || strlen(extra_name) >= 16 || strchr(extra_name, '/') != NULL || strcmp(extra_name, PACKAGE_FILE) == 0)) {
+        return PURR_APP_IO_ERROR;
+    }
     if (len < sizeof(purr_image_header_t)) {
         return PURR_APP_BAD_MAGIC;
     }
@@ -293,26 +339,35 @@ purr_app_result_t purr_appmgr_add(const purr_appmgr_fs_t *fs, const char *root, 
     snprintf(tmp_file, sizeof(tmp_file), "%s/%s", tmp_dir, PACKAGE_FILE);
     join(final_dir, sizeof(final_dir), root, hdr.name);
 
-    fs->remove(tmp_file);                      /* in case a previous attempt left one */
-    fs->remove(tmp_dir);
+    remove_tree(fs, tmp_dir);                  /* in case a previous attempt left one (with whatever it had staged beside the package) */
     if (fs->mkdir(tmp_dir) != 0 || fs->write(tmp_file, data, len) != 0) {
+        remove_tree(fs, tmp_dir);
         return PURR_APP_IO_ERROR;
+    }
+    if (extra_name != NULL) {
+        /* A file that has to exist together with the package (a Store install's receipt) goes into the staging folder too, so the one rename below makes both appear. Written
+         * afterwards into the live folder it left a window: a reset between the rename and the write left an app with no receipt, which is hidden from every list (its data
+         * still there) until someone reinstalls it. */
+        char extra_path[sizeof(tmp_dir) + 16];
+        snprintf(extra_path, sizeof(extra_path), "%s/%s", tmp_dir, extra_name);
+        if (fs->write(extra_path, extra, extra_len) != 0) {
+            remove_tree(fs, tmp_dir);
+            return PURR_APP_IO_ERROR;
+        }
     }
 
     /* Check the copy, not just trust the write. */
     purr_sha256_t sha;
     purr_sha256_init(&sha);
     if (fs->read(tmp_file, hash_accumulate, &sha) != 0) {
-        fs->remove(tmp_file);
-        fs->remove(tmp_dir);
+        remove_tree(fs, tmp_dir);
         return PURR_APP_IO_ERROR;
     }
     uint8_t digest[PURR_SHA256_LEN], expected[PURR_SHA256_LEN];
     purr_sha256_final(&sha, digest);
     purr_sha256(data, len, expected);
     if (memcmp(digest, expected, sizeof(digest)) != 0) {
-        fs->remove(tmp_file);
-        fs->remove(tmp_dir);
+        remove_tree(fs, tmp_dir);
         return PURR_APP_IO_ERROR;
     }
 
@@ -327,22 +382,17 @@ purr_app_result_t purr_appmgr_add(const purr_appmgr_fs_t *fs, const char *root, 
     if (existing != NULL) {
         char old_dir[sizeof(final_dir) + sizeof(OLD_SUFFIX)];
         snprintf(old_dir, sizeof(old_dir), "%s%s", final_dir, OLD_SUFFIX);
-        char old_file[sizeof(old_dir) + 16];
-        snprintf(old_file, sizeof(old_file), "%s/%s", old_dir, PACKAGE_FILE);
-        fs->remove(old_file);           /* in case a previous attempt left one */
-        fs->remove(old_dir);
+        remove_tree(fs, old_dir);       /* in case a previous attempt left one */
 
         if (fs->rename(final_dir, old_dir) != 0) {
-            fs->remove(tmp_file);
-            fs->remove(tmp_dir);
+            remove_tree(fs, tmp_dir);
             return PURR_APP_IO_ERROR;
         }
         if (fs->rename(tmp_dir, final_dir) != 0) {
             fs->rename(old_dir, final_dir);    /* put the old one back; best-effort */
             return PURR_APP_IO_ERROR;
         }
-        fs->remove(old_file);
-        fs->remove(old_dir);
+        remove_tree(fs, old_dir);       /* with its receipt: the folder used to stay for ever, one more entry in every listing */
         return PURR_APP_OK;
     }
     if (fs->rename(tmp_dir, final_dir) != 0) {
@@ -357,7 +407,11 @@ int purr_appmgr_remove(const purr_appmgr_fs_t *fs, const char *root, const char 
     join(dir, sizeof(dir), root, name);
     char file[sizeof(dir) + 16];
     snprintf(file, sizeof(file), "%s/%s", dir, PACKAGE_FILE);
-    int had_file = fs->remove(file) == 0;
-    int had_dir = fs->remove(dir) == 0;
-    return (had_file || had_dir) ? 0 : -1;
+    int is_dir = 0;
+    uint32_t size = 0;
+    if (fs->stat(file, &is_dir, &size) != 0 && fs->stat(dir, &is_dir, &size) != 0) {
+        return -1;                              /* there is no such app */
+    }
+    remove_tree(fs, dir);                       /* the package and its receipt, then the folder */
+    return fs->stat(dir, &is_dir, &size) == 0 ? -1 : 0;
 }

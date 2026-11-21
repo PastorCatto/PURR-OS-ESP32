@@ -1624,3 +1624,14 @@ int purr_rt_exec_once(purr_rt_t *rt)
     }
     return opened;
 }
+
+int purr_rt_conf_is_text(const char *text, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (c == 0x7F || (c < 0x20 && c != '\n' && c != '\r' && c != '\t')) {
+            return 0;
+        }
+    }
+    return 1;
+}

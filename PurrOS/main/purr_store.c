@@ -1487,6 +1487,95 @@ int purr_store_vouch_retry_pending(void)
     return r;
 }
 
+/* ---- the receipt that was lost: a local, manual check of the package against what the device has already seen
+ *
+ * A receipt (/home/<user>/apps/<name>/receipt) says which saved, signed Store index vouches for the package next to it. Without it a Store app is "unverified" and every list hides
+ * it, its data still there. Installs write it with the package now (purr_appmgr_add_ex), but a device that took the old order, a receipt that does not read any more, or a
+ * damaged one can still be found in that state. So: hash the package that is in the folder, then ask every saved index under /var/store whether it lists exactly this app
+ * with exactly this hash (receipt_vouches checks the index's own signature against the repository's key, like the loader does). The first one that does gets its receipt
+ * written again. Nothing is fetched and no trust is invented: an app no saved index vouches for stays hidden, and a package that is not the one that was vouched for never matches. */
+typedef struct {
+    purr_sha256_t sha;
+} pkg_hash_t;
+
+static int pkg_hash_cb(void *ctx, const void *data, uint32_t len)
+{
+    purr_sha256_update(&((pkg_hash_t *)ctx)->sha, data, len);
+    return 0;
+}
+
+typedef struct {
+    char names[24][24];
+    int n;
+} namelist_t;
+
+static void namelist_cb(void *ctx, const char *name, int is_dir, uint32_t size)
+{
+    (void)is_dir;
+    (void)size;
+    namelist_t *l = ctx;
+    if (l->n < 24 && strlen(name) < sizeof(l->names[0])) {
+        snprintf(l->names[l->n++], sizeof(l->names[0]), "%s", name);
+    }
+}
+
+/* 1 if a receipt was written (the app is vouched for again), 0 if no saved index vouches for the package, -1 if it could not be tried (no memory, a read failed). */
+static int repair_receipt(const char *apps_root, const char *name)
+{
+    char folder[128], pkg[160];
+    snprintf(folder, sizeof(folder), "%s/%s", apps_root, name);
+    snprintf(pkg, sizeof(pkg), "%s/package.cat", folder);
+    pkg_hash_t h;
+    purr_sha256_init(&h.sha);
+    if (x_read(pkg, pkg_hash_cb, &h) < 0) {
+        return -1;
+    }
+    uint8_t sha[32];
+    purr_sha256_final(&h.sha, sha);
+    namelist_t *repos = calloc(1, sizeof(*repos)), *files = calloc(1, sizeof(*files));
+    if (repos == NULL || files == NULL) {
+        free(repos);
+        free(files);
+        return -1;
+    }
+    int result = 0;
+    if (x_list(STORE_DIR, namelist_cb, repos) == 0) {
+        for (int r = 0; r < repos->n && result == 0; r++) {
+            char dir[64];
+            snprintf(dir, sizeof(dir), STORE_DIR "/%s", repos->names[r]);
+            files->n = 0;
+            if (x_list(dir, namelist_cb, files) != 0) {
+                continue;
+            }
+            for (int f = 0; f < files->n && result == 0; f++) {
+                const char *fn = files->names[f];
+                size_t n = strlen(fn);
+                if (strncmp(fn, "idx-", 4) != 0 || n != 4 + IDX8 + 5 || strcmp(fn + n - 5, ".json") != 0) {
+                    continue;                                   /* the index copies only (not their .sig files) */
+                }
+                char idx8[IDX8 + 1];
+                snprintf(idx8, sizeof(idx8), "%.*s", IDX8, fn + 4);
+                int ok = receipt_vouches(name, repos->names[r], idx8, sha);
+                if (ok < 0) {
+                    result = -1;
+                } else if (ok == 1) {
+                    char path[170], rc[160], full[65];
+                    hex_of(sha, 32, full);
+                    snprintf(path, sizeof(path), "%s/receipt", folder);
+                    int len = snprintf(rc, sizeof(rc), "repo=%s\nidx=%s\nsha=%s\n", repos->names[r], idx8, full);
+                    result = purr_fs_write(fs(), path, rc, (uint32_t)len) >= 0 ? 1 : -1;
+                    if (result == 1) {
+                        ESP_LOGW("store", "%s: its receipt was missing; written again from the saved index %s/%s", name, repos->names[r], idx8);
+                    }
+                }
+            }
+        }
+    }
+    free(repos);
+    free(files);
+    return result;
+}
+
 void purr_store_mark_vouched(purr_app_registry_t *reg, const char *apps_root)
 {
     static struct {
@@ -1504,7 +1593,27 @@ void purr_store_mark_vouched(purr_app_registry_t *reg, const char *apps_root)
         uint8_t sha[32];
         snprintf(folder, sizeof(folder), "%s/%s", apps_root, a->name);
         if (parse_receipt(folder, repo, idx8, sha) != 0) {
-            continue;
+            /* No receipt, or one that does not read: look for the proof ourselves once per start (a hit writes the receipt again and the app is checked as usual below). */
+            static char tried[8][32];
+            static int ntried;
+            int already = 0;
+            for (int k = 0; k < ntried; k++) {
+                already |= strcmp(tried[k], a->name) == 0;
+            }
+            if (already) {
+                continue;
+            }
+            int rr = repair_receipt(apps_root, a->name);
+            if (rr < 0) {
+                s_vouch_retry = 1;                               /* could not try this time: look again soon, do not remember */
+                continue;
+            }
+            if (ntried < 8) {
+                snprintf(tried[ntried++], sizeof(tried[0]), "%s", a->name);
+            }
+            if (rr == 0 || parse_receipt(folder, repo, idx8, sha) != 0) {
+                continue;
+            }
         }
         int ok = -1;
         for (int k = 0; k < ncache; k++) {
@@ -1554,7 +1663,7 @@ static void ensure_exec_once(const char *app)
         return;
     }
     n += (uint32_t)snprintf((char *)buf + n, sizeof(buf) - n, "%sexec-once = %s\n", n > 0 && buf[n - 1] != '\n' ? "\n" : "", app);
-    purr_fs_write(fs(), "/etc/apps.conf", buf, n);
+    purr_fs_write_kept(fs(), "/etc/apps.conf", buf, n);                  /* the previous one stays as apps.conf.bak */
     char err[80];
     purr_catrt_reload(err, sizeof(err));
 }
@@ -1597,7 +1706,7 @@ static void remove_exec_once(const char *app)
         }
         p += len;
     }
-    purr_fs_write(fs(), "/etc/apps.conf", out, o);
+    purr_fs_write_kept(fs(), "/etc/apps.conf", out, o);
     char err[80];
     purr_catrt_reload(err, sizeof(err));
 }

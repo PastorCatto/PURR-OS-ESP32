@@ -588,9 +588,118 @@ static void test_recover_works_under_a_nested_root(void)
     CHECK(purr_fs_stat(&fs, tmp_dir, &is_dir, NULL) < 0);   /* gone */
 }
 
+static int append_to_buf(void *ctx, const void *data, uint32_t len);
+static int exists(const char *path)
+{
+    int is_dir = 0;
+    return purr_fs_stat(&fs, path, &is_dir, NULL) == 0;
+}
+
+static void test_a_receipt_appears_together_with_the_package(void)
+{
+    fresh_fs();
+    purr_appmgr_env_t env = env_for(PURR_CHIP_ESP32S3);
+    purr_cfg_t cfg;
+    purr_cfg_defaults(&cfg);
+    purr_app_registry_t reg = {0};
+    appspec_t v1 = {"notes", "1.0.0", PURR_CHIP_ESP32S3, 100, K_SYS};
+    uint32_t len1 = build_app(&v1, s_img);
+    const uint8_t rc1[] = "repo=a\nidx=1\nsha=2\n";
+    CHECK_EQ(purr_appmgr_add_ex(&s_test_fs, "/", &env, &cfg, &reg, s_img, len1, "receipt", rc1, sizeof(rc1) - 1), PURR_APP_OK);
+    CHECK(exists("/notes/package.cat"));
+    CHECK(exists("/notes/receipt"));                       /* in the folder the moment the app is */
+    CHECK(!exists("/notes.tmp"));                          /* nothing of the staging is left */
+
+    /* A cut after the staging and before the rename leaves only the staging folder, receipt and all: recover() clears it, and nothing half-installed shows. */
+    purr_fs_mkdir(&fs, "/half.tmp");
+    purr_fs_write(&fs, "/half.tmp/package.cat", "x", 1);
+    purr_fs_write(&fs, "/half.tmp/receipt", "y", 1);
+    purr_appmgr_recover(&s_test_fs, "/");
+    CHECK(!exists("/half.tmp"));                           /* the folder with its receipt is removed, not left behind */
+    CHECK(exists("/notes/receipt"));
+
+    /* An update: the new receipt comes with the new package, and the old folder, receipt too, is gone, not parked for ever. */
+    purr_appmgr_scan(&s_test_fs, "/", &env, s_scratch, sizeof(s_scratch), &reg);
+    appspec_t v2 = {"notes", "2.0.0", PURR_CHIP_ESP32S3, 120, K_SYS};
+    uint32_t len2 = build_app(&v2, s_img);
+    const uint8_t rc2[] = "repo=a\nidx=9\nsha=8\n";
+    CHECK_EQ(purr_appmgr_add_ex(&s_test_fs, "/", &env, &cfg, &reg, s_img, len2, "receipt", rc2, sizeof(rc2) - 1), PURR_APP_OK);
+    CHECK(!exists("/notes.old"));
+    char got[40] = {0};
+    CHECK_EQ(purr_fs_read(&fs, "/notes/receipt", append_to_buf, got), 0);
+    CHECK(strncmp(got, "repo=a\nidx=9\nsha=8\n", sizeof(rc2) - 1) == 0);
+
+    /* A bad extra name is refused before anything is written. */
+    CHECK_EQ(purr_appmgr_add_ex(&s_test_fs, "/", &env, &cfg, &reg, s_img, len2, "a/b", rc2, sizeof(rc2) - 1), PURR_APP_IO_ERROR);
+    CHECK_EQ(purr_appmgr_add_ex(&s_test_fs, "/", &env, &cfg, &reg, s_img, len2, "package.cat", rc2, sizeof(rc2) - 1), PURR_APP_IO_ERROR);
+    CHECK(!exists("/notes.tmp"));
+}
+
+static void test_remove_takes_the_receipt_and_the_folder(void)
+{
+    fresh_fs();
+    purr_appmgr_env_t env = env_for(PURR_CHIP_ESP32S3);
+    purr_cfg_t cfg;
+    purr_cfg_defaults(&cfg);
+    purr_app_registry_t reg = {0};
+    appspec_t v1 = {"gone", "1.0.0", PURR_CHIP_ESP32S3, 50, K_SYS};
+    uint32_t len = build_app(&v1, s_img);
+    CHECK_EQ(purr_appmgr_add_ex(&s_test_fs, "/", &env, &cfg, &reg, s_img, len, "receipt", (const uint8_t *)"r", 1), PURR_APP_OK);
+    CHECK_EQ(purr_appmgr_remove(&s_test_fs, "/", "gone"), 0);
+    CHECK(!exists("/gone"));                               /* the folder used to stay behind, holding the receipt, and every scan counted it as dropped */
+    purr_appmgr_scan(&s_test_fs, "/", &env, s_scratch, sizeof(s_scratch), &reg);
+    CHECK_EQ(reg.dropped, 0);
+    CHECK(purr_appmgr_remove(&s_test_fs, "/", "gone") != 0);       /* nothing there: still an error */
+}
+
+static void test_a_full_folder_with_leftovers_loses_nothing(void)
+{
+    fresh_fs();
+    purr_appmgr_env_t env = env_for(PURR_CHIP_ESP32S3);
+    purr_cfg_t cfg;
+    purr_cfg_defaults(&cfg);
+    purr_app_registry_t reg = {0};
+    /* The apps are after thirty leftovers in the listing order (names sort: "a.." before "z.."): the listing used to stop at 32 entries. */
+    for (int i = 0; i < 30; i++) {
+        char d[32];
+        snprintf(d, sizeof(d), "/a%02d.tmp", i);
+        purr_fs_mkdir(&fs, d);
+    }
+    for (int i = 0; i < 5; i++) {
+        char name[16];
+        snprintf(name, sizeof(name), "zapp%d", i);
+        appspec_t sp = {name, "1.0.0", PURR_CHIP_ESP32S3, 40, K_SYS};
+        uint32_t len = build_app(&sp, s_img);
+        CHECK_EQ(purr_appmgr_add(&s_test_fs, "/", &env, &cfg, &reg, s_img, len), PURR_APP_OK);
+        purr_appmgr_scan(&s_test_fs, "/", &env, s_scratch, sizeof(s_scratch), &reg);
+    }
+    CHECK_EQ(reg.count, 5);                                /* all five found past thirty leftovers */
+    purr_appmgr_recover(&s_test_fs, "/");
+    CHECK(!exists("/a00.tmp"));
+    CHECK(!exists("/a29.tmp"));                            /* and every leftover cleaned, not just the first ones */
+}
+
+static void test_a_listing_that_overflows_is_reported(void)
+{
+    fresh_fs();
+    purr_appmgr_env_t env = env_for(PURR_CHIP_ESP32S3);
+    for (int i = 0; i < 70; i++) {
+        char d[32];
+        snprintf(d, sizeof(d), "/junk%02d", i);
+        purr_fs_mkdir(&fs, d);
+    }
+    purr_app_registry_t reg;
+    purr_appmgr_scan(&s_test_fs, "/", &env, s_scratch, sizeof(s_scratch), &reg);
+    CHECK(reg.dropped >= 70 - 48);                         /* the entries that did not fit are counted as dropped, not lost silently */
+}
+
 int main(void)
 {
     setup_keys();
+    test_a_receipt_appears_together_with_the_package();
+    test_remove_takes_the_receipt_and_the_folder();
+    test_a_full_folder_with_leftovers_loses_nothing();
+    test_a_listing_that_overflows_is_reported();
     test_add_then_scan();
     test_add_rejects_bad_magic();
     test_add_rejects_wrong_type();

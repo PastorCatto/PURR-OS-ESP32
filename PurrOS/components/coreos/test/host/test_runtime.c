@@ -1160,8 +1160,20 @@ static void test_the_internal_reserve_is_a_config_option(void)
 }
 
 
+static void test_a_config_must_be_text(void)
+{
+    CHECK_EQ(purr_rt_conf_is_text("", 0), 1);                                        /* nothing listed is a config */
+    CHECK_EQ(purr_rt_conf_is_text("# note\nexec-once = notes\r\n\tgeneral:max_apps = 8\n", 46), 1);
+    const char with_nul[] = "exec-once = notes\0\0\0";
+    CHECK_EQ(purr_rt_conf_is_text(with_nul, sizeof(with_nul) - 1), 0);               /* what a cut write or a bad block leaves */
+    CHECK_EQ(purr_rt_conf_is_text("exec-once = n\x01otes\n", 19), 0);
+    CHECK_EQ(purr_rt_conf_is_text("a\x7f\n", 3), 0);
+    CHECK_EQ(purr_rt_conf_is_text("caf\xc3\xa9\n", 6), 1);                          /* UTF-8 is fine */
+}
+
 int main(void)
 {
+    test_a_config_must_be_text();
     test_open_and_lifecycle();
     test_an_unsigned_app_never_runs();
     test_failed_create_leaves_nothing();

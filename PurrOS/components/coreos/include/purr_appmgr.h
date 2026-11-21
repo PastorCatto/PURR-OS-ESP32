@@ -120,7 +120,15 @@ purr_app_result_t purr_appmgr_add(const purr_appmgr_fs_t *fs, const char *root, 
                                   const purr_cfg_t *cfg, const purr_app_registry_t *reg,
                                   const uint8_t *data, uint32_t len);
 
-/* Removes "<root>/<name>/" entirely. 0 on success, nonzero if there is no such app or it
+/* The same, with one more file that has to appear together with the package: `extra_name` (a bare file name, at most 15 letters; a Store install's "receipt") holding `extra`, written
+ * into the staging folder before the rename that makes the app visible, so a reset can never leave the package without it. A replaced version's extra file goes with the old
+ * folder. NULL / 0 for none (purr_appmgr_add is this with none). */
+purr_app_result_t purr_appmgr_add_ex(const purr_appmgr_fs_t *fs, const char *root, const purr_appmgr_env_t *env,
+                                     const purr_cfg_t *cfg, const purr_app_registry_t *reg,
+                                     const uint8_t *data, uint32_t len,
+                                     const char *extra_name, const uint8_t *extra, uint32_t extra_len);
+
+/* Removes "<root>/<name>/" entirely: the package, anything beside it (the receipt) and the folder. 0 on success, nonzero if there is no such app or it
  * could not be fully removed (a partial removal is safe: the next scan just drops it as
  * incomplete, the same as a cut install). */
 int purr_appmgr_remove(const purr_appmgr_fs_t *fs, const char *root, const char *name);

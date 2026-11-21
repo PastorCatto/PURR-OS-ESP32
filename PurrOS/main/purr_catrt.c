@@ -1161,6 +1161,31 @@ static const void *catcall_get(const char *name, uint32_t min_version)
 
 /* ------------------------------------------------------------------ the manager task */
 
+/* /etc/apps.conf and its two safety nets. The file is what decides which apps start, which keys do what and how much memory apps may use, so it is never lost to one bad moment:
+ *   - a copy of the last config that loaded clean is kept beside it (apps.conf.bak);
+ *   - a config that is there but does not read (an error, bigger than the buffer) or is not text (a cut write, a bad flash block) is not the default's to replace: the backup is
+ *     used and put back, or, with no backup, the damaged file is kept as apps.conf.damaged before the default is planted;
+ *   - only a file that is really missing (first boot) is planted from the default straight away.
+ * It used to plant the default over anything that failed to read, which turned one failed read into a config that was gone for good (the exec-once and rule lines with it). */
+#define CONF_BAK     CONF_PATH ".bak"
+#define CONF_DAMAGED CONF_PATH ".damaged"
+
+static int conf_exists(const char *path)
+{
+    return s_plat->file_exists != NULL ? s_plat->file_exists(path) : 0;
+}
+
+/* Reads `path` into text: its length, or -1 if it is missing, does not read, or is not text. *present says whether the file was there at all. */
+static int conf_read(const char *path, char *text, int *present)
+{
+    int n = s_plat->read_file ? s_plat->read_file(path, text, CONF_MAX) : -1;
+    *present = n >= 0 || conf_exists(path);
+    if (n >= 0 && !purr_rt_conf_is_text(text, (size_t)n)) {
+        return -1;
+    }
+    return n;
+}
+
 static int do_reload(req_t *r)
 {
     char *text = malloc(CONF_MAX);
@@ -1168,15 +1193,55 @@ static int do_reload(req_t *r)
         snprintf(r->out, sizeof(r->out), "error: out of memory\n");
         return -1;
     }
-    int n = s_plat->read_file ? s_plat->read_file(CONF_PATH, text, CONF_MAX) : -1;
-    if (n < 0) {
+    int present = 0;
+    int n = conf_read(CONF_PATH, text, &present);
+    if (n < 0 && present) {
+        /* There, and no good: try again once (a read can fail while something else holds the file system), then the backup. */
+        vTaskDelay(pdMS_TO_TICKS(100));
+        n = conf_read(CONF_PATH, text, &present);
+    }
+    if (n < 0 && present) {
+        int bp = 0;
+        int bn = conf_read(CONF_BAK, text, &bp);
+        if (bn >= 0) {
+            ESP_LOGW(TAG, "%s is damaged: restored from %s", CONF_PATH, CONF_BAK);
+            if (s_plat->write_file) {
+                s_plat->write_file(CONF_PATH, text, (size_t)bn);
+            }
+            n = bn;
+        } else {
+            ESP_LOGE(TAG, "%s is damaged and there is no good backup: keeping it as %s, using the default", CONF_PATH, CONF_DAMAGED);
+            char *raw = malloc(CONF_MAX);
+            if (raw != NULL) {
+                int rn = s_plat->read_file ? s_plat->read_file(CONF_PATH, raw, CONF_MAX) : -1;
+                if (rn > 0 && s_plat->write_file) {
+                    s_plat->write_file(CONF_DAMAGED, raw, (size_t)rn);
+                }
+                free(raw);
+            }
+            if (s_plat->write_file) {
+                s_plat->write_file(CONF_PATH, s_default_conf, sizeof(s_default_conf) - 1);
+            }
+            snprintf(text, CONF_MAX, "%s", s_default_conf);
+            n = (int)strlen(text);
+        }
+    } else if (n < 0) {
         /* First boot: plant the commented default so there is something to edit. */
         if (s_plat->write_file) {
             s_plat->write_file(CONF_PATH, s_default_conf, sizeof(s_default_conf) - 1);
         }
         snprintf(text, CONF_MAX, "%s", s_default_conf);
+        n = (int)strlen(text);
     }
     int bad = purr_rt_config_load(&s_rt, text, r->out, sizeof(r->out));
+    if (bad == 0 && n >= 0 && s_plat->write_file) {                  /* it loaded clean: this is the one to go back to */
+        char *old = malloc(CONF_MAX);
+        int bp = 0;
+        if (old == NULL || conf_read(CONF_BAK, old, &bp) != n || memcmp(old, text, (size_t)n) != 0) {
+            s_plat->write_file(CONF_BAK, text, (size_t)n);
+        }
+        free(old);
+    }
     free(text);
     if (bad > 0) {
         ESP_LOGW(TAG, "%s: %d bad line(s)\n%s", CONF_PATH, bad, r->out);

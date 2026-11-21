@@ -223,6 +223,27 @@ class Audit(unittest.TestCase):
         self.assertNotIn("purr_appmgr_scan(&s_appmgr_fs, root, &env, scratch", cmd)
         self.assertEqual(cmd.count("SCRATCH_GUARD(s_install_lock);"), cmd.count("uint8_t *scratch = app_scratch();"))      # every install holds the install lock
 
+    def test_a_receipt_is_staged_with_the_package_and_a_lost_one_is_found_again(self):
+        cmd = read("PurrOS", "main", "commands.c")
+        body = cmd[cmd.index("int purr_apps_install_vouched"):cmd.index("int purr_apps_remove")]
+        self.assertIn("purr_appmgr_add_ex(", body)                                       # one rename makes the package and its receipt appear
+        self.assertNotIn("/receipt\"", body)                                              # and nothing writes the receipt afterwards, into the live folder
+        store = read("PurrOS", "main", "purr_store.c")
+        self.assertIn("static int repair_receipt(", store)
+        i = store.index("void purr_store_mark_vouched")
+        self.assertIn("repair_receipt(apps_root, a->name)", store[i:])                   # an app with no receipt is checked against the saved indexes
+        self.assertIn("receipt_vouches(name, repos->names[r], idx8, sha)", store)        # by the index's own signature and the package's own hash, never by trust given
+
+    def test_apps_conf_is_never_replaced_by_the_default_when_it_merely_failed_to_read(self):
+        c = read("PurrOS", "main", "purr_catrt.c")
+        body = c[c.index("static int do_reload"):c.index("static void manager_task")]
+        self.assertIn("conf_read(CONF_BAK", body)                                        # the last good copy is tried first
+        self.assertIn("CONF_DAMAGED", body)                                              # and what cannot be read is kept, not overwritten
+        self.assertLess(body.index("if (n < 0 && present)"), body.index("First boot"))   # the default is planted over a file only when it is missing
+        self.assertIn("file_exists", read("PurrOS", "main", "purr_catrt.h"))
+        self.assertIn(".file_exists = catrt_file_exists", read("PurrOS", "main", "commands.c"))
+        self.assertIn("purr_fs_write_kept(fs(), \"/etc/apps.conf\"", read("PurrOS", "main", "purr_store.c"))     # an edit keeps the previous file
+
     def test_a_failed_vouch_check_is_not_remembered_as_no(self):
         store = read("PurrOS", "main", "purr_store.c")
         self.assertIn("int purr_store_vouch_retry_pending(void)", store)
