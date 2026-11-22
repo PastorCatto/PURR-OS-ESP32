@@ -303,7 +303,7 @@ The owner suspected corruption during reinstalls and asked to reinforce the down
 - **Read-back everywhere.** The loader's module write (`fetch_and_install_module`) now reads the slot back and compares the payload hash, like `install_kittenos` and `netinstall` already did. A driver file saved to `/boot/drivers` is read back and removed if it does not match.
 - Not changed: the picture pack is still one 5 MB file in one PSRAM block. If reinstalls still fail there, split it into parts of a few hundred KB, each with its own hash in the index and written straight to flash as it arrives (also makes a resume possible); that needs a purrstrap and manifest change.
 
-## Key rotation (owner, due 7 November 2026; planned 2026-11-05, nothing generated or changed yet)
+## Key rotation (owner, due 7 November 2026; planned 2026-11-05; keys 3, 4, 5 generated 2026-11-06, release 1.1 signed with them 2026-11-09; the old keys 1 and 2 are deprecated, not revoked; phase 6 is open; status in the sections below)
 
 **What is rotated:** the boot key (id 1) and the developer key (id 2), and with them everything that carries or is signed by them: the public keys compiled into the bootloader and the firmware (`PurrOS/components/coreos/keys/purr_default_keys.c`), the signatures on the boot package, KittenOS, the kernel, the loader, the modules, the drivers and the picture pack, the apps in the dev repository (and the new apps repository), the official repository's key and the endorsement of Devices as an official app. The developer key becomes **developer-mode only** and driver signing is restricted, as the owner decided earlier.
 
