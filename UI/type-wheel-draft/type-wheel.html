@@ -1,0 +1,626 @@
+<title>Type Wheel Draft</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Space+Mono:wght@400;700&display=swap">
+<style>
+/* Concept: the Type shell's list screen becomes the whole shell, with a click-wheel column added on the right for touch.
+   Page chrome follows the page theme; the device screen keeps the shell's own paper, ink and one accent (--paper, --ink, --acc). */
+:root{
+  --bg:#e8e4d9; --fg:#14120f; --muted:#5b564a; --line:#14120f; --card:#f4f1ea;
+  --acc:#ff5a1f; --on-acc:#14120f;
+  --paper:#f4f1ea; --ink:#14120f;
+  --display:'Space Grotesk',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'Space Mono',ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){--bg:#171510;--fg:#f1eee6;--muted:#aaa493;--line:#f1eee6;--card:#211e18;color-scheme:dark}
+}
+:root[data-theme="dark"]{--bg:#171510;--fg:#f1eee6;--muted:#aaa493;--line:#f1eee6;--card:#211e18;color-scheme:dark}
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--fg);font-family:var(--display);font-size:16px;line-height:1.5;-webkit-text-size-adjust:100%}
+.page{max-width:1080px;margin:0 auto;padding-block:28px 56px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.eyebrow{font:700 12px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(40px,8vw,72px);line-height:.95;letter-spacing:-.04em;margin:10px 0 14px;text-wrap:balance}
+.lead{max-width:62ch;margin:0 0 30px;font-size:18px;line-height:1.45}
+h2{font:700 12px var(--mono);letter-spacing:.14em;text-transform:uppercase;margin:0 0 10px;padding-bottom:8px;border-bottom:3px solid var(--line)}
+p,li{max-width:62ch}
+a{color:inherit}
+
+.work{display:grid;grid-template-columns:minmax(0,680px) minmax(250px,1fr);gap:32px;align-items:start}
+@media (max-width:880px){.work{grid-template-columns:minmax(0,1fr)}}
+
+/* ---------- controls beside the device ---------- */
+.ctl{display:flex;flex-direction:column;gap:20px;min-width:0}
+.grp{display:flex;flex-direction:column;gap:8px}
+.lab{font:700 12px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.row2{display:flex;flex-wrap:wrap;gap:8px}
+.btn{font:700 13px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--fg);background:var(--card);border:3px solid var(--line);padding:8px 12px;min-height:40px;cursor:pointer;text-align:left}
+.btn[aria-pressed="true"]{background:var(--acc);color:var(--on-acc)}
+.btn:active{transform:translate(2px,2px)}
+.btn:focus-visible,.sw:focus-visible{outline:3px solid var(--fg);outline-offset:3px}
+.sw{width:44px;height:40px;border:3px solid var(--line);cursor:pointer;padding:0}
+.sw[aria-pressed="true"]{box-shadow:4px 4px 0 var(--line);transform:translate(-2px,-2px)}
+.pad{display:grid;grid-template-columns:repeat(3,56px);grid-template-rows:repeat(3,48px);gap:6px}
+.pad .btn{display:flex;align-items:center;justify-content:center;padding:0;font-size:16px;text-align:center}
+.pad .gap{pointer-events:none}
+.pad2{display:flex;flex-wrap:wrap;gap:8px}
+.hint{font:400 13px/1.5 var(--mono);color:var(--muted);margin:0}
+
+/* ---------- the device ---------- */
+.frame{border:4px solid var(--line);box-shadow:8px 8px 0 var(--line);background:var(--paper);outline-offset:8px;cursor:default}
+.frame:focus-visible{outline:3px solid var(--acc)}
+.vp{position:relative;width:100%;aspect-ratio:4/3;overflow:hidden}
+.screen{position:absolute;left:0;top:0;width:640px;height:480px;transform-origin:0 0;transform:scale(var(--s,1));
+  background:var(--paper);color:var(--ink);font-family:var(--display);display:flex;flex-direction:column;overflow:hidden;
+  user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+.fi{fill:var(--ink)} .fp{fill:var(--paper)} .fa{fill:var(--acc)} .ac-ink{fill:var(--acc);stroke:var(--ink);stroke-width:2}
+.si{stroke:var(--ink)}
+
+.bar{height:44px;flex:none;padding:0 24px;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;border-bottom:4px solid var(--ink);font:700 18px var(--mono);letter-spacing:.1em;white-space:nowrap}
+.bar .l{display:flex;align-items:center;gap:12px}
+.bar .r{justify-self:end;display:flex;align-items:center;gap:12px}
+.batt{display:inline-block;width:44px;height:14px;border:3px solid var(--ink)}
+.batt i{display:block;width:87%;height:100%;background:var(--ink)}
+
+.mid{flex:1;display:flex;min-height:0}
+.main{flex:1;min-width:0;display:flex;min-height:0}
+.main.in-r{animation:inR .16s steps(4) both}
+.main.in-l{animation:inL .16s steps(4) both}
+@keyframes inR{from{transform:translateX(40px);opacity:.15}to{transform:none;opacity:1}}
+@keyframes inL{from{transform:translateX(-40px);opacity:.15}to{transform:none;opacity:1}}
+
+.rows-vp{flex:1;min-width:0;overflow:hidden;margin-top:6px}
+.rows{transition:transform .09s steps(3)}
+.row{height:62px;display:flex;align-items:center;gap:10px;padding:0 16px 0 24px;border-bottom:2px solid var(--ink);color:var(--ink);cursor:pointer}
+.row .nm{flex:1;min-width:0;font-weight:700;font-size:38px;letter-spacing:-.02em;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .val{font:700 20px var(--mono);letter-spacing:.06em;display:flex;align-items:center;gap:8px}
+.row .box{width:20px;height:20px;border:3px solid currentColor}
+.row .box.on{background:currentColor}
+.row svg{flex:none;width:14px;height:18px;fill:currentColor}
+.row .mk{width:16px;flex:none;color:var(--ink)}
+.row.sel{background:var(--ink);color:var(--paper)}
+.row.sel .chev,.row.sel .mk{color:var(--acc)}
+.sb{width:18px;flex:none;margin:6px 6px 8px 6px;border:2px solid var(--ink);position:relative}
+.sb i{position:absolute;left:0;right:0;background:var(--ink)}
+
+.aside{flex:none;display:flex}
+.panel{width:220px;background:var(--acc);color:var(--on-acc);border-left:4px solid var(--ink);padding:20px 20px 16px;display:flex;flex-direction:column;font-family:var(--mono)}
+.panel .pl{font-size:17px;font-weight:700;letter-spacing:.08em}
+.panel .pclock{font:700 124px/.82 var(--display);letter-spacing:-.05em;margin-top:14px}
+.panel .pbig{font:700 150px/.8 var(--display);letter-spacing:-.05em;margin-top:6px}
+.panel .plines{margin-top:auto;font-size:16px;font-weight:700;letter-spacing:.08em;line-height:1.45;min-height:44px}
+.panel .cover{--cv:164px;margin-top:6px}
+.wcol{width:268px;align-items:center;justify-content:center;border-left:4px solid var(--ink)}
+.wcol svg{display:block;touch-action:none;cursor:grab}
+.wt{font:700 14px var(--mono);letter-spacing:.08em;fill:var(--ink)}
+
+.foot{height:52px;flex:none;padding:0 28px;display:flex;align-items:center;gap:22px;background:var(--ink);color:var(--paper);font:700 16px var(--mono);letter-spacing:.06em;white-space:nowrap;overflow:hidden}
+.foot b{color:var(--acc);font-weight:700}
+.foot .push{margin-left:auto}
+
+.screen[data-layout="wheel"] .foot,.screen[data-layout="wheel"] .panel{display:none}
+.screen[data-layout="pad"] .wcol{display:none}
+.screen[data-layout="pad"][data-view="np"] .aside{display:none}
+.screen[data-layout="wheel"] .wcol{display:flex}
+.screen[data-layout="wheel"] .rows-vp{margin-top:0}
+.screen[data-layout="wheel"] .sb{margin-top:8px}
+.screen[data-layout="wheel"] .row .nm{font-size:34px}
+
+/* cover art: original, three variants */
+.cover{position:relative;overflow:hidden;background:var(--ink);border:6px solid var(--ink);width:var(--cv,232px);height:var(--cv,232px);box-shadow:8px 8px 0 var(--ink);margin:0 8px 8px 0;flex:none}
+.cover::before,.cover::after{content:"";position:absolute}
+.cv0::before{left:14%;top:8%;width:64%;height:64%;border-radius:50%;background:var(--paper)}
+.cv0::after{left:0;right:0;bottom:0;height:38%;background:repeating-linear-gradient(180deg,var(--ink) 0 11px,var(--acc) 11px 22px)}
+.cv1::before{inset:20%;background:var(--paper);box-shadow:0 0 0 7px var(--ink),0 0 0 14px var(--acc),0 0 0 21px var(--ink),0 0 0 28px var(--paper)}
+.cv1::after{left:42%;top:42%;width:16%;height:16%;background:var(--ink)}
+.cv2::before{inset:0;background:repeating-linear-gradient(135deg,var(--ink) 0 14px,var(--acc) 14px 28px)}
+.cv2::after{right:12%;top:12%;width:34%;height:34%;border-radius:50%;background:var(--paper);box-shadow:0 0 0 6px var(--ink)}
+
+/* now playing */
+.np{--cv:232px;flex:1;min-width:0;padding:24px 28px 14px;display:flex;flex-direction:column}
+.screen[data-layout="wheel"] .np{--cv:150px;padding:20px 24px 14px}
+.np-top{display:flex;gap:26px;min-height:0}
+.np-info{min-width:0;flex:1;padding-top:2px}
+.np-trk{font:700 18px var(--mono);letter-spacing:.08em}
+.np-title{font-weight:700;font-size:60px;line-height:.95;letter-spacing:-.04em;margin-top:8px;overflow-wrap:anywhere}
+.np-art{font:700 18px var(--mono);letter-spacing:.06em;margin-top:10px;line-height:1.4}
+.screen[data-layout="wheel"] .np-title{font-size:32px}
+.screen[data-layout="wheel"] .np-trk,.screen[data-layout="wheel"] .np-art{font-size:14px}
+.vrow{display:flex;align-items:center;gap:10px;margin-top:auto;padding-top:10px;font:700 16px var(--mono);letter-spacing:.08em}
+.pips{display:flex;gap:4px}
+.pip{width:18px;height:18px;border:3px solid var(--ink)}
+.pip.on{background:var(--ink)}
+.mode{margin-left:auto;font:700 14px var(--mono);letter-spacing:.08em;padding:1px 8px;border:3px solid var(--ink);white-space:nowrap}
+.mode.scrub{background:var(--acc);color:var(--on-acc)}
+.np-bar{padding-top:10px}
+.bar-t{position:relative;height:18px;border:3px solid var(--ink)}
+.bar-t i{display:block;height:100%;background:var(--acc);border-right:3px solid var(--ink)}
+.bar-t .head{display:none;position:absolute;top:-9px;width:10px;height:30px;background:var(--ink);margin-left:-5px}
+.scrubbing .head{display:block}
+.times{display:flex;justify-content:space-between;font:700 17px var(--mono);margin-top:6px}
+
+.toast{position:absolute;left:24px;bottom:66px;max-width:592px;background:var(--ink);color:var(--paper);font:700 17px var(--mono);letter-spacing:.06em;padding:10px 16px;border:3px solid var(--ink);box-shadow:5px 5px 0 var(--acc);opacity:0;pointer-events:none;transition:opacity .12s}
+.toast.on{opacity:1}
+.screen[data-layout="wheel"] .toast{bottom:22px;max-width:330px}
+
+/* ---------- notes ---------- */
+.notes{margin-top:52px;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:34px 40px}
+.notes section{min-width:0}
+.notes ul{margin:0;padding-left:1.1em;display:flex;flex-direction:column;gap:6px}
+.notes p{margin:0 0 8px}
+.wide{grid-column:1/-1}
+.tw{overflow-x:auto;border:3px solid var(--line)}
+table{border-collapse:collapse;width:100%;min-width:640px;font-size:15px}
+th,td{padding:9px 12px;text-align:left;vertical-align:top;border-bottom:2px solid var(--line)}
+tr:last-child td{border-bottom:0}
+th{font:700 12px var(--mono);letter-spacing:.1em;text-transform:uppercase;background:var(--card)}
+td:first-child{font-weight:700}
+.k{font:700 13px var(--mono);border:2px solid var(--line);padding:0 5px;white-space:nowrap}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+@media (prefers-reduced-motion:reduce){.main.in-r,.main.in-l{animation:none}.rows,.toast{transition:none}}
+</style>
+
+<div class="page">
+  <div class="eyebrow">Type shell × click wheel · draft 1 · real screen 320 × 240, shown at 2×</div>
+  <h1>Type Wheel</h1>
+  <p class="lead">The Type shell's list screen becomes the whole shell: one column, one highlight, drill down and back. A click wheel sits on the right where the board has a touch screen. The pad and trackball keep the full-width list. Everything below works: click the screen, then use the arrow keys, or drag the ring.</p>
+
+  <div class="work">
+    <div>
+      <div class="frame" id="frame" tabindex="0" role="group" aria-label="Device screen. Arrow keys scroll, Enter selects, Escape goes back, H goes home, Space plays or pauses.">
+        <div class="vp" id="vp">
+          <div class="screen" id="screen" data-layout="pad" data-view="list">
+            <div class="bar"><span class="l" id="bl"></span><span id="bc"></span><span class="r" id="br"></span></div>
+            <div class="mid">
+              <div class="main" id="main"></div>
+              <div class="aside" id="aside">
+                <div class="panel" id="panel"></div>
+                <div class="wcol" id="wcol">
+                  <svg id="wheel" viewBox="0 0 248 248" width="248" height="248" role="img" aria-label="Click wheel: drag the ring to scroll, tap the centre to select, tap the top, sides or bottom for menu, previous, next and play">
+                    <circle cx="124" cy="124" r="112" class="fi"/>
+                    <circle cx="118" cy="118" r="112" class="fp si" stroke-width="5"/>
+                    <g id="ticks"></g>
+                    <text class="wt" x="118" y="46" text-anchor="middle">MENU</text>
+                    <g transform="translate(36 118)"><rect x="-15" y="-12" width="4" height="24" class="fi"/><path d="M13 -12L-7 0L13 12z" class="fi"/></g>
+                    <g transform="translate(200 118)"><rect x="11" y="-12" width="4" height="24" class="fi"/><path d="M-13 -12L7 0L-13 12z" class="fi"/></g>
+                    <g transform="translate(118 194)"><path id="icoPlay" d="M-8 -12L12 0L-8 12z" class="fi"/><g id="icoPause"><rect x="-10" y="-12" width="7" height="24" class="fi"/><rect x="3" y="-12" width="7" height="24" class="fi"/></g></g>
+                    <circle cx="118" cy="118" r="42" class="fa si" stroke-width="5"/>
+                  </svg>
+                </div>
+              </div>
+            </div>
+            <div class="foot" id="foot"></div>
+            <div class="toast" id="toast" role="status"></div>
+          </div>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:20px">Click the screen to give it the keys: <span class="k">▲</span><span class="k">▼</span> scroll · <span class="k">Enter</span> A · <span class="k">Esc</span> B · <span class="k">H</span> Y · <span class="k">Space</span> FUNC · <span class="k">◀</span><span class="k">▶</span> track. The mouse wheel scrolls it too.</p>
+    </div>
+
+    <div class="ctl">
+      <div class="grp">
+        <div class="lab">Layout</div>
+        <div class="row2">
+          <button class="btn" type="button" data-layout-btn="pad" aria-pressed="true">A · Pad, keys, trackball</button>
+          <button class="btn" type="button" data-layout-btn="wheel" aria-pressed="false">B · Wheel on screen</button>
+        </div>
+      </div>
+      <div class="grp">
+        <div class="lab">Accent</div>
+        <div class="row2" id="sws"></div>
+      </div>
+      <div class="grp">
+        <div class="lab">Jump to</div>
+        <div class="row2">
+          <button class="btn" type="button" data-jump="home">Home</button>
+          <button class="btn" type="button" data-jump="music">Music</button>
+          <button class="btn" type="button" data-jump="songs">Songs</button>
+          <button class="btn" type="button" data-jump="np">Now playing</button>
+          <button class="btn" type="button" data-jump="settings">Settings</button>
+        </div>
+      </div>
+      <div class="grp" id="padbox">
+        <div class="lab">Pad (the Playtime buttons)</div>
+        <div class="pad" aria-label="D-pad">
+          <span class="gap"></span><button class="btn" type="button" data-k="up" aria-label="Up">▲</button><span class="gap"></span>
+          <button class="btn" type="button" data-k="left" aria-label="Left">◀</button><span class="gap"></span><button class="btn" type="button" data-k="right" aria-label="Right">▶</button>
+          <span class="gap"></span><button class="btn" type="button" data-k="down" aria-label="Down">▼</button><span class="gap"></span>
+        </div>
+        <div class="pad2">
+          <button class="btn" type="button" data-k="a">A</button>
+          <button class="btn" type="button" data-k="b">B</button>
+          <button class="btn" type="button" data-k="y">Y</button>
+          <button class="btn" type="button" data-k="func">FUNC tap</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <section>
+      <h2>Kept from the Type shell</h2>
+      <ul>
+        <li>Paper, ink and one accent that follows the Personalization setting; the text on the accent flips between ink and paper by contrast.</li>
+        <li>Space Grotesk for names, Space Mono for labels. Both are already bitmap fonts in <span class="k">tpfonts</span>.</li>
+        <li>The list is the board's app list: 62 px rows, a chevron on each, the chosen row inverted with an accent chevron, the ink hint bar with the keys in the accent.</li>
+        <li>The side panel stays, and keeps the stacked clock on Home. It now shows one fact about the highlighted row (cover, count, value) in the place of an iPod's cover preview.</li>
+      </ul>
+    </section>
+    <section>
+      <h2>Taken from the click wheel</h2>
+      <ul>
+        <li>One highlight, always a drill-down: a row pushes the next list in from the right, Back slides it out. The title bar names where you are.</li>
+        <li>Now Playing: the wheel sets the volume, the centre switches it to scrub (the bar grows a playhead), and the same three taps work from any list.</li>
+        <li>One row per 20° of travel, about 18 per turn. Rows clamp at the ends and do not wrap.</li>
+        <li>A "Shuffle Songs" row on Home, and the playing track marked with a triangle in the song lists.</li>
+      </ul>
+    </section>
+    <section>
+      <h2>No new buttons on the pad</h2>
+      <p>The Type controls board already has the wheel's whole vocabulary: ◀ ▶ for previous and next, FUNC tap for play and pause, A to select, B for back, Y for home. The only change is that ▲ ▼ become the wheel's scroll, and in Now Playing set the volume. X keeps its job as the options menu for the screen.</p>
+      <p>Home loses its three shortcut tiles. FUNC held plus A, B, X or Y can still jump to the four pinned items. Whether those live as rows or stay tiles is a question below.</p>
+    </section>
+
+    <section class="wide">
+      <h2>Inputs (proposed)</h2>
+      <div class="tw">
+        <table>
+          <thead><tr><th>Input</th><th>Scroll</th><th>Select</th><th>Back</th><th>Home</th><th>Previous / next</th><th>Play / pause</th></tr></thead>
+          <tbody>
+            <tr><td>Playtime pad (existing map)</td><td>▲ ▼</td><td>A</td><td>B</td><td>Y</td><td>◀ ▶</td><td>FUNC tap</td></tr>
+            <tr><td>T-Deck Plus</td><td>Roll the trackball</td><td>Click it</td><td>Esc (as in Froyo)</td><td>Hold the click 0.6 s (as in Froyo)</td><td>Roll left or right</td><td>Space</td></tr>
+            <tr><td>Touch, layout B</td><td>Drag round the ring, or drag the list</td><td>Tap the centre, or tap a row</td><td>Tap MENU</td><td>Hold MENU</td><td>Tap ◀◀ or ▶▶</td><td>Tap the bottom</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>How it would be built</h2>
+      <ul>
+        <li>The rows, scroll bar and panel are what <span class="k">purr_tp_home.c</span> already draws for the app list. The draft makes that list the shell's navigation and adds one column.</li>
+        <li>The wheel is drawn from primitives: a ring, 36 ticks, a disc and four glyphs. No images, so nothing extra in PSRAM, and one small invalidated square per tick.</li>
+        <li>Touch angle from <span class="k">atan2</span> of the touch point to the wheel's centre, one step per 20° of change. The step size is the thing to tune on the device.</li>
+        <li>Layout B is drawn only when touch is the active input. Pad and trackball keep layout A.</li>
+        <li>On the 2.8 inch T-Deck panel the 232 px wheel here is 116 px across, about 21 mm, so the ring is a band of roughly 6 mm. A thumb fits. It is tighter than a real wheel, which is the first thing to check on hardware.</li>
+        <li>Nothing here is written in C or built into an image.</li>
+      </ul>
+    </section>
+    <section>
+      <h2>Questions for you</h2>
+      <ul>
+        <li>Should the wheel be a setting (Settings, Wheel, as in the mockup), or appear by itself when the last input was a touch?</li>
+        <li>Home as a list with the clock in the side panel, or keep the big clock and tiles and use the wheel list from Apps downward?</li>
+        <li>A wider wheel (136 px at 1×) leaves a 184 px list and about 5 characters fewer per row. Is the bigger target worth that?</li>
+        <li>Should B held go home, like Menu held on a click wheel, instead of Y alone?</li>
+      </ul>
+    </section>
+  </div>
+</div>
+<div class="sr" id="live" aria-live="polite"></div>
+
+<script>
+(function(){
+'use strict';
+var $=function(s,r){return (r||document).querySelector(s)};
+var $$=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
+var clamp=function(v,a,b){return Math.max(a,Math.min(b,v))};
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function fmt(s){s=Math.max(0,Math.floor(s));return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2)}
+function p2(n){return ('0'+n).slice(-2)}
+
+var ACC=['#ff5a1f','#2b59ff','#1f9d55','#e0268f'],ACCN=['ORANGE','BLUE','GREEN','PINK'];
+function lum(c){var a=[c>>16&255,c>>8&255,c&255].map(function(v){v/=255;return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4)});return 0.2126*a[0]+0.7152*a[1]+0.0722*a[2]}
+function onAcc(hex){var L=lum(parseInt(hex.slice(1),16));var ink=(L+0.05)/(lum(0x14120f)+0.05),pap=(lum(0xf4f1ea)+0.05)/(L+0.05);return ink>=pap?'#14120f':'#f4f1ea'}
+
+/* title, artist, album, seconds */
+var SONGS=[
+  ['Low Tide','Salt Lamp','Harbour Tapes',201],
+  ['Paper Moon Rally','Fold Club','Origami',233],
+  ['Night Shift','The Bench Notes','Bench Sessions',238],
+  ['Copper Wire','The Bench Notes','Bench Sessions',187],
+  ['Soft Reset','Salt Lamp','Harbour Tapes',276],
+  ['Bench Hum','The Bench Notes','Bench Sessions',144],
+  ['Quiet Carrier','Fold Club','Origami',209]
+];
+var ALB={'Bench Sessions':0,'Harbour Tapes':1,'Origami':2};
+var APPS=['Clock','Files','Games','Images','Music','Notes'];
+var S={stack:[{id:'home',arg:null,sel:0,top:0}],layout:'pad',acc:0,wifi:true,click:true,light:1,
+  trk:2,pos:102,playing:true,loaded:true,vol:4,scrub:false};
+
+var scr=$('#screen'),main=$('#main'),panel=$('#panel'),vp=$('#vp'),frame=$('#frame'),toastEl=$('#toast');
+var TRI='<svg viewBox="0 0 14 18" aria-hidden="true"><path d="M1 1l12 8-12 8z"/></svg>';
+var BATT='<span class="batt" role="img" aria-label="Battery 87 percent"><i></i></span>';
+var PLAYI='<svg width="16" height="18" viewBox="0 0 16 18" role="img" aria-label="Playing"><path class="ac-ink" d="M2 2l12 7-12 7z"/></svg>';
+var PAUSEI='<svg width="16" height="18" viewBox="0 0 16 18" role="img" aria-label="Paused"><rect x="2" y="2" width="4" height="14" class="fi"/><rect x="10" y="2" width="4" height="14" class="fi"/></svg>';
+
+function cur(){return S.stack[S.stack.length-1]}
+function isNP(){return cur().id==='np'}
+function VIS(){return S.layout==='wheel'?7:6}
+function N(id,arg){return {id:id,arg:arg||null,sel:0,top:0}}
+function cover(v,extra){return '<div class="cover cv'+v+'" aria-hidden="true"'+(extra||'')+'></div>'}
+
+/* ---------- the lists ---------- */
+function songsFor(arg){var o=[];SONGS.forEach(function(s,i){if(!arg||(arg.artist&&s[1]===arg.artist)||(arg.album&&s[2]===arg.album))o.push(i)});return o}
+function uniq(k){var o=[];SONGS.forEach(function(s){if(o.indexOf(s[k])<0)o.push(s[k])});return o.sort()}
+function playIdx(i){S.trk=i;S.pos=0;S.playing=true;S.loaded=true;push('np')}
+function shuffle(){var i;do{i=Math.floor(Math.random()*SONGS.length)}while(i===S.trk&&SONGS.length>1);playIdx(i)}
+function cycle(a,v){return (a.indexOf(v)+1)%a.length}
+
+function itemsOf(c){
+  var id=c.id,t=SONGS[S.trk],o=[];
+  if(id==='home'){return [
+    {l:'Music',go:['music'],pv:{clock:1,lines:['7 SONGS','3 ARTISTS']}},
+    {l:'Apps',go:['apps'],pv:{clock:1,lines:['6 APPS']}},
+    {l:'Settings',go:['settings'],pv:{clock:1,lines:['WI-FI '+(S.wifi?'ON':'OFF'),'WHEEL '+(S.layout==='wheel'?'ON':'OFF')]}},
+    {l:'Now Playing',go:['np'],pv:{clock:1,lines:[t[0].toUpperCase(),t[1].toUpperCase()]}},
+    {l:'Shuffle Songs',act:shuffle,pv:{clock:1,lines:['7 SONGS','RANDOM ORDER']}}]}
+  if(id==='music'){return [
+    {l:'Now Playing',go:['np'],pv:{cover:ALB[t[2]],lines:[t[0].toUpperCase(),t[1].toUpperCase()]}},
+    {l:'Artists',go:['artists'],pv:{big:'3',lines:['ARTISTS']}},
+    {l:'Albums',go:['albums'],pv:{big:'3',lines:['ALBUMS']}},
+    {l:'Songs',go:['songs'],pv:{big:'7',lines:['SONGS']}}]}
+  if(id==='artists'){uniq(1).forEach(function(a){var ix=songsFor({artist:a});o.push({l:a,go:['songs',{artist:a}],pv:{cover:ALB[SONGS[ix[0]][2]],lines:[ix.length+' SONGS']}})});return o}
+  if(id==='albums'){uniq(2).forEach(function(a){var ix=songsFor({album:a});o.push({l:a,go:['songs',{album:a}],pv:{cover:ALB[a],lines:[SONGS[ix[0]][1].toUpperCase(),ix.length+' SONGS']}})});return o}
+  if(id==='songs'){songsFor(c.arg).forEach(function(i){var s=SONGS[i];o.push({l:s[0],act:function(){playIdx(i)},cur:i===S.trk&&S.loaded,pv:{cover:ALB[s[2]],lines:[s[1].toUpperCase(),fmt(s[3])]}})});return o}
+  if(id==='apps'){return APPS.map(function(n){return n==='Music'?{l:n,go:['music'],pv:{big:'M',lines:['OPENS WITH A']}}:{l:n,act:function(){toast('OPENS '+n.toUpperCase()+' · NOT IN THIS DRAFT')},pv:{big:n[0],lines:['OPENS WITH A']}}})}
+  if(id==='settings'){return [
+    {l:'Wi-Fi',v:S.wifi?'ON':'OFF',sw:S.wifi,act:function(){S.wifi=!S.wifi;refresh()},pv:{big:S.wifi?'ON':'OFF',lines:['WI-FI']}},
+    {l:'Click sound',v:S.click?'ON':'OFF',sw:S.click,act:function(){S.click=!S.click;refresh();tick()},pv:{big:S.click?'ON':'OFF',lines:['A TICK PER ROW']}},
+    {l:'Backlight',v:['LOW','MID','HIGH'][S.light],act:function(){S.light=cycle([0,1,2],S.light);refresh()},pv:{big:['LOW','MID','HIGH'][S.light],lines:['BACKLIGHT']}},
+    {l:'Wheel',v:S.layout==='wheel'?'ON':'OFF',sw:S.layout==='wheel',act:function(){setLayout(S.layout==='wheel'?'pad':'wheel')},pv:{big:S.layout==='wheel'?'ON':'OFF',lines:['WHEEL ON SCREEN']}},
+    {l:'Accent',v:ACCN[S.acc],act:function(){setAcc(cycle(ACC,ACC[S.acc]));refresh()},pv:{big:ACCN[S.acc][0],lines:[ACCN[S.acc],'PERSONALIZATION']}}]}
+  return o;
+}
+function ttl(c){
+  switch(c.id){
+    case 'home':return 'PURR OS';case 'music':return 'MUSIC';case 'artists':return 'ARTISTS';case 'albums':return 'ALBUMS';
+    case 'songs':return c.arg?(c.arg.artist||c.arg.album).toUpperCase():'SONGS';
+    case 'apps':return 'APPS';case 'settings':return 'SETTINGS';default:return 'NOW PLAYING';
+  }
+}
+
+/* ---------- painting ---------- */
+function paintBar(){
+  var c=cur();
+  $('#bl').innerHTML=c.id==='home'?'SUN 22 NOV':(S.loaded?(S.playing?PLAYI:PAUSEI):'')+'20:59';
+  $('#bc').textContent=ttl(c);
+  $('#br').innerHTML=(c.id==='home'?(S.wifi?'WI-FI':'NO WI-FI'):'')+BATT;
+  $('#icoPlay').style.display=S.playing?'none':'';
+  $('#icoPause').style.display=S.playing?'':'none';
+}
+function paintFoot(){
+  var np=isNP(),a=np?[['▲▼',S.scrub?'SCRUB':'VOLUME'],['A',S.scrub?'VOLUME':'SCRUB'],['◀ ▶','TRACK'],['B','BACK']]:[['▲▼','SCROLL'],['A','OPEN'],['B','BACK'],['◀ ▶','TRACK']];
+  $('#foot').innerHTML=a.map(function(x){return '<span><b>'+x[0]+'</b> '+x[1]+'</span>'}).join('')+'<span class="push"><b>FUNC</b> '+(S.playing?'PAUSE':'PLAY')+'</span>';
+}
+function panelHTML(it){
+  var pv=(it&&it.pv)||{},h='';
+  if(pv.clock)h+='<div class="pl">SUN 22 NOV</div><div class="pclock">20<br>59</div>';
+  else if(pv.cover!=null)h+=cover(pv.cover);
+  else if(pv.big)h+='<div class="pbig">'+esc(pv.big)+'</div>';
+  h+='<div class="plines">'+(pv.lines||[]).map(function(l){return '<div>'+esc(l)+'</div>'}).join('')+'</div>';
+  return h;
+}
+function buildList(c){
+  var its=itemsOf(c),h='<div class="rows-vp"><div class="rows" id="rows">';
+  its.forEach(function(it,i){
+    h+='<div class="row" data-i="'+i+'">'+(c.id==='songs'?'<span class="mk">'+(it.cur?TRI:'')+'</span>':'')+'<span class="nm">'+esc(it.l)+'</span>';
+    if(it.v!=null)h+='<span class="val">'+esc(it.v)+(it.sw!=null?'<span class="box'+(it.sw?' on':'')+'"></span>':'')+'</span>';
+    else h+='<span class="chev">'+TRI+'</span>';
+    h+='</div>';
+  });
+  main.innerHTML=h+'</div></div><div class="sb"><i id="sbt"></i></div>';
+  sync();
+}
+function sync(){
+  var c=cur();if(c.id==='np')return;
+  var its=itemsOf(c),vis=VIS(),n=its.length;
+  if(c.sel>=n)c.sel=Math.max(0,n-1);
+  if(c.sel<c.top)c.top=c.sel;
+  if(c.sel>c.top+vis-1)c.top=c.sel-vis+1;
+  c.top=clamp(c.top,0,Math.max(0,n-vis));
+  $$('.row',main).forEach(function(r,i){r.classList.toggle('sel',i===c.sel)});
+  var rows=$('#rows');if(rows)rows.style.transform='translateY('+(-c.top*62)+'px)';
+  var t=$('#sbt');
+  if(t){var f=Math.min(1,vis/n);t.style.height=(f*100)+'%';t.style.top=(n<=vis?0:(c.top/n*100))+'%'}
+  panel.innerHTML=panelHTML(its[c.sel]);
+  say(ttl(c)+', '+(its[c.sel]?its[c.sel].l:''));
+}
+function npHTML(){
+  var t=SONGS[S.trk],pips='';
+  for(var i=0;i<6;i++)pips+='<span class="pip"></span>';
+  return '<div class="np"><div class="np-top">'+cover(ALB[t[2]])+
+    '<div class="np-info"><div class="np-trk">TRACK '+p2(S.trk+1)+' / '+p2(SONGS.length)+'</div><div class="np-title">'+esc(t[0])+'</div><div class="np-art">'+esc(t[1].toUpperCase())+'<br>'+esc(t[2].toUpperCase())+'</div></div></div>'+
+    '<div class="vrow"><span>VOL</span><span class="pips">'+pips+'</span><span class="mode" id="mode"></span></div>'+
+    '<div class="np-bar" id="npbar"><div class="bar-t"><i id="npfill"></i><span class="head" id="nphead"></span></div><div class="times"><span id="t1"></span><span id="t2"></span></div></div></div>';
+}
+function updateNP(){
+  if(!isNP())return;
+  var f=$('#npfill');if(!f)return;
+  var d=SONGS[S.trk][3],pct=S.pos/d*100;
+  f.style.width=pct+'%';$('#nphead').style.left=pct+'%';
+  $('#t1').textContent=fmt(S.pos);$('#t2').textContent='-'+fmt(d-S.pos);
+  $$('.pip').forEach(function(p,i){p.classList.toggle('on',i<S.vol)});
+  var m=$('#mode');m.textContent=(S.layout==='wheel'?'WHEEL: ':'▲▼: ')+(S.scrub?'SCRUB':'VOLUME');m.classList.toggle('scrub',S.scrub);
+  $('#npbar').classList.toggle('scrubbing',S.scrub);
+}
+function anim(dir){
+  main.classList.remove('in-r','in-l');
+  if(!dir)return;
+  void main.offsetWidth;
+  main.classList.add(dir==='in'?'in-r':'in-l');
+}
+function showView(dir){
+  var c=cur();
+  scr.dataset.view=c.id==='np'?'np':'list';
+  paintBar();paintFoot();
+  if(c.id==='np'){main.innerHTML=npHTML();updateNP();say('Now playing, '+SONGS[S.trk][0])}
+  else buildList(c);
+  anim(dir);
+}
+function refresh(){
+  paintBar();paintFoot();
+  if(isNP()){main.innerHTML=npHTML();updateNP()}else buildList(cur());
+}
+function say(t){var l=$('#live');if(l)l.textContent=t}
+var tt=0;
+function toast(t){toastEl.textContent=t;toastEl.classList.add('on');clearTimeout(tt);tt=setTimeout(function(){toastEl.classList.remove('on')},1700)}
+
+/* ---------- actions ---------- */
+function push(id,arg){S.scrub=false;S.stack.push(N(id,arg));showView('in')}
+function back(){if(S.stack.length>1){S.scrub=false;S.stack.pop();showView('out')}}
+function home(){if(S.stack.length>1){S.scrub=false;S.stack=[S.stack[0]];showView('out')}}
+function press(){
+  var c=cur();
+  if(c.id==='np'){S.scrub=!S.scrub;updateNP();paintFoot();tick();return}
+  var it=itemsOf(c)[c.sel];if(!it)return;
+  tick();
+  if(it.go)push(it.go[0],it.go[1]);else if(it.act)it.act();
+}
+function step(d){
+  var c=cur();
+  if(c.id==='np'){
+    if(S.scrub){S.pos=clamp(S.pos+d*5,0,SONGS[S.trk][3]-1)}else{S.vol=clamp(S.vol+d,0,6)}
+    updateNP();tick();return;
+  }
+  var n=itemsOf(c).length,ns=clamp(c.sel+d,0,n-1);
+  if(ns===c.sel)return;
+  c.sel=ns;sync();tick();
+}
+function trackStep(d){S.trk=(S.trk+d+SONGS.length)%SONGS.length;S.pos=0;S.loaded=true;refresh();tick()}
+function playPause(){if(!S.loaded)return;S.playing=!S.playing;paintBar();paintFoot();if(!isNP())sync();tick()}
+function setLayout(l){
+  S.layout=l;scr.dataset.layout=l;
+  $$('[data-layout-btn]').forEach(function(b){b.setAttribute('aria-pressed',b.getAttribute('data-layout-btn')===l?'true':'false')});
+  $('#padbox').hidden=(l!=='pad');
+  showView(null);
+}
+function setAcc(i){
+  S.acc=i;var h=ACC[i],r=document.documentElement.style;
+  r.setProperty('--acc',h);r.setProperty('--on-acc',onAcc(h));
+  $$('.sw').forEach(function(b,j){b.setAttribute('aria-pressed',j===i?'true':'false')});
+}
+function jump(k){
+  var st=[S.stack[0]];
+  if(k==='music')st.push(N('music'));
+  if(k==='songs')st.push(N('music'),N('songs'));
+  if(k==='np')st.push(N('np'));
+  if(k==='settings')st.push(N('settings'));
+  S.stack=st;S.scrub=false;showView(null);
+}
+function key(k){
+  ({up:function(){step(-1)},down:function(){step(1)},left:function(){trackStep(-1)},right:function(){trackStep(1)},
+    a:press,b:back,y:home,func:playPause}[k]||function(){})();
+}
+
+/* ---------- sound: one short tick per step, after the first touch ---------- */
+var AC=null;
+function tick(){
+  if(!S.click)return;
+  try{
+    AC=AC||new (window.AudioContext||window.webkitAudioContext)();
+    if(AC.state==='suspended')AC.resume();
+    var o=AC.createOscillator(),g=AC.createGain(),t=AC.currentTime;
+    o.type='square';o.frequency.value=1900;
+    g.gain.setValueAtTime(0.03,t);g.gain.exponentialRampToValueAtTime(0.0001,t+0.018);
+    o.connect(g);g.connect(AC.destination);o.start(t);o.stop(t+0.02);
+  }catch(e){}
+}
+
+/* ---------- the wheel ---------- */
+var STEP=20,CX=118,tickAng=0,down=null;
+(function(){
+  var g=$('#ticks'),NS='http://www.w3.org/2000/svg';
+  for(var i=0;i<36;i++){
+    var a=i*10*Math.PI/180,big=i%9===0,r1=big?95:98,r2=106;
+    var l=document.createElementNS(NS,'line');
+    l.setAttribute('x1',CX+r1*Math.cos(a));l.setAttribute('y1',CX+r1*Math.sin(a));
+    l.setAttribute('x2',CX+r2*Math.cos(a));l.setAttribute('y2',CX+r2*Math.sin(a));
+    l.setAttribute('stroke-width',big?5:3);
+    l.setAttribute('class',big?'':'si');
+    if(big)l.setAttribute('style','stroke:var(--acc)');
+    g.appendChild(l);
+  }
+})();
+var wheel=$('#wheel');
+function wpt(e){var r=wheel.getBoundingClientRect(),k=248/r.width,x=(e.clientX-r.left)*k-CX,y=(e.clientY-r.top)*k-CX;return {x:x,y:y,r:Math.sqrt(x*x+y*y),a:Math.atan2(y,x)*180/Math.PI}}
+function norm(d){while(d>180)d-=360;while(d<-180)d+=360;return d}
+wheel.addEventListener('pointerdown',function(e){
+  var p=wpt(e);if(p.r>112)return;
+  e.preventDefault();frame.focus({preventScroll:true});
+  try{wheel.setPointerCapture(e.pointerId)}catch(x){}
+  var zone=p.r<44?'center':(Math.abs(p.y)>Math.abs(p.x)?(p.y<0?'menu':'play'):(p.x<0?'prev':'next'));
+  down={last:p.a,acc:0,moved:0,zone:zone,t:Date.now(),fired:false,id:e.pointerId};
+  if(zone==='menu')down.hold=setTimeout(function(){if(down&&down.moved<10){down.fired=true;home()}},650);
+});
+wheel.addEventListener('pointermove',function(e){
+  if(!down||down.zone==='center')return;
+  var p=wpt(e),d=norm(p.a-down.last);down.last=p.a;
+  down.acc+=d;down.moved+=Math.abs(d);tickAng+=d;
+  $('#ticks').setAttribute('transform','rotate('+tickAng.toFixed(1)+' '+CX+' '+CX+')');
+  while(down.acc>=STEP){down.acc-=STEP;step(1)}
+  while(down.acc<=-STEP){down.acc+=STEP;step(-1)}
+});
+function wend(){if(down&&down.hold)clearTimeout(down.hold)}
+wheel.addEventListener('pointerup',function(){
+  if(!down)return;
+  wend();
+  var d=down;down=null;
+  if(d.fired)return;
+  if(d.zone==='center'){press();return}
+  if(d.moved<10){({menu:back,play:playPause,prev:function(){trackStep(-1)},next:function(){trackStep(1)}})[d.zone]()}
+});
+wheel.addEventListener('pointercancel',function(){wend();down=null});
+
+/* ---------- other input ---------- */
+main.addEventListener('click',function(e){
+  var r=e.target.closest?e.target.closest('.row'):null;if(!r)return;
+  var c=cur();c.sel=+r.getAttribute('data-i');sync();press();
+});
+frame.addEventListener('pointerdown',function(){if(document.activeElement!==frame)frame.focus({preventScroll:true})});
+frame.addEventListener('keydown',function(e){
+  if(e.metaKey||e.ctrlKey||e.altKey)return;
+  var m={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Enter:'a',Escape:'b',Backspace:'b',h:'y',H:'y',' ':'func'}[e.key];
+  if(!m)return;
+  e.preventDefault();key(m);
+});
+var wacc=0;
+frame.addEventListener('wheel',function(e){
+  if(document.activeElement!==frame)return;
+  e.preventDefault();wacc+=e.deltaY;
+  while(wacc>=40){wacc-=40;step(1)}
+  while(wacc<=-40){wacc+=40;step(-1)}
+},{passive:false});
+$$('[data-k]').forEach(function(b){b.addEventListener('click',function(){key(b.getAttribute('data-k'))})});
+$$('[data-jump]').forEach(function(b){b.addEventListener('click',function(){jump(b.getAttribute('data-jump'))})});
+$$('[data-layout-btn]').forEach(function(b){b.addEventListener('click',function(){setLayout(b.getAttribute('data-layout-btn'))})});
+(function(){
+  var h=$('#sws');
+  ACC.forEach(function(c,i){
+    var b=document.createElement('button');
+    b.type='button';b.className='sw';b.style.background=c;b.setAttribute('aria-label','Accent '+ACCN[i].toLowerCase());
+    b.setAttribute('aria-pressed',i===0?'true':'false');
+    b.addEventListener('click',function(){setAcc(i);refresh()});
+    h.appendChild(b);
+  });
+})();
+
+/* playback clock */
+setInterval(function(){
+  if(!S.playing||!S.loaded)return;
+  S.pos+=1;
+  if(S.pos>=SONGS[S.trk][3]){trackStep(1)}else updateNP();
+},1000);
+
+/* fit the 640 x 480 screen to its box */
+function fit(){scr.style.setProperty('--s',vp.clientWidth/640)}
+fit();
+if(window.ResizeObserver)new ResizeObserver(fit).observe(vp);else window.addEventListener('resize',fit);
+
+setAcc(0);
+setLayout('pad');
+})();
+</script>
