@@ -1,5 +1,5 @@
 # Name,   Type, SubType, Offset,  Size
-# Must match PurrOS/partitions/waveshare154.csv exactly -- the bootloader and PurrOS/kernel both have to agree on where every partition lives. Flash map v2 shape
+# Must match PurrOS/partitions/waveshare154.csv exactly -- the bootloader and PurrOS/kernel both have to agree on where every partition lives. Flash map v3 shape
 # for the 8 MB e-paper board: see the comment in that file. bootloader/partitions.csv (the default) is the 16 MB T-Deck layout, which does not fit this board.
 nvs,      data, nvs,     0xB000,   0x4000
 purrcfg,  data, 0x40,    0xF000,   0x2000
@@ -9,4 +9,5 @@ kittenos, app,  factory, 0x20000,  0x160000
 kernel,   app,  ota_0,   0x180000, 0x180000
 loader,   app,  test,    0x300000, 0x160000
 netrec,   data, 0x41,    0x460000, 0x1000
-root,     data, 0x83,    0x461000, 0x39F000
+root,     data, 0x83,    0x461000, 0x38B000
+drivers,  data, 0x42,    0x7EC000, 0x14000

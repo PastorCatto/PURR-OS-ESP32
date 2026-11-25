@@ -22,7 +22,7 @@ import hashlib
 import os
 import struct
 
-from . import boards, minitoml, runner, workspace
+from . import boards, drivers, minitoml, runner, workspace
 
 TABLE_AT = 0xA000
 BOOTLOADER_LIMIT = 0xA000                       # the bootloader gets 40 KB, then comes the table
@@ -178,12 +178,13 @@ def plan(board, folder):
         rows.append(row)
     if DRIVERS_PART in by:                       # a board with the partition cannot start without what is in it
         path = find_drivers(folder, board) if folder and os.path.isdir(folder) else None
+        carries_none = board in drivers.DEFAULTS and not drivers.DEFAULTS[board]   # a board the SDK lists as having no driver: its partition stays blank slots
         row = {"part": DRIVERS_PART, "path": path, "found": bool(path), "offset": by[DRIVERS_PART]["offset"], "room": by[DRIVERS_PART]["size"], "size": None, "version": None, "key_id": None}
         if path:
             row["size"] = os.path.getsize(path)
             if row["size"] > row["room"]:
                 problems.append("The drivers image is %d bytes and its partition holds %d: %d too many." % (row["size"], row["room"], row["size"] - row["room"]))
-        else:
+        elif not carries_none:
             problems.append("I cannot find the drivers image for %s (drivers-%s.bin) in %s: the display, keyboard and touch drivers are in it. The source build writes it when you give it a developer key." % (board, board, folder or "(no folder)"))
         rows.append(row)
     flash = max(p["offset"] + p["size"] for p in layout)
@@ -228,7 +229,7 @@ def build(board, folder, out, trust_block=None, on_line=print, work=None):
         notes.append("No trust block: the device uses its defaults (it boots what is signed by a key it knows, and warns about the rest).")
     with open(parts["bootpkg"], "rb") as fh:
         put("bootpkg", layout["bootpkg"]["offset"], fh.read(), layout["bootpkg"]["size"])
-    if DRIVERS_PART in layout:
+    if DRIVERS_PART in layout and parts.get(DRIVERS_PART):      # a board with no driver of its own leaves the partition blank (0xFF)
         with open(parts[DRIVERS_PART], "rb") as fh:
             put(DRIVERS_PART, layout[DRIVERS_PART]["offset"], fh.read(), layout[DRIVERS_PART]["size"])
     for slot in SLOTS:

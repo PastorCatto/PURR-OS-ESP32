@@ -105,7 +105,7 @@ a board cannot start without (its display, keyboard, touch panel, battery gauge,
 **`drivers`**, so the kernel is not rebuilt to add or replace one.
 
 - **Where:** the last 0x14000 bytes of the 16 MB flash (0xFEC000), `data` subtype 0x42. `root` keeps its start (0x5C1000) and loses the same 0x14000 bytes of its tail (0xA3F000 to 0xA2B000).
-  A layout change: a device needs a full flash, not an update, to get it. The 8 MB board (waveshare154) has no LCD and no drivers to carry, and keeps its table.
+  A layout change: a device needs a full flash, not an update, to get it. The 8 MB board (waveshare154) took the same rule on 2026-11-25 (1.2): its `drivers` partition is the last 0x14000 bytes of its flash (0x7EC000) and its `root` is 0x38B000 bytes (was 0x39F000). It has no driver of its own to carry yet, so its drivers image is blank slots; the partition is there so that every board follows one layout rule.
 - **Format** (`PurrOS/components/coreos/include/purr_drvpart.h`, `src/purr_drvpart.c`, `purrstrap/scripts/drvpart.py`; the C and Python sides share a golden slot in their tests): ten slots
   of 8 KB, one driver each. Slot n starts at n * 8192 with a 64-byte header (`PDRV`, version 1, flags, the length of the .cat, the crc32 of the .cat, the file name the driver is planted
   under, 0xFF), then the .cat exactly as it ships, then 0xFF. A blank header is an empty slot; one that does not hold together is damaged and skipped.

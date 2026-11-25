@@ -6363,7 +6363,7 @@ static int builtin_driver_file(const char *file)
     if (!purr_drvpart_present()) {
         /* A board whose flash map has no drivers partition (flash map v2: a device that took a newer kernel by update) keeps the essential drivers as files in /boot/drivers, planted by
          * the kernel it had before or by `netinstall drivers`. Those files are exempt by name, as the baked ones always were: setting the display driver aside as "unproven" is a black screen. */
-        static const char *const essential[] = {"st7789.cat", "gt911.cat", "kbd_i2c.cat", "battery.cat", "kbd-backlight.cat", "gamepad.cat"};
+        static const char *const essential[] = {"st7789.cat", "gt911.cat", "kbd_i2c.cat", "battery.cat", "kbd-backlight.cat"};
         for (size_t i = 0; i < sizeof(essential) / sizeof(essential[0]); i++) {
             if (strcmp(file, essential[i]) == 0) {
                 return 1;

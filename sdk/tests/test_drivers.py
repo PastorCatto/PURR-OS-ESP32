@@ -61,7 +61,7 @@ class Kernel(unittest.TestCase):
         text = _read("PurrOS", "main", "commands.c")
         self.assertIn("purr_drvpart_each(plant_slot_cb, &pd)", text)
         self.assertIn("purr_drvpart_each(load_slot_cb, &ld)", text)                         # the loader and KittenOS have no file system: straight from the slots
-        self.assertIn("return purr_drvpart_has_file(file);", text)                          # a planted essential driver is never held back or set aside
+        self.assertIn("if (purr_drvpart_has_file(file)) {", text)                           # a planted essential driver is never held back or set aside
         self.assertIn('"purr_drvpart_plat.c"', _read("PurrOS", "main", "CMakeLists.txt"))
         self.assertIn('"src/purr_drvpart.c"', _read("PurrOS", "components", "coreos", "CMakeLists.txt"))
 
@@ -139,9 +139,16 @@ class ImageMaker(unittest.TestCase):
         row = [r for r in image.plan("playtime", folder)["parts"] if r["part"] == "drivers"][0]
         self.assertEqual((row["offset"], row["room"], row["found"]), (0xFEC000, 0x14000, True))
 
-    def test_a_board_without_the_partition_is_not_asked_for_one(self):
+    def test_a_board_that_carries_no_driver_is_not_asked_for_an_image(self):
+        """The 8 MB e-paper board has the drivers partition (flash map v3, 1.2) but no driver of its own: no image is demanded and the slots stay blank."""
         p = image.plan("waveshare154", helpers.tmpdir())
-        self.assertFalse([x for x in p["problems"] if "drivers" in x])
+        self.assertFalse([x for x in p["problems"] if "drivers image" in x])
+        row = [r for r in p["parts"] if r["part"] == "drivers"][0]
+        self.assertEqual((row["offset"], row["room"], row["found"]), (0x7EC000, 0x14000, False))
+
+    def test_a_16_mb_board_is_still_asked_for_its_drivers_image(self):
+        p = image.plan("tdeck_plus", helpers.tmpdir())
+        self.assertTrue([x for x in p["problems"] if "drivers image" in x])
 
     def test_the_image_has_the_drivers_at_the_end_of_the_flash(self):
         lay = {p["name"]: p for p in image.layout_for("playtime")}

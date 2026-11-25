@@ -27,6 +27,7 @@ DEFAULTS = {
     "tdeck_plus": ("st7789.cat", "gt911.cat", "kbd_i2c.cat", "battery.cat", "kbd-backlight.cat"),
     "tdeck": ("st7789.cat", "gt911.cat", "kbd_i2c.cat", "battery.cat", "kbd-backlight.cat"),
     "playtime": ("st7789.cat", "gamepad.cat"),
+    "waveshare154": (),                  # the 8 MB e-paper board: no driver of its own yet; its drivers partition (flash map v3) stays blank slots
 }
 MAX_DRIVERS = 10
 
