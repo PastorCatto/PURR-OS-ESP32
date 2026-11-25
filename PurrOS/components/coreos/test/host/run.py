@@ -94,9 +94,16 @@ def main(argv):
     src.append(os.path.join(KERNEL, "src", "purr_driver.c"))
     # The account store (accounts and their backup copy) is plain C over purr_fs: tested with read failures injected.
     src.append(os.path.join(KERNEL, "src", "purr_userstore.c"))
-    common = ["-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
+    common = ["-std=c11", "-D_POSIX_C_SOURCE=200809L", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
               "-I", os.path.join(CORE, "include"), "-I", os.path.join(KERNEL, "include"),
               "-I", LFS, "-I", HERE, "-I", uecc]
+    # GCC 14.2 (Debian 13) miscompiles purr_trust_eval at -O1 and up: jump threading folds the
+    # signed-path clamp of `tighten` so that 2 becomes 1 (test_trust fails 2 of 85 checks; the
+    # same code passes at -O0, on clang and on the firmware's xtensa GCC 13.2). Real GCC only:
+    # clang rejects the flag under -Werror.
+    ver = run([gcc, "--version"]).stdout
+    if "clang" not in ver.lower() and "gcc" in ver.lower():
+        common.append("-fno-thread-jumps")
 
     # Third-party code is compiled once, without our warning flags.
     uecc_obj = os.path.join(BUILD, "uECC.o")

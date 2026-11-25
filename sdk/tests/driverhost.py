@@ -7,6 +7,7 @@ and checks what the driver did with them. This is how the reference drivers are 
 import ctypes as C
 import os
 import subprocess
+import sys
 
 import helpers
 
@@ -16,8 +17,9 @@ PTR = C.c_void_p
 
 def build(source, name):
     """Compile `source` into a shared library and load it."""
-    out = os.path.join(helpers.tmpdir(), "lib%s.dylib" % name)
-    cmd = [helpers.clang(), "-dynamiclib", "-fPIC", "-O1", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fvisibility=default"] + \
+    mac = sys.platform == "darwin"          # -dynamiclib is Apple's flag; GCC reads it as a pile of -d debug options
+    out = os.path.join(helpers.tmpdir(), "lib%s.%s" % (name, "dylib" if mac else "so"))
+    cmd = [helpers.clang(), "-dynamiclib" if mac else "-shared", "-fPIC", "-O1", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fvisibility=default"] + \
         ["-I" + i for i in helpers.INCLUDES] + [source, "-o", out]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
