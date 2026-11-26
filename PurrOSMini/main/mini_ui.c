@@ -201,11 +201,11 @@ static void draw_keyboard(int mode)
     draw_key(272, y, 48, "OK", 0);
 }
 
-static void draw_field(const char *ssid, const char *pass, int show)
+static void draw_field(const char *prompt, const char *pass, int show)
 {
     mini_fill(0, BAR_H, MINI_W, 46, MINI_WHITE);
     char s[48];
-    snprintf(s, sizeof(s), "Password for %.26s", ssid);
+    snprintf(s, sizeof(s), "%.46s", prompt);
     mini_draw_text_in(10, BAR_H + 2, MINI_W - 20, 0, &mini_font_small, s, MINI_DIM, MINI_WHITE);
     mini_frame(8, FIELD_Y + 12, MINI_W - 16, 28, MINI_EDGE);
     char shown[72];
@@ -222,13 +222,14 @@ static void draw_field(const char *ssid, const char *pass, int show)
     mini_draw_text_in(12, FIELD_Y + 17, MINI_W - 24, 0, &mini_font_row, shown, MINI_INK, MINI_WHITE);
 }
 
-bool mini_ui_password(const char *ssid, char *pass, int cap)
+/* The keyboard, for any text: `title` in the bar, `prompt` over the box, the result in pass (cap bytes). secret = shown as stars until the right end of the box is tapped. false if the person goes back. */
+bool mini_ui_text(const char *title, const char *prompt, char *pass, int cap, bool secret)
 {
-    int mode = 0, show = 0;
+    int mode = 0, show = secret ? 0 : 1;
     pass[0] = '\0';
     mini_fill(0, 0, MINI_W, MINI_H, MINI_WHITE);
-    bar("Wi-Fi password");
-    draw_field(ssid, pass, show);
+    bar(title);
+    draw_field(prompt, pass, show);
     draw_keyboard(mode);
     for (;;) {
         int x, y;
@@ -239,7 +240,7 @@ bool mini_ui_password(const char *ssid, char *pass, int cap)
         }
         if (y >= FIELD_Y + 10 && y < FIELD_Y + 42 && x > MINI_W - 60) {
             show = !show;                                        /* the right end of the box shows or hides the typing */
-            draw_field(ssid, pass, show);
+            draw_field(prompt, pass, show);
             continue;
         }
         if (y < KB_Y) {
@@ -277,8 +278,15 @@ bool mini_ui_password(const char *ssid, char *pass, int cap)
                 return true;
             }
         }
-        draw_field(ssid, pass, show);
+        draw_field(prompt, pass, show);
     }
+}
+
+bool mini_ui_password(const char *ssid, char *pass, int cap)
+{
+    char prompt[48];
+    snprintf(prompt, sizeof(prompt), "Password for %.26s", ssid);
+    return mini_ui_text("Wi-Fi password", prompt, pass, cap, true);
 }
 
 /* ---------------------------------------------------------------- touch calibration */
@@ -394,7 +402,7 @@ static void home_sub(int i, const mini_home_t *info, char *out, size_t cap)
         snprintf(out, cap, info->host != NULL ? "apps from %.18s, drawn here" : "pair a host first", info->host);
         break;
     case 2:
-        snprintf(out, cap, "a basic desktop; not in this version yet");
+        snprintf(out, cap, "a desktop with remote setup for other devices");
         break;
     case 3:
         snprintf(out, cap, info->wifi != NULL ? "%.24s, connected" : "choose a network", info->wifi);
@@ -509,16 +517,17 @@ int mini_ui_hosts(const char *title, const char names[][20], const unsigned char
 {
     mini_fill(0, 0, MINI_W, MINI_H, MINI_WHITE);
     bar(title);
+    bool setup = strcmp(title, "Remote setup") == 0;
     for (int i = 0; i < n && i < LIST_ROWS; i++) {
         int y = BAR_H + i * ROW_H;
         mini_fill(0, y + ROW_H - 1, MINI_W, 1, MINI_HAIR);
         char line[40];
         snprintf(line, sizeof(line), "%.18s", names[i]);
         mini_draw_text_in(10, y + 5, MINI_W - 90, 0, &mini_font_row, line, MINI_INK, MINI_WHITE);
-        mini_draw_text_in(MINI_W - 80, y + 7, 72, 2, &mini_font_small, paired[i] ? "paired" : "tap to pair", MINI_DIM, MINI_WHITE);
+        mini_draw_text_in(MINI_W - 80, y + 7, 72, 2, &mini_font_small, setup ? "tap to set up" : (paired[i] ? "paired" : "tap to pair"), MINI_DIM, MINI_WHITE);
     }
     if (n == 0) {
-        mini_draw_text_in(10, 90, MINI_W - 20, 1, &mini_font_row, "No host in range yet", MINI_DIM, MINI_WHITE);
+        mini_draw_text_in(10, 90, MINI_W - 20, 1, &mini_font_row, strcmp(title, "Remote setup") == 0 ? "No device asking for setup" : "No host in range yet", MINI_DIM, MINI_WHITE);
     }
     button(MINI_W / 2 - 60, 120, "Cancel");
     int x, y;
@@ -596,4 +605,99 @@ void mini_ui_boot(int progress, const char *hint)
         mini_draw_text_in(0, 222, MINI_W, 1, &mini_font_small, hint, MINI_RGB(0x8A, 0x90, 0x9B), BOOT_BG);
     }
     boot_bar(progress);
+}
+
+/* ---------------------------------------------------------------- the desktop (Mini PDA) */
+
+#define DESK_BG MINI_RGB(0x00, 0x80, 0x80)
+#define DESK_ICON 56
+#define TASK_H 26
+
+/* a drawn picture for each icon: a square with a simple shape, no bitmaps */
+static void desk_icon(int x, int y, int kind, const char *label)
+{
+    mini_fill(x, y, DESK_ICON, DESK_ICON, MINI_RGB(0xC0, 0xC0, 0xC0));
+    mini_fill(x, y, DESK_ICON, 2, MINI_WHITE);
+    mini_fill(x, y, 2, DESK_ICON, MINI_WHITE);
+    mini_fill(x + DESK_ICON - 2, y, 2, DESK_ICON, MINI_RGB(0x40, 0x40, 0x40));
+    mini_fill(x, y + DESK_ICON - 2, DESK_ICON, 2, MINI_RGB(0x40, 0x40, 0x40));
+    uint16_t ink = MINI_RGB(0x10, 0x10, 0x60);
+    if (kind == 0) {                                            /* remote setup: a node with waves going out */
+        mini_fill(x + 12, y + 30, 14, 14, ink);
+        mini_fill(x + 30, y + 22, 3, 22, ink);
+        mini_fill(x + 36, y + 16, 3, 28, ink);
+        mini_fill(x + 42, y + 10, 3, 34, ink);
+    } else if (kind == 1) {                                     /* Wi-Fi: bars rising */
+        for (int i = 0; i < 4; i++) {
+            mini_fill(x + 10 + i * 9, y + 38 - i * 8, 6, 8 + i * 8, ink);
+        }
+    } else {                                                    /* settings: sliders */
+        for (int i = 0; i < 3; i++) {
+            mini_fill(x + 10, y + 14 + i * 12, 36, 3, ink);
+            mini_fill(x + 14 + i * 12, y + 10 + i * 12, 6, 11, MINI_RGB(0x80, 0x00, 0x00));
+        }
+    }
+    mini_draw_text_in(x - 12, y + DESK_ICON + 2, DESK_ICON + 24, 1, &mini_font_small, label, MINI_WHITE, DESK_BG);
+}
+
+int mini_ui_desktop(void)
+{
+    static const char *label[3] = {"Remote setup", "Wi-Fi", "Settings"};
+    mini_fill(0, 0, MINI_W, MINI_H, DESK_BG);
+    for (int i = 0; i < 3; i++) {
+        desk_icon(24 + i * 100, 20, i, label[i]);
+    }
+    /* the taskbar: a Menu button and the name of the mode */
+    mini_fill(0, MINI_H - TASK_H, MINI_W, TASK_H, MINI_RGB(0xC0, 0xC0, 0xC0));
+    mini_fill(0, MINI_H - TASK_H, MINI_W, 2, MINI_WHITE);
+    mini_fill(4, MINI_H - TASK_H + 4, 70, TASK_H - 8, MINI_RGB(0xC0, 0xC0, 0xC0));
+    mini_frame(4, MINI_H - TASK_H + 4, 70, TASK_H - 8, MINI_RGB(0x40, 0x40, 0x40));
+    mini_draw_text_in(5, MINI_H - TASK_H + 6, 68, 1, &mini_font_row, "Menu", MINI_INK, MINI_RGB(0xC0, 0xC0, 0xC0));
+    mini_draw_text_in(MINI_W - 120, MINI_H - TASK_H + 8, 116, 2, &mini_font_small, "Mini PDA", MINI_INK, MINI_RGB(0xC0, 0xC0, 0xC0));
+    for (;;) {
+        int x, y;
+        tap_irq(&x, &y, 0);
+        if (y < 0) {
+            return -1;                                           /* something took over the screen: draw again */
+        }
+        if (y >= MINI_H - TASK_H) {
+            if (x < 80) {
+                return 3;                                        /* Menu */
+            }
+            continue;
+        }
+        for (int i = 0; i < 3; i++) {
+            int ix = 24 + i * 100;
+            if (x >= ix - 6 && x < ix + DESK_ICON + 6 && y >= 14 && y < 20 + DESK_ICON + 20) {
+                return i;
+            }
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- remote setup screens */
+
+int mini_ui_setup_nodes(const char names[][20], int n, int wait_ms)
+{
+    unsigned char none[8] = {0};
+    return mini_ui_hosts("Remote setup", names, none, n, wait_ms);
+}
+
+int mini_ui_choice(const char *title, const char *l1, const char *l2, const char *yes, const char *no)
+{
+    mini_fill(0, 0, MINI_W, MINI_H, MINI_WHITE);
+    bar(title);
+    mini_draw_text_in(10, 60, MINI_W - 20, 1, &mini_font_row, l1, MINI_INK, MINI_WHITE);
+    if (l2 != NULL) {
+        mini_draw_text_in(10, 96, MINI_W - 20, 1, &mini_font_small, l2, MINI_DIM, MINI_WHITE);
+    }
+    button(10, MINI_W / 2 - 15, yes);
+    button(MINI_W / 2 + 5, MINI_W / 2 - 15, no);
+    for (;;) {
+        int x, y;
+        mini_ui_tap(&x, &y, 0);
+        if (y >= BTN_Y) {
+            return x < MINI_W / 2 ? 1 : 0;
+        }
+    }
 }

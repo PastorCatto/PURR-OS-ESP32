@@ -218,3 +218,41 @@ void mini_px_open_window(int seconds)
         xSemaphoreGive(s_lock);
     }
 }
+
+int mini_px_setup_nodes(purr_link_peer_t *out, int max)
+{
+    static purr_link_peer_t all[16];
+    if (!s_up || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return 0;
+    }
+    int n = purr_pxl_ops.nearby(&s_link, all, 16);
+    xSemaphoreGive(s_lock);
+    int k = 0;
+    for (int i = 0; i < n && i < 16 && k < max; i++) {
+        if ((all[i].roles & PURR_PX_ROLE_SETUP) && all[i].online) {
+            out[k++] = all[i];
+        }
+    }
+    return k;
+}
+
+int mini_px_connect(const uint8_t id[8]) { LOCKED(purr_pxl_ops.connect(&s_link, id)); }
+
+bool mini_px_session_up(const uint8_t id[8])
+{
+    static purr_link_peer_t all[16];
+    if (!s_up || xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return false;
+    }
+    int n = purr_pxl_ops.nearby(&s_link, all, 16);
+    xSemaphoreGive(s_lock);
+    for (int i = 0; i < n && i < 16; i++) {
+        if (memcmp(all[i].id, id, 8) == 0) {
+            return all[i].session != 0;
+        }
+    }
+    return false;
+}
+
+int mini_px_send(const uint8_t id[8], uint8_t channel, const uint8_t *data, size_t len) { LOCKED(purr_pxl_ops.send(&s_link, id, channel, data, len)); }
+int mini_px_recv(const uint8_t id[8], uint8_t *channel, uint8_t *buf, size_t cap) { LOCKED(purr_pxl_ops.recv(&s_link, id, channel, buf, cap)); }

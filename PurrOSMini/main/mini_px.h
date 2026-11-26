@@ -21,6 +21,12 @@ bool mini_px_paired_name(char *out, size_t cap);        /* the name of the first
 
 /* Lets a stranger ask to pair for this many seconds (the person at both devices still compares the six digits); 0 closes it. */
 void mini_px_open_window(int seconds);
+/* Nodes in range that are asking for setup (they say so in their beacon), and a secure session to a paired one: connect, then send and receive messages on a channel. */
+int mini_px_setup_nodes(purr_link_peer_t *out, int max);
+int mini_px_connect(const uint8_t id[8]);
+bool mini_px_session_up(const uint8_t id[8]);
+int mini_px_send(const uint8_t id[8], uint8_t channel, const uint8_t *data, size_t len);
+int mini_px_recv(const uint8_t id[8], uint8_t *channel, uint8_t *buf, size_t cap);   /* the length, 0 if nothing, < 0 on error */
 int mini_px_pair(const uint8_t id[8]);                 /* asks it to pair; 0 or < 0 */
 int mini_px_prompt(purr_link_prompt_t *out);           /* 1 while the six digits wait for a yes or no */
 int mini_px_answer(int yes);

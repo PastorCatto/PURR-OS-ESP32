@@ -16,6 +16,7 @@
 #include "mini_lcd.h"
 #include "mini_link.h"
 #include "mini_px.h"
+#include "mini_setup.h"
 #include "mini_touch.h"
 #include "mini_ui.h"
 #include "mini_wifi.h"
@@ -145,7 +146,27 @@ void app_main(void)
             say_and_wait("Apps", "Coming soon", "apps from your host, drawn on this screen");
             break;
         case MINI_HOME_PDA:
-            say_and_wait("Mini PDA", "Not in this version yet", "a basic desktop for a board with no host in reach");
+            for (bool desk = true; desk;) {
+                switch (mini_ui_desktop()) {
+                case 0:
+                    mini_setup_run();
+                    break;
+                case 1:
+                    mini_wifi_disconnect();
+                    choose_network();
+                    break;
+                case 2:
+                    if (mini_ui_settings(mini_px_have_paired()) == MINI_SET_CAL) {
+                        mini_ui_calibrate();
+                    }
+                    break;
+                case 3:
+                    desk = false;
+                    break;
+                default:
+                    break;
+                }
+            }
             break;
         case MINI_HOME_WIFI:
             mini_wifi_disconnect();

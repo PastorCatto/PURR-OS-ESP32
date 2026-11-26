@@ -16,6 +16,8 @@ void mini_ui_status(const char *title, const char *line1, const char *line2);
 bool mini_ui_pick_network(mini_ap_t *out);
 /* The keyboard: types a password for ssid into pass (cap bytes). false if the user goes back. */
 bool mini_ui_password(const char *ssid, char *pass, int cap);
+/* The same keyboard for any text (a name, a user name, a password): title in the bar, a prompt over the box; secret shows stars. false if the person goes back. */
+bool mini_ui_text(const char *title, const char *prompt, char *out, int cap, bool secret);
 /* Waits for a touch: returns when a finger goes down and comes up, with the last point; or false after timeout_ms (0 waits forever). */
 bool mini_ui_tap(int *x, int *y, int timeout_ms);
 
@@ -53,6 +55,13 @@ bool mini_ui_cancel_hit(int x, int y);
 int mini_ui_hosts(const char *title, const char names[][20], const unsigned char *paired, int n, int wait_ms);
 /* The pairing question: the six digits and Pair / Cancel. Returns 1, 0, or -1 if nothing was tapped within wait_ms. */
 int mini_ui_code(const char *name, int code, int wait_ms);
+
+/* The Mini PDA desktop: icons for Remote setup (0), Wi-Fi (1) and Settings (2); the taskbar's Menu button returns 3; -1 when something took over the screen (draw again). */
+int mini_ui_desktop(void);
+/* Devices asking for setup, like the host list. Returns the row tapped, -1 for Cancel, -2 for no tap in wait_ms. */
+int mini_ui_setup_nodes(const char names[][20], int n, int wait_ms);
+/* Two buttons: returns 1 for yes, 0 for no. */
+int mini_ui_choice(const char *title, const char *l1, const char *l2, const char *yes, const char *no);
 
 /* Four crosses at the corners; the taps are turned into the touch calibration and kept. */
 void mini_ui_calibrate(void);

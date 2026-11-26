@@ -421,6 +421,11 @@ int mini_link_search(void)
     }
 }
 
+bool mini_link_pair(const purr_link_peer_t *p)
+{
+    return pair_with(p) != 0;
+}
+
 int mini_link_pair_interrupt(void)
 {
     purr_link_prompt_t pr;
