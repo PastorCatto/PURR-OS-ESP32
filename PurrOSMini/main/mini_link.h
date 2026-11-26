@@ -15,4 +15,8 @@ int mini_link_reconnect(int timeout_ms);
 /* The searching screen with a Cancel button: looks until a host answers (then runs the session) or the user cancels. */
 int mini_link_search(void);
 
+/* The pairing question, for whatever screen is waiting: if a pairing has reached the six digits (the other device started it, or ours did), shows the code screen until it is answered or gone.
+ * 1 if it took over the screen. Hand it to mini_ui_set_interrupt. */
+int mini_link_pair_interrupt(void);
+
 #endif

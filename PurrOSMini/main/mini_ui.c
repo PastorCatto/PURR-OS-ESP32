@@ -37,6 +37,10 @@ void mini_ui_status(const char *title, const char *line1, const char *line2)
     }
 }
 
+static int (*s_irq)(void);
+
+void mini_ui_set_interrupt(int (*fn)(void)) { s_irq = fn; }
+
 bool mini_ui_tap(int *x, int *y, int timeout_ms)
 {
     int64_t t0 = esp_timer_get_time();
@@ -58,6 +62,24 @@ bool mini_ui_tap(int *x, int *y, int timeout_ms)
             return false;
         }
         vTaskDelay(pdMS_TO_TICKS(15));
+    }
+}
+
+/* A tap, with the interrupt asked in between: true with x = y = -1 when the interrupt took over the screen (the caller draws its screen again). */
+static bool tap_irq(int *x, int *y, int timeout_ms)
+{
+    int64_t t0 = esp_timer_get_time();
+    for (;;) {
+        if (mini_ui_tap(x, y, 200)) {
+            return true;
+        }
+        if (s_irq != NULL && s_irq()) {
+            *x = *y = -1;
+            return true;
+        }
+        if (timeout_ms > 0 && (esp_timer_get_time() - t0) / 1000 >= timeout_ms) {
+            return false;
+        }
     }
 }
 
@@ -420,7 +442,10 @@ int mini_ui_home(const mini_home_t *info)
     }
     for (;;) {
         int x, y;
-        mini_ui_tap(&x, &y, 0);
+        tap_irq(&x, &y, 0);
+        if (y < 0) {
+            return MINI_HOME_NONE;
+        }
         int i = (y - top) / HOME_ROW_H;
         if (y < top || i < 0 || i > 4) {
             continue;
@@ -454,7 +479,7 @@ int mini_ui_settings(bool have_paired)
     button(MINI_W / 2 - 60, 120, "Back");
     for (;;) {
         int x, y;
-        mini_ui_tap(&x, &y, 0);
+        tap_irq(&x, &y, 0);
         if (y >= BTN_Y || y < BAR_H) {
             return MINI_SET_BACK;
         }
@@ -497,7 +522,7 @@ int mini_ui_hosts(const char *title, const char names[][20], const unsigned char
     }
     button(MINI_W / 2 - 60, 120, "Cancel");
     int x, y;
-    if (!mini_ui_tap(&x, &y, wait_ms)) {
+    if (!tap_irq(&x, &y, wait_ms)) {
         return -2;
     }
     if (y >= BTN_Y) {

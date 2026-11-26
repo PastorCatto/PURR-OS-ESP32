@@ -165,7 +165,7 @@ static int run_pairing(void *h, int device_says, int peer_says, int *peer_code)
             if (w > 0) feed(PURR_PX_T_PAIR, out, w);
         }
         purr_link_prompt_t pr;
-        if (!answered_dev && ops->prompt(h, &pr) == 1) {
+        if (!answered_dev && ops->prompt(h, &pr) == 1 && pr.code >= 0) {
             code = pr.code;
             ops->answer(h, device_says);
             answered_dev = 1;
@@ -289,6 +289,21 @@ int main(void)
     drain();
     run_pairing(h, 1, 0, NULL);                              /* and the other person refusing */
     CHECK(ops->paired(h, peers, 8) == 0);
+    /* 4b. The question is on the screen as soon as the pairing starts (no digits yet, only Cancel), and cancelling there ends it */
+    {
+        drain();
+        purr_px_pair_init(&p_pair, &p_ecc, p_pub, p_priv, "Mini-test");
+        uint8_t req[PURR_PX_PAIR_MAX_MSG];
+        int rn = purr_px_pair_start(&p_pair, 0, req, sizeof(req));
+        feed(PURR_PX_T_PAIR, req, rn);
+        tick_ms(h, 20);
+        purr_link_prompt_t pr;
+        CHECK(ops->prompt(h, &pr) == 1 && pr.kind == PURR_LINK_PROMPT_PAIR && pr.code == -1 && strcmp(pr.name, "Mini-test") == 0);
+        CHECK(ops->answer(h, 0) == 0);
+        CHECK(ops->prompt(h, &pr) == 0 && s_link.pair.state == PURR_PX_PAIR_IDLE);
+        drain();
+    }
+
     drain();
     CHECK(run_pairing(h, 1, 1, NULL) >= 0);
     CHECK(ops->paired(h, peers, 8) == 1);

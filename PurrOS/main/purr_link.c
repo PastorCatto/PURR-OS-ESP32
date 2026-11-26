@@ -105,6 +105,7 @@ void purr_link_stream_close(int stream)
 static lv_obj_t *s_dlg;
 static volatile int s_dlg_shown;
 static uint8_t s_dlg_id[8];
+static int s_dlg_code = -2;                 /* the digits the open question shows (-1: not known yet): it is drawn again when they arrive */
 
 static void answer_cb(lv_event_t *e)
 {
@@ -157,7 +158,7 @@ static void *show_cb(void *arg)
     lv_obj_set_style_pad_all(c, 10, 0);
 
     lv_obj_t *n = lv_label_create(s_dlg);
-    lv_label_set_text(n, "The same six digits must show on the other device.");
+    lv_label_set_text(n, p->code >= 0 ? "The same six digits must show on the other device." : "Waiting for the other device...");
     lv_obj_set_style_text_color(n, lv_color_make(0xB0, 0xB0, 0xB0), 0);
 
     lv_obj_t *row = lv_obj_create(s_dlg);
@@ -166,7 +167,7 @@ static void *show_cb(void *arg)
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    for (int i = 0; i < 2; i++) {
+    for (int i = p->code >= 0 ? 0 : 1; i < 2; i++) {               /* before the digits are known there is only Cancel */
         lv_obj_t *b = lv_btn_create(row);
         lv_obj_set_size(b, 110, 44);
         lv_obj_add_event_cb(b, answer_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(i == 0));
@@ -175,6 +176,7 @@ static void *show_cb(void *arg)
         lv_obj_center(l);
     }
     memcpy(s_dlg_id, p->id, 8);
+    s_dlg_code = p->code;
     return NULL;
 }
 
@@ -214,7 +216,7 @@ static void link_task(void *arg)
         give();
 
         if (has && p.kind == PURR_LINK_PROMPT_PAIR) {
-            if (!s_dlg_shown || memcmp(s_dlg_id, p.id, 8) != 0) {
+            if (!s_dlg_shown || memcmp(s_dlg_id, p.id, 8) != 0 || p.code != s_dlg_code) {
                 s_dlg_shown = 1;
                 purr_ui_service_run(show_cb, &p, NULL);
             }

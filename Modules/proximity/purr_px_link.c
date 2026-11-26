@@ -566,14 +566,21 @@ static int l_pair(void *h, const uint8_t id[8])
 static int l_prompt(void *h, purr_link_prompt_t *o)
 {
     purr_pxl_t *L = h;
-    if (L->pair.state != PURR_PX_PAIR_WAIT_USER || L->pair_auto || L->pair.user != 0) {
+    int st = L->pair.state;
+    if (L->pair_auto || (st != PURR_PX_PAIR_WAIT_ACC && st != PURR_PX_PAIR_WAIT_REVEAL && st != PURR_PX_PAIR_WAIT_USER) || (st == PURR_PX_PAIR_WAIT_USER && L->pair.user != 0)) {
         return 0;
     }
     memset(o, 0, sizeof(*o));
     o->kind = PURR_LINK_PROMPT_PAIR;
     memcpy(o->id, L->pair_peer, 8);
     copy_name(o->name, sizeof(o->name), L->pair.peer_name);
-    o->code = purr_px_pair_code(&L->pair);
+    if (o->name[0] == '\0') {                                  /* the initiator does not know the name until the other end answers: the one from its beacon */
+        const purr_px_peer_t *np = purr_px_table_find(&L->table, L->pair_peer);
+        if (np != NULL) {
+            copy_name(o->name, sizeof(o->name), np->beacon.name);
+        }
+    }
+    o->code = st == PURR_PX_PAIR_WAIT_USER ? purr_px_pair_code(&L->pair) : -1;     /* -1: still waiting for the digits; the question is already on the screen */
     return 1;
 }
 
@@ -581,6 +588,11 @@ static int l_answer(void *h, int yes)
 {
     purr_pxl_t *L = h;
     if (L->pair.state != PURR_PX_PAIR_WAIT_USER) {
+        if (!yes && L->pair.state != PURR_PX_PAIR_IDLE) {               /* cancelled before the digits were known */
+            pair_reset(L);
+            L->pair_last_n = 0;
+            return 0;
+        }
         return -1;
     }
     uint8_t out[PURR_PX_PAIR_MAX_MSG];

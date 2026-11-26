@@ -386,6 +386,7 @@ static int pair_with(const purr_link_peer_t *p)
 
 int mini_link_search(void)
 {
+    mini_px_open_window(120);                               /* while the host list is up, another device may start a pairing with this one */
     for (;;) {
         purr_link_peer_t hosts[7];
         int n = mini_px_hosts(hosts, 7);
@@ -418,4 +419,39 @@ int mini_link_search(void)
             return r;
         }
     }
+}
+
+int mini_link_pair_interrupt(void)
+{
+    purr_link_prompt_t pr;
+    if (mini_px_prompt(&pr) != 1 || pr.code < 0) {
+        return 0;
+    }
+    uint8_t id[8];
+    char name[20];
+    memcpy(id, pr.id, 8);
+    snprintf(name, sizeof(name), "%.19s", pr.name);
+    for (;;) {
+        if (mini_px_prompt(&pr) != 1) {
+            break;                                           /* the other end said no, or it timed out */
+        }
+        int a = mini_ui_code(name, pr.code, 400);
+        if (a >= 0) {
+            mini_px_answer(a);
+            if (a) {
+                mini_ui_status("Pair", "Checking", "the other device is confirming too");
+                for (int i = 0; i < 80 && !mini_px_is_paired(id); i++) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+                if (mini_px_is_paired(id)) {
+                    mini_ui_status("Pair", "Paired", name);
+                } else {
+                    mini_ui_status("Pair", "Not paired", "the other device did not confirm");
+                }
+                vTaskDelay(pdMS_TO_TICKS(1500));
+            }
+            break;
+        }
+    }
+    return 1;
 }

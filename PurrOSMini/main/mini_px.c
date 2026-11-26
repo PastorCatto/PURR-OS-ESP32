@@ -210,3 +210,11 @@ bool mini_px_paired_name(char *out, size_t cap)
     xSemaphoreGive(s_lock);
     return found;
 }
+
+void mini_px_open_window(int seconds)
+{
+    if (s_up && xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) == pdTRUE) {
+        purr_pxl_ops.option(&s_link, PURR_LINK_OPT_PAIR_WINDOW, seconds);
+        xSemaphoreGive(s_lock);
+    }
+}

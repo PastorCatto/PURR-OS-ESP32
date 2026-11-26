@@ -96,7 +96,11 @@ void app_main(void)
         mini_ui_status("PURR OS Mini", "Wi-Fi did not start", "restart the board");
         return;
     }
-    mini_px_start();                                             /* the link: hosts in range, pairing, the sealed display stream */
+    mini_px_start();
+    mini_ui_set_interrupt(mini_link_pair_interrupt);
+    if (!mini_px_have_paired()) {
+        mini_px_open_window(300);                                    /* nothing paired yet: a device may ask to pair for the first five minutes */
+    }                                             /* the link: hosts in range, pairing, the sealed display stream */
     mini_ui_boot(100, NULL);
     vTaskDelay(pdMS_TO_TICKS(500));
     mini_mark_healthy();                                         /* the panel and Wi-Fi are up: this boot is a good one */

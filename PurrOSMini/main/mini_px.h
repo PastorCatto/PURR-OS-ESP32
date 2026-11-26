@@ -19,6 +19,8 @@ bool mini_px_paired_host(purr_link_peer_t *out);
 bool mini_px_have_paired(void);
 bool mini_px_paired_name(char *out, size_t cap);        /* the name of the first paired device, for the menu */
 
+/* Lets a stranger ask to pair for this many seconds (the person at both devices still compares the six digits); 0 closes it. */
+void mini_px_open_window(int seconds);
 int mini_px_pair(const uint8_t id[8]);                 /* asks it to pair; 0 or < 0 */
 int mini_px_prompt(purr_link_prompt_t *out);           /* 1 while the six digits wait for a yes or no */
 int mini_px_answer(int yes);

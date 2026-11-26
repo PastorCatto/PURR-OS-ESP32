@@ -21,6 +21,7 @@ bool mini_ui_tap(int *x, int *y, int timeout_ms);
 
 /* The main menu (plan1.md, "Mini main menu"): a status bar (Wi-Fi bars, the title, the paired host), an optional one-line strip, and the iPod list. Apps is greyed until a host is paired.
  * Returns the row tapped (a greyed row is refused with a short flash and the menu stays). */
+#define MINI_HOME_NONE -1               /* something took over the screen: draw the menu again */
 #define MINI_HOME_DISPLAY 0
 #define MINI_HOME_APPS 1
 #define MINI_HOME_PDA 2
@@ -40,6 +41,9 @@ int mini_ui_home(const mini_home_t *info);
 #define MINI_SET_ABOUT 2
 #define MINI_SET_BACK -1
 int mini_ui_settings(bool have_paired);
+
+/* While the main menu, the host list or Settings wait for a tap, this is asked about every 200 ms; if it returns 1 it has taken over the screen (the pairing question), and the menu is drawn again. */
+void mini_ui_set_interrupt(int (*fn)(void));
 
 /* The searching screen: a status and a Cancel button. mini_ui_cancel_hit says whether a touch at x, y is on it. */
 void mini_ui_search(const char *line1, const char *line2);
