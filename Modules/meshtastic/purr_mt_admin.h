@@ -73,6 +73,23 @@ int purr_mta_check_request(purr_mta_node_t *n, const purr_px_ecc_t *ecc, uint32_
 int purr_mta_answer_parts(size_t len);
 int purr_mta_make_answer(uint16_t seq, const char *text, size_t len, int part, uint8_t *out, size_t cap);
 
+/* ---- the commands a node will run: a fixed safe set, not the whole command line (owner, 2026-11-26) */
+
+typedef struct purr_mta_cmd {
+    const char *name;                   /* the first word of the line, lower case: "status" */
+    const char *help;
+    int min_args, max_args;             /* words after the name */
+    /* Writes its answer to out (NUL-terminated, at most cap - 1 bytes) and returns 0, or a negative number for a failure the answer explains. args are the words after the name. */
+    int (*run)(void *ctx, int argc, char **argv, char *out, size_t cap);
+} purr_mta_cmd_t;
+
+#define PURR_MTA_E_UNKNOWN_CMD -10
+#define PURR_MTA_E_BAD_ARGS -11
+
+/* Runs a request line against the table: an unknown name is refused (and `help` and `?` list what there is), a wrong number of words is refused, a word over 40 bytes or more than 8 words
+ * is refused, anything not printable ASCII is refused. Returns the command's own result, or PURR_MTA_E_*; out always holds a short answer. */
+int purr_mta_dispatch(const purr_mta_cmd_t *table, int ncmds, void *ctx, const char *line, char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

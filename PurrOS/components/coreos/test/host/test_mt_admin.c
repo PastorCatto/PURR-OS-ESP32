@@ -15,8 +15,48 @@ static int e_sign(const uint8_t priv[32], const uint8_t h[32], uint8_t sig[64]) 
 static int e_verify(const uint8_t pub[64], const uint8_t h[32], const uint8_t sig[64]) { return uECC_verify(pub, h, 32, sig, uECC_secp256r1()); }
 static const purr_px_ecc_t ecc = {.random = e_random, .keypair = e_keypair, .shared = e_shared, .sign = e_sign, .verify = e_verify};
 
+static int g_ran;
+static int cmd_status(void *ctx, int argc, char **argv, char *out, size_t cap) { (void)ctx; (void)argc; (void)argv; g_ran++; snprintf(out, cap, "up 12 s, heard 5"); return 0; }
+static int cmd_radio(void *ctx, int argc, char **argv, char *out, size_t cap) { (void)ctx; g_ran++; snprintf(out, cap, "radio %s%s%s", argv[0], argc > 1 ? " " : "", argc > 1 ? argv[1] : ""); return 0; }
+static int cmd_fail(void *ctx, int argc, char **argv, char *out, size_t cap) { (void)ctx; (void)argc; (void)argv; snprintf(out, cap, "could not"); return -1; }
+static const purr_mta_cmd_t k_cmds[] = {
+    {"status", "how the node is doing", 0, 0, cmd_status},
+    {"radio", "radio get|set <what> [value]", 1, 2, cmd_radio},
+    {"fail", "always fails", 0, 0, cmd_fail},
+};
+
+static void test_dispatch(void)
+{
+    char out[200];
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "status", out, sizeof(out)), 0);
+    CHECK(strcmp(out, "up 12 s, heard 5") == 0 && g_ran == 1);
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "  status  ", out, sizeof(out)), 0);                    /* extra spaces */
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "radio set power", out, sizeof(out)), 0);
+    CHECK(strcmp(out, "radio set power") == 0);
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "radio", out, sizeof(out)), PURR_MTA_E_BAD_ARGS);        /* too few words */
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "status now", out, sizeof(out)), PURR_MTA_E_BAD_ARGS);   /* too many */
+    int ran = g_ran;
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "reboot", out, sizeof(out)), PURR_MTA_E_UNKNOWN_CMD);    /* nothing outside the table runs */
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "rm -rf /", out, sizeof(out)), PURR_MTA_E_UNKNOWN_CMD);
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "status; wipe", out, sizeof(out)), PURR_MTA_E_UNKNOWN_CMD);  /* "status;" is not "status", and a ; is not a separator here: nothing runs */
+    CHECK_EQ(g_ran, ran);
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "help", out, sizeof(out)), 0);
+    CHECK(strstr(out, "status - how the node is doing") != NULL && strstr(out, "radio - radio get") != NULL);
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "?", out, sizeof(out)), 0);
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "fail", out, sizeof(out)), -1);                          /* the command's own failure comes back with its text */
+    CHECK(strcmp(out, "could not") == 0);
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "", out, sizeof(out)), PURR_MTA_E_BAD_ARGS);
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "status\n", out, sizeof(out)), PURR_MTA_E_BAD_ARGS);     /* a control character */
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "radio aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", out, sizeof(out)), PURR_MTA_E_BAD_ARGS);   /* a word over 40 */
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "radio a b c d e f g h i j", out, sizeof(out)), PURR_MTA_E_BAD_ARGS);
+    char small[8];
+    CHECK_EQ(purr_mta_dispatch(k_cmds, 3, NULL, "help", small, sizeof(small)), 0);
+    CHECK(strlen(small) < sizeof(small));                                                                 /* a small buffer is never overrun */
+}
+
 int main(void)
 {
+    test_dispatch();
     srand(11);
     uECC_set_rng(rng_fn);
     uint8_t apub[64], apriv[32], opub[64], opriv[32];

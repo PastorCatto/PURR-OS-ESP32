@@ -181,3 +181,91 @@ int purr_mta_make_answer(uint16_t seq, const char *text, size_t len, int part, u
     memcpy(out + 5, text + off, n);
     return (int)(5 + n);
 }
+
+/* ---------------------------------------------------------------- the safe command set */
+
+static void put_text(char *out, size_t cap, const char *text)
+{
+    size_t i = 0;
+    for (; text[i] != '\0' && i + 1 < cap; i++) {
+        out[i] = text[i];
+    }
+    out[i] = '\0';
+}
+
+static void append_text(char *out, size_t cap, const char *text)
+{
+    size_t n = 0;
+    while (out[n] != '\0') {
+        n++;
+    }
+    put_text(out + n, cap - n, text);
+}
+
+int purr_mta_dispatch(const purr_mta_cmd_t *table, int ncmds, void *ctx, const char *line, char *out, size_t cap)
+{
+    char buf[PURR_MTA_CMD_MAX + 1];
+    char *argv[10];
+    int argc = 0;
+    if (cap == 0) {
+        return PURR_MTA_E_BAD_ARGS;
+    }
+    out[0] = '\0';
+    size_t n = 0;
+    for (; line[n] != '\0'; n++) {
+        if (n >= PURR_MTA_CMD_MAX || (unsigned char)line[n] < 0x20 || (unsigned char)line[n] > 0x7E) {
+            put_text(out, cap, "refused: a command is printable text of at most 120 characters");
+            return PURR_MTA_E_BAD_ARGS;
+        }
+        buf[n] = line[n];
+    }
+    buf[n] = '\0';
+    for (size_t i = 0; buf[i] != '\0'; ) {                               /* split on spaces */
+        while (buf[i] == ' ') {
+            buf[i++] = '\0';
+        }
+        if (buf[i] == '\0') {
+            break;
+        }
+        if (argc >= 9) {
+            put_text(out, cap, "refused: too many words");
+            return PURR_MTA_E_BAD_ARGS;
+        }
+        argv[argc++] = buf + i;
+        size_t w = 0;
+        while (buf[i] != '\0' && buf[i] != ' ') {
+            i++;
+            w++;
+        }
+        if (w > 40) {
+            put_text(out, cap, "refused: a word is too long");
+            return PURR_MTA_E_BAD_ARGS;
+        }
+    }
+    if (argc == 0) {
+        put_text(out, cap, "refused: empty command");
+        return PURR_MTA_E_BAD_ARGS;
+    }
+    if ((argv[0][0] == '?' && argv[0][1] == '\0') || strcmp(argv[0], "help") == 0) {
+        put_text(out, cap, "commands:");
+        for (int i = 0; i < ncmds; i++) {
+            append_text(out, cap, "\n");
+            append_text(out, cap, table[i].name);
+            append_text(out, cap, " - ");
+            append_text(out, cap, table[i].help);
+        }
+        return 0;
+    }
+    for (int i = 0; i < ncmds; i++) {
+        if (strcmp(table[i].name, argv[0]) == 0) {
+            if (argc - 1 < table[i].min_args || argc - 1 > table[i].max_args) {
+                put_text(out, cap, "refused: wrong number of words for ");
+                append_text(out, cap, table[i].name);
+                return PURR_MTA_E_BAD_ARGS;
+            }
+            return table[i].run(ctx, argc - 1, argv + 1, out, cap);
+        }
+    }
+    put_text(out, cap, "unknown command (try: help)");
+    return PURR_MTA_E_UNKNOWN_CMD;
+}
