@@ -1,0 +1,76 @@
+name = "meshtastic"
+version = "0.2.1"
+description = "Meshtastic: text messages over the LoRa mesh (US 915 LongFast to start). Shows up in Messages."
+class = "unprivileged"
+kind = "ui"
+sdk_version = "0.1.0"
+entry = "meshtastic_entry"
+
+[catcalls]
+console = "1.0"
+ui = "2.0"
+app = "1.0"
+sched = "1.0"
+system = "2.0"
+storage = "1.0"
+messaging = "1.0"
+radio = "1.0"
+contacts = "1.0"
+
+[permissions]
+requests = ["radio", "messaging", "contacts"]
+
+[runtime]
+stack_bytes = 6144
+heap_bytes = 16384
+threads = 1
+background = true
+saves_state = false
+
+[display]
+name = "Meshtastic"
+icon = ""
+
+[provides.messaging]
+version    = "1.0"
+name       = "Meshtastic"
+tag        = "MTS"
+address    = "node id"
+text_max   = 200
+images     = "none"
+image_max  = 0
+needs      = ["radio"]
+radio      = "lease"
+companion  = "none"
+
+[[provides.messaging.setting]]
+key     = "region"
+label   = "Region"
+kind    = "choice"
+options = ["US", "EU_868", "EU_433", "ANZ", "CN", "JP", "KR", "TW", "RU", "IN", "NZ_865", "TH"]
+
+[[provides.messaging.setting]]
+key     = "preset"
+label   = "Modem preset"
+kind    = "choice"
+options = ["LongFast", "LongSlow", "MediumFast", "MediumSlow", "ShortFast", "ShortSlow", "LongModerate", "ShortTurbo"]
+
+[[provides.messaging.setting]]
+key     = "name"
+label   = "Your name on the mesh"
+kind    = "text"
+
+[[provides.messaging.setting]]
+key     = "hops"
+label   = "Hop limit"
+kind    = "number"
+
+[[provides.messaging.setting]]
+key     = "relay"
+label   = "Pass other nodes' messages on"
+kind    = "toggle"
+
+[[provides.messaging.setting]]
+key     = "pkc"
+label   = "Sealed direct messages (experimental)"
+kind    = "toggle"

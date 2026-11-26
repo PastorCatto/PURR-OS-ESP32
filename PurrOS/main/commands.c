@@ -71,6 +71,8 @@
 #include "purr_notify.h"
 #include "purr_recovery_src.h"
 #include "purr_catrt_power.h"
+#include "purr_catrt_media.h"
+#include "purr_catrt_radio.h"
 #include "purr_runtime.h"
 #include "purr_fs.h"
 #include "purr_kernel.h"
@@ -4515,6 +4517,19 @@ static const uint8_t s_w5500_driver_module[] = {
 /* The only driver still compiled into the kernel is the W5500 (a virtual device: purr_vm_info() decides, and a VM has no other way to the network). Every other driver the
  * firmware provides (the display, the keyboard, the touch panel, the battery gauge, the Playtime gamepad) is a signed module in the `drivers` partition
  * (purr_drvpart_plat.h, Drivers/SPEC.md "The driver partition"), written when the image is made and replaceable without rebuilding the kernel. */
+#ifdef PURR_EMBED_PROXIMITY
+extern const uint8_t _binary_proximity_cat_start[];
+extern const uint8_t _binary_proximity_cat_end[];
+#endif
+#ifdef PURR_EMBED_LORA_SX126X
+extern const uint8_t _binary_lora_sx126x_cat_start[];
+extern const uint8_t _binary_lora_sx126x_cat_end[];
+#endif
+#ifdef PURR_EMBED_MESHTASTIC
+extern const uint8_t _binary_meshtastic_cat_start[];
+extern const uint8_t _binary_meshtastic_cat_end[];
+#endif
+
 static const temp_module_asset_t s_temp_drivers[] = {
     {"w5500.cat", s_w5500_driver_module, sizeof(s_w5500_driver_module)},      /* only in a VM: temp_driver_wanted() */
 };
@@ -4652,6 +4667,47 @@ static int plant_temp_modules_ex(purr_cli_t *cli, int only_if_missing)
         }
         purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)s_temp_drivers[i].len);
     }
+#ifdef PURR_EMBED_PROXIMITY
+    {   /* the proximity link's driver, carried in this image (main/CMakeLists.txt); a newer one from the driver index replaces it the same way any driver is replaced */
+        const char *path = PURR_DRIVERS_DIR "/proximity.cat";
+        uint32_t plen = (uint32_t)(_binary_proximity_cat_end - _binary_proximity_cat_start);
+        if (!(only_if_missing && fs_file_is(path, _binary_proximity_cat_start, plen))) {
+            if (purr_fs_write(&s_fs, path, _binary_proximity_cat_start, plen) < 0) {
+                purr_cli_printf(cli, "could not plant %s\n", path);
+            } else {
+                purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)plen);
+            }
+        }
+    }
+#endif
+#ifdef PURR_EMBED_LORA_SX126X
+    {   /* the LoRa radio's driver (Modules/drivers/lora_sx126x_module.c), carried in this image the same way */
+        const char *path = PURR_DRIVERS_DIR "/lora-sx126x.cat";
+        uint32_t plen = (uint32_t)(_binary_lora_sx126x_cat_end - _binary_lora_sx126x_cat_start);
+        if (!(only_if_missing && fs_file_is(path, _binary_lora_sx126x_cat_start, plen))) {
+            if (purr_fs_write(&s_fs, path, _binary_lora_sx126x_cat_start, plen) < 0) {
+                purr_cli_printf(cli, "could not plant %s\n", path);
+            } else {
+                purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)plen);
+            }
+        }
+    }
+#endif
+#ifdef PURR_EMBED_MESHTASTIC
+    {   /* the Meshtastic app (Apps/meshtastic), for every user: /apps/<name>/package.cat is where the runtime looks after a user's own folder */
+        const char *path = "/apps/meshtastic/package.cat";
+        uint32_t plen = (uint32_t)(_binary_meshtastic_cat_end - _binary_meshtastic_cat_start);
+        purr_fs_mkdir(&s_fs, "/apps");
+        purr_fs_mkdir(&s_fs, "/apps/meshtastic");
+        if (!(only_if_missing && fs_file_is(path, _binary_meshtastic_cat_start, plen))) {
+            if (purr_fs_write(&s_fs, path, _binary_meshtastic_cat_start, plen) < 0) {
+                purr_cli_printf(cli, "could not plant %s\n", path);
+            } else {
+                purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)plen);
+            }
+        }
+    }
+#endif
     plant_drv_t pd = {cli, only_if_missing, 0};
     if (purr_drvpart_each(plant_slot_cb, &pd) < 0) {
         purr_cli_puts(cli, "drivers: this board's flash has no drivers partition (a layout from before flash map v3): only the built-in drivers are planted\n");
@@ -5988,6 +6044,8 @@ void purr_catrt_setup(purr_cli_t *cli)
     purr_catrt_devices_init();
     STORE_INIT();
     purr_catrt_power_init();
+    purr_catrt_media_init();
+    purr_catrt_radio_init();
     esp_err_t e = purr_catrt_start(&plat);
     purr_cli_printf(cli, "apps: runtime %s\n", e == ESP_OK ? "up" : "did not start");
 }
