@@ -459,10 +459,12 @@ int main(void)
     bk.name = "back";
     c.arg = s_h_row[0];
     on_event(&c);                                                       /* a node: its page */
-    CHECK(strcmp(ui_title, "OTHR") == 0 && thread_for_calls == 0);
+    int tf0 = thread_for_calls;                                         /* the channel chats were made when the service started */
+    CHECK(tf0 >= 1);
+    CHECK(strcmp(ui_title, "OTHR") == 0);
     c.arg = s_h_btn[0];
     on_event(&c);                                                       /* Message: its thread opens in Messages */
-    CHECK(thread_for_calls == 1 && open_thread_calls == 1);
+    CHECK(thread_for_calls == tf0 + 1 && open_thread_calls == 1);
     c.arg = s_h_btn[1];
     on_event(&c);                                                       /* Save to contacts */
     CHECK(contacts_added == 1 && addr_set == 1);
