@@ -1,2 +1,5 @@
-# CYD 2.4C: original ESP32, 4 MB flash, no PSRAM
+# CYD 2.4C: original ESP32, 4 MB flash, no PSRAM. PURR OS Mini (RemoteDisplay/SPEC.md section 6): the bootloader sits at 0x1000 on this chip, under the table at 0xA000.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_OFFSET=0xC000
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/cyd_24c.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions/cyd_24c.csv"

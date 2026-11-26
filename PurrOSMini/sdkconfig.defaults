@@ -1,0 +1,18 @@
+# PURR OS Mini (CYD 2.4C, classic ESP32, 4 MB flash, no PSRAM). Build:
+#   idf.py -B ../out/mini -D IDF_TARGET=esp32 -D SDKCONFIG=../out/mini.sdkconfig build      (from PurrOSMini/)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../PurrOS/partitions/cyd_24c.csv"
+CONFIG_PARTITION_TABLE_FILENAME="../PurrOS/partitions/cyd_24c.csv"
+# the same as the PURR bootloader built for this board (bootloader/sdkconfig.board.cyd_24c): the table at 0xC000 (the bootloader is too big for 0xA000 on a classic ESP32), and the RTC area it hands over through
+CONFIG_PARTITION_TABLE_OFFSET=0xC000
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC=y
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE=0x14
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+CONFIG_FREERTOS_HZ=1000
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# no Bluetooth: one radio, and the RAM is the point
+CONFIG_BT_ENABLED=n

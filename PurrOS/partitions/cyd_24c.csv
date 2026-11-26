@@ -1,0 +1,11 @@
+# Name,   Type, SubType, Offset,  Size
+#
+# PURR OS Mini on the CYD 2.4C (classic ESP32, 4 MB flash, no PSRAM; RemoteDisplay/SPEC.md section 6). The PURR bootloader sits at 0x1000 on a classic ESP32 (the S3 boards use 0x0), and at its
+# current size (38 KB) it does not fit under the usual table offset 0xA000 (36 KB from 0x1000): on this board the table is at 0xC000 (CONFIG_PARTITION_TABLE_OFFSET in both
+# bootloader/sdkconfig.board.cyd_24c and PurrOSMini/sdkconfig.defaults), which leaves the bootloader 44 KB. There is no boot package, no KittenOS and no recovery loader: the bootloader boots
+# the `kernel` slot when it passes its check and otherwise resets. Wi-Fi credentials and the pairing keys live in `nvs`. 0x1C0000 to the end of the flash (2.25 MB) is free: room for a second
+# slot a host can push an update into, and for the bitmap cache.
+nvs,      data, nvs,     0xD000,  0x4000
+purrcfg,  data, 0x40,    0x11000, 0x2000
+phy_init, data, phy,     0x13000, 0x1000
+kernel,   app,  ota_0,   0x20000, 0x1A0000
