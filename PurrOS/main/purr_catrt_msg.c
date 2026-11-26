@@ -38,6 +38,8 @@ static const char *TAG = "msg";
 #define SCRATCH_BYTES 12288
 #define BOOK_TEXT_MAX 16384
 
+#define MAX_PEERS 32
+
 typedef struct {
     int used, id;
     char app[32];
@@ -47,6 +49,8 @@ typedef struct {
     uint32_t image_max;
     uint32_t q[QUEUE_MAX];
     int nq;
+    int npeers;                                         /* the people the service says it knows (peers_set) */
+    struct { char addr[40]; char name[24]; } peers[MAX_PEERS];
 } svc_t;
 
 static SemaphoreHandle_t s_mx;
@@ -725,12 +729,80 @@ static uint32_t cc_take_open_request(void)
     return t;
 }
 
+static void cc_peers_clear(void)
+{
+    char app[32];
+    if (gate_msg() != 0 || caller_app(app, sizeof(app)) < 0) {
+        return;
+    }
+    lock();
+    svc_t *s = svc_by_app(app);
+    if (s != NULL) {
+        s->npeers = 0;
+    }
+    unlock();
+}
+
+static int cc_peers_set(const char *addr, const char *name)
+{
+    char app[32];
+    int g = gate_msg();
+    if (g != 0) {
+        return g;
+    }
+    if (caller_app(app, sizeof(app)) < 0 || addr == NULL || addr[0] == '\0') {
+        return PURR_MSGCC_BAD;
+    }
+    lock();
+    svc_t *s = svc_by_app(app);
+    int rc = PURR_MSGCC_NOSERVICE;
+    if (s != NULL) {
+        int k = -1;
+        for (int i = 0; i < s->npeers; i++) {
+            if (strcmp(s->peers[i].addr, addr) == 0) {
+                k = i;
+            }
+        }
+        if (k < 0) {
+            k = s->npeers < MAX_PEERS ? s->npeers++ : MAX_PEERS - 1;       /* a full list gives up its last place */
+        }
+        copy(s->peers[k].addr, sizeof(s->peers[k].addr), addr);
+        copy(s->peers[k].name, sizeof(s->peers[k].name), name ? name : "");
+        rc = PURR_MSGCC_OK;
+    }
+    unlock();
+    return rc;
+}
+
+static int cc_peers(const char *service, int i, char *addr, size_t addr_cap, char *name, size_t name_cap)
+{
+    int g = gate_msg();
+    if (g != 0) {
+        return g;
+    }
+    int found = 0;
+    lock();
+    for (int k = 0; k < MAX_SVC && service != NULL; k++) {
+        if (s_svc[k].used && strcmp(s_svc[k].key, service) == 0 && purr_catrt_slot_of(s_svc[k].app) >= 0) {
+            if (i >= 0 && i < s_svc[k].npeers) {
+                if (addr != NULL) copy(addr, addr_cap, s_svc[k].peers[i].addr);
+                if (name != NULL) copy(name, name_cap, s_svc[k].peers[i].name);
+                found = 1;
+            }
+            break;
+        }
+    }
+    unlock();
+    return found;
+}
+
 static const purr_cc_messaging_t s_cc_msg = {
-    .version = 1,
+    .version = 2,
     .service_register = cc_service_register, .service_online = cc_service_online, .next_outgoing = cc_next_outgoing, .delivery = cc_delivery, .incoming = cc_incoming,
     .services = cc_services, .threads = cc_threads, .messages = cc_messages, .send = cc_send, .mark_read = cc_mark_read, .remove_thread = cc_remove_thread,
     .subscribe = cc_subscribe, .usage = cc_usage, .set_limit = cc_set_limit, .export_all = cc_export_all, .trim = cc_trim,
     .open_thread = cc_open_thread, .take_open_request = cc_take_open_request, .thread_for = cc_thread_for,
+    .peers_clear = cc_peers_clear, .peers_set = cc_peers_set, .peers = cc_peers,
 };
 
 /* ---------------------------------------------------------------- the contacts catcall */

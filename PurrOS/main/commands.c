@@ -4532,6 +4532,10 @@ extern const uint8_t _binary_lora_sx126x_cat_end[];
 extern const uint8_t _binary_meshtastic_cat_start[];
 extern const uint8_t _binary_meshtastic_cat_end[];
 #endif
+#ifdef PURR_EMBED_MESSAGES
+extern const uint8_t _binary_messages_cat_start[];
+extern const uint8_t _binary_messages_cat_end[];
+#endif
 
 static const temp_module_asset_t s_temp_drivers[] = {
     {"w5500.cat", s_w5500_driver_module, sizeof(s_w5500_driver_module)},      /* only in a VM: temp_driver_wanted() */
@@ -4615,6 +4619,26 @@ static int fs_file_is(const char *path, const uint8_t *want, uint32_t want_len)
     return c.same && c.pos == want_len;
 }
 
+
+#if defined(PURR_EMBED_MESHTASTIC) || defined(PURR_EMBED_MESSAGES)
+/* An app this image carries (optional files under out/link, main/CMakeLists.txt): planted in /apps/<name>/package.cat, the folder the runtime looks in after a user's own. */
+static void plant_carried_app(purr_cli_t *cli, const char *name, const uint8_t *data, uint32_t len, int only_if_missing)
+{
+    char dir[40], path[64];
+    snprintf(dir, sizeof(dir), "/apps/%s", name);
+    snprintf(path, sizeof(path), "/apps/%s/package.cat", name);
+    purr_fs_mkdir(&s_fs, "/apps");
+    purr_fs_mkdir(&s_fs, dir);
+    if (!(only_if_missing && fs_file_is(path, data, len))) {
+        if (purr_fs_write(&s_fs, path, data, len) < 0) {
+            purr_cli_printf(cli, "could not plant %s\n", path);
+        } else {
+            purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)len);
+        }
+    }
+}
+#endif
+
 static int plant_temp_modules_ex(purr_cli_t *cli, int only_if_missing)
 {
     if (!need_fs(cli)) return 1;
@@ -4697,19 +4721,10 @@ static int plant_temp_modules_ex(purr_cli_t *cli, int only_if_missing)
     }
 #endif
 #ifdef PURR_EMBED_MESHTASTIC
-    {   /* the Meshtastic app (Apps/meshtastic), for every user: /apps/<name>/package.cat is where the runtime looks after a user's own folder */
-        const char *path = "/apps/meshtastic/package.cat";
-        uint32_t plen = (uint32_t)(_binary_meshtastic_cat_end - _binary_meshtastic_cat_start);
-        purr_fs_mkdir(&s_fs, "/apps");
-        purr_fs_mkdir(&s_fs, "/apps/meshtastic");
-        if (!(only_if_missing && fs_file_is(path, _binary_meshtastic_cat_start, plen))) {
-            if (purr_fs_write(&s_fs, path, _binary_meshtastic_cat_start, plen) < 0) {
-                purr_cli_printf(cli, "could not plant %s\n", path);
-            } else {
-                purr_cli_printf(cli, "planted %s (%u bytes)\n", path, (unsigned)plen);
-            }
-        }
-    }
+    plant_carried_app(cli, "meshtastic", _binary_meshtastic_cat_start, (uint32_t)(_binary_meshtastic_cat_end - _binary_meshtastic_cat_start), only_if_missing);
+#endif
+#ifdef PURR_EMBED_MESSAGES
+    plant_carried_app(cli, "messages", _binary_messages_cat_start, (uint32_t)(_binary_messages_cat_end - _binary_messages_cat_start), only_if_missing);
 #endif
     plant_drv_t pd = {cli, only_if_missing, 0};
     if (purr_drvpart_each(plant_slot_cb, &pd) < 0) {
@@ -6859,6 +6874,31 @@ static void recover_drivers_task(void *arg)
 }
 
 
+#if CONFIG_PURR_PROFILE_FULL && (defined(PURR_EMBED_MESHTASTIC) || defined(PURR_EMBED_MESSAGES))
+/* The apps the image carries go into the signed-in user's own apps, the folder the launcher lists, by the same install any app takes; an older copy is replaced. */
+static void install_carried_app(const char *name, const uint8_t *data, uint32_t len)
+{
+    const purr_user_t *u = purr_login_current();
+    if (u == NULL || u->name[0] == '\0') {
+        return;
+    }
+    char path[96], src[64], msg[96];
+    snprintf(path, sizeof(path), "/home/%s/apps/%s/package.cat", u->name, name);
+    snprintf(src, sizeof(src), "/apps/%s/package.cat", name);
+    int isdir = 0;
+    uint32_t sz = 0;
+    int have = purr_fs_stat(&s_fs, path, &isdir, &sz) == 0;
+    if (have && !fs_file_is(path, data, len)) {
+        purr_apps_remove(name);                                       /* a different version is carried: replace the installed one (its folder of data stays) */
+        have = 0;
+    }
+    if (!have) {
+        int r = purr_apps_install(src, msg, sizeof(msg));
+        ESP_LOGI("apps", "carried app %s: %s (%s)", name, r == 0 ? "installed" : "not installed", msg);
+    }
+}
+#endif
+
 static void late_drivers_task(void *arg)
 {
     (void)arg;
@@ -6871,25 +6911,10 @@ static void late_drivers_task(void *arg)
     s_drv_mode = 0;
     purr_hwsetup_boot(&cli);                            /* bind the devices whose drivers have just arrived */
 #ifdef PURR_EMBED_MESHTASTIC
-    {   /* the app the image carries (planted in /apps/meshtastic) goes into the signed-in user's own apps, the folder the launcher lists, by the same install any app takes */
-        const purr_user_t *u = purr_login_current();
-        if (u != NULL && u->name[0] != '\0') {
-            char path[96], msg[96];
-            snprintf(path, sizeof(path), "/home/%s/apps/meshtastic/package.cat", u->name);
-            int isdir = 0;
-            uint32_t sz = 0;
-            uint32_t plen = (uint32_t)(_binary_meshtastic_cat_end - _binary_meshtastic_cat_start);
-            int have = purr_fs_stat(&s_fs, path, &isdir, &sz) == 0;
-            if (have && !fs_file_is(path, _binary_meshtastic_cat_start, plen)) {
-                purr_apps_remove("meshtastic");            /* the image carries a different version: the installed one is replaced (its own folder of data stays) */
-                have = 0;
-            }
-            if (!have) {
-                int r = purr_apps_install("/apps/meshtastic/package.cat", msg, sizeof(msg));
-                ESP_LOGI("apps", "carried app meshtastic: %s (%s)", r == 0 ? "installed" : "not installed", msg);
-            }
-        }
-    }
+    install_carried_app("meshtastic", _binary_meshtastic_cat_start, (uint32_t)(_binary_meshtastic_cat_end - _binary_meshtastic_cat_start));
+#endif
+#ifdef PURR_EMBED_MESSAGES
+    install_carried_app("messages", _binary_messages_cat_start, (uint32_t)(_binary_messages_cat_end - _binary_messages_cat_start));
 #endif
     if (xTaskCreate(settle_task, "drv-settle", 4096, NULL, 3, NULL) != pdPASS) {
         purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);

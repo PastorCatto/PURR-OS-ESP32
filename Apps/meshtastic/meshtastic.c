@@ -412,6 +412,38 @@ static void who(char *out, size_t cap, uint32_t num)                    /* a sho
     }
 }
 
+/* The channels are chats from the moment the service runs (LongFast among them): Messages lists them without anyone starting one. */
+static void publish_channels(void)
+{
+    for (int i = 0; i < PURR_MT_MAX_CHANNELS; i++) {
+        if (s_cfg.ch[i].role != 0) {
+            char peer[16];
+            peer[0] = '#';
+            copy(peer + 1, sizeof(peer) - 1, s_cfg.ch[i].name);
+            msg->thread_for("meshtastic", peer, s_cfg.ch[i].name);
+        }
+    }
+}
+
+/* The nodes heard, as the people a new chat can be started with (Messages: New message > Meshtastic). */
+static void publish_peers(void)
+{
+    if (msg->version < 2 || msg->peers_clear == NULL) {
+        return;
+    }
+    msg->peers_clear();
+    int total = purr_mt_node_count(&s_node);
+    for (int i = 0; i < total; i++) {
+        const purr_mt_nodeinfo_t *n = purr_mt_node_at(&s_node, i);
+        if (n == NULL || n->num == s_node.cfg.my_num) {
+            continue;
+        }
+        char addr[12];
+        node_name(addr, n->num);
+        msg->peers_set(addr, n->long_name[0] != '\0' ? n->long_name : (n->short_name[0] != '\0' ? n->short_name : addr));
+    }
+}
+
 static void deliver_events(void)
 {
     purr_mt_event_t e;
@@ -515,10 +547,12 @@ static void ago(char *dst, size_t cap, uint32_t ms)
     }
 }
 
+
 static void restart_service(void)                                       /* after a setting changed: the node is built again and the radio asked for with the new modem settings */
 {
     save_config();
     start_node();
+    publish_channels();
     s_lease_not_before = 0;
     try_lease();
 }
@@ -1037,6 +1071,13 @@ static void pump(void)
     deliver_events();
     static uint32_t last_count_ms, last_saved_ms;
     static int last_count = -1, saved_count = -1;
+    static uint32_t last_peers_ms;
+    static int peers_count = -1;
+    if (t - last_peers_ms >= 15000u && purr_mt_node_count(&s_node) != peers_count) {      /* the people list follows the node list */
+        last_peers_ms = t;
+        peers_count = purr_mt_node_count(&s_node);
+        publish_peers();
+    }
     if (t - last_saved_ms >= 60000u) {                                  /* the node list is kept in a file, once a minute when it changed */
         last_saved_ms = t;
         int c = purr_mt_node_count(&s_node);
@@ -1097,6 +1138,9 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
     s_service = msg->service_register("meshtastic", "Meshtastic", "MTS", PURR_MT_TEXT_MAX, PURR_MSGCC_IMG_NONE, 0, 1);
     if (s_service < 0) {
         say("meshtastic: the messaging service was not accepted (permission?)\n");
+    } else {
+        publish_channels();
+        publish_peers();
     }
     try_lease();
     s_timer = sc->timer_start(TICK_MS, 1);

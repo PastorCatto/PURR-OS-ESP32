@@ -54,7 +54,7 @@ idf_component_register(SRCS ${main_srcs} REQUIRES ${main_reqs})
 # Signed files carried in this image for a device that has no way to fetch them yet, planted like the firmware's own drivers: the proximity link's driver (loaded after sign-in), the LoRa
 # radio's driver and the Meshtastic app (planted in /apps). Each is optional: with no file nothing is embedded and it comes from the driver index or the Store as usual. They are made by
 # purrstrap modules build and signed with the developer key (docs: plan1.md, plan9.md); a newer one from the Store replaces the planted one.
-foreach(carried proximity lora-sx126x meshtastic)
+foreach(carried proximity lora-sx126x meshtastic messages)
     string(TOUPPER "${carried}" carried_up)
     string(REPLACE "-" "_" carried_up "${carried_up}")
     if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../out/link/${carried}.cat" AND NOT CONFIG_PURR_PROFILE_RECOVERY)

@@ -600,6 +600,12 @@ typedef struct {
     uint32_t (*take_open_request)(void);
     /* The thread for (service, peer), made if there is none: so a front end can start one. Returns the thread id or < 0. */
     int  (*thread_for)(const char *service, const char *peer, const char *peer_name);
+    /* ---- version 2: the people a service knows about (nodes it has heard, say), so a front end can offer them when someone starts a chat
+     * Service side: peers_clear() empties the service's list; peers_set(addr, name) adds one (or renames it); up to 32. Front end side: peers() returns the i-th one of a
+     * service (1 and the address and name, or 0), so "New message" can list people instead of asking for an address. A front end checks `version >= 2` first. */
+    void (*peers_clear)(void);
+    int  (*peers_set)(const char *addr, const char *name);
+    int  (*peers)(const char *service, int i, char *addr, size_t addr_cap, char *name, size_t name_cap);
 } purr_cc_messaging_t;
 
 /* ---------------------------------------------------------------- contacts */

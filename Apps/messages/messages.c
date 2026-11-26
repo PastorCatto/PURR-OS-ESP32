@@ -28,7 +28,7 @@ static const purr_cc_files_t *fl;
 static const purr_cc_system_t *sys2;
 static const purr_cc_app_t *app;
 
-enum { PG_LIST, PG_THREAD, PG_NEW, PG_NEW_ADDR, PG_PAIRS, PG_ATTACH, PG_EMOJI, PG_SERVICES, PG_FULL, PG_WAIT, PG_NOTE };
+enum { PG_LIST, PG_THREAD, PG_NEW, PG_NEW_ADDR, PG_PAIRS, PG_ATTACH, PG_EMOJI, PG_SERVICES, PG_FULL, PG_WAIT, PG_NOTE, PG_PEERS, PG_CONTACT };
 static int s_page, s_prev;                          /* the page on show, and the one Back returns to from a side page */
 static int s_retry;                                 /* what to redo when a permission answer arrives: 1 = start, 2 = the page on show */
 
@@ -48,6 +48,11 @@ static purr_cc_msg_service_t s_sv[4];
 static int s_nsv;
 static int h_more, h_older, h_input, h_send, h_emoji, h_attach, h_start, h_addr, h_name, h_a, h_b, h_c;
 static int s_sel_svc;                               /* the service chosen on the New page */
+static int h_contact, h_cname, h_csave, h_typed;    /* the contact row on a thread, the new-contact page's name field and Save, the "type an address" row */
+/* the people a service says it knows (the nodes Meshtastic has heard) */
+#define MAX_PEOPLE 24
+static char s_ppl_addr[MAX_PEOPLE][40], s_ppl_name[MAX_PEOPLE][24];
+static int s_ppl_row[MAX_PEOPLE], s_nppl;
 
 /* a pair of (contact, service address) on the contact chooser */
 static char s_pair_svc[MAX_PAIRS][16], s_pair_addr[MAX_PAIRS][40], s_pair_name[MAX_PAIRS][24];
@@ -234,7 +239,7 @@ NO_OPT static void show_list(void)
         if (t->last_dir == PURR_MSGCC_OUT) {
             append(sub, t->last_state == PURR_MSGCC_FAILED ? "Not sent: " : "You: ", 64);
         }
-        append(sub, t->last[0] ? t->last : "Picture", 64);
+        append(sub, t->last[0] ? t->last : (t->last_time == 0 ? "No messages yet" : "Picture"), 64);
         fmt_time(t->last_time, tm, sizeof(tm));
         unread_total += (int)t->unread;
         s_row[s_nrows] = ui->conv_row(t->name[0] ? t->name : t->peer, sub, tm, svc_tag(t->service),
@@ -294,6 +299,11 @@ NO_OPT static void show_thread(uint32_t id)
     ui->win_back(1);
     ui->win_action(PURR_UI_ACT_NONE);
     ui->win_title(s_name[0] ? s_name : s_peer);
+    h_contact = 0;
+    if (ct != NULL && s_peer[0] != '#' && s_peer[0] != '\0') {          /* a person (not a channel): saved in Contacts or not */
+        uint32_t cid = ct->find(s_svc, s_peer);
+        h_contact = ui->row(cid != 0 ? "In your contacts" : "Not in your contacts", cid != 0 ? "Open Contacts to change them" : "Tap to save this person");
+    }
     int n = mq->messages(id, s_skip, s_msgs, MAX_SHOWN);
     h_older = 0;
     if (n >= MAX_SHOWN) {
@@ -363,11 +373,59 @@ NO_OPT static void show_new(void)
         t[0] = '\0';
         append(t, "On ", 48);
         append(t, s_sv[i].name, 48);
-        s_emoji_h[i] = ui->row(t, "Type the other person's address");     /* reuse the array for the row handles */
+        char first[40], fname[24];
+        int has = mq->version >= 2 && mq->peers != NULL && mq->peers(s_sv[i].key, 0, first, sizeof(first), fname, sizeof(fname)) == 1;
+        s_emoji_h[i] = ui->row(t, has ? "Choose from the people it has found" : "Type the other person's address");     /* reuse the array for the row handles */
     }
     if (s_nsv == 0) {
         ui->label("No messaging app is running.", PURR_UI_ROLE_DIM);
     }
+}
+
+NO_OPT static void show_peers(int svc)
+{
+    s_page = PG_PEERS;
+    s_sel_svc = svc;
+    s_nppl = 0;
+    ui->clear();
+    ui->win_back(1);
+    ui->win_action(PURR_UI_ACT_NONE);
+    char t[48];
+    t[0] = '\0';
+    append(t, s_sv[svc].name, 48);
+    ui->win_title(t);
+    for (int i = 0; i < MAX_PEOPLE; i++) {
+        if (mq->peers(s_sv[svc].key, i, s_ppl_addr[s_nppl], sizeof(s_ppl_addr[0]), s_ppl_name[s_nppl], sizeof(s_ppl_name[0])) != 1) {
+            break;
+        }
+        s_ppl_row[s_nppl] = ui->row(s_ppl_name[s_nppl][0] ? s_ppl_name[s_nppl] : s_ppl_addr[s_nppl], s_ppl_addr[s_nppl]);
+        s_nppl++;
+    }
+    if (s_nppl == 0) {
+        ui->label("Nobody found yet. Nodes appear here as they are heard.", PURR_UI_ROLE_DIM);
+    }
+    h_typed = ui->row("Type an address", "For someone not in the list");
+}
+
+NO_OPT static void show_contact(void)
+{
+    s_page = PG_CONTACT;
+    ui->clear();
+    ui->win_back(1);
+    ui->win_action(PURR_UI_ACT_NONE);
+    ui->win_title("New contact");
+    ui->label("Name", PURR_UI_ROLE_DIM);
+    h_cname = ui->input_line(23, "name");
+    ui->set_text(h_cname, s_name[0] ? s_name : s_peer);
+    int si = svc_index(s_svc);
+    char l[72];
+    l[0] = '\0';
+    append(l, si >= 0 ? s_sv[si].name : s_svc, 72);
+    append(l, ": ", 72);
+    append(l, s_peer, 72);
+    ui->label(l, PURR_UI_ROLE_DIM);
+    h_csave = ui->button("Save contact");
+    ui->focus(h_cname);
 }
 
 NO_OPT static void show_new_addr(int svc)
@@ -644,7 +702,11 @@ NO_OPT static void go_back(void)
         break;
     case PG_NEW_ADDR:
     case PG_PAIRS:
+    case PG_PEERS:
         show_new();
+        break;
+    case PG_CONTACT:
+        show_thread(s_thread);
         break;
     case PG_ATTACH:
     case PG_EMOJI:
@@ -687,6 +749,13 @@ NO_OPT static void on_click(int h)
             save_draft();
             s_skip += MAX_SHOWN;
             show_thread(s_thread);
+        } else if (h_contact > 0 && h == h_contact) {
+            if (ct != NULL && ct->find(s_svc, s_peer) != 0) {
+                ui->status("Already in your contacts", 0);
+            } else {
+                save_draft();
+                show_contact();
+            }
         }
     } else if (s_page == PG_NEW) {
         if (h_a > 0 && h == h_a) {
@@ -695,8 +764,40 @@ NO_OPT static void on_click(int h)
         }
         for (int i = 0; i < s_nsv; i++) {
             if (s_emoji_h[i] == h) {
-                show_new_addr(i);
+                char a[40], nm[24];
+                if (mq->version >= 2 && mq->peers != NULL && mq->peers(s_sv[i].key, 0, a, sizeof(a), nm, sizeof(nm)) == 1) {
+                    show_peers(i);
+                } else {
+                    show_new_addr(i);
+                }
                 return;
+            }
+        }
+    } else if (s_page == PG_PEERS) {
+        if (h_typed > 0 && h == h_typed) {
+            show_new_addr(s_sel_svc);
+            return;
+        }
+        for (int i = 0; i < s_nppl; i++) {
+            if (s_ppl_row[i] == h) {
+                go_thread_for(s_sv[s_sel_svc].key, s_ppl_addr[i], s_ppl_name[i]);
+                return;
+            }
+        }
+    } else if (s_page == PG_CONTACT) {
+        if (h == h_csave) {
+            char nm[24];
+            ui->get_text(h_cname, nm, sizeof(nm));
+            if (nm[0] == '\0') {
+                ui->status("Give them a name first", 1);
+                return;
+            }
+            int id = ct->add(nm);
+            if (id > 0 && ct->set_addr((uint32_t)id, s_svc, s_peer) == 0) {
+                ui->status("Saved to contacts", 0);
+                show_thread(s_thread);
+            } else if (!explain(id, 2)) {
+                ui->status("Could not save the contact", 1);
             }
         }
     } else if (s_page == PG_NEW_ADDR) {
