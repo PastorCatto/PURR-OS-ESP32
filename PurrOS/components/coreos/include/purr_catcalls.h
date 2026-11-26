@@ -55,6 +55,8 @@ typedef struct {
     int  (*request_focus)(void);
     /* Post a bus event to this app's own queue (a way to defer work out of a callback). */
     int  (*post_self)(const char *name, const char *data);
+    /* Version 2 (ask for it with catcall_get("app", 2)): step back to the start screen without closing, as the home key does. A background app keeps running. */
+    void (*go_home)(void);
 } purr_cc_app_t;
 
 /* -------------------------------------------------------------------- sched */

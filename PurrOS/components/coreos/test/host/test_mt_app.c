@@ -12,8 +12,12 @@
 
 static uint32_t clock_ms = 5000;
 static char console_log[512];
-static uint8_t file_data[sizeof(config_t) + 64];
-static int file_len, file_open, file_pos;
+/* two files in the app's folder: config.bin and nodes.bin; anything else (join.txt, link.txt) reads as missing and writes go nowhere */
+static uint8_t file_data[2][sizeof(config_t) + 64 + PURR_MT_MAX_NODES * (sizeof(purr_mt_nodeinfo_t) + 8)];
+static int file_len[2], file_pos[2], file_which[8];
+static int file_open;
+
+static int which_file(const char *p) { return strcmp(p, "config.bin") == 0 ? 0 : (strcmp(p, "nodes.bin") == 0 ? 1 : -1); }
 
 static void f_print(const char *s) { strncat(console_log, s, sizeof(console_log) - strlen(console_log) - 1); }
 static uint32_t f_uptime(void) { return clock_ms; }
@@ -24,26 +28,27 @@ static void f_timer_cancel(int id) { (void)id; }
 
 static int f_open(const char *p, int flags)
 {
-    if (strcmp(p, "config.bin") != 0) {                                 /* join.txt and link.txt: nothing to read, writes go nowhere */
+    int w = which_file(p);
+    if (w < 0) {
         return (flags & PURR_CC_O_WRITE) ? 4 : -1;
     }
-    file_open = 1;
-    file_pos = 0;
+    file_pos[w] = 0;
     if (flags & PURR_CC_O_TRUNC) {
-        file_len = 0;
+        file_len[w] = 0;
     }
-    if (!(flags & PURR_CC_O_WRITE) && file_len == 0) {
-        file_open = 0;
+    if (!(flags & PURR_CC_O_WRITE) && file_len[w] == 0) {
         return -1;
     }
-    return 3;
+    file_open = 1;
+    file_which[0] = w;
+    return 3 + w * 10;                                                  /* 3 for config.bin, 13 for nodes.bin */
 }
 static int f_read(int h, void *b, size_t n)
 {
-    (void)h;
-    size_t k = (size_t)(file_len - file_pos) < n ? (size_t)(file_len - file_pos) : n;
-    memcpy(b, file_data + file_pos, k);
-    file_pos += (int)k;
+    int w = h == 13;
+    size_t k = (size_t)(file_len[w] - file_pos[w]) < n ? (size_t)(file_len[w] - file_pos[w]) : n;
+    memcpy(b, file_data[w] + file_pos[w], k);
+    file_pos[w] += (int)k;
     return (int)k;
 }
 static int f_write(int h, const void *b, size_t n)
@@ -51,8 +56,9 @@ static int f_write(int h, const void *b, size_t n)
     if (h == 4) {
         return (int)n;
     }
-    memcpy(file_data + file_len, b, n);
-    file_len += (int)n;
+    int w = h == 13;
+    memcpy(file_data[w] + file_len[w], b, n);
+    file_len[w] += (int)n;
     return (int)n;
 }
 static int f_close(int h) { (void)h; file_open = 0; return 0; }
@@ -152,6 +158,8 @@ static void u_focus(int h) { (void)h; }
 static void u_status(const char *m, int bad) { (void)m; (void)bad; }
 static purr_cc_ui_t s_ui = {.version = 5};
 static void a_close(void) { closed++; }
+static int went_home;
+static void a_home(void) { went_home++; }
 static purr_cc_app_t s_app = {.version = 1};
 static purr_cc_contacts_t s_con_tab = {.version = 1};
 static uint32_t contact_found;
@@ -266,6 +274,8 @@ int main(void)
     s_ui.win_title = u_title; s_ui.win_action = u_action; s_ui.win_back = u_back; s_ui.clear = u_clear; s_ui.label = u_label; s_ui.button = u_button;
     s_ui.row = u_row; s_ui.spacer = u_spacer; s_ui.input_line = u_input; s_ui.set_text = u_set_text; s_ui.get_text = u_get_text; s_ui.focus = u_focus; s_ui.status = u_status;
     s_app.close_self = a_close;
+    s_app.go_home = a_home;
+    s_app.version = 2;
     s_con_tab.find = c_find;
     s_con_tab.add = c_add;
     s_con_tab.set_addr = c_set_addr;
@@ -284,7 +294,7 @@ int main(void)
     /* a first start: it registers, writes its defaults and takes the radio on US LongFast (906.875 MHz, SF11, 250 kHz, sync 0x24B4) */
     CHECK_EQ(on_create(&env, NULL, 0), 0);
     CHECK_EQ(service_calls, 1);
-    CHECK(file_len == (int)sizeof(config_t));
+    CHECK(file_len[0] == (int)sizeof(config_t));
     CHECK_EQ(lease_calls, 1);
     CHECK(last_cfg.freq_hz == 906875000u && last_cfg.bw_hz == 250000 && last_cfg.sf == 11 && last_cfg.cr == 5 && last_cfg.sync_word == 0x24B4 && last_cfg.crc_on == 1 && last_cfg.preamble == 16);
     CHECK(last_cfg.tx_dbm == 22);
@@ -419,7 +429,7 @@ int main(void)
 
     /* the app's own screens: home, nodes, a node's thread, settings (the region changes the radio), joining from a link, back */
     CHECK_EQ(on_create(&env, NULL, 0), 0);
-    CHECK(strcmp(ui_title, "Meshtastic") == 0 && ui_buttons_made == 4);
+    CHECK(strcmp(ui_title, "Meshtastic") == 0 && ui_buttons_made == 5);
     purr_mt_node_announce(&other, clock_ms);                            /* the other device says who it is, so there is a node to list */
     for (int i = 0; i < 400; i++) {
         uint8_t f[255];
@@ -510,9 +520,22 @@ int main(void)
         on_event(&bk);
         c.arg = s_h_btn[2];
     }
-    CHECK(closed == 0);
-    on_event(&bk);                                                      /* back from the first page closes the app */
+    CHECK(closed == 0 && went_home == 0);
+    on_event(&bk);                                                      /* Back from the first page steps to the start screen and leaves the service running */
+    CHECK(closed == 0 && went_home == 1);
+    c.arg = s_h_btn[4];
+    on_event(&c);                                                       /* "Stop Meshtastic" is how it is switched off */
     CHECK(closed == 1);
+
+    /* the node list is kept in a file and comes back after a restart, with how long ago each was heard */
+    CHECK(file_len[1] > 8);
+    int known = purr_mt_node_count(&s_node);
+    on_destroy(0);
+    CHECK(file_len[1] > 8);
+    lease_rc = 0;
+    CHECK_EQ(on_create(&env, NULL, 0), 0);
+    CHECK_EQ(purr_mt_node_count(&s_node), known);
+    CHECK(purr_mt_node_find(&s_node, 0xBEEF) != NULL && purr_mt_node_find(&s_node, 0xBEEF)->long_name[0] != '\0');
 
     /* a busy radio at the start is retried */
     on_destroy(0);

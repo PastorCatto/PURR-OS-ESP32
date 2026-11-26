@@ -791,9 +791,11 @@ static int cc_post_self(const char *name, const char *data)
     return 0;
 }
 
+static void cc_go_home(void) { purr_catrt_home(); }
+
 static const purr_cc_app_t s_cc_app = {
-    .version = 1, .info = cc_app_info, .close_self = cc_close_self,
-    .request_focus = cc_request_focus, .post_self = cc_post_self,
+    .version = 2, .info = cc_app_info, .close_self = cc_close_self,
+    .request_focus = cc_request_focus, .post_self = cc_post_self, .go_home = cc_go_home,
 };
 
 static uint32_t cc_uptime_ms(void)

@@ -57,6 +57,7 @@ static purr_mt_t s_node;
 static int s_service = -1;
 static int s_timer = -1;
 static int s_leased;
+static int s_lease_rc;                              /* what the radio catcall answered at the last try (0 = got it) */
 static uint32_t s_lease_try_ms;
 static uint32_t s_lease_not_before;         /* after handing the radio back: not asked for again before this time */
 static struct { uint32_t pkt, msg; } s_sent[8];
@@ -337,6 +338,7 @@ static void try_lease(void)
     purr_cc_radio_cfg_t r;
     radio_cfg(&r);
     int rc = rad->lease(&r);
+    s_lease_rc = rc;
     s_lease_try_ms = now_ms();
     if (rc == PURR_RADIO_OK) {
         s_leased = 1;
@@ -544,7 +546,7 @@ static void page_begin(int page, const char *title, int app_handles_back)
 
 static void show_home(void)
 {
-    page_begin(P_HOME, "Meshtastic", 0);
+    page_begin(P_HOME, "Meshtastic", 1);                              /* Back here steps to the start screen and leaves the service running */
     char line[80];
     if (s_leased) {
         purr_cc_radio_cfg_t r;
@@ -578,6 +580,7 @@ static void show_home(void)
     s_h_btn[1] = ui->button("Channels");
     s_h_btn[2] = ui->button("Join a group");
     s_h_btn[3] = ui->button("Settings");
+    s_h_btn[4] = ui->button("Stop Meshtastic");
 }
 
 static void show_nodes(void)
@@ -768,6 +771,7 @@ static void click(int h)
         else if (h == s_h_btn[1]) show_channels();
         else if (h == s_h_btn[2]) show_join();
         else if (h == s_h_btn[3]) show_settings();
+        else if (h == s_h_btn[4] && app != NULL) app->close_self();      /* the only way to switch the service off */
         break;
     case P_NODES:
         for (int i = 0; i < s_rows; i++) {
@@ -899,9 +903,67 @@ static void go_back(void)
     case P_SHARE: show_channels(); break;
     case P_NODE: show_nodes(); break;
     case P_JOIN: show_channels(); break;
-    case P_HOME: if (app != NULL) app->close_self(); break;
+    case P_HOME:
+        if (app != NULL && app->version >= 2 && app->go_home != NULL) {
+            app->go_home();
+        } else if (app != NULL) {
+            app->close_self();
+        }
+        break;
     default: show_home(); break;
     }
+}
+
+
+/* ---------------------------------------------------------------- the node list survives a restart */
+
+#define NODES_MAGIC 0x4E444231u                         /* "NDB1" */
+
+static void save_nodes(void)
+{
+    if (stg == NULL) {
+        return;
+    }
+    int h = stg->open("nodes.bin", PURR_CC_O_WRITE | PURR_CC_O_CREATE | PURR_CC_O_TRUNC);
+    if (h < 0) {
+        return;
+    }
+    uint32_t hdr[2] = {NODES_MAGIC, (uint32_t)sizeof(purr_mt_nodeinfo_t)};
+    stg->write(h, hdr, sizeof(hdr));
+    uint32_t now = now_ms();
+    for (int i = 0; i < PURR_MT_MAX_NODES; i++) {
+        purr_mt_nodeinfo_t n = s_node.nodes[i];
+        if (n.num == 0) {
+            continue;
+        }
+        n.last_heard_ms = now - n.last_heard_ms;         /* stored as how long ago: the clock starts again at the next start */
+        stg->write(h, &n, sizeof(n));
+    }
+    stg->close(h);
+}
+
+static void load_nodes(void)
+{
+    if (stg == NULL) {
+        return;
+    }
+    int h = stg->open("nodes.bin", PURR_CC_O_READ);
+    if (h < 0) {
+        return;
+    }
+    uint32_t hdr[2] = {0, 0};
+    if (stg->read(h, hdr, sizeof(hdr)) == (int)sizeof(hdr) && hdr[0] == NODES_MAGIC && hdr[1] == sizeof(purr_mt_nodeinfo_t)) {
+        uint32_t now = now_ms();
+        int k = 0;
+        purr_mt_nodeinfo_t n;
+        while (k < PURR_MT_MAX_NODES && stg->read(h, &n, sizeof(n)) == (int)sizeof(n)) {
+            if (n.num != 0 && n.num != s_node.cfg.my_num) {
+                n.last_heard_ms = now >= n.last_heard_ms ? now - n.last_heard_ms : 1;
+                s_node.nodes[k++] = n;
+            }
+        }
+    }
+    stg->close(h);
 }
 
 /* ---------------------------------------------------------------- the loop */
@@ -926,7 +988,14 @@ static void report(void)                                                /* one l
     cat_num(line, sizeof(line), s_n_tx);
     cat(line, sizeof(line), ", nodes ");
     cat_num(line, sizeof(line), (uint32_t)purr_mt_node_count(&s_node));
-    cat(line, sizeof(line), s_leased ? ", radio held" : ", radio NOT held");
+    cat(line, sizeof(line), s_leased ? ", radio held" : ", radio NOT held (lease answer ");
+    if (!s_leased) {
+        char rc[8];
+        utoa_(rc, (uint32_t)(s_lease_rc < 0 ? -s_lease_rc : s_lease_rc));
+        cat(line, sizeof(line), s_lease_rc < 0 ? "-" : "");
+        cat(line, sizeof(line), rc);
+        cat(line, sizeof(line), ")");
+    }
     cat(line, sizeof(line), "\n");
     say(line);
 }
@@ -966,8 +1035,16 @@ static void pump(void)
         }
     }
     deliver_events();
-    static uint32_t last_count_ms;
-    static int last_count = -1;
+    static uint32_t last_count_ms, last_saved_ms;
+    static int last_count = -1, saved_count = -1;
+    if (t - last_saved_ms >= 60000u) {                                  /* the node list is kept in a file, once a minute when it changed */
+        last_saved_ms = t;
+        int c = purr_mt_node_count(&s_node);
+        if (c != saved_count) {
+            saved_count = c;
+            save_nodes();
+        }
+    }
     if (ui != NULL && (s_page == P_HOME || s_page == P_NODES) && t - last_count_ms >= 5000u) {      /* a screen that shows how many nodes are known keeps up with it */
         last_count_ms = t;
         int c = purr_mt_node_count(&s_node);
@@ -996,7 +1073,10 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
     msg = (const purr_cc_messaging_t *)env->catcall_get("messaging", 1);
     rad = (const purr_cc_radio_t *)env->catcall_get("radio", 1);
     ui = (const purr_cc_ui_t *)env->catcall_get("ui", 2);
-    app = (const purr_cc_app_t *)env->catcall_get("app", 1);
+    app = (const purr_cc_app_t *)env->catcall_get("app", 2);
+    if (app == NULL) {
+        app = (const purr_cc_app_t *)env->catcall_get("app", 1);       /* an older system: no way to step back without closing */
+    }
     con_tab = (const purr_cc_contacts_t *)env->catcall_get("contacts", 1);
     (void)sys;
     if (sc == NULL || msg == NULL || rad == NULL) {
@@ -1013,6 +1093,7 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
     join_and_share();
     save_config();                                                      /* the first start writes the defaults, so Messages' settings have a file to change */
     start_node();
+    load_nodes();
     s_service = msg->service_register("meshtastic", "Meshtastic", "MTS", PURR_MT_TEXT_MAX, PURR_MSGCC_IMG_NONE, 0, 1);
     if (s_service < 0) {
         say("meshtastic: the messaging service was not accepted (permission?)\n");
@@ -1049,9 +1130,16 @@ static void on_event(const purr_app_event_t *ev)
     }
 }
 
+static void on_resume(void)
+{
+    s_lease_try_ms = 0;                                                 /* in front again (a permission prompt can be answered now): try for the radio at once */
+    s_lease_not_before = 0;
+}
+
 static void on_destroy(int reason)
 {
     (void)reason;
+    save_nodes();
     if (rad != NULL) {
         rad->release();
     }
@@ -1062,7 +1150,7 @@ static void on_destroy(int reason)
 
 static const purr_app_table2_t s_table = {
     .base = {.abi_version = PURR_APP_ABI_VERSION_2, .on_create = on_create, .on_destroy = on_destroy},
-    .on_event = on_event,
+    .on_resume = on_resume, .on_event = on_event,
     .memory_needed = 65536, .kind = 2 /* ui */, .flags = 0x05 /* background, persistent */,
 };
 
