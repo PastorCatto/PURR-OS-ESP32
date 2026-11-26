@@ -24,6 +24,7 @@ typedef struct {
     int rx_on;                              /* the chip is in continuous receive: a packet is only heard whole if nothing takes it out of receive while it is on the air */
     purr_lora_status_t heard;               /* the last packet received (rssi, snr, count) */
     uint64_t heard_us;                      /* when, by the bus clock */
+    uint64_t rx_checked_us;                 /* when the chip's mode was last asked: it is checked twice a second while listening */
 } lora_t;
 
 static lora_t s_dev[2];
@@ -261,12 +262,20 @@ static int l_receive(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms, pur
     lora_t *d = h;
     if (d == NULL || !d->in_use || !d->configured || buf == NULL || cap == 0) return -1;
     static const uint8_t rx_cont[3] = {0xFF, 0xFF, 0xFF};             /* receive until told to stop */
+    if (d->rx_on && s_bus->now_us() - d->rx_checked_us > 500000) {     /* the chip is asked, now and then, whether it is still listening (it can fall out of receive after an error) */
+        uint8_t gs_tx[2] = {OP_GET_STATUS, 0}, gs[2] = {0, 0};
+        d->rx_checked_us = s_bus->now_us();
+        if (xfer(d, gs_tx, gs, 2) == 0 && ((gs[1] >> 4) & 7) != 5) {
+            d->rx_on = 0;
+        }
+    }
     if (!d->rx_on) {                                                   /* start listening, once; after that the chip keeps listening between calls (and keeps what it heard) */
         int rc = cmd1(d, OP_SET_STANDBY, 0x00);
         rc |= clear_irq(d, 0xFFFF);
         rc |= cmd(d, OP_SET_RX, rx_cont, 3);
         if (rc != 0) return -1;
         d->rx_on = 1;
+        d->rx_checked_us = s_bus->now_us();
     }
     uint64_t t0 = s_bus->now_us();
     for (;;) {

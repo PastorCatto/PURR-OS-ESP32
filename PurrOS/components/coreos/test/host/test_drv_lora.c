@@ -148,5 +148,17 @@ int main(void)
     }
     CHECK(chip.set_rx_calls - before <= 1);
 
+    /* the chip falls out of receive on its own (an error): within half a second the driver notices and listens again, and the next packet is heard */
+    s_ops.receive(d, buf, sizeof(buf), 5, &info);
+    chip.mode = 2;
+    fb_now += 600000;
+    air(fb_now + 10000, 50000, "after a lapse");
+    n = 0;
+    for (int call = 0; call < 10 && n == 0; call++) {
+        n = s_ops.receive(d, buf, sizeof(buf), 60, &info);
+        fb_now += 3000;
+    }
+    CHECK(n == 13 && memcmp(buf, "after a lapse", 13) == 0);
+
     TK_DONE("test_drv_lora");
 }
