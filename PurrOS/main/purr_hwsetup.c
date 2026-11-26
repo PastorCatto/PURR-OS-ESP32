@@ -861,6 +861,12 @@ int purr_hwsetup_read_text(const char *name, char *out, size_t cap)
 int purr_hwsetup_cmd(purr_cli_t *cli, int argc, char **argv)
 {
     char msg[160];
+    if (argc >= 3 && strcmp(argv[1], "get") == 0) {                /* hwdev get <compatible>: one driver by name (the proximity link: purr,proximity) */
+        char summary[160];
+        purr_hwsetup_get_one(argv[2], NULL, summary, sizeof(summary));
+        purr_cli_printf(cli, "%s\n", summary);
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "get") == 0) {
         char summary[160];
         purr_hwsetup_get_missing(NULL, summary, sizeof(summary));
@@ -892,6 +898,6 @@ int purr_hwsetup_cmd(purr_cli_t *cli, int argc, char **argv)
         }
         return 0;
     }
-    purr_cli_printf(cli, "usage: hwdev | hwdev get | hwdev add <driver> <sda> <scl> <addr> | hwdev read <name> | hwdev remove <name>\n");
+    purr_cli_printf(cli, "usage: hwdev | hwdev get [<driver>] | hwdev add <driver> <sda> <scl> <addr> | hwdev read <name> | hwdev remove <name>\n");
     return 1;
 }

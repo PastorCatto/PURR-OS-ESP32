@@ -29,6 +29,7 @@ extern "C" {
 #define PURR_DRV_CLASS_HCI    5     /* a Bluetooth controller, as an HCI transport */
 #define PURR_DRV_CLASS_BLOCK  6     /* a block device: an SD card, an eMMC, a flash chip with sectors */
 #define PURR_DRV_CLASS_ETHERNET 7   /* a wired network chip that moves raw Ethernet frames (the kernel's own TCP/IP stack sits on top) */
+#define PURR_DRV_CLASS_LINK   9     /* the proximity link: pairing, nearby devices, secure sessions (Modules/drivers/proximity_module.c) */
 #define PURR_DRV_CLASS_GAMEPAD 8    /* a gamepad module: nine buttons and a light for each (the Playtime board's input module) */
 
 const char *purr_drv_class_name(uint32_t class_id);   /* "gnss", "lora", "modem", "wifi", "hci", "block", "none", "?" */
@@ -244,6 +245,73 @@ typedef struct {
     int (*write)(void *h, uint32_t lba, const uint8_t *buf, uint32_t count);        /* 0 or < 0 */
     int (*sync)(void *h);                                   /* waits until the card is done writing */
 } purr_block_ops_t;
+
+/* ---------------------------------------------------------------- the proximity link (pairing, nearby devices, secure sessions)
+ *
+ * What the OS sees of Modules/drivers/proximity_module.c. The module does the work (beacons, the nearby table, pairing, encryption, what may talk to whom);
+ * the OS only pumps it (tick), shows its prompts, and moves the bytes of the channels it wants (the remote display, the terminal, setup). */
+
+#define PURR_LINK_VIA_RADIO 1       /* heard over the chip's own radio link (ESP-NOW) */
+#define PURR_LINK_VIA_UDP   2       /* heard over the network the OS is on */
+
+typedef struct {
+    uint8_t id[8];              /* the device id: the first eight bytes of the hash of its public key */
+    char name[17];
+    uint8_t roles;              /* PURR_PX_ROLE_* (purr_prox.h) */
+    uint8_t klass;              /* PURR_PX_CLASS_* */
+    int8_t rssi;                /* smoothed, dBm; -127 when unknown (a device heard only over the network) */
+    uint8_t paired;
+    uint8_t close;              /* brought close: strong for a moment */
+    uint8_t online;             /* heard within the last few seconds */
+    uint8_t via;                /* PURR_LINK_VIA_*, 0 when not heard */
+    uint8_t session;            /* a secure session is up */
+    uint8_t caps_lo;            /* PURR_PX_CAP_* (the low byte): what it offers */
+    uint32_t ip;                /* its address on the network the beacons came over, in network byte order; 0 if it has only been heard over the radio */
+} purr_link_peer_t;
+
+#define PURR_LINK_PROMPT_NONE   0
+#define PURR_LINK_PROMPT_PAIR   1   /* "Pair with <name>?" and the six digits: the person on both devices must see the same */
+#define PURR_LINK_PROMPT_CLAIM  2   /* an unowned device was claimed by a close device: tell the person */
+
+typedef struct {
+    int kind;                   /* PURR_LINK_PROMPT_* */
+    uint8_t id[8];
+    char name[17];
+    int code;                   /* 0..999999 for PURR_LINK_PROMPT_PAIR, once known (-1 before) */
+} purr_link_prompt_t;
+
+#define PURR_LINK_OPT_AUTO_ANY_NET 1   /* "Allow auto-connect on any network" */
+#define PURR_LINK_OPT_CLOSE_DBM    2   /* the strength that counts as brought close */
+#define PURR_LINK_OPT_PAIR_WINDOW  3   /* seconds a stranger may be asked to pair even when not close (the person opened "pair a new device"); 0 closes it; reads back the seconds left */
+
+typedef struct {
+    uint32_t version;                                       /* 1 */
+    int (*tick)(void *h, uint32_t now_ms);                  /* pump: receive, beacon, time out. Call it every 20 to 50 ms */
+    int (*self)(void *h, uint8_t id[8], char name[17]);     /* this device's id and name; 0 or < 0 */
+    int (*nearby)(void *h, purr_link_peer_t *out, int max); /* devices heard lately, paired or not; how many (may be more than max) */
+    int (*paired)(void *h, purr_link_peer_t *out, int max); /* the paired devices, heard or not */
+    int (*pair)(void *h, const uint8_t id[8]);              /* starts pairing with a nearby device; 0 or < 0 */
+    int (*prompt)(void *h, purr_link_prompt_t *out);        /* 1 if a question waits (and fills out), 0 if not */
+    int (*answer)(void *h, int yes);                        /* the person's answer to the open PURR_LINK_PROMPT_PAIR; 0 or < 0 */
+    int (*forget)(void *h, const uint8_t id[8]);            /* 1 if it was paired */
+    int (*notice)(void *h, char line[64]);                  /* one line about a network a paired device handed over, once; 1 if there was one */
+    int (*nets)(void *h, char ssid[][33], int max);         /* the networks paired devices handed over (Settings lists and can forget them) */
+    int (*forget_net)(void *h, const char *ssid);
+    int (*option)(void *h, int opt, int value);             /* sets PURR_LINK_OPT_*; the value now (what was set, or the old one when value is -1000) */
+    int (*connect)(void *h, const uint8_t id[8]);           /* opens a secure session to a paired device; 0 started, < 0 not possible */
+    int (*send)(void *h, const uint8_t id[8], uint8_t channel, const uint8_t *data, size_t len);   /* one message on a channel of a session that is up; 0 or < 0 */
+    int (*recv)(void *h, const uint8_t id[8], uint8_t *channel, uint8_t *buf, size_t cap);         /* one message (its length), 0 if none, < 0 on error */
+    int (*share_wifi)(void *h, const uint8_t id[8], const char *ssid);   /* hands a saved network to a paired device over the session; 0 or < 0 */
+    /* version 2: secure streams. A TCP connection (the remote display's) carries the same handshake as a session -- the client's HELLO1 (152 bytes) and the server's HELLO2 (144) --
+     * and then one sealed record per message. The caller does the sockets and the framing; the keys, signatures and counters are the driver's. A stream handle is 1 or more. */
+    int (*stream_accept)(void *h, const uint8_t *hello1, size_t n, uint8_t *hello2, size_t cap, uint8_t peer_id[8]);   /* server: a handle, < 0 if the client is not paired */
+    int (*stream_start)(void *h, const uint8_t server_id[8], uint8_t *hello1, size_t cap);                          /* client: a handle; hello1 is filled */
+    int (*stream_finish)(void *h, int stream, const uint8_t *hello2, size_t n);                                      /* client: 0 once the server is the one meant */
+    int (*stream_seal)(void *h, int stream, uint8_t channel, const uint8_t *pt, size_t n, uint8_t *out, size_t cap);  /* the record's length (n + 26) */
+    int (*stream_open)(void *h, int stream, const uint8_t *rec, size_t n, uint8_t *channel, uint8_t *pt, size_t cap); /* the plaintext length, < 0 if the record does not check */
+    void (*stream_close)(void *h, int stream);
+    int (*has_peers)(void *h);                                                                                        /* 1 if any device is paired */
+} purr_link_ops_t;
 
 #ifdef __cplusplus
 }

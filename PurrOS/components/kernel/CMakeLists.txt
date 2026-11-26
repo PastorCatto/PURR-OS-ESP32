@@ -12,7 +12,9 @@ set(srcs
     "src/purr_fetch.c"
     "src/purr_crypto_mbedtls.c"
     "src/purr_userstore.c"
-    "src/purr_font_data.c")
+    "src/purr_font_data.c"
+    "src/purr_link_bus.c"
+    "../../../Modules/proximity/esp/purr_px_esp.c")
 
 # One network backend (purr_net.h). Wi-Fi unless the VM flavor selects the wired one.
 if(CONFIG_PURR_NET_ETH_W5500)
@@ -38,8 +40,8 @@ if(CONFIG_PURR_BOARD_PLAYTIME)
 endif()
 
 idf_component_register(SRCS ${srcs}
-                       INCLUDE_DIRS "include"
-                       REQUIRES coreos littlefs esp_partition esp_wifi esp_netif esp_event nvs_flash
+                       INCLUDE_DIRS "include" "../../../Modules/proximity/esp"
+                       REQUIRES coreos littlefs esp_partition esp_wifi esp_netif esp_event nvs_flash lwip
                                 mbedtls esp_http_client esp-tls esp_timer bootloader_support
                                 driver esp_driver_gpio esp_driver_spi esp_driver_i2c esp_driver_ledc esp_driver_uart esp_adc heap log
                                 # Always listed: component requirements are expanded before

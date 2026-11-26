@@ -208,6 +208,20 @@ int purr_net_saved(purr_net_ap_t *out, int max)
     return 0;
 }
 
+int purr_net_saved_pass(const char *ssid, char pass[65])
+{
+    (void)ssid;
+    (void)pass;
+    return -1;
+}
+
+esp_err_t purr_net_save(const char *ssid, const char *pass)
+{
+    (void)ssid;
+    (void)pass;
+    return ESP_OK;                                   /* a wire has no networks to remember; the link still keeps its own record */
+}
+
 int purr_net_wired(void)
 {
     return 1;

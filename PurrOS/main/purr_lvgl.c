@@ -18,6 +18,17 @@
 
 static const char *TAG = "lvgl";
 
+/* The remote display host (purr_rd_host.c) is built wherever the shells are (everything but the recovery profile, main/CMakeLists.txt). These are NOT weak stand-ins: a weak
+ * definition satisfies the reference and the linker never pulls the real file out of the library (found for real, 2026-11-25). */
+#if !CONFIG_PURR_PROFILE_RECOVERY
+#include "purr_rd_host.h"
+#include "purr_link.h"
+#else
+static inline void purr_rd_host_flush(int x, int y, int w, int h, const uint16_t *px) { (void)x; (void)y; (void)w; (void)h; (void)px; }
+static inline void purr_rd_host_start(void) {}
+static inline void purr_link_start(void) {}
+#endif
+
 /* purr_display_v2_t's blit()/fill() already do their own panel-specific chunking
  * internally (st7789.c's d_blit() loops over its own DMA buffer size) -- the flush
  * callback below can hand it any area in one call, no chunking of its own needed. */
@@ -67,6 +78,7 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
          * silence cost a lot of time). Still ends in flush_ready so LVGL does not stall. */
         ESP_LOGW(TAG, "flush (%d,%d %dx%d): blit failed (%d)", (int)area->x1, (int)area->y1, w, h, e);
     }
+    purr_rd_host_flush(area->x1, area->y1, w, h, (const uint16_t *)px_map);          /* a connected remote display gets the same rectangle */
     lv_display_flush_ready(disp);
 }
 
@@ -393,7 +405,10 @@ esp_err_t purr_lvgl_init(void)
     /* The service task is what actually drives LVGL from here on (purr_ui_service.h's own
      * comment on why) -- started here, not left for the caller to remember, so the two can
      * never be paired wrong. */
-    return purr_ui_service_start();
+    esp_err_t svc = purr_ui_service_start();
+    purr_link_start();                               /* the proximity link's pump: does nothing until its driver is loaded */
+    purr_rd_host_start();                            /* a stand-in unless this is a full build (purr_rd_host.c) */
+    return svc;
 }
 
 void purr_lvgl_demo_screen(void)

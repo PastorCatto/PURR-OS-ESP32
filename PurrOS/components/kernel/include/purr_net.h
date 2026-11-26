@@ -61,6 +61,12 @@ void purr_net_status(purr_net_status_t *out);
  * not been one yet. Mainly for the shell to explain a failed connect. */
 uint8_t purr_net_last_disconnect_reason(void);
 
+/* The password of a saved network (the link hands it to a paired device, inside an encrypted session); 0, or -1 if there is no such network. */
+int purr_net_saved_pass(const char *ssid, char pass[65]);
+
+/* Saves a network without connecting to it (one a paired device handed over): the reconnect task will use it when it is in range. */
+esp_err_t purr_net_save(const char *ssid, const char *pass);
+
 /* 1 when this build's backend is wired Ethernet (no SSID, no password, no radio), else 0. */
 int purr_net_wired(void);
 

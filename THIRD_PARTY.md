@@ -84,3 +84,11 @@ The Type shell (plan7.md, "The Type shell") draws its clocks, dates, list names 
 - **Space Mono** Bold, copyright 2016 The Space Mono Project Authors, <https://github.com/googlefonts/spacemono>. Licence text: [`UI/fonts/OFL-SpaceMono.txt`](UI/fonts/OFL-SpaceMono.txt).
 
 They are in the firmware as bitmap renderings at fixed sizes (`PurrOS/main/tpfonts/`, made by `tools/ui/gen_lvgl_font.py`; how to make them again is in [`UI/fonts/README.md`](UI/fonts/README.md)). The TrueType files are not in the repository. The generated files carry the licence with them, as a note at the top of each and here; they are not sold on their own.
+
+## Typeface of the Click Wheel shell (Source Sans 3)
+
+The Click Wheel shell (plan7.md) sets its screens in **Source Sans 3** (Bold, Semibold, Regular), under the **SIL Open Font License 1.1**: copyright 2010-2024 Adobe (<https://github.com/adobe-fonts/source-sans>, release 3.052R, `TTF/SourceSans3-*.ttf`). Licence text: [`UI/fonts/OFL-SourceSans3.txt`](UI/fonts/OFL-SourceSans3.txt). The firmware carries fixed-size bitmap renderings (`PurrOS/main/whfonts/`, made by `tools/ui/gen_lvgl_font.py`), not a font file anyone installs; as with the Type shell's fonts, if the reserved-name rule is ever read against that, the answer is to rename them.
+
+## micro-ecc in the proximity driver
+
+The proximity driver module (`Modules/drivers/proximity_module.c`, plan1.md) carries a copy of **micro-ecc** (Kenneth MacKay, <https://github.com/kmackay/micro-ecc>), **BSD-2-Clause**, the same copy ESP-IDF 5.3.5 ships for the bootloader (`Modules/proximity/uecc/`, with its licence in `Modules/proximity/uecc/LICENSE.txt`). It is built for P-256 only (the other curves are switched off in `uecc/px_uecc.c`) and gives the pairing code its key agreement and signatures. A driver module is freestanding and cannot link the kernel's copy, which is why it is carried here.

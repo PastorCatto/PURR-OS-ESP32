@@ -61,6 +61,8 @@
 #include "purr_trust_os.h"
 #include "purr_shell.h"
 #include "purr_wallpaper.h"
+#include "purr_rd_host.h"
+#include "purr_link.h"
 #include "purr_ui_service.h"
 #include "purr_w10m_priv.h"
 #include "purr_w10m_theme.h"
@@ -366,13 +368,20 @@ static void page_main(void)
             lv_obj_clear_flag(badge, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_set_size(badge, 30, 30);
             lv_obj_align(badge, LV_ALIGN_LEFT_MID, 6, 0);
-            lv_obj_set_style_bg_color(badge, lv_color_hex(0x14120F), 0);
+            if (purr_theme_wheel_look()) {              /* the Click Wheel: a disc in the accent, lifted and lowered, with a white letter */
+                lv_obj_set_style_radius(badge, 15, 0);
+                lv_obj_set_style_bg_color(badge, lv_color_mix(lv_color_white(), purr_theme_accent_color(), 89), 0);
+                lv_obj_set_style_bg_grad_color(badge, lv_color_mix(lv_color_black(), purr_theme_accent_color(), 56), 0);
+                lv_obj_set_style_bg_grad_dir(badge, LV_GRAD_DIR_VER, 0);
+            } else {
+                lv_obj_set_style_bg_color(badge, lv_color_hex(0x14120F), 0);
+            }
             lv_obj_set_style_bg_opa(badge, LV_OPA_COVER, 0);
             lv_obj_t *bl = lv_label_create(badge);
             char letter[2] = {sec->title[0], '\0'};
             lv_label_set_text(bl, letter);
             lv_obj_set_style_text_font(bl, &lv_font_montserrat_16, 0);
-            lv_obj_set_style_text_color(bl, lv_color_hex(0xF4F1EA), 0);
+            lv_obj_set_style_text_color(bl, purr_theme_wheel_look() ? lv_color_white() : lv_color_hex(0xF4F1EA), 0);
             lv_obj_center(bl);
             lv_obj_t *tt = cm_text(row, sec->title);
             lv_obj_set_style_text_font(tt, &lv_font_montserrat_16, 0);
@@ -480,6 +489,8 @@ static void timeout_cb(lv_event_t *e)
     }
 }
 
+static void remote_display_cb(lv_event_t *e);
+
 static void page_system(void)
 {
     cm_title(s_body, "Display");
@@ -538,6 +549,13 @@ static void page_system(void)
         cm_dim(s_body, "Only an administrator can change this.");
     }
 
+    cm_space(s_body, 6);
+    cm_title(s_body, "Remote display");
+    lv_obj_t *rd = cm_switch(s_body, "Show this screen on a PURR OS Mini", purr_rd_host_enabled(), remote_display_cb);
+    cm_dim(s_body, "Once a device is paired (Network > Nearby devices), only paired devices can look, and the stream is encrypted. With none paired, anyone on the same Wi-Fi could look. Administrators only.");
+    if (!acting_admin()) {
+        lv_obj_add_state(rd, LV_STATE_DISABLED);
+    }
     cm_space(s_body, 6);
     cm_title(s_body, "Power");
     lv_obj_t *b = cm_button(s_body, "Restart", restart_cb, NULL);
@@ -787,6 +805,121 @@ static void net_forget_cb(lv_event_t *e)
     }
 }
 
+/* ---------------------------------------------------------------- Nearby devices (the proximity link, plan1.md) */
+
+#define LINK_ROWS 8
+static purr_link_peer_t s_lk_near[LINK_ROWS], s_lk_pair[LINK_ROWS];
+static char s_lk_nets[LINK_ROWS][33];
+
+static void link_pair_cb(lv_event_t *e)
+{
+    const purr_link_peer_t *p = lv_event_get_user_data(e);
+    int r = purr_link_pair(p->id);
+    say(r == 0 ? "Asking it to pair: the same six digits will show on both devices." : "That device is no longer in range.", r == 0);
+}
+
+static void link_forget_cb(lv_event_t *e)
+{
+    const purr_link_peer_t *p = lv_event_get_user_data(e);
+    purr_link_forget(p->id);
+    show_page(PAGE_NETWORK);
+}
+
+static void link_net_forget_cb(lv_event_t *e)
+{
+    purr_link_forget_net(lv_event_get_user_data(e));
+    show_page(PAGE_NETWORK);
+}
+
+static void link_open_cb(lv_event_t *e)
+{
+    (void)e;
+    purr_link_option(PURR_LINK_OPT_PAIR_WINDOW, 60);
+    say("Open for pairing for one minute: start it from the other device.", 1);
+}
+
+static void link_any_cb(lv_event_t *e)
+{
+    purr_link_option(PURR_LINK_OPT_AUTO_ANY_NET, lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED) ? 1 : 0);
+}
+
+static void link_refresh_cb(lv_event_t *e)
+{
+    (void)e;
+    show_page(PAGE_NETWORK);
+}
+
+static void link_section(void)
+{
+    cm_space(s_body, 6);
+    cm_title(s_body, "Nearby devices");
+    if (!purr_link_present()) {
+        cm_dim(s_body, "The link driver is not installed. Get it in Device Manager (purr,proximity), or with: hwdev get purr,proximity");
+        return;
+    }
+    uint8_t id[8];
+    char name[17];
+    if (purr_link_self(id, name) == 0) {
+        char line[64];
+        snprintf(line, sizeof(line), "This device: %s", name);
+        cm_dim(s_body, line);
+    }
+    lv_obj_t *sw = cm_switch(s_body, "Allow auto-connect on any network", purr_link_option(PURR_LINK_OPT_AUTO_ANY_NET, -1000) == 1, link_any_cb);
+    cm_dim(s_body, "Off: a paired device connects only over a network you trust, or when brought close.");
+    if (!acting_admin()) {
+        lv_obj_add_state(sw, LV_STATE_DISABLED);
+    }
+    cm_button(s_body, "Pair a new device", link_open_cb, NULL);
+    cm_button(s_body, "Refresh", link_refresh_cb, NULL);
+
+    int n = purr_link_nearby(s_lk_near, LINK_ROWS);
+    int shown = 0;
+    for (int i = 0; i < n && i < LINK_ROWS; i++) {
+        if (s_lk_near[i].paired || !s_lk_near[i].online) {
+            continue;
+        }
+        if (shown++ == 0) {
+            cm_dim(s_body, "In range:");
+        }
+        char line[48];
+        snprintf(line, sizeof(line), "%s%s", s_lk_near[i].name, s_lk_near[i].close ? "  (close)" : "");
+        lv_obj_t *row = cm_row(s_body, line, NULL, 0, NULL, NULL);
+        lv_obj_set_style_opa(row, LV_OPA_COVER, 0);
+        lv_obj_t *b = cm_button(row, "Pair", link_pair_cb, &s_lk_near[i]);
+        lv_obj_set_height(b, 26);
+        lv_obj_align(b, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
+    if (shown == 0) {
+        cm_dim(s_body, "No other device in range.");
+    }
+
+    int pn = purr_link_paired(s_lk_pair, LINK_ROWS);
+    cm_dim(s_body, "Paired:");
+    if (pn <= 0) {
+        cm_dim(s_body, "None yet.");
+    }
+    for (int i = 0; i < pn && i < LINK_ROWS; i++) {
+        char line[56];
+        snprintf(line, sizeof(line), "%s%s", s_lk_pair[i].name, s_lk_pair[i].session ? "  (connected)" : (s_lk_pair[i].online ? "  (in range)" : ""));
+        lv_obj_t *row = cm_row(s_body, line, NULL, 0, NULL, NULL);
+        lv_obj_set_style_opa(row, LV_OPA_COVER, 0);
+        lv_obj_t *b = cm_button(row, "Forget", link_forget_cb, &s_lk_pair[i]);
+        lv_obj_set_height(b, 26);
+        lv_obj_align(b, LV_ALIGN_RIGHT_MID, 0, 0);
+    }
+    int nn = purr_link_nets(s_lk_nets, LINK_ROWS);
+    if (nn > 0) {
+        cm_dim(s_body, "Networks a paired device added:");
+        for (int i = 0; i < nn && i < LINK_ROWS; i++) {
+            lv_obj_t *row = cm_row(s_body, s_lk_nets[i], NULL, 0, NULL, NULL);
+            lv_obj_set_style_opa(row, LV_OPA_COVER, 0);
+            lv_obj_t *b = cm_button(row, "Forget", link_net_forget_cb, s_lk_nets[i]);
+            lv_obj_set_height(b, 26);
+            lv_obj_align(b, LV_ALIGN_RIGHT_MID, 0, 0);
+        }
+    }
+}
+
 static void page_network(void)
 {
     cm_title(s_body, "Status");
@@ -834,6 +967,7 @@ static void page_network(void)
         lv_obj_set_height(b, 26);
         lv_obj_align(b, LV_ALIGN_RIGHT_MID, 0, 0);
     }
+    link_section();
     make_status();
 }
 
@@ -871,6 +1005,11 @@ static void base_cb(lv_event_t *e)
 static void transparency_cb(lv_event_t *e)
 {
     purr_theme_set_transparency(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
+}
+
+static void remote_display_cb(lv_event_t *e)
+{
+    purr_rd_host_set_enabled(lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED));
 }
 
 static void tile_opa_cb(lv_event_t *e)
@@ -2172,7 +2311,7 @@ static void show_page(page_t page)
     lv_group_remove_all_objs(s_group);
     lv_obj_clean(s_body);
     lv_obj_scroll_to(s_body, 0, 0, LV_ANIM_OFF);
-    if (purr_theme_type_look()) {                       /* the Type layout sets the titles in capitals */
+    if (purr_theme_type_look() && !purr_theme_wheel_look()) {   /* the Type layout sets the titles in capitals (the Click Wheel does not) */
         char up[48];
         const char *pt = page_title(page);
         size_t k = 0;
@@ -2304,7 +2443,7 @@ void w10m_settings_build(void)
     purr_theme_apply(arrow, PURR_TH_TEXT);
     lv_obj_align(arrow, LV_ALIGN_LEFT_MID, 8, 0);
     s_head_title = lv_label_create(s_head);
-    lv_label_set_text(s_head_title, purr_theme_type_look() ? "SETTINGS" : "Settings");
+    lv_label_set_text(s_head_title, purr_theme_type_look() && !purr_theme_wheel_look() ? "SETTINGS" : "Settings");
     lv_obj_set_style_text_font(s_head_title, &lv_font_montserrat_16, 0);
     purr_theme_apply(s_head_title, PURR_TH_TEXT);
     lv_obj_align(s_head_title, LV_ALIGN_LEFT_MID, 34, 0);

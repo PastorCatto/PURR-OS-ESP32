@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define PURR_DRIVER_BUS_ABI_VERSION 9u
+#define PURR_DRIVER_BUS_ABI_VERSION 10u
 /* The oldest bus table layout this kernel still serves. The table only ever grows at the end (see Drivers/SPEC.md section 4.1), so a driver
  * built against any version from this one up to the current works unchanged: the driver's version is independent of the OS's. Raise this
  * only if a slot is ever moved, which the append-only rule forbids. */
@@ -124,6 +124,29 @@ typedef struct {
      * plugged in (the gamepad) looks for itself with this instead of writing to an address that may be empty: every failed write is an ERROR line from the I2C
      * driver. 0 if it answered, < 0 if not (or on a bad handle). */
     int (*i2c_probe)(uint32_t handle, int timeout_ms);
+
+    /* ABI 10: link services, the thin primitives the proximity driver (Modules/drivers/proximity_module.c) is built on. Everything with a decision in it
+     * (who may talk to whom, pairing, encryption, what a channel carries) is in the module; these only move bytes and keep a blob. All of them are
+     * non-blocking: a receive returns 0 when nothing is waiting. */
+    int (*rand_bytes)(uint8_t *buf, size_t len);                                       /* hardware random bytes; 0 or < 0 */
+    /* The chip's own radio link (ESP-NOW). `mac` NULL means broadcast. A frame is at most 250 bytes. */
+    int (*radio_send)(const uint8_t *mac, const uint8_t *data, size_t len);            /* 0 or < 0 */
+    int (*radio_recv)(uint8_t mac[6], int8_t *rssi_dbm, uint8_t *buf, size_t cap);     /* the length of one frame, 0 if none waits, < 0 on error */
+    /* UDP over whatever network the OS is on (Wi-Fi, Ethernet, the virtual device's). `ip` is in network byte order as a uint32_t; 0xFFFFFFFF is broadcast. */
+    int (*udp_open)(uint16_t port);                                                    /* a handle > 0, or < 0 */
+    int (*udp_send)(int handle, uint32_t ip, uint16_t port, const uint8_t *data, size_t len);   /* 0 or < 0 */
+    int (*udp_recv)(int handle, uint32_t *ip, uint16_t *port, uint8_t *buf, size_t cap);        /* the length, 0 if none waits, < 0 on error */
+    void (*udp_close)(int handle);
+    /* One small blob the module keeps across restarts (its pairings and trusted networks), up to 2048 bytes. */
+    int (*store_load)(uint8_t *buf, size_t cap);                                       /* the length (0 if none yet), or < 0 */
+    int (*store_save)(const uint8_t *data, size_t len);                                /* 0 or < 0 */
+    /* What the network looks like now: 1 connected with an address in `ip`, 0 not; the name of the network and the channel it is on. */
+    int (*net_info)(uint32_t *ip, char ssid[33], uint8_t *channel);
+    /* The network the OS keeps for `ssid`, or -1 if it has none. Used to hand a trusted network to a paired device. The password is only ever copied into
+     * a buffer the module seals before it leaves; it is never logged. */
+    int (*net_saved_get)(const char *ssid, char pass[65]);
+    /* Saves a network a paired device handed over (marked as handed over by the link, so Settings can list it). 0 or < 0. */
+    int (*net_saved_add)(const char *ssid, const char *pass, const uint8_t peer_id[8]);
 } purr_driver_bus_table_t;
 
 /* core -> module direction (Modules/SPEC.md section 6, scoped to drivers): called once per

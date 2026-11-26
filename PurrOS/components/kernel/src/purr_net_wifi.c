@@ -374,6 +374,26 @@ int purr_net_wired(void)
     return wired_now() || purr_netlink_available();       /* an Ethernet driver is bound: this is a wired device, up yet or not */
 }
 
+int purr_net_saved_pass(const char *ssid, char pass[65])
+{
+    const purr_wifi_net_t *n = purr_wifi_list_find(&s_saved, ssid);
+    if (n == NULL) {
+        return -1;
+    }
+    snprintf(pass, 65, "%s", n->pass);
+    return 0;
+}
+
+esp_err_t purr_net_save(const char *ssid, const char *pass)
+{
+    int r = purr_wifi_list_add(&s_saved, ssid, pass ? pass : "");
+    if (r == PURR_WIFI_ADDED || r == PURR_WIFI_UPDATED) {
+        save_list();
+        return ESP_OK;
+    }
+    return r == PURR_WIFI_FULL ? ESP_ERR_NO_MEM : ESP_ERR_INVALID_ARG;
+}
+
 int purr_net_saved(purr_net_ap_t *out, int max)
 {
     int n = s_saved.count < max ? s_saved.count : max;

@@ -1,5 +1,5 @@
 set(main_srcs "main.c" "commands.c" "recovery_loader.c" "purr_drvpart_plat.c" "recovery_screen.c" "login.c" "purr_slot_trailer.c" "purr_trust_os.c" "purr_resetnote_os.c"
-              "purr_catrt.c" "purr_catrt_storage.c" "purr_settings.c" "purr_power_plat.c" "purr_catrt_power.c" "purr_catrt_files.c" "purr_battery.c" "purr_radio_bars.c" "purr_clock.c" "purr_bootupdate.c" "purr_kbdlight.c"
+              "purr_catrt.c" "purr_catrt_storage.c" "purr_settings.c" "purr_power_plat.c" "purr_catrt_power.c" "purr_catrt_media.c" "purr_catrt_radio.c" "purr_catrt_files.c" "purr_battery.c" "purr_radio_bars.c" "purr_clock.c" "purr_bootupdate.c" "purr_kbdlight.c"
               "oobe_job.c" "oobe_ui.c" "recovery_app.c" "purr_hwscan_plat.c" "purr_hwsetup.c" "purr_netsettle.c" "purr_sysupdate.c" "oobe_firstboot.c" "purr_lan_discover.c" "purr_recovery_src.c" "purr_drvcmds.c" "purr_catrt_devices.c" "purr_store.c" "purr_builtin_apps.c" "purr_sd.c")
 set(main_reqs kernel coreos littlefs esp_partition esp_system esp_timer esp_wifi
              mbedtls esp_http_client app_update heap esp_mm
@@ -20,11 +20,17 @@ if(CONFIG_PURR_BOARD_COLOR_LCD)
     # profile: KittenOS's slot is 1.5 MB and the recovery build had no room for it.
     if(NOT CONFIG_PURR_PROFILE_RECOVERY)
         # shared by every official shell: Settings, Developer Portal, task manager, permission prompt, the ui catcall windows
-        list(APPEND main_srcs "purr_shell.c" "purr_shell_abi.c" "purr_w10m_settings.c" "purr_repo_dev.c"
+        list(APPEND main_srcs "purr_shell.c" "purr_shell_abi.c" "purr_w10m_settings.c" "purr_repo_dev.c" "purr_rd_host.c" "purr_link.c" "../../Modules/vdisplay/purr_rdisp.c"
                               "purr_w10m_devportal.c" "purr_catrt_ui.c" "purr_w10m_perm.c" "purr_w10m_tasks.c" "purr_systasks.c" "purr_catrt_game.c")
         # The Android style shell is built into every image: it is the one that always works. Any other shell (the Windows 10 Mobile one, purr_w10m.c) is a loadable
         # module built by `purrstrap shells build` from its own source and installed under /ui/shells/ (plan7.md); it is not part of the kernel.
-        if(CONFIG_PURR_SHELL_TYPE)
+        if(CONFIG_PURR_SHELL_WHEEL)
+            # The Click Wheel shell (plan7.md "The Click Wheel shell"): the iPod-style one, with files of its own (purr_wh*.c). It shares no source file with the Type shell
+            # or the Android shell (owner's rule, 2026-11-25: the shells are never merged); only one is compiled per image.
+            list(APPEND main_srcs "purr_wh.c" "purr_wh_face.c" "purr_wh_home.c" "purr_wh_lock.c" "purr_wh_slot.c")
+            file(GLOB wh_font_srcs CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/whfonts/*.c")
+            list(APPEND main_srcs ${wh_font_srcs})
+        elseif(CONFIG_PURR_SHELL_TYPE)
             # The Type shell (plan7.md "The Type shell"): the same entry points, its own files. The Android shell's files are left out of this image, not changed.
             list(APPEND main_srcs "purr_tp.c" "purr_tp_home.c" "purr_tp_lock.c" "purr_tp_slot.c")
             # the typefaces (UI/fonts/README.md): generated bitmap fonts, one file per size
@@ -36,13 +42,28 @@ if(CONFIG_PURR_BOARD_COLOR_LCD)
     endif()
     # The d-pad navigation and the key grid (the on-screen keyboard): the Type shell uses them for every sheet, and a board with a gamepad uses them in every image
     # that has no shell above it (KittenOS's recovery app, the internet loader, the setup wizard). purr_tp_shim.c holds the weak answers for what a shell would give.
-    if(CONFIG_PURR_SHELL_TYPE OR CONFIG_PURR_BOARD_PLAYTIME)
+    if(CONFIG_PURR_SHELL_WHEEL)
+        list(APPEND main_srcs "purr_wh_kbd.c" "purr_wh_nav.c" "purr_wh_shim.c")      # the Click Wheel's own copies: its keys and sign-in are drawn in its look
+    elseif(CONFIG_PURR_SHELL_TYPE OR CONFIG_PURR_BOARD_PLAYTIME)
         list(APPEND main_srcs "purr_tp_kbd.c" "purr_tp_nav.c" "purr_tp_shim.c")
     endif()
     list(APPEND main_reqs lvgl)
 endif()
 
 idf_component_register(SRCS ${main_srcs} REQUIRES ${main_reqs})
+# Signed files carried in this image for a device that has no way to fetch them yet, planted like the firmware's own drivers: the proximity link's driver (loaded after sign-in), the LoRa
+# radio's driver and the Meshtastic app (planted in /apps). Each is optional: with no file nothing is embedded and it comes from the driver index or the Store as usual. They are made by
+# purrstrap modules build and signed with the developer key (docs: plan1.md, plan9.md); a newer one from the Store replaces the planted one.
+foreach(carried proximity lora-sx126x meshtastic)
+    string(TOUPPER "${carried}" carried_up)
+    string(REPLACE "-" "_" carried_up "${carried_up}")
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../../out/link/${carried}.cat" AND NOT CONFIG_PURR_PROFILE_RECOVERY)
+        target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_LIST_DIR}/../../out/link/${carried}.cat" BINARY)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE PURR_EMBED_${carried_up}=1)
+    endif()
+endforeach()
+# the remote display core lives with the module-side code (Modules/vdisplay); it is compiled into the kernel only until the virtual display driver takes purr_rd_host.c over
+target_include_directories(${COMPONENT_LIB} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../Modules/vdisplay")
 
 # The Android shell's own picture pack (UI/android-assets, the Froyo art) is built here and embedded in the full OS image, next to the code that asks for the names, so a
 # kernel always carries the pictures it needs: no separate file to go missing after an update or a reset (plan7.md "The Froyo pictures travel with the kernel").

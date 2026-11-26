@@ -85,6 +85,10 @@ def main(argv):
 
     os.makedirs(BUILD, exist_ok=True)
     src = sorted(glob.glob(os.path.join(CORE, "src", "*.c")))
+    # The module-side cores (Modules/proximity, Modules/vdisplay): plain C that goes into a signed module or driver and into the Mini, not into the kernel library, tested here all the same.
+    module_dirs = [os.path.join(COMPONENTS, "..", "..", "Modules", d) for d in ("proximity", "vdisplay", "meshtastic")]
+    for md in module_dirs:
+        src.extend(sorted(f for f in glob.glob(os.path.join(md, "*.c")) if os.path.basename(f) != "px_libc.c"))     # px_libc.c is the libc a freestanding module lacks: the host has one
     # The filesystem layer is kernel code, but it is plain C over an abstract block device,
     # so it is tested here against a RAM disk. LittleFS itself is third-party.
     src.append(os.path.join(KERNEL, "src", "purr_fs.c"))
@@ -96,6 +100,7 @@ def main(argv):
     src.append(os.path.join(KERNEL, "src", "purr_userstore.c"))
     common = ["-std=c11", "-D_POSIX_C_SOURCE=200809L", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
               "-I", os.path.join(CORE, "include"), "-I", os.path.join(KERNEL, "include"),
+              *sum((["-I", md] for md in module_dirs), []),
               "-I", LFS, "-I", HERE, "-I", uecc]
     # GCC 14.2 (Debian 13) miscompiles purr_trust_eval at -O1 and up: jump threading folds the
     # signed-path clamp of `tighten` so that 2 becomes 1 (test_trust fails 2 of 85 checks; the

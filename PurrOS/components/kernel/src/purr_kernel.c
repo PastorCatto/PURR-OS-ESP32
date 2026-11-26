@@ -31,6 +31,7 @@
 #endif
 
 #include "purr_driver_bus.h"
+#include "purr_link_bus.h"
 
 static const char *TAG = "kernel";
 
@@ -594,6 +595,18 @@ static const purr_driver_bus_table_t s_bus_table = {
     .spi_lock = bus_spi_lock,
     .spi_unlock = bus_spi_unlock,
     .spi_open_bus = bus_spi_open_bus,
+    .rand_bytes = purr_link_bus_rand,
+    .radio_send = purr_link_bus_radio_send,
+    .radio_recv = purr_link_bus_radio_recv,
+    .udp_open = purr_link_bus_udp_open,
+    .udp_send = purr_link_bus_udp_send,
+    .udp_recv = purr_link_bus_udp_recv,
+    .udp_close = purr_link_bus_udp_close,
+    .store_load = purr_link_bus_store_load,
+    .store_save = purr_link_bus_store_save,
+    .net_info = purr_link_bus_net_info,
+    .net_saved_get = purr_link_bus_net_saved_get,
+    .net_saved_add = purr_link_bus_net_saved_add,
 };
 
 const purr_driver_bus_table_t *purr_driver_bus_table(void)
@@ -657,12 +670,26 @@ static void declare_vm_devices(const purr_board_t *board)
     purr_device_add(board, &s_nic_dev);
 }
 
+/* The proximity link's virtual device: not a chip, a service every board offers (Modules/drivers/proximity_module.c is its driver, loaded from /boot/drivers like any
+ * other). Declared on every board so the driver manager finds it by name; with no driver installed it stays unbound and costs nothing. */
+static purr_device_t s_link_dev;
+
+static void declare_link_device(const purr_board_t *board)
+{
+    s_link_dev = (purr_device_t){.name = "prox0", .compatible = "purr,proximity", .priority = PURR_PRI_OPTIONAL, .cfg = NULL};
+    for (int i = 0; i < PURR_MAX_EXTRA_PINS; i++) {
+        s_link_dev.extra_pins[i] = PURR_PIN_NONE;
+    }
+    purr_device_add(board, &s_link_dev);
+}
+
 void purr_drivers_bind_all(const purr_board_t *board)
 {
     int count = 0;
     const purr_driver_t *const *table = purr_driver_table(&count);
     purr_drivers_bind(board, table, count);
     declare_vm_devices(board);
+    declare_link_device(board);
 }
 
 /* ---------------------------------------------------------------- init */
