@@ -11,6 +11,10 @@ set(main_reqs kernel coreos littlefs esp_partition esp_system esp_timer esp_wifi
 # 0x19580 bytes once LVGL became reachable through commands.c's "lvgldemo"). Fitting it
 # there is its own later chunk (shrinking something else, or a leaner LVGL config), not
 # something to force through now.
+if(NOT CONFIG_PURR_BOARD_COLOR_LCD AND CONFIG_PURR_PROFILE_FULL)
+    # boards without a colour screen: the hooks of the shell/UI/Store the shared code still names (purr_headless.c)
+    list(APPEND main_srcs "purr_headless.c")
+endif()
 if(CONFIG_PURR_BOARD_COLOR_LCD)
     list(APPEND main_srcs "purr_catrt_msg.c" "purr_notify.c" "purr_lvgl.c" "purr_ui_config.c" "purr_ui_assets.c" "purr_ui_service.c"
                           # the setup wizard (recovery loader and KittenOS first boot) and what it is made of: the theme and

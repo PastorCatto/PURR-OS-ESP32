@@ -7,3 +7,8 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/heltec_v3.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions/heltec_v3.csv"
 CONFIG_PURR_BOARD_HELTEC_V3=y
 # CONFIG_SPIRAM is not set
+
+# Apps and modules run from internal RAM on this board (no PSRAM to map executable): the S3's memory protection splits internal RAM into instruction-only and data-only halves
+# at link time, which would stop code that is loaded into the data half and run through its instruction alias. With it off, a signed app can run from the heap (the loader only
+# accepts signed ones). This is the cost of running small apps on a board with no PSRAM; a board with PSRAM keeps the protection on.
+# CONFIG_ESP_SYSTEM_MEMPROT_FEATURE is not set

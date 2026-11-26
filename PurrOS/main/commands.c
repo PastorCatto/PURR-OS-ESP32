@@ -5383,6 +5383,17 @@ static int path_in_boot_drivers(const char *path)
     return strncmp(path, PURR_DRIVERS_DIR "/", sizeof(PURR_DRIVERS_DIR)) == 0 && strstr(path, "..") == NULL;
 }
 
+/* A module's memory is one of two kinds. With PSRAM (every T-Deck): a block of PSRAM, plus an MMU mapping that shows the same pages as instructions. With no PSRAM (the Heltec V3):
+ * a block of internal RAM that the S3 shows twice, as data at one address and as instructions at a fixed offset (SOC_I_D_OFFSET): there is no mapping to undo, only the block to free.
+ * Every place that used to call esp_mmu_unmap(exec_ptr) calls this, so either kind is let go the right way. */
+#include "esp_memory_utils.h"
+static void module_unmap(void *exec_ptr)
+{
+    if (!esp_ptr_in_diram_iram(exec_ptr)) {
+        esp_mmu_unmap(exec_ptr);
+    }
+}
+
 /* Everything after the bytes are in memory: verify the signature, lay the module out, relocate it, map it executable. Takes
  * ownership of rb (malloc'd, len bytes) and frees it. The file version below reads the module from the filesystem; the recovery
  * loader, which has no filesystem, hands in the baked-in driver modules directly (purr_loader_load_drivers). */
@@ -5540,8 +5551,23 @@ static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, con
         free(rb);
         return PURR_LOAD_UNTRUSTED;
     }
-    uint8_t *databuf = heap_caps_aligned_alloc(CONFIG_MMU_PAGE_SIZE, want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const int internal = heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0;      /* no PSRAM on this board: the module lives in internal RAM (see module_unmap) */
+    uint8_t *databuf;
+    if (internal) {
+        want = (layout.code_size + extra + 15u) & ~15u;                         /* no mapping, so no whole pages: just the bytes (the page budget above still caps the size) */
+        databuf = heap_caps_aligned_alloc(16, want, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (databuf != NULL && !esp_ptr_in_diram_dram(databuf)) {
+            ESP_LOGW(log_tag, "%s: the block is not in the RAM that can run code", path);
+            free(databuf);
+            databuf = NULL;
+        }
+    } else {
+        databuf = heap_caps_aligned_alloc(CONFIG_MMU_PAGE_SIZE, want, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
     if (databuf == NULL) {
+        if (internal) {
+            ESP_LOGW(log_tag, "%s: no internal RAM for %u bytes (largest free block %u)", path, (unsigned)want, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        }
         free(data_offsets);
         free(code_offsets);
         free(rb);
@@ -5563,14 +5589,19 @@ static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, con
     }
 
     /* Code relocations need the executable alias's address, which only exists after mapping. */
-    esp_err_t ee = esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+    esp_err_t ee = ESP_OK;
     esp_paddr_t paddr = 0;
     mmu_target_t target = 0;
-    if (ee == ESP_OK) ee = esp_mmu_vaddr_to_paddr(databuf, &paddr, &target);
     void *exec_ptr = NULL;
-    if (ee == ESP_OK) {
-        ee = esp_mmu_map(paddr, want, MMU_TARGET_PSRAM0, MMU_MEM_CAP_EXEC | MMU_MEM_CAP_READ,
-                         ESP_MMU_MMAP_FLAG_PADDR_SHARED, &exec_ptr);
+    if (internal) {
+        exec_ptr = esp_ptr_diram_dram_to_iram(databuf);                         /* the same bytes, seen as instructions: nothing to map */
+    } else {
+        ee = esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+        if (ee == ESP_OK) ee = esp_mmu_vaddr_to_paddr(databuf, &paddr, &target);
+        if (ee == ESP_OK) {
+            ee = esp_mmu_map(paddr, want, MMU_TARGET_PSRAM0, MMU_MEM_CAP_EXEC | MMU_MEM_CAP_READ,
+                             ESP_MMU_MMAP_FLAG_PADDR_SHARED, &exec_ptr);
+        }
     }
     if (ee != ESP_OK) {
         ESP_LOGW(log_tag, "%s: PSRAM exec mapping failed: %s", path, esp_err_to_name(ee));
@@ -5586,7 +5617,7 @@ static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, con
     free(rb);
     if (rr != PURR_RELOC_OK) {
         ESP_LOGW(log_tag, "%s: code relocation failed: %s", path, purr_reloc_result_name(rr));
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return PURR_LOAD_UNTRUSTED;
     }
@@ -5595,21 +5626,21 @@ static purr_load_result_t load_relocatable_image_ex(uint8_t *rb, size_t len, con
         purr_shellhdr_result_t hr = purr_shellhdr_patch(databuf, layout.code_size, &sh, purr_shell_export_names, (uint32_t)purr_shell_export_count, purr_shell_exports);
         if (hr != PURR_SHELLHDR_OK) {
             ESP_LOGW(log_tag, "%s: %s", path, purr_shellhdr_result_name(hr));
-            esp_mmu_unmap(exec_ptr);
+            module_unmap(exec_ptr);
             free(databuf);
             return PURR_LOAD_UNTRUSTED;
         }
     }
 #endif
 
-    ee = esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-    if (ee == ESP_OK) {
+    ee = internal ? ESP_OK : esp_cache_msync(databuf, want, ESP_CACHE_MSYNC_FLAG_DIR_C2M);      /* internal RAM has no cache to flush */
+    if (ee == ESP_OK && !internal) {
         ee = esp_cache_msync(exec_ptr, want,
                             ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_TYPE_INST | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
     }
     if (ee != ESP_OK) {
         ESP_LOGW(log_tag, "%s: post-relocation cache sync failed: %s", path, esp_err_to_name(ee));
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return PURR_LOAD_TRANSIENT;
     }
@@ -5802,7 +5833,7 @@ const purr_shell_ops_t *purr_shell_module_load(const char *id)
     const purr_shell_ops_t *ops = entry();
     if (ops == NULL || ops->size < sizeof(purr_shell_ops_t) || ops->abi_version != PURR_SHELL_ABI_VERSION || ops->start == NULL || ops->id == NULL) {
         ESP_LOGW("shell", "%s: the entry point gave no usable ops table", path);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return NULL;
     }
@@ -5858,7 +5889,7 @@ static int kernel_table_app_run(purr_cli_t *cli, const char *name)
     const purr_app_table_t *table = entry();
     if (table == NULL || table->abi_version != PURR_APP_ABI_VERSION || table->on_create == NULL) {
         purr_cli_printf(cli, "run: '%s' is not compatible with this runtime\n", name);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return 1;
     }
@@ -5876,7 +5907,7 @@ static int kernel_table_app_run(purr_cli_t *cli, const char *name)
     }
     s_apprt_cli = NULL;
 
-    esp_mmu_unmap(exec_ptr);
+    module_unmap(exec_ptr);
     free(databuf);
     return 0;
 }
@@ -5915,13 +5946,13 @@ static int catrt_try_load(const char *path, const purr_app_table_t **table, void
     if (t == NULL || t->on_create == NULL ||
         (t->abi_version != PURR_APP_ABI_VERSION && t->abi_version != PURR_APP_ABI_VERSION_2)) {
         ESP_LOGW("apprt", "%s: not compatible with this runtime", path);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return -1;
     }
     catrt_loaded_t *l = malloc(sizeof(*l));
     if (l == NULL) {
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return -1;
     }
@@ -5967,7 +5998,7 @@ static void catrt_platform_unload(void *handle)
     if (l == NULL) {
         return;
     }
-    esp_mmu_unmap(l->exec_ptr);
+    module_unmap(l->exec_ptr);
     free(l->databuf);
     free(l);
 }
@@ -6085,7 +6116,7 @@ static module_load_result_t load_one_module_file(const char *path)
 
     if (s_loaded_module_count >= PURR_MODULE_MAX) {
         ESP_LOGW("modules", "%s: too many modules already loaded", path);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return MODULE_LOAD_TRANSIENT;
     }
@@ -6094,7 +6125,7 @@ static module_load_result_t load_one_module_file(const char *path)
     const purr_module_table_t *table = entry(&s_core_table);
     if (table == NULL || table->abi_version != PURR_MODULE_ABI_VERSION) {
         ESP_LOGW("modules", "%s: bad module table (abi mismatch or NULL)", path);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return MODULE_LOAD_INCOMPATIBLE;
     }
@@ -6193,7 +6224,7 @@ static int load_one_kernelmod_file(const char *path)
 
     if (s_loaded_kernelmod_count >= PURR_KERNELMOD_MAX) {
         ESP_LOGW("kernelmods", "%s: too many kernelmods already loaded", path);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return -1;
     }
@@ -6203,7 +6234,7 @@ static int load_one_kernelmod_file(const char *path)
     const purr_kernel_module_table_t *table = entry(&s_kernel_table);
     if (table == NULL || table->abi_version != PURR_KERNEL_TABLE_ABI_VERSION) {
         ESP_LOGW("kernelmods", "%s: bad kernelmod table (abi mismatch or NULL)", path);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return -1;
     }
@@ -6302,7 +6333,7 @@ static int driver_from_loaded(const char *path, uint8_t *databuf, void *exec_ptr
     const purr_driver_t *drv = entry(purr_driver_bus_table());
     if (drv == NULL || drv->name == NULL || drv->compatible == NULL || drv->probe == NULL) {
         ESP_LOGW("drivers", "%s: bad driver (NULL or missing required fields)", path);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return -1;
     }
@@ -6312,7 +6343,7 @@ static int driver_from_loaded(const char *path, uint8_t *databuf, void *exec_ptr
         ESP_LOGE("drivers", "%s: '%s' was built for driver bus ABI %u, this kernel serves %u to %u: "
                  "rebuild it (or get a version for this ABI)", path, drv->name, (unsigned)drv->bus_abi,
                  (unsigned)PURR_DRIVER_BUS_ABI_MIN, (unsigned)PURR_DRIVER_BUS_ABI_VERSION);
-        esp_mmu_unmap(exec_ptr);
+        module_unmap(exec_ptr);
         free(databuf);
         return -1;
     }
