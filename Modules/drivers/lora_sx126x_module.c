@@ -21,6 +21,7 @@ typedef struct {
     int busy_pin, dio1_pin, rst_pin, pwr_pin;
     purr_lora_cfg_t cfg;
     int configured;
+    int rx_on;                              /* the chip is in continuous receive: a packet is only heard whole if nothing takes it out of receive while it is on the air */
     purr_lora_status_t heard;               /* the last packet received (rssi, snr, count) */
     uint64_t heard_us;                      /* when, by the bus clock */
 } lora_t;
@@ -207,6 +208,9 @@ static int l_configure(void *h, const purr_lora_cfg_t *cfg)
     uint16_t sw = cfg->sync_word ? cfg->sync_word : 0x1424;
     uint8_t reg[4] = {(uint8_t)(REG_SYNC_WORD >> 8), (uint8_t)REG_SYNC_WORD, (uint8_t)(sw >> 8), (uint8_t)sw};
     rc |= cmd(d, OP_WRITE_REG, reg, 4);
+    static const uint8_t boost[4] = {0x08, 0xAC, 0x96, 0x00};           /* receive gain boosted (register 0x08AC): the difference between hearing a distant node and not */
+    rc |= cmd(d, OP_WRITE_REG, boost, 3);
+    d->rx_on = 0;
     /* Interrupts: TxDone, RxDone, CRC error and timeout, all on DIO1. */
     uint16_t m = IRQ_TX_DONE | IRQ_RX_DONE | IRQ_CRC_ERR | IRQ_TIMEOUT;
     uint8_t irq[8] = {(uint8_t)(m >> 8), (uint8_t)m, (uint8_t)(m >> 8), (uint8_t)m, 0, 0, 0, 0};
@@ -221,6 +225,7 @@ static int l_send(void *h, const uint8_t *data, size_t len, uint32_t timeout_ms)
 {
     lora_t *d = h;
     if (d == NULL || !d->in_use || !d->configured || data == NULL || len == 0 || len > 255) return -1;
+    d->rx_on = 0;                                                     /* transmitting ends receive: the next receive starts it again */
     int rc = cmd1(d, OP_SET_STANDBY, 0x00);
     rc |= clear_irq(d, 0xFFFF);
     uint8_t pk[6] = {(uint8_t)(d->cfg.preamble >> 8), (uint8_t)d->cfg.preamble, d->cfg.implicit_header ? 1 : 0, (uint8_t)len, d->cfg.crc_on ? 1 : 0, 0};
@@ -255,19 +260,21 @@ static int l_receive(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms, pur
 {
     lora_t *d = h;
     if (d == NULL || !d->in_use || !d->configured || buf == NULL || cap == 0) return -1;
-    int rc = cmd1(d, OP_SET_STANDBY, 0x00);
-    rc |= clear_irq(d, 0xFFFF);
     static const uint8_t rx_cont[3] = {0xFF, 0xFF, 0xFF};             /* receive until told to stop */
-    rc |= cmd(d, OP_SET_RX, rx_cont, 3);
-    if (rc != 0) return -1;
+    if (!d->rx_on) {                                                   /* start listening, once; after that the chip keeps listening between calls (and keeps what it heard) */
+        int rc = cmd1(d, OP_SET_STANDBY, 0x00);
+        rc |= clear_irq(d, 0xFFFF);
+        rc |= cmd(d, OP_SET_RX, rx_cont, 3);
+        if (rc != 0) return -1;
+        d->rx_on = 1;
+    }
     uint64_t t0 = s_bus->now_us();
     for (;;) {
         uint16_t irq = 0;
         if (get_irq(d, &irq) != 0) return -1;
         if (irq & IRQ_RX_DONE) {
             clear_irq(d, 0xFFFF);
-            if ((irq & IRQ_CRC_ERR) && d->cfg.crc_on) {               /* a damaged packet: keep listening */
-                cmd(d, OP_SET_RX, rx_cont, 3);
+            if ((irq & IRQ_CRC_ERR) && d->cfg.crc_on) {               /* a damaged packet: keep listening (the chip does) */
                 continue;
             }
             uint8_t st_tx[4] = {OP_GET_RX_STATUS, 0, 0, 0}, st[4];
@@ -292,20 +299,19 @@ static int l_receive(void *h, uint8_t *buf, size_t cap, uint32_t timeout_ms, pur
             rb_tx[1] = (uint8_t)start;
             if (xfer(d, rb_tx, rb, plen + 3) != 0) return -1;
             for (size_t i = 0; i < plen; i++) buf[i] = rb[3 + i];
-            cmd1(d, OP_SET_STANDBY, 0x00);
-            return (int)plen;
+            return (int)plen;                                         /* still in receive: the next packet may be on its way */
         }
         if ((s_bus->now_us() - t0) / 1000 > timeout_ms) break;
         s_bus->delay_ms(2);
     }
-    cmd1(d, OP_SET_STANDBY, 0x00);
-    return 0;                                                         /* nothing arrived in time */
+    return 0;                                                         /* nothing arrived in time; the chip keeps listening */
 }
 
 static int l_sleep(void *h)
 {
     lora_t *d = h;
     if (d == NULL || !d->in_use) return -1;
+    d->rx_on = 0;
     return cmd1(d, OP_SET_SLEEP, 0x04);                               /* warm start: keep the configuration */
 }
 

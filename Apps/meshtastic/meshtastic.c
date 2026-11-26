@@ -28,7 +28,7 @@ static const purr_cc_ui_t *ui;
 static const purr_cc_app_t *app;
 static const purr_cc_contacts_t *con_tab;
 
-#define CONFIG_MAGIC 0x4D545331u        /* "MTS1" */
+#define CONFIG_MAGIC 0x4D545332u        /* "MTS2": 2 = pass-on is off until the person turns it on (the town mesh is live) */
 #define TICK_MS 20
 #define RX_WAIT_MS 60
 #define LEASE_RETRY_MS 5000u
@@ -133,7 +133,7 @@ static void defaults(void)
     copy(s_cfg.region, sizeof(s_cfg.region), "US");
     copy(s_cfg.preset, sizeof(s_cfg.preset), "LongFast");
     s_cfg.hop_limit = 3;
-    s_cfg.rebroadcast = 1;
+    s_cfg.rebroadcast = 0;                                              /* a new node listens first; passing other nodes' packets on is a Settings choice */
     s_cfg.tx_dbm = 22;
     uint8_t seed[32];
     for (int i = 0; i < 32; i += 4) {
@@ -935,6 +935,20 @@ static void pump(void)
         }
     }
     deliver_events();
+    static uint32_t last_count_ms;
+    static int last_count = -1;
+    if (ui != NULL && (s_page == P_HOME || s_page == P_NODES) && t - last_count_ms >= 5000u) {      /* a screen that shows how many nodes are known keeps up with it */
+        last_count_ms = t;
+        int c = purr_mt_node_count(&s_node);
+        if (c != last_count) {
+            last_count = c;
+            if (s_page == P_HOME) {
+                show_home();
+            } else {
+                show_nodes();
+            }
+        }
+    }
 }
 
 static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)

@@ -69,6 +69,9 @@
 #include "purr_drvcmds.h"
 #include "purr_hwsetup.h"
 #include "purr_notify.h"
+#if CONFIG_PURR_PROFILE_FULL
+#include "purr_shell.h"                /* purr_shell_notify: a notification from any task (it hops onto the UI task; purr_notify_add builds widgets and is for the UI task only) */
+#endif
 #include "purr_recovery_src.h"
 #include "purr_catrt_power.h"
 #include "purr_catrt_media.h"
@@ -6816,7 +6819,7 @@ static void recover_drivers_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    purr_notify_add("System", "The system is still setting itself up in the background.");
+    purr_shell_notify("System", "The system is still setting itself up in the background.");
     int back = 0, stay = 0;
     for (int i = 0; i < l.count; i++) {
         size_t n = strlen(l.names[i]);
@@ -6851,7 +6854,7 @@ static void recover_drivers_task(void *arg)
     }
     char msg[120];
     snprintf(msg, sizeof(msg), "Setup finished: %d driver(s) are back%s.", back, stay ? ", the others stay set aside (Device Manager > Drivers)" : "");
-    purr_notify_add("System", msg);
+    purr_shell_notify("System", msg);
     vTaskDelete(NULL);
 }
 
@@ -6867,6 +6870,27 @@ static void late_drivers_task(void *arg)
     load_drivers_from(&cli, PURR_DRIVERS_DIR);
     s_drv_mode = 0;
     purr_hwsetup_boot(&cli);                            /* bind the devices whose drivers have just arrived */
+#ifdef PURR_EMBED_MESHTASTIC
+    {   /* the app the image carries (planted in /apps/meshtastic) goes into the signed-in user's own apps, the folder the launcher lists, by the same install any app takes */
+        const purr_user_t *u = purr_login_current();
+        if (u != NULL && u->name[0] != '\0') {
+            char path[96], msg[96];
+            snprintf(path, sizeof(path), "/home/%s/apps/meshtastic/package.cat", u->name);
+            int isdir = 0;
+            uint32_t sz = 0;
+            uint32_t plen = (uint32_t)(_binary_meshtastic_cat_end - _binary_meshtastic_cat_start);
+            int have = purr_fs_stat(&s_fs, path, &isdir, &sz) == 0;
+            if (have && !fs_file_is(path, _binary_meshtastic_cat_start, plen)) {
+                purr_apps_remove("meshtastic");            /* the image carries a different version: the installed one is replaced (its own folder of data stays) */
+                have = 0;
+            }
+            if (!have) {
+                int r = purr_apps_install("/apps/meshtastic/package.cat", msg, sizeof(msg));
+                ESP_LOGI("apps", "carried app meshtastic: %s (%s)", r == 0 ? "installed" : "not installed", msg);
+            }
+        }
+    }
+#endif
     if (xTaskCreate(settle_task, "drv-settle", 4096, NULL, 3, NULL) != pdPASS) {
         purr_fs_remove(&s_fs, DRIVER_SETTLE_FILE);
     }
