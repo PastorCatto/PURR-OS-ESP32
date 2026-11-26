@@ -906,9 +906,35 @@ static void go_back(void)
 
 /* ---------------------------------------------------------------- the loop */
 
+static uint32_t s_n_rx, s_n_rx_err, s_n_tx;                /* what the radio did: packets heard, receive errors, packets sent */
+static int s_last_rssi;
+
+static void report(void)                                                /* one line on the console every 20 s: whether the radio hears anything at all */
+{
+    static uint32_t last;
+    uint32_t t = now_ms();
+    if (t - last < 20000u) {
+        return;
+    }
+    last = t;
+    char line[120];
+    copy(line, sizeof(line), "meshtastic: heard ");
+    cat_num(line, sizeof(line), s_n_rx);
+    cat(line, sizeof(line), ", receive errors ");
+    cat_num(line, sizeof(line), s_n_rx_err);
+    cat(line, sizeof(line), ", sent ");
+    cat_num(line, sizeof(line), s_n_tx);
+    cat(line, sizeof(line), ", nodes ");
+    cat_num(line, sizeof(line), (uint32_t)purr_mt_node_count(&s_node));
+    cat(line, sizeof(line), s_leased ? ", radio held" : ", radio NOT held");
+    cat(line, sizeof(line), "\n");
+    say(line);
+}
+
 static void pump(void)
 {
     uint32_t t = now_ms();
+    report();
     if (!s_leased) {
         if ((int32_t)(t - s_lease_not_before) >= 0 && t - s_lease_try_ms >= LEASE_RETRY_MS) {
             try_lease();
@@ -920,7 +946,11 @@ static void pump(void)
     purr_cc_radio_rx_t info;
     int n = rad->receive(buf, sizeof(buf), &info, RX_WAIT_MS);
     if (n > 0) {
+        s_n_rx++;
+        s_last_rssi = info.rssi_dbm;
         purr_mt_node_rx(&s_node, now_ms(), buf, (size_t)n, info.rssi_dbm, info.snr_db);
+    } else if (n < 0 && n != PURR_RADIO_LOST) {
+        s_n_rx_err++;
     } else if (n == PURR_RADIO_LOST) {
         s_leased = 0;
         msg->service_online(0);
@@ -929,6 +959,7 @@ static void pump(void)
     uint8_t out[255];
     size_t ol = 0;
     if (purr_mt_node_tick(&s_node, now_ms(), out, sizeof(out), &ol)) {
+        s_n_tx++;
         if (rad->send(out, ol, 4000) == PURR_RADIO_LOST) {
             s_leased = 0;
             msg->service_online(0);

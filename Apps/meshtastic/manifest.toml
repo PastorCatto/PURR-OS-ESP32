@@ -1,5 +1,5 @@
 name = "meshtastic"
-version = "0.2.2"
+version = "0.2.3"
 description = "Meshtastic: text messages over the LoRa mesh (US 915 LongFast to start). Shows up in Messages."
 class = "unprivileged"
 kind = "ui"
