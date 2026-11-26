@@ -46,6 +46,7 @@ typedef enum {
     PURR_MT_EV_FAILED,              /* ... or never was, after every retry (id) */
     PURR_MT_EV_HEARD,               /* a broadcast of ours was passed on by someone else: the implicit acknowledgement (id) */
     PURR_MT_EV_NODE,                /* a node appeared or changed (from = its number) */
+    PURR_MT_EV_PRIVATE,             /* a packet on the private application port (256): the bytes are in text[0..len) (not text; they may be anything) */
 } purr_mt_event_kind_t;
 
 typedef struct {
@@ -55,6 +56,7 @@ typedef struct {
     int8_t snr;
     int16_t rssi;
     uint8_t pkc;                    /* it came sealed with the public keys */
+    uint16_t len;                   /* PURR_MT_EV_PRIVATE: how many bytes of text are the payload */
     char text[PURR_MT_TEXT_MAX + 1];
 } purr_mt_event_t;
 
@@ -116,6 +118,9 @@ int purr_mt_channel_set(purr_mt_t *m, int index, const char *name, const uint8_t
 void purr_mt_node_rx(purr_mt_t *m, uint32_t now_ms, const uint8_t *frame, size_t len, int rssi, int snr);
 /* A text to a node (PURR_MT_BROADCAST for a channel) on a channel. A message to one node asks for an acknowledgement and is sent again if none comes. Returns the packet id, or 0. */
 uint32_t purr_mt_node_send_text(purr_mt_t *m, uint32_t now_ms, uint32_t to, int channel, const char *text);
+/* Sends a packet on any port (the private application port, say) to a node or to everyone, on a channel, encrypted with the channel's key. No acknowledgement is asked for or waited
+ * for: whoever needs one asks again. 0 if it was queued, -1 if the channel is not one we have or the payload is too long. */
+int purr_mt_node_send_data(purr_mt_t *m, uint32_t now_ms, uint32_t to, int channel, uint32_t portnum, const uint8_t *payload, size_t len);
 /* Our own details on the mesh now (otherwise they go out at the start and every three hours). */
 void purr_mt_node_announce(purr_mt_t *m, uint32_t now_ms);
 /* Asks for a frame to transmit now: 1 and the bytes if one is due, 0 if not. Call it when the radio is idle and the channel is clear. */

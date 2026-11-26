@@ -17,6 +17,9 @@ static int cur;
 static int tx_count[MAXN];
 static int drop_all;                                     /* the radio channel is dead */
 static int texts[MAXN], delivered[MAXN], failed[MAXN], heard[MAXN];
+static int priv_n[MAXN], priv_len[MAXN], priv_ch[MAXN];
+static uint8_t priv_data[MAXN][PURR_MT_TEXT_MAX + 1];
+static uint32_t priv_from[MAXN];
 static char last_text[MAXN][PURR_MT_TEXT_MAX + 1];
 static uint32_t last_text_from[MAXN];
 
@@ -67,6 +70,7 @@ static void reset(void)
     memset(last_text, 0, sizeof(last_text));
     drop_all = 0;
     memset(pkc_seen, 0, sizeof(pkc_seen));
+    memset(priv_n, 0, sizeof(priv_n));
     make_keys = 0;
     now = 1000;
 }
@@ -91,6 +95,7 @@ static void drain_events(int i)
         case PURR_MT_EV_DELIVERED: delivered[i]++; break;
         case PURR_MT_EV_FAILED: failed[i]++; break;
         case PURR_MT_EV_HEARD: heard[i]++; break;
+        case PURR_MT_EV_PRIVATE: priv_n[i]++; priv_len[i] = e.len; memcpy(priv_data[i], e.text, e.len); priv_from[i] = e.from; priv_ch[i] = e.channel; break;
         default: break;
         }
     }
@@ -299,6 +304,33 @@ static void test_sealed_direct(void)
     CHECK_EQ(pkc_seen[1], 0);
 }
 
+static void test_private_port(void)
+{
+    reset();
+    static const uint8_t admin_key[16] = {0xA1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    add_node(0x1111, "Alpha", &K1, 1);
+    add_node(0x2222, "Bravo", &K1, 1);
+    add_node(0x3333, "Charlie", &K1, 1);
+    purr_mt_channel_set(&node[0], 1, "admin", admin_key, 16, 2);          /* a private channel on A and C; B does not have it */
+    purr_mt_channel_set(&node[2], 1, "admin", admin_key, 16, 2);
+    line(0, 1);
+    line(1, 2);
+    run(2000);
+    uint8_t payload[100];
+    for (int i = 0; i < 100; i++) payload[i] = (uint8_t)(i * 3 + 1);          /* binary: it is not text */
+    cur = 0;
+    CHECK_EQ(purr_mt_node_send_data(&node[0], now, 0x3333, 1, 256, payload, sizeof(payload)), 0);
+    run(20000);
+    CHECK_EQ(priv_n[2], 1);                                             /* arrived at C, through B, on the private channel */
+    CHECK(priv_len[2] == 100 && memcmp(priv_data[2], payload, 100) == 0 && priv_from[2] == 0x1111 && priv_ch[2] == 1);
+    CHECK_EQ(priv_n[1], 0);                                             /* B carried it but has no key for that channel: it saw nothing */
+    CHECK_EQ(texts[2], 0);                                              /* and it is not a text message */
+    CHECK_EQ(purr_mt_node_send_data(&node[0], now, 0x3333, 5, 256, payload, sizeof(payload)), -1);      /* no such channel */
+    uint8_t big[PURR_MT_TEXT_MAX + 5];
+    memset(big, 1, sizeof(big));
+    CHECK_EQ(purr_mt_node_send_data(&node[0], now, 0x3333, 1, 256, big, sizeof(big)), -1);               /* too long */
+}
+
 static void test_rules(void)
 {
     reset();
@@ -329,6 +361,7 @@ int main(void)
     test_foreign_channel();
     test_nodeinfo_and_range();
     test_sealed_direct();
+    test_private_port();
     test_rules();
     TK_DONE("test_mt_node");
 }

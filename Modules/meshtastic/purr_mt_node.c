@@ -331,6 +331,29 @@ static void queue_nodeinfo(purr_mt_t *m, uint32_t now_ms, uint32_t to, int want_
     }
 }
 
+int purr_mt_node_send_data(purr_mt_t *m, uint32_t now_ms, uint32_t to, int channel, uint32_t portnum, const uint8_t *payload, size_t len)
+{
+    if (channel < 0) {
+        channel = primary_channel(m);
+    }
+    if (channel < 0 || len > PURR_MT_TEXT_MAX) {
+        return -1;
+    }
+    purr_mt_data_t d;
+    memset(&d, 0, sizeof(d));
+    d.portnum = portnum;
+    d.payload = payload;
+    d.payload_len = len;
+    uint8_t f[255];
+    uint32_t id = new_id(m);
+    int fl = build_frame_ex(m, to, id, channel, 0, m->cfg.hop_limit, &d, f, sizeof(f), 0);
+    if (fl <= 0) {
+        return -1;
+    }
+    queue(m, f, (size_t)fl, now_ms + (rnd(m) % 200u), id, m->cfg.my_num, 0);
+    return 0;
+}
+
 void purr_mt_node_announce(purr_mt_t *m, uint32_t now_ms)
 {
     queue_nodeinfo(m, now_ms, PURR_MT_BROADCAST, 1, 0);
@@ -455,6 +478,14 @@ static void handle_data(purr_mt_t *m, uint32_t now_ms, const purr_mt_hdr_t *h, i
         }
         break;
     }
+    case 256:                                                           /* PRIVATE_APP: whatever an application on top of the mesh sends (the admin channel) */
+        if ((for_me || bcast) && d->payload != NULL && d->payload_len <= PURR_MT_TEXT_MAX) {
+            e.kind = PURR_MT_EV_PRIVATE;
+            e.len = (uint16_t)d->payload_len;
+            memcpy(e.text, d->payload, d->payload_len);
+            ev_push(m, &e);
+        }
+        break;
     default:
         break;                                                          /* telemetry, admin, traceroute...: heard, passed on, not acted on here */
     }

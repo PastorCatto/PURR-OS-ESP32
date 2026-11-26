@@ -17,6 +17,8 @@
 #include "purr_catcalls.h"
 #include "../../Modules/meshtastic/purr_mt_node.h"
 #include "../../Modules/meshtastic/purr_mt_pkc.h"
+#include "../../Modules/meshtastic/purr_mt_admin.h"
+#include "../../Modules/proximity/uecc/uECC.h"
 
 static const purr_cc_console_t *con;
 static const purr_cc_sched_t *sc;
@@ -57,11 +59,22 @@ static purr_mt_t s_node;
 static int s_service = -1;
 static int s_timer = -1;
 static int s_leased;
+static uint32_t s_n_rx, s_n_rx_err, s_n_tx;                 /* what the radio did: packets heard, receive errors, packets sent */
+static int s_last_rssi;
+static uint32_t s_admin_target;                             /* the node the Admin page talks to */
+static void admin_send(void);
 static int s_lease_rc;                              /* what the radio catcall answered at the last try (0 = got it) */
 static uint32_t s_lease_try_ms;
 static uint32_t s_lease_not_before;         /* after handing the radio back: not asked for again before this time */
 static struct { uint32_t pkt, msg; } s_sent[8];
 static int s_sent_next;
+
+static void svc_online(int on)
+{
+    if (msg != NULL) {
+        msg->service_online(on);
+    }
+}
 
 static void say(const char *t)
 {
@@ -119,6 +132,27 @@ static void copy(char *dst, size_t cap, const char *src)
     }
     dst[i] = '\0';
 }
+
+
+/* ---------------------------------------------------------------- the curve, for signing and checking administrator commands (micro-ecc, as in the proximity driver) */
+
+static int ecc_rng(uint8_t *dest, unsigned size)
+{
+    for (unsigned i = 0; i < size; i += 4) {
+        uint32_t r = rad->random32();
+        for (unsigned k = 0; k < 4 && i + k < size; k++) {
+            dest[i + k] = (uint8_t)(r >> (8 * k));
+        }
+    }
+    return 1;
+}
+
+static void e_random(uint8_t *out, int n) { ecc_rng(out, (unsigned)n); }
+static int e_keypair(uint8_t pub[64], uint8_t priv[32]) { return uECC_make_key(pub, priv, uECC_secp256r1()); }
+static int e_shared(const uint8_t pub[64], const uint8_t priv[32], uint8_t out[32]) { return uECC_shared_secret(pub, priv, out, uECC_secp256r1()); }
+static int e_sign(const uint8_t priv[32], const uint8_t hash[32], uint8_t sig[64]) { return uECC_sign(priv, hash, 32, sig, uECC_secp256r1()); }
+static int e_verify(const uint8_t pub[64], const uint8_t hash[32], const uint8_t sig[64]) { return uECC_verify(pub, hash, 32, sig, uECC_secp256r1()); }
+static const purr_px_ecc_t s_ecc = {.random = e_random, .keypair = e_keypair, .shared = e_shared, .sign = e_sign, .verify = e_verify};
 
 /* ---------------------------------------------------------------- configuration */
 
@@ -342,11 +376,11 @@ static void try_lease(void)
     s_lease_try_ms = now_ms();
     if (rc == PURR_RADIO_OK) {
         s_leased = 1;
-        msg->service_online(1);
+        svc_online(1);
         say("meshtastic: on the air\n");
     } else {
         s_leased = 0;
-        msg->service_online(0);
+        svc_online(0);
     }
 }
 
@@ -367,7 +401,7 @@ static void send_outgoing(void)
     purr_cc_msg_t m;
     char peer[40];
     int guard = 4;
-    while (guard-- > 0 && msg->next_outgoing(&m, peer, sizeof(peer))) {
+    while (msg != NULL && guard-- > 0 && msg->next_outgoing(&m, peer, sizeof(peer))) {
         uint32_t to = PURR_MT_BROADCAST;
         int ch = -1;
         int ok = 0;
@@ -415,6 +449,9 @@ static void who(char *out, size_t cap, uint32_t num)                    /* a sho
 /* The channels are chats from the moment the service runs (LongFast among them): Messages lists them without anyone starting one. */
 static void publish_channels(void)
 {
+    if (msg == NULL) {
+        return;
+    }
     for (int i = 0; i < PURR_MT_MAX_CHANNELS; i++) {
         if (s_cfg.ch[i].role != 0) {
             char peer[16];
@@ -428,7 +465,7 @@ static void publish_channels(void)
 /* The nodes heard, as the people a new chat can be started with (Messages: New message > Meshtastic). */
 static void publish_peers(void)
 {
-    if (msg->version < 2 || msg->peers_clear == NULL) {
+    if (msg == NULL || msg->version < 2 || msg->peers_clear == NULL) {
         return;
     }
     msg->peers_clear();
@@ -444,11 +481,17 @@ static void publish_peers(void)
     }
 }
 
+static void private_in(const purr_mt_event_t *e);
+
 static void deliver_events(void)
 {
     purr_mt_event_t e;
     while (purr_mt_node_event(&s_node, &e)) {
-        if (e.kind == PURR_MT_EV_TEXT) {
+        if (e.kind == PURR_MT_EV_PRIVATE) {
+            private_in(&e);
+        } else if (msg == NULL) {
+            continue;                                                   /* no Messages on this device: texts and acknowledgements have nowhere to go */
+        } else if (e.kind == PURR_MT_EV_TEXT) {
             char peer[40], pname[24], text[PURR_MSGCC_TEXT];
             if (e.to == PURR_MT_BROADCAST) {
                 copy(peer, sizeof(peer), "#");
@@ -491,7 +534,7 @@ static void deliver_events(void)
 
 /* ---------------------------------------------------------------- the app's own screens */
 
-enum { P_HOME, P_NODES, P_CHANNELS, P_SHARE, P_JOIN, P_SETTINGS, P_NAME, P_NODE };
+enum { P_HOME, P_NODES, P_CHANNELS, P_SHARE, P_JOIN, P_SETTINGS, P_NAME, P_NODE, P_ADMIN };
 static uint32_t s_node_sel;                         /* the node on the node page */
 static int s_page;
 static int s_sel;                                   /* the channel on the share page */
@@ -565,6 +608,7 @@ static void show_join(void);
 static void show_settings(void);
 static void show_name(void);
 static void show_node(uint32_t num);
+static void show_admin(uint32_t num);
 
 static void page_begin(int page, const char *title, int app_handles_back)
 {
@@ -711,6 +755,7 @@ static void show_node(uint32_t num)
     s_h_btn[0] = ui->button("Message");
     int in = con_tab != NULL ? (int)con_tab->find("meshtastic", id) : 0;
     s_h_btn[1] = ui->button(in > 0 ? "In your contacts" : "Save to contacts");
+    s_h_btn[2] = ui->button("Administer");
 }
 
 static void show_channels(void)
@@ -820,10 +865,12 @@ static void click(int h)
             char peer[12];
             node_name(peer, s_node_sel);
             const purr_mt_nodeinfo_t *nd = purr_mt_node_find(&s_node, s_node_sel);
-            int tid = msg->thread_for("meshtastic", peer, nd != NULL && nd->long_name[0] != '\0' ? nd->long_name : peer);
+            int tid = msg == NULL ? 0 : msg->thread_for("meshtastic", peer, nd != NULL && nd->long_name[0] != '\0' ? nd->long_name : peer);
             if (tid > 0) {
                 msg->open_thread((uint32_t)tid);
             }
+        } else if (h == s_h_btn[2]) {
+            show_admin(s_node_sel);
         } else if (h == s_h_btn[1] && con_tab != NULL) {
             char peer[12];
             node_name(peer, s_node_sel);
@@ -911,6 +958,11 @@ static void click(int h)
             show_settings();
         }
         break;
+    case P_ADMIN:
+        if (h == s_h_btn[0]) {
+            admin_send();
+        }
+        break;
     case P_NAME:
         if (h == s_h_btn[0]) {
             char nm[40];
@@ -936,6 +988,7 @@ static void go_back(void)
     case P_NAME: show_settings(); break;
     case P_SHARE: show_channels(); break;
     case P_NODE: show_nodes(); break;
+    case P_ADMIN: show_node(s_admin_target); break;
     case P_JOIN: show_channels(); break;
     case P_HOME:
         if (app != NULL && app->version >= 2 && app->go_home != NULL) {
@@ -948,6 +1001,360 @@ static void go_back(void)
     }
 }
 
+
+/* ---------------------------------------------------------------- administering a node over the mesh (plan9.md, "The Heltec V3 as a PURR OS node") */
+
+/* The node side: the keys of its administrators (and the last counter of each), a fixed set of commands, and the answer sent back in pieces. A request is believed only if it arrives on a
+ * secondary channel (never on the public one), is signed by an enrolled key, carries a counter that only goes up, and names this node. */
+static purr_mta_node_t s_adm;
+static uint8_t s_aid_priv[32], s_aid_pub[64];                           /* this device's own administrator key: made when it is first needed */
+static int s_aid_ok;
+static uint32_t s_aid_counter;
+static int s_h_ans;                                                     /* the label that shows the answer */
+static purr_mta_answer_t s_rx_ans;
+static int s_rx_waiting;
+static uint32_t s_rx_since_ms;
+static uint16_t s_tx_seq;
+
+static struct {
+    int active;
+    uint16_t seq;
+    uint32_t to;
+    int channel, parts, next;
+    uint32_t last_ms;
+    size_t len;
+    char text[PURR_MTA_RESP_PARTS * PURR_MTA_RESP_DATA + 1];
+} s_ans;
+
+static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : (c >= 'a' && c <= 'f' ? c - 'a' + 10 : (c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1)); }
+
+static void admin_save(void)
+{
+    if (stg == NULL) {
+        return;
+    }
+    int h = stg->open("admin.bin", PURR_CC_O_WRITE | PURR_CC_O_CREATE | PURR_CC_O_TRUNC);
+    if (h >= 0) {
+        uint32_t magic = 0x4D544131u;                                   /* "MTA1" */
+        stg->write(h, &magic, sizeof(magic));
+        stg->write(h, &s_adm, sizeof(s_adm));
+        stg->close(h);
+    }
+    if (s_aid_ok) {
+        h = stg->open("adminid.bin", PURR_CC_O_WRITE | PURR_CC_O_CREATE | PURR_CC_O_TRUNC);
+        if (h >= 0) {
+            stg->write(h, &s_aid_counter, sizeof(s_aid_counter));
+            stg->write(h, s_aid_priv, sizeof(s_aid_priv));
+            stg->write(h, s_aid_pub, sizeof(s_aid_pub));
+            stg->close(h);
+        }
+    }
+}
+
+/* This device's administrator key (made once, kept), so it can command nodes that were given its public key. */
+static void admin_identity(void)
+{
+    if (s_aid_ok) {
+        return;
+    }
+    if (stg != NULL) {
+        int h = stg->open("adminid.bin", PURR_CC_O_READ);
+        if (h >= 0) {
+            uint32_t c = 0;
+            if (stg->read(h, &c, sizeof(c)) == (int)sizeof(c) && stg->read(h, s_aid_priv, 32) == 32 && stg->read(h, s_aid_pub, 64) == 64) {
+                s_aid_counter = c;
+                s_aid_ok = 1;
+            }
+            stg->close(h);
+        }
+    }
+    if (!s_aid_ok && s_ecc.keypair(s_aid_pub, s_aid_priv)) {
+        s_aid_ok = 1;
+        admin_save();
+    }
+}
+
+static void admin_load(void)
+{
+    purr_mta_node_init(&s_adm);
+    if (stg == NULL) {
+        return;
+    }
+    int h = stg->open("admin.bin", PURR_CC_O_READ);
+    if (h >= 0) {
+        uint32_t magic = 0;
+        purr_mta_node_t tmp;
+        if (stg->read(h, &magic, sizeof(magic)) == (int)sizeof(magic) && magic == 0x4D544131u && stg->read(h, &tmp, sizeof(tmp)) == (int)sizeof(tmp)) {
+            s_adm = tmp;
+        }
+        stg->close(h);
+    }
+    h = stg->open("admin.pub", PURR_CC_O_READ);                         /* a public key left in the folder (128 hex characters) is enrolled: how a node with no screen is given its administrator */
+    if (h >= 0) {
+        char hex[140];
+        int n = stg->read(h, hex, sizeof(hex) - 1);
+        stg->close(h);
+        uint8_t pub[64];
+        int ok = n >= 128;
+        for (int i = 0; ok && i < 64; i++) {
+            int a = hexval(hex[2 * i]), b = hexval(hex[2 * i + 1]);
+            ok = a >= 0 && b >= 0;
+            pub[i] = (uint8_t)((a << 4) | (b & 15));
+        }
+        if (ok && purr_mta_add_admin(&s_adm, pub) == 0) {
+            admin_save();
+            say("meshtastic: an administrator key was enrolled from admin.pub\n");
+        }
+    }
+}
+
+static void print_admin_key(void)                                       /* the public key, on the console, so it can be given to a node */
+{
+    char line[160];
+    static const char hx[] = "0123456789abcdef";
+    copy(line, sizeof(line), "meshtastic: this device's administrator key ");
+    size_t n = strlen(line);
+    for (int i = 0; i < 64 && n + 3 < sizeof(line); i++) {
+        line[n++] = hx[s_aid_pub[i] >> 4];
+        line[n++] = hx[s_aid_pub[i] & 15];
+    }
+    line[n++] = '\n';
+    line[n] = '\0';
+    say(line);
+}
+
+/* ---- the commands (a fixed set; nothing else can be run) */
+
+static int cmd_status(void *ctx, int argc, char **argv, char *out, size_t cap)
+{
+    (void)ctx; (void)argc; (void)argv;
+    copy(out, cap, "up ");
+    cat_num(out, cap, sc->uptime_ms() / 1000u);
+    cat(out, cap, " s, heard ");
+    cat_num(out, cap, s_n_rx);
+    cat(out, cap, ", sent ");
+    cat_num(out, cap, s_n_tx);
+    cat(out, cap, ", nodes ");
+    cat_num(out, cap, (uint32_t)purr_mt_node_count(&s_node));
+    cat(out, cap, s_leased ? ", radio held, " : ", radio NOT held, ");
+    cat(out, cap, s_cfg.region);
+    cat(out, cap, " ");
+    cat(out, cap, s_cfg.preset);
+    return 0;
+}
+
+static int cmd_nodes(void *ctx, int argc, char **argv, char *out, size_t cap)
+{
+    (void)ctx; (void)argc; (void)argv;
+    out[0] = '\0';
+    int total = purr_mt_node_count(&s_node);
+    for (int i = 0; i < total && strlen(out) + 40 < cap && i < 25; i++) {
+        const purr_mt_nodeinfo_t *n = purr_mt_node_at(&s_node, i);
+        char id[12];
+        node_name(id, n->num);
+        if (out[0] != '\0') {
+            cat(out, cap, "\n");
+        }
+        cat(out, cap, id);
+        cat(out, cap, " ");
+        cat(out, cap, n->short_name[0] != '\0' ? n->short_name : "-");
+        cat(out, cap, n->hops_away == 0 ? " direct" : " relayed");
+    }
+    if (out[0] == '\0') {
+        copy(out, cap, "none heard yet");
+    }
+    return 0;
+}
+
+static int cmd_channels(void *ctx, int argc, char **argv, char *out, size_t cap)
+{
+    (void)ctx; (void)argc; (void)argv;
+    out[0] = '\0';
+    for (int i = 0; i < PURR_MT_MAX_CHANNELS; i++) {
+        if (s_cfg.ch[i].role != 0) {
+            if (out[0] != '\0') {
+                cat(out, cap, "\n");
+            }
+            cat(out, cap, s_cfg.ch[i].role == 1 ? "primary " : "secondary ");
+            cat(out, cap, s_cfg.ch[i].name);                            /* names only: never a key */
+        }
+    }
+    return 0;
+}
+
+static int cmd_radio(void *ctx, int argc, char **argv, char *out, size_t cap)
+{
+    (void)ctx;
+    if (streq(argv[0], "get")) {
+        purr_cc_radio_cfg_t r;
+        radio_cfg(&r);
+        copy(out, cap, s_cfg.region);
+        cat(out, cap, " ");
+        cat(out, cap, s_cfg.preset);
+        cat(out, cap, ", ");
+        cat_num(out, cap, r.freq_hz / 1000u);
+        cat(out, cap, " kHz, hops ");
+        cat_num(out, cap, s_cfg.hop_limit);
+        cat(out, cap, s_cfg.rebroadcast ? ", passes messages on" : ", does not pass messages on");
+        return 0;
+    }
+    if (argc == 2 && streq(argv[0], "region") && purr_mt_region_by_name(argv[1]) != NULL) {
+        copy(s_cfg.region, sizeof(s_cfg.region), argv[1]);
+        restart_service();
+        copy(out, cap, "region ");
+        cat(out, cap, argv[1]);
+        return 0;
+    }
+    if (argc == 2 && streq(argv[0], "preset") && purr_mt_preset_by_name(argv[1]) != NULL) {
+        copy(s_cfg.preset, sizeof(s_cfg.preset), argv[1]);
+        restart_service();
+        copy(out, cap, "preset ");
+        cat(out, cap, argv[1]);
+        return 0;
+    }
+    if (argc == 2 && streq(argv[0], "hops") && argv[1][0] >= '1' && argv[1][0] <= '7' && argv[1][1] == '\0') {
+        s_cfg.hop_limit = (uint8_t)(argv[1][0] - '0');
+        restart_service();
+        copy(out, cap, "hops set");
+        return 0;
+    }
+    if (argc == 2 && streq(argv[0], "relay") && (streq(argv[1], "on") || streq(argv[1], "off"))) {
+        s_cfg.rebroadcast = streq(argv[1], "on");
+        restart_service();
+        copy(out, cap, s_cfg.rebroadcast ? "passing messages on" : "not passing messages on");
+        return 0;
+    }
+    copy(out, cap, "radio get | region <name> | preset <name> | hops 1-7 | relay on|off");
+    return -1;
+}
+
+static int cmd_admins(void *ctx, int argc, char **argv, char *out, size_t cap)
+{
+    (void)ctx; (void)argc; (void)argv;
+    int n = 0;
+    for (int i = 0; i < PURR_MTA_MAX_ADMINS; i++) {
+        n += s_adm.admin[i].used;
+    }
+    copy(out, cap, "administrators: ");
+    cat_num(out, cap, (uint32_t)n);
+    return 0;
+}
+
+static const purr_mta_cmd_t k_cmds[] = {
+    {"status", "how the node is doing", 0, 0, cmd_status},
+    {"nodes", "the nodes it has heard", 0, 0, cmd_nodes},
+    {"channels", "its channels (names only)", 0, 0, cmd_channels},
+    {"radio", "radio get | region <n> | preset <n> | hops 1-7 | relay on|off", 1, 2, cmd_radio},
+    {"admins", "how many administrators it has", 0, 0, cmd_admins},
+};
+
+static void private_in(const purr_mt_event_t *e)
+{
+    /* this device sent a command and is waiting for its answer */
+    if (s_rx_waiting && e->from == s_admin_target) {
+        int r = purr_mta_answer_push(&s_rx_ans, (const uint8_t *)e->text, e->len);
+        if (r == 1) {
+            s_rx_waiting = 0;
+            if (ui != NULL && s_page == P_ADMIN && s_h_ans > 0) {
+                ui->set_text(s_h_ans, s_rx_ans.text);
+            }
+        }
+        return;
+    }
+    /* a command for this node: only on a secondary channel, never the public one */
+    if (e->channel < 0 || e->channel >= PURR_MT_MAX_CHANNELS || s_cfg.ch[e->channel].role != 2 || e->to != s_node.cfg.my_num) {
+        return;
+    }
+    char cmd[PURR_MTA_CMD_MAX + 1];
+    uint16_t seq = 0;
+    int r = purr_mta_check_request(&s_adm, &s_ecc, s_node.cfg.my_num, (const uint8_t *)e->text, e->len, cmd, sizeof(cmd), &seq);
+    if (r < 0) {
+        return;                                                         /* no answer to anything that does not check: nothing is learned from silence */
+    }
+    admin_save();                                                       /* the counter moved: kept, so a replay after a restart is still refused */
+    s_ans.text[0] = '\0';
+    purr_mta_dispatch(k_cmds, (int)(sizeof(k_cmds) / sizeof(k_cmds[0])), NULL, cmd, s_ans.text, sizeof(s_ans.text));
+    s_ans.len = strlen(s_ans.text);
+    s_ans.parts = purr_mta_answer_parts(s_ans.len);
+    s_ans.seq = seq;
+    s_ans.to = e->from;
+    s_ans.channel = e->channel;
+    s_ans.next = 0;
+    s_ans.last_ms = 0;
+    s_ans.active = 1;
+}
+
+static void admin_tick(uint32_t t)                                      /* one piece of the answer at a time: the radio is slow and the queue is short */
+{
+    if (!s_ans.active || t - s_ans.last_ms < 1800u) {
+        return;
+    }
+    uint8_t piece[PURR_MTA_RESP_DATA + 8];
+    int n = purr_mta_make_answer(s_ans.seq, s_ans.text, s_ans.len, s_ans.next, piece, sizeof(piece));
+    if (n > 0) {
+        purr_mt_node_send_data(&s_node, t, s_ans.to, s_ans.channel, PURR_MTA_PORT, piece, (size_t)n);
+    }
+    s_ans.last_ms = t;
+    if (++s_ans.next >= s_ans.parts) {
+        s_ans.active = 0;
+    }
+}
+
+/* ---- the administrator side: the Admin page of a node */
+
+static int first_secondary(void)
+{
+    for (int i = 0; i < PURR_MT_MAX_CHANNELS; i++) {
+        if (s_cfg.ch[i].role == 2) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void show_admin(uint32_t num)
+{
+    s_admin_target = num;
+    page_begin(P_ADMIN, "Administer", 1);
+    char id[12];
+    node_name(id, num);
+    ui->label(id, PURR_UI_ROLE_TITLE);
+    ui->label(first_secondary() >= 0 ? "Sent on your private channel, signed with this device's key. Try: help" : "Join the private admin channel first (Channels > Join a group).", PURR_UI_ROLE_DIM);
+    s_h_in = ui->input_line(PURR_MTA_CMD_MAX, "command");
+    s_h_btn[0] = ui->button("Send");
+    s_h_ans = ui->label("", PURR_UI_ROLE_TEXT);
+    ui->focus(s_h_in);
+}
+
+static void admin_send(void)
+{
+    int ch = first_secondary();
+    char cmd[PURR_MTA_CMD_MAX + 1];
+    ui->get_text(s_h_in, cmd, sizeof(cmd));
+    if (ch < 0 || cmd[0] == '\0') {
+        ui->status(ch < 0 ? "No private channel yet" : "Type a command", 1);
+        return;
+    }
+    admin_identity();
+    uint32_t c = s_aid_counter + 1;
+    int64_t unix_now = sys != NULL ? sys->unix_time() : 0;
+    if (unix_now > 0 && (uint32_t)unix_now > c) {
+        c = (uint32_t)unix_now;                                         /* the clock keeps the counter ahead even if this device forgot its own */
+    }
+    s_aid_counter = c;
+    admin_save();
+    uint8_t req[PURR_MTA_REQ_MAX];
+    s_tx_seq++;
+    int n = purr_mta_make_request(&s_ecc, s_aid_priv, s_admin_target, c, s_tx_seq, cmd, req, sizeof(req));
+    if (n < 0 || purr_mt_node_send_data(&s_node, now_ms(), s_admin_target, ch, PURR_MTA_PORT, req, (size_t)n) != 0) {
+        ui->status("Could not send", 1);
+        return;
+    }
+    purr_mta_answer_init(&s_rx_ans, s_tx_seq);
+    s_rx_waiting = 1;
+    s_rx_since_ms = now_ms();
+    ui->set_text(s_h_ans, "Waiting for the answer...");
+}
 
 /* ---------------------------------------------------------------- the node list survives a restart */
 
@@ -1002,9 +1409,6 @@ static void load_nodes(void)
 
 /* ---------------------------------------------------------------- the loop */
 
-static uint32_t s_n_rx, s_n_rx_err, s_n_tx;                /* what the radio did: packets heard, receive errors, packets sent */
-static int s_last_rssi;
-
 static void report(void)                                                /* one line on the console every 20 s: whether the radio hears anything at all */
 {
     static uint32_t last;
@@ -1056,7 +1460,7 @@ static void pump(void)
         s_n_rx_err++;
     } else if (n == PURR_RADIO_LOST) {
         s_leased = 0;
-        msg->service_online(0);
+        svc_online(0);
         return;
     }
     uint8_t out[255];
@@ -1065,10 +1469,17 @@ static void pump(void)
         s_n_tx++;
         if (rad->send(out, ol, 4000) == PURR_RADIO_LOST) {
             s_leased = 0;
-            msg->service_online(0);
+            svc_online(0);
         }
     }
     deliver_events();
+    admin_tick(t);
+    if (s_rx_waiting && t - s_rx_since_ms > 90000u) {
+        s_rx_waiting = 0;
+        if (ui != NULL && s_page == P_ADMIN && s_h_ans > 0) {
+            ui->set_text(s_h_ans, "No answer (try again)");
+        }
+    }
     static uint32_t last_count_ms, last_saved_ms;
     static int last_count = -1, saved_count = -1;
     static uint32_t last_peers_ms;
@@ -1120,23 +1531,29 @@ static int on_create(const purr_app_env_t *env, const void *state, uint32_t len)
     }
     con_tab = (const purr_cc_contacts_t *)env->catcall_get("contacts", 1);
     (void)sys;
-    if (sc == NULL || msg == NULL || rad == NULL) {
-        say("meshtastic: needs the sched, messaging and radio catcalls\n");
+    if (sc == NULL || rad == NULL) {
+        say("meshtastic: needs the sched and radio catcalls\n");
         return -1;
     }
     if (rad->count() == 0) {
         say("meshtastic: this device has no LoRa radio\n");
         return -1;
     }
+    uECC_set_rng(ecc_rng);
     s_lease_not_before = 0;
     s_leased = 0;
     load_config();
+    admin_load();
     join_and_share();
     save_config();                                                      /* the first start writes the defaults, so Messages' settings have a file to change */
     start_node();
     load_nodes();
-    s_service = msg->service_register("meshtastic", "Meshtastic", "MTS", PURR_MT_TEXT_MAX, PURR_MSGCC_IMG_NONE, 0, 1);
-    if (s_service < 0) {
+    admin_identity();
+    print_admin_key();
+    s_service = msg != NULL ? msg->service_register("meshtastic", "Meshtastic", "MTS", PURR_MT_TEXT_MAX, PURR_MSGCC_IMG_NONE, 0, 1) : -1;
+    if (msg == NULL) {
+        say("meshtastic: no Messages on this device: running as a node\n");
+    } else if (s_service < 0) {
         say("meshtastic: the messaging service was not accepted (permission?)\n");
     } else {
         publish_channels();
@@ -1163,12 +1580,12 @@ static void on_event(const purr_app_event_t *ev)
     } else if (ev->type == PURR_APPEV_USER && ev->name != NULL && streq(ev->name, "radio.yield")) {
         rad->release();                                                 /* the user switched services: hand the radio back */
         s_leased = 0;
-        msg->service_online(0);
+        svc_online(0);
         s_lease_not_before = now_ms() + 60000u;                         /* and do not grab it back at once */
     } else if (ev->type == PURR_APPEV_PERM) {
         s_lease_try_ms = 0;                                             /* an answer to a prompt: try again now */
         s_lease_not_before = 0;
-        if (s_service < 0) {
+        if (msg != NULL && s_service < 0) {
             s_service = msg->service_register("meshtastic", "Meshtastic", "MTS", PURR_MT_TEXT_MAX, PURR_MSGCC_IMG_NONE, 0, 1);
         }
     }
@@ -1187,9 +1604,7 @@ static void on_destroy(int reason)
     if (rad != NULL) {
         rad->release();
     }
-    if (msg != NULL) {
-        msg->service_online(0);
-    }
+    svc_online(0);
 }
 
 static const purr_app_table2_t s_table = {

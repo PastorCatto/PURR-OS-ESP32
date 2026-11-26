@@ -11,13 +11,15 @@
 /* ---------------------------------------------------------------- fakes */
 
 static uint32_t clock_ms = 5000;
-static char console_log[512];
-/* two files in the app's folder: config.bin and nodes.bin; anything else (join.txt, link.txt) reads as missing and writes go nowhere */
-static uint8_t file_data[2][sizeof(config_t) + 64 + PURR_MT_MAX_NODES * (sizeof(purr_mt_nodeinfo_t) + 8)];
-static int file_len[2], file_pos[2], file_which[8];
+static char console_log[2048];
+/* the app's folder: a few named files; anything else (join.txt, link.txt) reads as missing and writes go nowhere */
+#define NFILES 5
+static const char *file_name[NFILES] = {"config.bin", "nodes.bin", "admin.bin", "adminid.bin", "admin.pub"};
+static uint8_t file_data[NFILES][sizeof(config_t) + 64 + PURR_MT_MAX_NODES * (sizeof(purr_mt_nodeinfo_t) + 8)];
+static int file_len[NFILES], file_pos[NFILES];
 static int file_open;
 
-static int which_file(const char *p) { return strcmp(p, "config.bin") == 0 ? 0 : (strcmp(p, "nodes.bin") == 0 ? 1 : -1); }
+static int which_file(const char *p) { for (int i = 0; i < NFILES; i++) if (strcmp(p, file_name[i]) == 0) return i; return -1; }
 
 static void f_print(const char *s) { strncat(console_log, s, sizeof(console_log) - strlen(console_log) - 1); }
 static uint32_t f_uptime(void) { return clock_ms; }
@@ -30,7 +32,7 @@ static int f_open(const char *p, int flags)
 {
     int w = which_file(p);
     if (w < 0) {
-        return (flags & PURR_CC_O_WRITE) ? 4 : -1;
+        return (flags & PURR_CC_O_WRITE) ? 99 : -1;
     }
     file_pos[w] = 0;
     if (flags & PURR_CC_O_TRUNC) {
@@ -40,12 +42,11 @@ static int f_open(const char *p, int flags)
         return -1;
     }
     file_open = 1;
-    file_which[0] = w;
-    return 3 + w * 10;                                                  /* 3 for config.bin, 13 for nodes.bin */
+    return 3 + w * 10;
 }
 static int f_read(int h, void *b, size_t n)
 {
-    int w = h == 13;
+    int w = (h - 3) / 10;
     size_t k = (size_t)(file_len[w] - file_pos[w]) < n ? (size_t)(file_len[w] - file_pos[w]) : n;
     memcpy(b, file_data[w] + file_pos[w], k);
     file_pos[w] += (int)k;
@@ -53,10 +54,10 @@ static int f_read(int h, void *b, size_t n)
 }
 static int f_write(int h, const void *b, size_t n)
 {
-    if (h == 4) {
+    if (h == 99) {
         return (int)n;
     }
-    int w = h == 13;
+    int w = (h - 3) / 10;
     memcpy(file_data[w] + file_len[w], b, n);
     file_len[w] += (int)n;
     return (int)n;
@@ -177,8 +178,12 @@ static const purr_cc_storage_t s_stg = {.version = 1, .open = f_open, .read = f_
 static purr_cc_messaging_t s_msg = {.version = 1};
 static purr_cc_radio_t s_rad = {.version = 1};
 
+static int headless;
 static const void *catcall_get(const char *name, uint32_t v)
 {
+    if (headless && (strcmp(name, "messaging") == 0 || strcmp(name, "ui") == 0 || strcmp(name, "contacts") == 0 || strcmp(name, "app") == 0)) {
+        return NULL;                                                    /* a node with no screen and no Messages */
+    }
     (void)v;
     if (strcmp(name, "console") == 0) return &s_con;
     if (strcmp(name, "sched") == 0) return &s_sch;
@@ -538,6 +543,148 @@ int main(void)
     CHECK_EQ(on_create(&env, NULL, 0), 0);
     CHECK_EQ(purr_mt_node_count(&s_node), known);
     CHECK(purr_mt_node_find(&s_node, 0xBEEF) != NULL && purr_mt_node_find(&s_node, 0xBEEF)->long_name[0] != '\0');
+
+    /* administering the node over the mesh (the Heltec case): the node has no screen and no Messages; an administrator's key is enrolled from a file; signed commands on a private channel are
+     * answered, anything else is met with silence */
+    {
+        on_destroy(0);
+        uint8_t apub[64], apriv[32];
+        CHECK(s_ecc.keypair(apub, apriv) == 1);
+        static const char hx[] = "0123456789abcdef";
+        for (int i = 0; i < 64; i++) {
+            file_data[4][2 * i] = (uint8_t)hx[apub[i] >> 4];
+            file_data[4][2 * i + 1] = (uint8_t)hx[apub[i] & 15];
+        }
+        file_len[4] = 128;
+        file_len[2] = 0;                                                /* no administrators saved yet */
+        const purr_cc_ui_t *ui_keep = ui;
+        (void)ui_keep;
+        s_msg.version = 1;
+        console_log[0] = '\0';
+        CHECK_EQ(on_create(&env, NULL, 0), 0);
+        CHECK(strstr(console_log, "enrolled from admin.pub") != NULL);
+        CHECK(strstr(console_log, "this device's administrator key") != NULL);
+        static const uint8_t admin_psk[16] = {0xA1, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1, 2, 3, 4, 5, 6};
+        purr_mt_channel_set(&s_node, 1, "admin", admin_psk, 16, 2);
+        strcpy(s_cfg.ch[1].name, "admin");
+        memcpy(s_cfg.ch[1].key, s_node.cfg.channels[1].key, 16);
+        s_cfg.ch[1].keylen = 16;
+        s_cfg.ch[1].role = 2;
+        purr_mt_channel_set(&other, 1, "admin", admin_psk, 16, 2);
+        const uint32_t me = s_node.cfg.my_num;
+
+        /* a signed command: the node answers with its status, in the pieces it was built for */
+        uint8_t req[PURR_MTA_REQ_MAX];
+        int rl = purr_mta_make_request(&s_ecc, apriv, me, 10, 1, "status", req, sizeof(req));
+        CHECK(rl > 0);
+        air_sent_n = 0;
+        purr_mt_node_send_data(&other, clock_ms, me, 1, 256, req, (size_t)rl);
+        for (int i = 0; i < 400; i++) {
+            uint8_t f[255];
+            size_t fl;
+            clock_ms += 10;
+            if (purr_mt_node_tick(&other, clock_ms, f, sizeof(f), &fl)) {
+                memcpy(air_in[air_in_w % 16], f, fl);
+                air_in_len[air_in_w % 16] = (int)fl;
+                air_in_w++;
+                break;
+            }
+        }
+        ticks(300);
+        CHECK(air_sent_n >= 1);
+        air_to_other();
+        purr_mta_answer_t ans;
+        purr_mta_answer_init(&ans, 1);
+        int got_answer = 0;
+        while (purr_mt_node_event(&other, &ev)) {
+            if (ev.kind == PURR_MT_EV_PRIVATE && purr_mta_answer_push(&ans, (const uint8_t *)ev.text, ev.len) == 1) {
+                got_answer = 1;
+            }
+        }
+        CHECK(got_answer && strncmp(ans.text, "up ", 3) == 0 && strstr(ans.text, "radio held") != NULL);
+
+        /* the same request again (a replay), a request signed by another key, and one on the public channel: no answer to any */
+        uint8_t xpub[64], xpriv[32];
+        CHECK(s_ecc.keypair(xpub, xpriv) == 1);
+        int rl2 = purr_mta_make_request(&s_ecc, xpriv, me, 11, 2, "status", req, sizeof(req));
+        for (int round = 0; round < 3; round++) {
+            uint8_t again[PURR_MTA_REQ_MAX];
+            int al;
+            int ch = 1;
+            if (round == 0) {
+                al = purr_mta_make_request(&s_ecc, apriv, me, 10, 3, "status", again, sizeof(again));      /* counter 10 was used */
+            } else if (round == 1) {
+                memcpy(again, req, (size_t)rl2);                                                           /* an unknown key */
+                al = rl2;
+            } else {
+                al = purr_mta_make_request(&s_ecc, apriv, me, 12, 4, "status", again, sizeof(again));      /* a good one, but on the public channel */
+                ch = 0;
+            }
+            air_sent_n = 0;
+            purr_mt_node_send_data(&other, clock_ms, me, ch, 256, again, (size_t)al);
+            for (int i = 0; i < 400; i++) {
+                uint8_t f[255];
+                size_t fl;
+                clock_ms += 10;
+                if (purr_mt_node_tick(&other, clock_ms, f, sizeof(f), &fl)) {
+                    memcpy(air_in[air_in_w % 16], f, fl);
+                    air_in_len[air_in_w % 16] = (int)fl;
+                    air_in_w++;
+                    break;
+                }
+            }
+            ticks(120);
+            CHECK_EQ(air_sent_n, 0);
+        }
+
+        /* only the safe commands run: a change is applied, an unknown one is refused */
+        const char *cmds[] = {"radio hops 5", "reboot"};
+        for (int k = 0; k < 2; k++) {
+            rl = purr_mta_make_request(&s_ecc, apriv, me, 20 + (uint32_t)k, (uint16_t)(10 + k), cmds[k], req, sizeof(req));
+            air_sent_n = 0;
+            purr_mt_node_send_data(&other, clock_ms, me, 1, 256, req, (size_t)rl);
+            for (int i = 0; i < 400; i++) {
+                uint8_t f[255];
+                size_t fl;
+                clock_ms += 10;
+                if (purr_mt_node_tick(&other, clock_ms, f, sizeof(f), &fl)) {
+                    memcpy(air_in[air_in_w % 16], f, fl);
+                    air_in_len[air_in_w % 16] = (int)fl;
+                    air_in_w++;
+                    break;
+                }
+            }
+            ticks(300);
+            air_to_other();
+            purr_mta_answer_init(&ans, (uint16_t)(10 + k));
+            got_answer = 0;
+            while (purr_mt_node_event(&other, &ev)) {
+                if (ev.kind == PURR_MT_EV_PRIVATE && purr_mta_answer_push(&ans, (const uint8_t *)ev.text, ev.len) == 1) {
+                    got_answer = 1;
+                }
+            }
+            CHECK(got_answer);
+            if (k == 0) {
+                CHECK(strcmp(ans.text, "hops set") == 0 && s_cfg.hop_limit == 5);
+            } else {
+                CHECK(strstr(ans.text, "unknown command") != NULL);
+            }
+        }
+        CHECK(file_len[2] > 8);                                         /* the counters were saved: a restart does not reopen a replay */
+    }
+
+    /* a node with no Messages, no screen and no app catcall (the Heltec): it still starts, takes the radio and runs, and drops what has nowhere to go */
+    on_destroy(0);
+    headless = 1;
+    console_log[0] = '\0';
+    CHECK_EQ(on_create(&env, NULL, 0), 0);
+    CHECK(strstr(console_log, "running as a node") != NULL);
+    other_sends(PURR_MT_BROADCAST, "nobody to show this to");
+    ticks(100);
+    out_r = 0;
+    out_w = 0;
+    CHECK(s_leased == 1);
+    headless = 0;
 
     /* a busy radio at the start is retried */
     on_destroy(0);
