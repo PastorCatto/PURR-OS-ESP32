@@ -1,0 +1,9 @@
+# Heltec WiFi LoRa 32 V3: ESP32-S3FN8, 8 MB flash, NO PSRAM. Internal RAM is all there is, so: no PSRAM settings at all, small buffers, and apps are placed in internal RAM
+# (plan9.md, "The Heltec V3 as a PURR OS node").
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/heltec_v3.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions/heltec_v3.csv"
+CONFIG_PURR_BOARD_HELTEC_V3=y
+# CONFIG_SPIRAM is not set

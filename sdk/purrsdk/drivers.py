@@ -20,6 +20,7 @@ ESSENTIAL = {
     "battery.cat": ("battery-adc", "Modules/drivers/battery_module.c", "battery_entry"),
     "kbd-backlight.cat": ("kbd-backlight", "Modules/drivers/kbd_backlight_module.c", "kbd_backlight_entry"),
     "gamepad.cat": ("gamepad-mcp23017", "Modules/drivers/gamepad_mcp23017_module.c", "gamepad_mcp23017_entry"),
+    "lora-sx126x.cat": ("lora-sx126x", "Modules/drivers/lora_sx126x_module.c", "lora_sx126x_entry"),
 }
 
 # what each board needs to start (its display, its input, its gauge): the kernel's board file declares the devices, these are the modules that drive them
@@ -27,9 +28,11 @@ DEFAULTS = {
     "tdeck_plus": ("st7789.cat", "gt911.cat", "kbd_i2c.cat", "battery.cat", "kbd-backlight.cat"),
     "tdeck": ("st7789.cat", "gt911.cat", "kbd_i2c.cat", "battery.cat", "kbd-backlight.cat"),
     "playtime": ("st7789.cat", "gamepad.cat"),
+    "heltec_v3": ("lora-sx126x.cat",),    # a mesh node: the radio's driver and at most four more; the partition keeps the standard ten 8 KB slots (a kernel expects that), the rest stay blank for updates
     "waveshare154": (),                  # the 8 MB e-paper board: no driver of its own yet; its drivers partition (flash map v3) stays blank slots
 }
 MAX_DRIVERS = 10
+MAX_DRIVERS_BY_BOARD = {"heltec_v3": 5}         # the small mesh node carries the LoRa driver and a few more, no more
 
 
 class DriverError(Exception):
@@ -45,8 +48,9 @@ def board_files(board, toml=None):
     for f in files:
         if f not in ESSENTIAL:
             raise DriverError("The driver %r is not one the image maker knows how to build (%s)." % (f, ", ".join(sorted(ESSENTIAL))))
-    if len(files) > MAX_DRIVERS:
-        raise DriverError("A board's drivers partition has %d slots; %d drivers are listed." % (MAX_DRIVERS, len(files)))
+    cap = MAX_DRIVERS_BY_BOARD.get(board, MAX_DRIVERS)
+    if len(files) > cap:
+        raise DriverError("The %s image carries at most %d drivers; %d are listed." % (board, cap, len(files)))
     if len(set(files)) != len(files):
         raise DriverError("A driver is listed twice.")
     return files

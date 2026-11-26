@@ -1,0 +1,13 @@
+# Heltec WiFi LoRa 32 V3: 8 MB flash, flash map v3 (the same shape as the Waveshare board, which also has 8 MB): bootloader data first, a recovery app, the kernel and the loader
+# slots, a record partition, the file system, and the drivers partition last. No PSRAM here, so the apps that run on it are small and carried as files in `root`.
+# Name,     Type, SubType, Offset,   Size
+nvs,      data, nvs,     0xB000,   0x4000
+purrcfg,  data, 0x40,    0xF000,   0x2000
+phy_init, data, phy,     0x11000,  0x1000
+bootpkg,  data, 0x40,    0x12000,  0xE000
+kittenos, app,  factory, 0x20000,  0x160000
+kernel,   app,  ota_0,   0x180000, 0x180000
+loader,   app,  test,    0x300000, 0x160000
+netrec,   data, 0x41,    0x460000, 0x1000
+root,     data, 0x83,    0x461000, 0x38B000
+drivers,  data, 0x42,    0x7EC000, 0x14000

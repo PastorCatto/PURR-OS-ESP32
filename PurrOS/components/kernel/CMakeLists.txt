@@ -35,6 +35,10 @@ if(CONFIG_PURR_BOARD_WAVESHARE154)
     list(APPEND srcs "boards/waveshare154.c")
 endif()
 
+if(CONFIG_PURR_BOARD_HELTEC_V3)
+    list(APPEND srcs "boards/heltec_v3.c")
+endif()
+
 if(CONFIG_PURR_BOARD_PLAYTIME)
     list(APPEND srcs "boards/playtime.c")
 endif()

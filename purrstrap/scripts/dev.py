@@ -394,7 +394,8 @@ def build_recovery_manifests(repo):
 SLOT_BYTES = {"kernel": 0x220000, "kittenos": 0x1C0000, "loader": 0x1C0000, "bootpkg": 0xE000, "bootloader": 0xA000, "uiassets": 0x500000,
               "ui_w10m": 5 * 1024 * 1024, "ui_android": 5 * 1024 * 1024}
 # Boards with a smaller flash have their own slot sizes (the partition table in PurrOS/partitions/<board>.csv); the T-Deck sizes above are the default.
-BOARD_SLOT_BYTES = {"waveshare154": {"kernel": 0x180000, "kittenos": 0x160000, "loader": 0x160000}}
+BOARD_SLOT_BYTES = {"waveshare154": {"kernel": 0x180000, "kittenos": 0x160000, "loader": 0x160000},
+                    "heltec_v3": {"kernel": 0x180000, "kittenos": 0x160000, "loader": 0x160000}}
 
 
 def recovery(ctx, dir, board, kernel, kittenos, loader, bootpkg, legal, modules, bootloader="", uiassets="", ui_w10m="", ui_android="", drivers="", drivers_abi=0):

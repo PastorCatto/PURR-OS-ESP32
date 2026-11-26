@@ -24,6 +24,7 @@ BOARDS = {"tdeck": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
           "tdeck_plus": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
           "cyd_24c": ("xtensa-esp32-elf", pimg.CHIP_ESP32),
           "waveshare154": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
+          "heltec_v3": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3),
           "playtime": ("xtensa-esp32s3-elf", pimg.CHIP_ESP32S3)}
 
 # name -> MOD_* subtype (purr_abi.h / purr_keybag.c's purr_role_may_sign).
