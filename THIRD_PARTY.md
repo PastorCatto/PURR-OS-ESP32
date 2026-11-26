@@ -92,3 +92,7 @@ The Click Wheel shell (plan7.md) sets its screens in **Source Sans 3** (Bold, Se
 ## micro-ecc in the proximity driver
 
 The proximity driver module (`Modules/drivers/proximity_module.c`, plan1.md) carries a copy of **micro-ecc** (Kenneth MacKay, <https://github.com/kmackay/micro-ecc>), **BSD-2-Clause**, the same copy ESP-IDF 5.3.5 ships for the bootloader (`Modules/proximity/uecc/`, with its licence in `Modules/proximity/uecc/LICENSE.txt`). It is built for P-256 only (the other curves are switched off in `uecc/px_uecc.c`) and gives the pairing code its key agreement and signatures. A driver module is freestanding and cannot link the kernel's copy, which is why it is carried here.
+
+## The Meshtastic app icon
+
+The launcher icon of the Meshtastic app (`UI/android-assets/fr_meshtastic.png`) is the official Meshtastic app icon (`logo/png/play_store_icon.png` from <https://github.com/meshtastic/design>), scaled to 48 pixels with rounded corners. Meshtastic® is a registered trademark of Meshtastic LLC. Meshtastic software components are released under various licenses, see GitHub for details. No warranty is provided - use at your own risk. The use of the Meshtastic logo is subject to the project's licensing and trademark guidelines (<https://meshtastic.org/docs/legal/licensing-and-trademark/>): it implies no sponsorship or endorsement by Meshtastic, and a release that ships it needs a trademark grant from Meshtastic LLC or the community "M-Powered" logo instead (owner's decision, 2026-11-26, to use the official icon for now).
