@@ -114,6 +114,20 @@ it, so it is a normal permission. Changing anything (brightness, time) stays und
   the Waveshare ESP32-S3-ePaper-1.54 is controlled over I2C and streams over I2S, which is two
   buses, so under the driver rule it needs a code driver.
 
+### 10a. media (now playing; added 2026-11-25, plan7.md "The Click Wheel shell")
+
+The sound path above plays; `media` is how an app tells the system *what* it plays, so the lock screen, the shell's Now Playing screen and the device's buttons can show
+it and control it. The OS plays nothing itself and no app is special: any app that plays sound can report, and a music app is simply the first that will.
+
+- **Permission:** `audio` (dangerous, asked at the first report, like `keep-awake`). Without it `report()` answers `PURR_MEDIA_ASK` then `PURR_MEDIA_DENIED`.
+- **Calls** (`purr_cc_media_t`, `purr_catcalls.h`): `report(info)` (the whole state: title, artist, album, state, track of tracks, position, duration, and the `caps` the app
+  supports: pause, skip, seek), `clear()`, `next_command(&cmd, &arg)`. The system moves the position of a playing track on by itself; report again when the track or the
+  state changes or after a seek.
+- **Commands** reach the owner as the event `PURR_APPEV_USER` named `media.cmd`: play, pause, toggle, next, previous, seek (arg = ms), stop. An app that did not declare
+  a capability is never sent the command.
+- **One session.** An app that is playing keeps it from one that is paused (`PURR_MEDIA_BUSY`); one that plays takes it over. The session is dropped when its owner stops.
+- **Core:** `coreos/src/purr_media.c` (plain C, 61 host checks); the device side is `main/purr_catrt_media.c`.
+
 ## 11. Testing
 
 - Fake drivers for each catcall, with the version matching and the legacy adapters

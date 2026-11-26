@@ -91,6 +91,7 @@ Dangerous permissions follow Android's model: the app asks when it first reaches
 |---|---|---|
 | `keep-awake` | Hold the screen or CPU awake | any |
 | `wake-alarm` | Wake the device on a schedule | any |
+| `audio` | Play sound and show it as "now playing" (the `media` catcall) | any |
 | `shared-storage` | See and change files in the user's home | any |
 | `system-files` | Read system files (read-only) | administrators |
 | `manage-devices` | Hardware, drivers, system updates | administrators |

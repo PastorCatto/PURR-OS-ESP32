@@ -118,6 +118,7 @@ static void (*s_power_stopped)(int slot, const char *name);
 static void (*s_power_paused)(int slot);
 static void (*s_power_frozen)(int slot);
 static const void *s_game_table;
+static const void *s_media_table, *s_radio_table;
 static void (*s_game_lifecycle)(int slot, int ev);
 static portMUX_TYPE s_notice_mux = portMUX_INITIALIZER_UNLOCKED;
 static char s_notice[64];
@@ -965,6 +966,9 @@ int purr_catrt_caller(char *name, size_t cap)
     return (int)(d - s_dev);
 }
 
+void purr_catrt_set_media(const void *table) { s_media_table = table; }
+void purr_catrt_set_radio(const void *table) { s_radio_table = table; }
+
 void purr_catrt_set_game(const void *table, void (*lifecycle)(int slot, int ev))
 {
     s_game_table = table;
@@ -1143,6 +1147,12 @@ static const void *catcall_get(const char *name, uint32_t min_version)
     }
     if (strcmp(name, "messaging") == 0 && s_messaging_table != NULL && min_version <= ((const uint32_t *)s_messaging_table)[0]) {
         return s_messaging_table;
+    }
+    if (strcmp(name, "media") == 0 && s_media_table != NULL && min_version <= ((const uint32_t *)s_media_table)[0]) {
+        return s_media_table;
+    }
+    if (strcmp(name, "radio") == 0 && s_radio_table != NULL && min_version <= ((const uint32_t *)s_radio_table)[0]) {
+        return s_radio_table;
     }
     if (strcmp(name, "contacts") == 0 && s_contacts_table != NULL && min_version <= ((const uint32_t *)s_contacts_table)[0]) {
         return s_contacts_table;

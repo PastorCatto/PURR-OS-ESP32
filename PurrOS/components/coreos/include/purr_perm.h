@@ -28,7 +28,8 @@ extern "C" {
 #define PURR_PERM_MESSAGING 6       /* "messaging": read and send messages through the shared message layer, and list the messaging services (Messaging/SPEC.md) */
 #define PURR_PERM_CONTACTS  7       /* "contacts": read and change the address book (Messaging/SPEC.md) */
 #define PURR_PERM_RADIO     8       /* "radio": ask for the LoRa radio lease (Messaging/SPEC.md section 4) */
-#define PURR_PERM_COUNT      9
+#define PURR_PERM_AUDIO     9       /* "audio": play sound and be the "now playing" source: the lock screen, the shell's playing screen and the buttons control it (the `media` catcall) */
+#define PURR_PERM_COUNT      10
 
 /* What the user has said about one permission of one app. */
 #define PURR_PERM_ASK    0          /* not decided: ask at first use */

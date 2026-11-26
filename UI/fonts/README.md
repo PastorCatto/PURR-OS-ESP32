@@ -30,3 +30,19 @@ G=tools/ui/gen_lvgl_font.py; O=PurrOS/main/tpfonts; B=SpaceGrotesk-Bold.ttf; M=S
 
 About 70 KB of bitmap in all, in flash, read in place. The shared screens (Settings, the portal, app windows) still use Montserrat; moving them is a theme job
 (plan7.md).
+
+
+# The Click Wheel shell's font
+
+The Click Wheel shell (plan7.md, "The Click Wheel shell") uses **Source Sans 3** (SIL Open Font License 1.1, `OFL-SourceSans3.txt`; https://github.com/adobe-fonts/source-sans, release 3.052R, `TTF/SourceSans3-Bold.ttf`, `-Semibold.ttf`, `-Regular.ttf`), the face of its design boards. Bitmap fonts in `PurrOS/main/whfonts/`, declared in `PurrOS/main/purr_wh_fonts.h`:
+
+```sh
+G=tools/ui/gen_lvgl_font.py; O=PurrOS/main/whfonts   # B, S, R = the Bold, Semibold and Regular TTF files
+/tmp/fontenv/bin/python $G --ttf $B --size 66 --bpp 4 --chars "0123456789:- " --name wh_font_clock_xl --out $O/wh_font_clock_xl.c
+/tmp/fontenv/bin/python $G --ttf $B --size 44 --bpp 4 --chars "0123456789:- " --name wh_font_clock_md --out $O/wh_font_clock_md.c
+/tmp/fontenv/bin/python $G --ttf $B --size 20 --bpp 4 --range 0x20-0x7E --name wh_font_title --out $O/wh_font_title.c
+/tmp/fontenv/bin/python $G --ttf $S --size 16 --bpp 4 --range 0x20-0x7E --name wh_font_row   --out $O/wh_font_row.c
+/tmp/fontenv/bin/python $G --ttf $B --size 13 --bpp 4 --range 0x20-0x7E --name wh_font_bar   --out $O/wh_font_bar.c
+/tmp/fontenv/bin/python $G --ttf $S --size 14 --bpp 4 --range 0x20-0x7E --name wh_font_date  --out $O/wh_font_date.c
+/tmp/fontenv/bin/python $G --ttf $R --size 12 --bpp 4 --range 0x20-0x7E --name wh_font_small --out $O/wh_font_small.c
+```

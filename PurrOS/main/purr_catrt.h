@@ -123,6 +123,8 @@ void purr_catrt_set_power(const void *table, void (*stopped)(int slot, const cha
 /* Called when the runtime freezes an app's task (it left the screen and may not run in the background): drop its locks and alarms. */
 void purr_catrt_set_power_frozen(void (*frozen)(int slot));
 /* The `game` catcall (purr_catrt_game.c): its table, and a hook called with PURR_RT_EV_RESUME / PAUSE / DESTROY for an app of kind game. */
+void purr_catrt_set_media(const void *table);           /* purr_catrt_media.c */
+void purr_catrt_set_radio(const void *table);           /* purr_catrt_radio.c */
 void purr_catrt_set_game(const void *table, void (*lifecycle)(int slot, int ev));
 
 /* A short line for the user when the runtime closed an app to make room ("Closed Notes to free memory") or refused a service. The shell

@@ -1,0 +1,4 @@
+# The Click Wheel shell (plan7.md "The Click Wheel shell"): the iPod-style shell, with source files of its own (purr_wh*.c). Add this fragment to SDKCONFIG_DEFAULTS after the
+# profile. Only one built-in shell is compiled per image (it is not the Type shell: do not set CONFIG_PURR_SHELL_TYPE with it).
+CONFIG_PURR_SHELL_WHEEL=y
+CONFIG_PURR_UI_DEFAULT_MODE="android"

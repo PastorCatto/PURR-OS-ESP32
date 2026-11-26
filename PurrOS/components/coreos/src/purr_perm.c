@@ -16,6 +16,7 @@ static const struct {
     {"messaging", "read and send your messages"},
     {"contacts", "read and change your contacts"},
     {"radio", "use the LoRa radio"},
+    {"audio", "play sound and show what is playing on the lock screen"},
 };
 
 const char *purr_perm_name(int perm)

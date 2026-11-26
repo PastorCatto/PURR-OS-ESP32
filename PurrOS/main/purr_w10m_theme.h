@@ -69,6 +69,7 @@ void purr_theme_set_skin(purr_skin_t skin);
 /* The Type look over the W10M roles (the Type shell, plan7.md): paper, ink and the accent, outlined controls, an ink title bar. Call right after purr_theme_set_skin(PURR_SKIN_W10M),
  * before purr_theme_init(). It changes the colours and outlines only; the layout tests in the shared screens still see the W10M skin. */
 void purr_theme_set_type_look(int on);
+void purr_theme_set_wheel_look(int on);       /* the Click Wheel shell: the Type layout in a white, silver and accent palette (call instead of purr_theme_set_type_look) */
 
 /* Dresses a window or sheet header made of a container, a back arrow and a title: the title bar role on the
  * container, and in the Android skin the arrow is hidden (Back is a key there) and the title moves to the left edge.
@@ -86,6 +87,7 @@ int purr_theme_transparency(void);              /* 1 = see-through sheets, 0 = s
 int purr_theme_tile_opacity(void);              /* 0..255 */
 
 lv_color_t purr_theme_accent_color(void);
+int purr_theme_wheel_look(void);               /* 1 in the Click Wheel shell (type_look is 1 there too) */
 int purr_theme_type_look(void);                 /* 1 in the Type shell: the shared primitives lay themselves out the Type way */
 void purr_theme_row_divider(lv_obj_t *obj);     /* the hairline under a list row (Type look only; no effect in the other looks) */
 lv_color_t purr_theme_warn_color(void);        /* warning text on a sheet */

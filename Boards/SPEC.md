@@ -9,10 +9,10 @@ board is found and installed is in `../Install/SPEC.md`.
 | Board | Chip | Tier | Notes |
 |-------|------|------|-------|
 | **T-Deck Plus** | ESP32-S3, 16 MB flash, 8 MB PSRAM | modular, primary | 3.2" ST7789, keyboard, touch, trackball, LoRa, GPS |
-| **CYD 2.4C** | ESP32, 4 MB flash, no PSRAM | monolithic | 2.4" ILI9341-compatible, CST816S touch, no keyboard |
+| **CYD 2.4C** | ESP32, 4 MB flash, no PSRAM | monolithic; **remote display client** (2026-11-25) | 2.4" ILI9341-compatible, CST816S touch, no keyboard. Boots a tiny image and acts as the screen and touch panel of a nearby PURR host: [RemoteDisplay/SPEC.md](../RemoteDisplay/SPEC.md) |
 | **Waveshare ESP32-S3-ePaper-1.54** | ESP32-S3, 8 MB flash, 8 MB PSRAM | modular, third | 200 by 200 e-paper, no touch, no keyboard, audio codec, clock, battery gauge |
 
-Also in the old archive, not yet planned: Heltec (128 by 64 OLED and LoRa), JC3248W535 (480 by 320),
+Also in the old archive, not yet planned: Heltec (the WiFi LoRa 32 V3: ESP32-S3, 8 MB flash, no PSRAM, 128 by 64 OLED, SX1262 LoRa, one button; it needs a kernel and image of its own, and is the second remote display client, RemoteDisplay/SPEC.md section 8), JC3248W535 (480 by 320),
 the T-Deck (non-Plus), the CYD 2.8-inch variants, the Waveshare 1.69-inch, and the Tab5.
 
 ## 2. Waveshare ESP32-S3-ePaper-1.54

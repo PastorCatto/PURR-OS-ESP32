@@ -116,6 +116,7 @@ static void test_messaging_permissions(void)
 {
     CHECK(purr_perm_by_name("messaging") == PURR_PERM_MESSAGING && purr_perm_by_name("contacts") == PURR_PERM_CONTACTS && purr_perm_by_name("radio") == PURR_PERM_RADIO);
     CHECK(purr_perm_describe(PURR_PERM_MESSAGING) != NULL && purr_perm_describe(PURR_PERM_RADIO) != NULL);
+    CHECK(purr_perm_by_name("audio") == PURR_PERM_AUDIO && purr_perm_describe(PURR_PERM_AUDIO) != NULL && PURR_PERM_AUDIO == PURR_PERM_COUNT - 1);
     purr_perm_t t;
     memset(&t, 0, sizeof(t));
     CHECK_EQ(purr_perm_decide(&t, "messages", PURR_PERM_MESSAGING, 0), PURR_PERM_PROMPT);       /* asked at first use */

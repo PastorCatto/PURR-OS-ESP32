@@ -57,6 +57,7 @@ app's own storage folder, `system` (read-only battery, time, memory), audio outp
 | `device-admin` | Adding, removing and exporting other installed apps (`appmgr` catcall) |
 | `keep-awake` | Holding the screen on or the CPU out of light sleep (`power` catcall, `hold`). Added by plan10. |
 | `wake-alarm` | Waking the device on a schedule (`power` catcall, `alarm_set`). Added by plan10. |
+| `audio` | Playing sound and reporting it as "now playing" (`media` catcall): the lock screen, the shell's playing screen and the buttons show and control it. Added 2026-11-25 (plan7). |
 
 Both power permissions are dangerous because battery is what a handheld runs out of. Android makes plain wake locks a
 normal permission; here a CPU lock carries a lease and expires on its own, and the user still gets the say.

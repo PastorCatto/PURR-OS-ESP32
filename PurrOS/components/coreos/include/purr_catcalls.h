@@ -10,7 +10,7 @@
  * catcall (a timer, an open file, a subscription) is owned by that app and released when it
  * stops (AppRuntime/SPEC.md section 9).
  *
- * Catcall names, for catcall_get: "console", "app", "sched", "storage", "system", "event", "ctl", "ui", "power", "files", "devices", "store".
+ * Catcall names, for catcall_get: "console", "app", "sched", "storage", "system", "event", "ctl", "ui", "power", "files", "devices", "store", "media", "radio".
  */
 #ifndef PURR_CATCALLS_H
 #define PURR_CATCALLS_H
@@ -415,6 +415,99 @@ typedef struct {
     uint64_t (*ticks_us)(void);                         /* microseconds since boot */
     void     (*quit)(void);                             /* close this game */
 } purr_cc_game_t;
+
+
+/* ------------------------------------------------------------------ media
+ * "Now playing": any app that plays sound reports what it plays here, and the system shows it (the lock screen, the shell's playing screen) and sends the buttons back
+ * (plan7.md, "The Click Wheel shell"). The OS plays nothing itself. Needs the "audio" permission (Permissions/SPEC.md): the first report answers PURR_MEDIA_ASK until the
+ * user decides, then the app gets PURR_APPEV_PERM and reports again. A background app is not asked; it may report if it was allowed before.
+ *
+ * report() tells the system the whole state; call it when the track or the state changes, and again after a seek (not every second: the system moves the position of a
+ * playing track on by itself). Commands the user gave arrive as the event PURR_APPEV_USER named "media.cmd"; the app calls next_command() until it returns 0. An app that
+ * says it cannot pause, skip or seek (caps) is never sent those. When the app stops or calls clear() the session goes. One session at a time: an app that is playing keeps it
+ * from one that is paused (report() answers PURR_MEDIA_BUSY). */
+#define PURR_MEDIA_OK        0
+#define PURR_MEDIA_BAD      -1
+#define PURR_MEDIA_BUSY     -2      /* another app is playing and has the session */
+#define PURR_MEDIA_DENIED   -3
+#define PURR_MEDIA_ASK      -4      /* the user is being asked: wait for PURR_APPEV_PERM, then report again */
+
+#define PURR_MEDIA_STATE_STOPPED 0
+#define PURR_MEDIA_STATE_PLAYING 1
+#define PURR_MEDIA_STATE_PAUSED  2
+#define PURR_MEDIA_CC_PAUSE (1u << 0)   /* the app can pause and resume (PLAY, PAUSE, TOGGLE) */
+#define PURR_MEDIA_CC_SKIP  (1u << 1)   /* next and previous */
+#define PURR_MEDIA_CC_SEEK  (1u << 2)
+#define PURR_MEDIA_COMMAND_PLAY   1
+#define PURR_MEDIA_COMMAND_PAUSE  2
+#define PURR_MEDIA_COMMAND_TOGGLE 3
+#define PURR_MEDIA_COMMAND_NEXT   4
+#define PURR_MEDIA_COMMAND_PREV   5
+#define PURR_MEDIA_COMMAND_SEEK   6     /* arg = the position in milliseconds */
+#define PURR_MEDIA_COMMAND_STOP   7
+
+typedef struct {
+    const char *title;                  /* up to 47 characters are kept; NULL for none */
+    const char *artist;
+    const char *album;
+    uint8_t state;                      /* PURR_MEDIA_STATE_* */
+    uint16_t track, tracks;             /* "3 of 12"; 0 = unknown */
+    uint32_t position_ms;               /* where it is now */
+    uint32_t duration_ms;               /* 0 = unknown */
+    uint32_t caps;                      /* PURR_MEDIA_CC_* */
+} purr_cc_media_info_t;
+
+typedef struct {
+    uint32_t version;                                   /* 1 */
+    int  (*report)(const purr_cc_media_info_t *info);   /* PURR_MEDIA_* */
+    void (*clear)(void);
+    int  (*next_command)(int *cmd, uint32_t *arg);      /* 1 and the command (PURR_MEDIA_COMMAND_*), or 0 */
+} purr_cc_media_t;
+
+
+/* ---------------------------------------------------------------- radio */
+/* The LoRa radio, whatever chip is behind it (Messaging/SPEC.md section 4). One app holds the radio at a time (a lease); the others are told BUSY. Needs the "radio" permission: it answers
+ * PURR_RADIO_ASK until the user decides. The modem settings are the app's own (a mesh service computes them for its network); the OS passes them to the driver, which clamps what the chip
+ * cannot do. The lease ends when the app calls release, stops, or is asked to yield by the user switching services (the app then gets PURR_APPEV_USER "radio.yield" and has a few seconds). */
+#define PURR_RADIO_OK        0
+#define PURR_RADIO_BAD      -1
+#define PURR_RADIO_DENIED   -2
+#define PURR_RADIO_ASK      -3
+#define PURR_RADIO_BUSY     -4      /* another app holds the radio */
+#define PURR_RADIO_NORADIO  -5      /* this device has no LoRa radio, or its driver is not loaded */
+#define PURR_RADIO_LOST     -6      /* the lease was taken back: ask for it again if the app still wants the radio */
+#define PURR_RADIO_TIMEOUT  -7
+
+typedef struct {
+    uint32_t freq_hz;
+    uint32_t bw_hz;
+    uint8_t sf;                 /* 5 .. 12 */
+    uint8_t cr;                 /* 5 .. 8: 4/5 .. 4/8 */
+    int8_t tx_dbm;
+    uint8_t crc_on;
+    uint16_t preamble;          /* symbols */
+    uint16_t sync_word;         /* the chip's register value (SX126x: 0x24B4 for a Meshtastic network) */
+} purr_cc_radio_cfg_t;
+
+typedef struct {
+    int16_t rssi_dbm;
+    int8_t snr_db;
+    uint8_t reserved;
+} purr_cc_radio_rx_t;
+
+typedef struct {
+    uint32_t version;                                                           /* 1 */
+    int  (*count)(void);                                                        /* LoRa radios this device has (0 or 1 today) */
+    int  (*lease)(const purr_cc_radio_cfg_t *cfg);                              /* takes the radio and applies cfg; PURR_RADIO_OK, _BUSY, ... Asking again with new settings is how to change them. */
+    void (*release)(void);
+    int  (*send)(const uint8_t *data, size_t len, uint32_t timeout_ms);         /* one packet; PURR_RADIO_OK once it has gone out */
+    int  (*receive)(uint8_t *buf, size_t cap, purr_cc_radio_rx_t *info, uint32_t timeout_ms);   /* bytes of one packet, 0 if none arrived in time, < 0 on error */
+    int  (*holder)(char *app, size_t cap);                                      /* the name of the app that holds the radio: 1 and the name, or 0 when it is free */
+    /* What a network on this radio needs from the device and an app has no other way to get: a number that stays the same for this device (the last four bytes of its Wi-Fi hardware
+     * address, which is how a mesh node picks its own number), and random numbers. No lease or permission needed beyond "radio". */
+    uint32_t (*device_id)(void);
+    uint32_t (*random32)(void);
+} purr_cc_radio_t;
 
 
 /* ---------------------------------------------------------------- messaging */

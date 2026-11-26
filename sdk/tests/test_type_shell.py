@@ -139,7 +139,7 @@ class TheTheme(unittest.TestCase):
         main = settings[i:i + 4200]
         branch = main[main.index("if (purr_theme_type_look())"):]
         self.assertLess(branch.index("continue;"), branch.index("w10m_img(sec->icon)"))     # no Windows-style pictures in the Type layout
-        self.assertIn("purr_theme_type_look() ? \"SETTINGS\"", settings)
+        self.assertIn("purr_theme_type_look() && !purr_theme_wheel_look() ? \"SETTINGS\"", settings)
         theme = read("PurrOS", "main", "purr_w10m_theme.c")
         self.assertRegex(theme, r"void purr_theme_row_divider\(lv_obj_t \*obj\)\s*\{\s*if \(s_type\)")   # no effect in any other look
         nav = read("PurrOS", "main", "purr_tp_nav.c")
@@ -303,7 +303,7 @@ class Build(unittest.TestCase):
         from purrsdk import source
         self.assertIn("type", source.SHELLS)
         coreos = read("purrstrap", "scripts", "coreos.py")
-        self.assertRegex(coreos, r'SHELLS = \("w10m", "android", "type"\)')
+        self.assertRegex(coreos, r'SHELLS = \("w10m", "android", "type", "wheel"\)')
         self.assertIn("Type shell", read("sdk", "studio", "web", "system.js"))
 
     def test_the_default_accent_reads_on_every_colour(self):
@@ -336,3 +336,38 @@ class Build(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WheelShell(unittest.TestCase):
+    """The Click Wheel shell (plan7.md) shares no source file with the Type shell: its own files, its own option, its own overlay."""
+
+    def test_it_has_files_of_its_own_and_none_of_the_type_shells(self):
+        cmake = read("PurrOS", "main", "CMakeLists.txt")
+        wheel = re.search(r"if\(CONFIG_PURR_SHELL_WHEEL\)(.*?)elseif\(CONFIG_PURR_SHELL_TYPE\)", cmake, re.S).group(1)
+        files = re.findall(r'"(purr_\w+\.c)"', wheel)
+        self.assertTrue(files)
+        for n in files:
+            self.assertTrue(n.startswith("purr_wh"), "%s is not a Click Wheel file" % n)
+            self.assertTrue(os.path.isfile(os.path.join(MAIN, n)), n)
+        self.assertIn("whfonts", wheel)
+        self.assertNotIn("tpfonts", wheel)
+
+    def test_no_wheel_file_includes_the_type_shells_header(self):
+        for n in sorted(os.listdir(MAIN)):
+            if n.startswith("purr_wh") and (n.endswith(".c") or n.endswith(".h")):
+                text = read("PurrOS", "main", n)
+                self.assertNotIn('#include "purr_tp_', text, n)
+
+    def test_the_option_and_the_overlay(self):
+        self.assertIn("config PURR_SHELL_WHEEL", read("PurrOS", "main", "Kconfig.projbuild"))
+        overlay = read("PurrOS", "sdkconfig.shell.wheel")
+        self.assertIn("CONFIG_PURR_SHELL_WHEEL=y", overlay)
+        self.assertNotIn("CONFIG_PURR_SHELL_TYPE=y", overlay)
+
+    def test_the_type_shells_own_files_are_not_touched_by_it(self):
+        for n in ("purr_tp.c", "purr_tp_home.c", "purr_tp_lock.c", "purr_tp_priv.h"):
+            self.assertNotIn("TP_WHEEL", read("PurrOS", "main", n), n)
+
+    def test_the_tools_know_it(self):
+        from purrsdk import source
+        self.assertIn("wheel", source.SHELLS)

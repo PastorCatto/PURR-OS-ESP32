@@ -130,6 +130,16 @@ menu "PURR OS user interface"
             It takes the place of the Android shell in the image (the same entry points, purr_tp*.c instead of purr_android*.c); the Android shell's files are not
             changed. Only one built-in shell is compiled per image. Set by the overlay sdkconfig.shell.type (`purrstrap coreos build --shell type`).
 
+    config PURR_SHELL_WHEEL
+        bool "Build the Click Wheel shell (iPod style) instead of Android 2.2 (Froyo) as the built-in shell"
+        depends on !PURR_SHELL_TYPE
+        default n
+        help
+            The Click Wheel shell (plan7.md): an iPod-style shell with files of its own (purr_wh*.c; it shares none with the Type shell): a silver status bar with the play mark,
+            Wi-Fi and battery, white lists with the chosen row in the accent, a Now Playing screen for whatever app reports through the `media` catcall, a lock screen with the
+            clock, the new messages and, while something plays, its cover, and a sign-in and PIN pad in the same look. Every size comes from the layout engine (coreos
+            purr_wh_layout.c): a profile for the displays the project knows, rules for any other. Set by the overlay sdkconfig.shell.wheel (`purrstrap coreos build --shell wheel`).
+
     config PURR_W10M_ROTATE_DEMO
         bool "Turn the Windows 10 Mobile style shell through every orientation (test only)"
         default n
